@@ -78,7 +78,7 @@ export interface StressHarnessDependencies {
   createEditor(document: StressEditorDocument): Promise<StressResource>;
   createBrowser(page: StressBrowserPage): Promise<StressResource>;
   focus(id: string, signal: AbortSignal): Promise<void>;
-  resize(step: number, geometry: StressGeometry): void;
+  resize(step: number, geometry: StressGeometry, signal: AbortSignal): void;
   setVisible(id: string, visible: boolean): Promise<void>;
   cycleWindow(): Promise<void>;
   loseGraphicsContext(): Promise<boolean>;
@@ -356,6 +356,7 @@ async function runActivePhase(
             frameStep,
             focusOrder,
           ),
+          phaseController.signal,
         );
         frameStep += 1;
         requestGeometryFrame();

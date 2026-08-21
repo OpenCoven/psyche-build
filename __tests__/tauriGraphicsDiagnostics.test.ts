@@ -2903,7 +2903,8 @@ describe('in-app graphics diagnostics surface', () => {
     expect(main).toContain('ptyRuntime.buildGraphicsDiagnosticsView(');
     expect(main).toContain('ptyRuntime.serializeGraphicsDiagnosticsSnapshot(');
     expect(main).toContain('clipboardManager.writeText(json)');
-    expect(main).toContain('showStatusError("Graphics diagnostics copy failed: " + String(error))');
+    expect(main).toContain('reportGraphicsDiagnosticsFailure(');
+    expect(main).toContain('clearGraphicsDiagnosticsFailure(');
     expect(main).toContain('graphicsDiagnosticsShellEl.inert = false;');
     expect(main).toContain('graphicsDiagnosticsShellEl.inert = true;');
     expect(main).toContain('beginCompositorTransition(graphicsDiagnosticsPanelEl)');
@@ -2921,6 +2922,9 @@ describe('in-app graphics diagnostics surface', () => {
     );
     expect(styles).not.toMatch(
       /\.graphics-diagnostics-[^{]+\{[^}]*(?:transition|animation)[^}]*(?:width|right|left|grid-template|flex-basis)/s,
+    );
+    expect(styles).toMatch(
+      /\.graphics-diagnostics-status\[data-level="error"\]\s*\{[^}]*color:\s*#fecaca;/s,
     );
   });
 
@@ -2989,16 +2993,411 @@ describe('in-app graphics diagnostics surface', () => {
     ]);
   });
 
-  it('reports clipboard failures through the existing accessible error surface', async () => {
+  it('records real production focus and resize interactions on their next paints', async () => {
     const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
-    const reportError = vi.fn();
+    const collector = createPerformanceMetricsCollector();
+    const pendingFrames = new Map<number, (timestamp: number) => void>();
+    const interactionState = {
+      sequence: 0,
+      focus: null,
+      resize: null,
+    };
+    let nextFrame = 1;
+    let now = 100;
+    const windowFixture = {
+      requestAnimationFrame(callback: (timestamp: number) => void) {
+        const handle = nextFrame;
+        nextFrame += 1;
+        pendingFrames.set(handle, callback);
+        return handle;
+      },
+      cancelAnimationFrame(handle: number) {
+        pendingFrames.delete(handle);
+      },
+    };
+    const begin = compileFunction<(kind: 'focus' | 'resize') => number | null>(
+      main,
+      'beginGraphicsDiagnosticsInteraction',
+      {
+        graphicsDiagnosticsCollector: collector,
+        graphicsDiagnosticsInteractions: interactionState,
+        performance: { now: () => now },
+        window: windowFixture,
+      },
+    );
+    const cancel = compileFunction<(kind: 'focus' | 'resize', token: number | null) => void>(
+      main,
+      'cancelGraphicsDiagnosticsInteraction',
+      {
+        graphicsDiagnosticsCollector: collector,
+        graphicsDiagnosticsInteractions: interactionState,
+        window: windowFixture,
+        clearGraphicsDiagnosticsFailure: vi.fn(),
+        reportGraphicsDiagnosticsFailure: vi.fn(),
+      },
+    );
+    const complete = compileFunction<
+      (kind: 'focus' | 'resize', token: number | null, signal?: AbortSignal) => void
+    >(
+      main,
+      'completeGraphicsDiagnosticsInteraction',
+      {
+        graphicsDiagnosticsCollector: collector,
+        graphicsDiagnosticsInteractions: interactionState,
+        window: windowFixture,
+        cancelGraphicsDiagnosticsInteraction: cancel,
+        clearGraphicsDiagnosticsFailure: vi.fn(),
+        reportGraphicsDiagnosticsFailure: vi.fn(),
+      },
+    );
+    const focus = compileFunction<(id: string, signal: AbortSignal) => Promise<void>>(
+      main,
+      'focusDiagnosticsStressSurface',
+      {
+        diagnosticsAbortReason: (signal: AbortSignal) => signal.reason,
+        canvasSurfaceById: () => ({ id: 'editor', kind: 'files', hidden: false }),
+        focusCanvasSurface: () => true,
+        fileEditor: { focus: vi.fn() },
+        awaitDiagnosticsOperation: vi.fn(),
+        focusThread: vi.fn(),
+        beginGraphicsDiagnosticsInteraction: begin,
+        completeGraphicsDiagnosticsInteraction: complete,
+        cancelGraphicsDiagnosticsInteraction: cancel,
+      },
+    );
+    const layout = { root: { type: 'leaf', id: 'pane-1' } };
+    const resize = compileFunction<
+      (step: number, geometry: { sidebarWidth: number; splitRatios: number[] }) => void
+    >(
+      main,
+      'applyDiagnosticsStressGeometry',
+      {
+        diagnosticsStressContext: { layoutKey: 'layout' },
+        paneLayouts: new Map([['layout', layout]]),
+        document: {
+          documentElement: {
+            style: { setProperty: vi.fn() },
+          },
+        },
+        diagnosticsSplitIds: () => [],
+        PsychePanes: { resizeSplit: vi.fn() },
+        applyProjectedSplitRatios: () => true,
+        renderPaneWorkspace: vi.fn(),
+        beginGraphicsDiagnosticsInteraction: begin,
+        completeGraphicsDiagnosticsInteraction: complete,
+        cancelGraphicsDiagnosticsInteraction: cancel,
+      },
+    );
+    const flush = (timestamp: number) => {
+      const callbacks = [...pendingFrames.values()];
+      pendingFrames.clear();
+      callbacks.forEach((callback) => callback(timestamp));
+    };
+
+    await focus('editor', new AbortController().signal);
+    expect(collector.snapshot().interactions).toEqual({});
+    flush(140);
+
+    now = 200;
+    resize(0, { sidebarWidth: 320, splitRatios: [0.5] });
+    expect(collector.snapshot().interactions).toEqual({ focusToNextPaintMs: 40 });
+    flush(272);
+
+    expect(collector.snapshot().interactions).toEqual({
+      focusToNextPaintMs: 40,
+      resizeToNextPaintMs: 72,
+    });
+    expect(pendingFrames.size).toBe(0);
+  });
+
+  it('correlates only the latest interaction and clears failed production records', async () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const collector = createPerformanceMetricsCollector();
+    const pendingFrames = new Map<number, (timestamp: number) => void>();
+    const interactionState = {
+      sequence: 0,
+      focus: null,
+      resize: null,
+    };
+    let nextFrame = 1;
+    let now = 100;
+    const windowFixture = {
+      requestAnimationFrame(callback: (timestamp: number) => void) {
+        const handle = nextFrame;
+        nextFrame += 1;
+        pendingFrames.set(handle, callback);
+        return handle;
+      },
+      cancelAnimationFrame(handle: number) {
+        pendingFrames.delete(handle);
+      },
+    };
+    const begin = compileFunction<(kind: 'focus' | 'resize') => number | null>(
+      main,
+      'beginGraphicsDiagnosticsInteraction',
+      {
+        graphicsDiagnosticsCollector: collector,
+        graphicsDiagnosticsInteractions: interactionState,
+        performance: { now: () => now },
+        window: windowFixture,
+      },
+    );
+    const cancel = compileFunction<(kind: 'focus' | 'resize', token: number | null) => void>(
+      main,
+      'cancelGraphicsDiagnosticsInteraction',
+      {
+        graphicsDiagnosticsCollector: collector,
+        graphicsDiagnosticsInteractions: interactionState,
+        window: windowFixture,
+      },
+    );
+    const complete = compileFunction<
+      (kind: 'focus' | 'resize', token: number | null, signal?: AbortSignal) => void
+    >(
+      main,
+      'completeGraphicsDiagnosticsInteraction',
+      {
+        graphicsDiagnosticsCollector: collector,
+        graphicsDiagnosticsInteractions: interactionState,
+        window: windowFixture,
+        cancelGraphicsDiagnosticsInteraction: cancel,
+        clearGraphicsDiagnosticsFailure: vi.fn(),
+        reportGraphicsDiagnosticsFailure: vi.fn(),
+      },
+    );
+
+    const first = begin('focus');
+    complete('focus', first);
+    now = 120;
+    const second = begin('focus');
+    complete('focus', second);
+    expect(pendingFrames.size).toBe(1);
+    [...pendingFrames.values()][0]?.(150);
+    pendingFrames.clear();
+    expect(collector.snapshot().interactions).toEqual({ focusToNextPaintMs: 30 });
+
+    collector.reset();
+    const failedFocus = compileFunction<(id: string, signal: AbortSignal) => Promise<void>>(
+      main,
+      'focusDiagnosticsStressSurface',
+      {
+        diagnosticsAbortReason: (signal: AbortSignal) => signal.reason,
+        canvasSurfaceById: () => ({ id: 'editor', kind: 'files', hidden: false }),
+        focusCanvasSurface: () => false,
+        fileEditor: { focus: vi.fn() },
+        awaitDiagnosticsOperation: vi.fn(),
+        focusThread: vi.fn(),
+        beginGraphicsDiagnosticsInteraction: begin,
+        completeGraphicsDiagnosticsInteraction: complete,
+        cancelGraphicsDiagnosticsInteraction: cancel,
+      },
+    );
+    now = 200;
+    await expect(failedFocus('editor', new AbortController().signal))
+      .rejects.toThrow('failed to focus diagnostics editor');
+    expect(pendingFrames.size).toBe(0);
+    expect(collector.snapshot().interactions).toEqual({});
+
+    const layout = { root: { type: 'leaf', id: 'pane-1' } };
+    const resize = compileFunction<
+      (
+        step: number,
+        geometry: { sidebarWidth: number; splitRatios: number[] },
+        signal: AbortSignal,
+      ) => void
+    >(
+      main,
+      'applyDiagnosticsStressGeometry',
+      {
+        diagnosticsStressContext: { layoutKey: 'layout' },
+        paneLayouts: new Map([['layout', layout]]),
+        document: {
+          documentElement: {
+            style: { setProperty: vi.fn() },
+          },
+        },
+        diagnosticsSplitIds: () => [],
+        PsychePanes: { resizeSplit: vi.fn() },
+        applyProjectedSplitRatios: () => true,
+        renderPaneWorkspace: vi.fn(),
+        beginGraphicsDiagnosticsInteraction: begin,
+        completeGraphicsDiagnosticsInteraction: complete,
+        cancelGraphicsDiagnosticsInteraction: cancel,
+        diagnosticsAbortReason: (signal: AbortSignal) => signal.reason,
+      },
+    );
+    const resizeController = new AbortController();
+    resize(0, { sidebarWidth: 320, splitRatios: [0.5] }, resizeController.signal);
+    expect(pendingFrames.size).toBe(1);
+    resizeController.abort(new DOMException('cancelled', 'AbortError'));
+    expect(pendingFrames.size).toBe(0);
+    expect(collector.snapshot().interactions).toEqual({});
+  });
+
+  it('surfaces collection failures and clears the panel error after recovery', () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const failures = new Map<string, string>();
+    const status = {
+      textContent: '',
+      dataset: {} as Record<string, string>,
+    };
+    const update = compileFunction<() => void>(
+      main,
+      'updateGraphicsDiagnosticsStatus',
+      {
+        graphicsDiagnosticsFailures: failures,
+        graphicsDiagnosticsStatusEl: status,
+        graphicsDiagnosticsHasEvidence: true,
+      },
+    );
+    const alerts: string[] = [];
+    const report = compileFunction<(key: string, message: string, error?: unknown) => void>(
+      main,
+      'reportGraphicsDiagnosticsFailure',
+      {
+        graphicsDiagnosticsFailures: failures,
+        updateGraphicsDiagnosticsStatus: update,
+        showStatusError: (message: string) => alerts.push(message),
+        console: { warn: vi.fn() },
+      },
+    );
+    const clear = compileFunction<(key: string) => void>(
+      main,
+      'clearGraphicsDiagnosticsFailure',
+      {
+        graphicsDiagnosticsFailures: failures,
+        updateGraphicsDiagnosticsStatus: update,
+      },
+    );
+
+    report('collection', 'Graphics diagnostics collection failed.', new Error('sample failed'));
+    expect(status.textContent).toBe('Graphics diagnostics collection failed.');
+    expect(status.dataset.level).toBe('error');
+    expect(alerts).toEqual(['Graphics diagnostics collection failed.']);
+
+    clear('collection');
+    expect(status.textContent).toBe('Live diagnostics are updating.');
+    expect(status.dataset.level).toBeUndefined();
+  });
+
+  it('routes snapshot, availability, and markup failures through diagnostics status', async () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const failures: Array<[string, string]> = [];
+    const reportFailure = (key: string, message: string) => {
+      failures.push([key, message]);
+    };
+    const clearFailure = vi.fn();
+    const snapshot = compileFunction<() => Record<string, unknown>>(
+      main,
+      'graphicsDiagnosticsSnapshot',
+      {
+        graphicsDiagnosticsReport: null,
+        graphicsDiagnosticsCollector: {
+          snapshot() {
+            throw new Error('metrics unavailable');
+          },
+        },
+        runtimeDiagnosticsReport: null,
+        runtimeStressHarness: null,
+        reportGraphicsDiagnosticsFailure: reportFailure,
+        clearGraphicsDiagnosticsFailure: clearFailure,
+      },
+    );
+
+    expect(snapshot()).toEqual({});
+    expect(failures.at(-1)).toEqual([
+      'collection',
+      'Graphics diagnostics metrics collection failed: Error: metrics unavailable',
+    ]);
+
+    const installUnavailable = compileFunction<() => Promise<unknown>>(
+      main,
+      'installGraphicsDiagnosticsSurface',
+      {
+        runtimeDiagnosticsReport: null,
+        invoke: async () => {
+          throw new Error('diagnostics command failed');
+        },
+        reportGraphicsDiagnosticsFailure: reportFailure,
+      },
+    );
+    await expect(installUnavailable()).resolves.toBeNull();
+    expect(failures.at(-1)).toEqual([
+      'availability',
+      'Graphics diagnostics availability check failed: Error: diagnostics command failed',
+    ]);
+
+    const installWithoutMarkup = compileFunction<() => Promise<unknown>>(
+      main,
+      'installGraphicsDiagnosticsSurface',
+      {
+        runtimeDiagnosticsReport: { debugBuild: true },
+        graphicsDiagnosticsToggleEl: null,
+        graphicsDiagnosticsShellEl: null,
+        graphicsDiagnosticsPanelEl: null,
+        graphicsDiagnosticsCloseEl: null,
+        graphicsDiagnosticsContentEl: null,
+        graphicsDiagnosticsRefreshEl: null,
+        graphicsDiagnosticsCopyEl: null,
+        graphicsDiagnosticsScenarioEl: null,
+        graphicsDiagnosticsRunEl: null,
+        graphicsDiagnosticsCancelEl: null,
+        reportGraphicsDiagnosticsFailure: reportFailure,
+      },
+    );
+    await expect(installWithoutMarkup()).resolves.toBeNull();
+    expect(failures.at(-1)).toEqual([
+      'markup',
+      'Graphics diagnostics panel markup is incomplete.',
+    ]);
+
+    const element = {
+      hidden: true,
+      inert: true,
+      disabled: true,
+      addEventListener: vi.fn(),
+    };
+    const installWithoutAccessibleStatus = compileFunction<() => Promise<unknown>>(
+      main,
+      'installGraphicsDiagnosticsSurface',
+      {
+        runtimeDiagnosticsReport: { debugBuild: true, stressAuthorized: false },
+        graphicsDiagnosticsToggleEl: element,
+        graphicsDiagnosticsShellEl: element,
+        graphicsDiagnosticsPanelEl: element,
+        graphicsDiagnosticsCloseEl: element,
+        graphicsDiagnosticsContentEl: element,
+        graphicsDiagnosticsRefreshEl: element,
+        graphicsDiagnosticsCopyEl: element,
+        graphicsDiagnosticsScenarioEl: element,
+        graphicsDiagnosticsRunEl: element,
+        graphicsDiagnosticsCancelEl: element,
+        graphicsDiagnosticsStatusEl: null,
+        graphicsDiagnosticsProgressEl: element,
+        graphicsDiagnosticsProgressTextEl: element,
+        graphicsDiagnosticsFallbackEl: element,
+        reportGraphicsDiagnosticsFailure: reportFailure,
+      },
+    );
+    await expect(installWithoutAccessibleStatus()).resolves.toBeNull();
+    expect(failures.at(-1)).toEqual([
+      'markup',
+      'Graphics diagnostics panel markup is incomplete.',
+    ]);
+  });
+
+  it('reports action failures and clears them after a successful retry', async () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const reportFailure = vi.fn();
+    const clearFailure = vi.fn();
+    let shouldFail = true;
     const copy = compileFunction<() => Promise<boolean>>(
       main,
       'copyGraphicsDiagnosticsJson',
       {
         clipboardManager: {
           writeText: vi.fn(async () => {
-            throw new Error('permission denied');
+            if (shouldFail) throw new Error('permission denied');
           }),
         },
         ptyRuntime: {
@@ -3006,13 +3405,20 @@ describe('in-app graphics diagnostics surface', () => {
         },
         graphicsDiagnosticsSnapshot: () => ({ graphics: {} }),
         toast: vi.fn(),
-        showStatusError: reportError,
+        reportGraphicsDiagnosticsFailure: reportFailure,
+        clearGraphicsDiagnosticsFailure: clearFailure,
       },
     );
 
     await expect(copy()).resolves.toBe(false);
-    expect(reportError).toHaveBeenCalledWith(
+    expect(reportFailure).toHaveBeenCalledWith(
+      'copy',
       'Graphics diagnostics copy failed: Error: permission denied',
+      expect.any(Error),
     );
+
+    shouldFail = false;
+    await expect(copy()).resolves.toBe(true);
+    expect(clearFailure).toHaveBeenCalledWith('copy');
   });
 });

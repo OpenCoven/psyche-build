@@ -1195,6 +1195,16 @@ describe('bounded performance metrics', () => {
       collector.stop();
     });
 
+    it('cancels a failed interaction without accepting a later paint', () => {
+      const collector = createPerformanceMetricsCollector();
+
+      collector.recordInteractionStart('focus', 100);
+      collector.cancelInteraction('focus');
+      collector.recordInteractionPaint('focus', 160);
+
+      expect(collector.snapshot().interactions).toEqual({});
+    });
+
     it('skips overlapping native polls and rejects stale results after stop', async () => {
       let intervalCallback: (() => void) | undefined;
       let resolvePty!: (value: unknown) => void;

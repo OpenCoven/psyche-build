@@ -118,6 +118,7 @@ export interface PerformanceMetricsCollector {
   recordLongTask(duration: number): void;
   recordInteractionStart(kind: InteractionKind, timestamp: number): void;
   recordInteractionPaint(kind: InteractionKind, timestamp: number): void;
+  cancelInteraction(kind: InteractionKind): void;
   mergeNativeSnapshot(input: unknown): void;
   snapshot(): RuntimePerformanceSnapshot;
   reset(): void;
@@ -629,6 +630,10 @@ export function createPerformanceMetricsCollector(
     const duration = value - started;
     if (kind === 'focus') focusToNextPaintMs = duration;
     if (kind === 'resize') resizeToNextPaintMs = duration;
+    interactions.delete(kind);
+  }
+
+  function cancelInteraction(kind: InteractionKind): void {
     interactions.delete(kind);
   }
 
@@ -1206,6 +1211,7 @@ export function createPerformanceMetricsCollector(
     recordLongTask,
     recordInteractionStart,
     recordInteractionPaint,
+    cancelInteraction,
     mergeNativeSnapshot,
     snapshot,
     reset,

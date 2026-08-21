@@ -8,6 +8,9 @@ import {
 import type {
   StressResource,
 } from '../native/desktop/psyche-build-tauri/web/runtime/stress-harness';
+import type {
+  RuntimePerformanceSnapshot,
+} from '../native/desktop/psyche-build-tauri/web/runtime/performance-metrics';
 
 const root = process.cwd();
 const main = readFileSync(
@@ -347,6 +350,21 @@ describe('Tauri stress runtime adapter', () => {
     expect(harness.running()).toBe(false);
   });
 
+  it('records completed production focus and resize input-to-next-paint samples', async () => {
+    const state = createHost();
+
+    const result = await createTauriStressHarness(state.host).run();
+
+    for (const scenario of result.scenarios) {
+      const interactions =
+        (scenario.metrics.afterMeasurement as RuntimePerformanceSnapshot).interactions;
+      expect(interactions.focusToNextPaintMs).toBeGreaterThan(0);
+      expect(interactions.resizeToNextPaintMs).toBeGreaterThan(0);
+      expect(interactions.focusToNextPaintMs).toBe(interactions.resizeToNextPaintMs);
+    }
+    expect(state.frames.pending()).toBe(0);
+  });
+
   it('cancels through the same resource and collector cleanup path', async () => {
     let warmupStarted!: () => void;
     const warmup = new Promise<void>((resolve) => {
@@ -550,6 +568,10 @@ describe('Tauri stress runtime adapter', () => {
     expect(main).toContain('createTerminal: createDiagnosticsTerminalFixture');
     expect(main).toContain('createEditor: createDiagnosticsEditorFixture');
     expect(main).toContain('createBrowser: createDiagnosticsBrowserFixture');
+    expect(main).toContain('beginGraphicsDiagnosticsInteraction("focus")');
+    expect(main).toContain('completeGraphicsDiagnosticsInteraction("focus"');
+    expect(main).toContain('beginGraphicsDiagnosticsInteraction("resize")');
+    expect(main).toContain('completeGraphicsDiagnosticsInteraction("resize"');
     expect(main).toContain('resize: applyDiagnosticsStressGeometry');
     expect(main).toContain('setVisible: setDiagnosticsStressSurfaceVisible');
     expect(main).toContain('loseGraphicsContext: loseDiagnosticsBrowserContext');

@@ -1,5 +1,6 @@
 import {
   createPerformanceMetricsCollector,
+  type InteractionKind,
   type PerformanceMetricsCollector,
   type PerformanceObserverFactory,
   type PerformanceRendererSnapshot,
@@ -24,7 +25,7 @@ export interface TauriStressRuntimeHost {
   createEditor(document: StressEditorDocument): Promise<StressResource>;
   createBrowser(page: StressBrowserPage): Promise<StressResource>;
   focus(id: string, signal: AbortSignal): Promise<void>;
-  resize(step: number, geometry: StressGeometry): void;
+  resize(step: number, geometry: StressGeometry, signal: AbortSignal): void;
   setVisible(id: string, visible: boolean): Promise<void>;
   loseGraphicsContext(): Promise<boolean>;
   invoke(command: string, args: Record<string, unknown>): Promise<unknown>;
@@ -112,6 +113,68 @@ export function createTauriStressHarness(
     let primaryError: unknown;
     let result: StressRunResult | undefined;
     const cleanupErrors: unknown[] = [];
+    let interactionSequence = 0;
+    const pendingInteractions = new Map<
+      InteractionKind,
+      { token: number; frameHandle: number | null }
+    >();
+
+    const cancelInteraction = (kind: InteractionKind, token?: number) => {
+      const pending = pendingInteractions.get(kind);
+      let cancellationError: unknown;
+      if (pending && (token === undefined || pending.token === token)) {
+        pendingInteractions.delete(kind);
+        if (pending.frameHandle !== null) {
+          try {
+            host.cancelFrame(pending.frameHandle);
+          } catch (error) {
+            cancellationError = error;
+          }
+        }
+      }
+      try {
+        collector?.cancelInteraction(kind);
+      } catch (error) {
+        cancellationError ??= error;
+      }
+      if (cancellationError !== undefined) throw cancellationError;
+    };
+    const cancelInteractions = () => {
+      const errors: unknown[] = [];
+      for (const kind of ['focus', 'resize'] as const) {
+        try {
+          cancelInteraction(kind);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, 'failed to clear stress interactions');
+      }
+    };
+    const beginInteraction = (kind: InteractionKind) => {
+      cancelInteraction(kind);
+      interactionSequence += 1;
+      const token = interactionSequence;
+      pendingInteractions.set(kind, { token, frameHandle: null });
+      collector?.recordInteractionStart(kind, host.now());
+      return token;
+    };
+    const completeInteraction = (kind: InteractionKind, token: number) => {
+      const pending = pendingInteractions.get(kind);
+      if (!pending || pending.token !== token) return;
+      try {
+        pending.frameHandle = host.requestFrame((timestamp) => {
+          const current = pendingInteractions.get(kind);
+          if (!current || current.token !== token) return;
+          pendingInteractions.delete(kind);
+          collector?.recordInteractionPaint(kind, timestamp);
+        });
+      } catch (error) {
+        cancelInteraction(kind, token);
+        throw error;
+      }
+    };
     try {
       throwIfAborted(controller.signal);
       runScope = await host.prepareRun();
@@ -134,15 +197,42 @@ export function createTauriStressHarness(
         createTerminal: host.createTerminal,
         createEditor: host.createEditor,
         createBrowser: host.createBrowser,
-        focus: host.focus,
-        resize: host.resize,
+        focus: async (id, signal) => {
+          const token = beginInteraction('focus');
+          try {
+            await host.focus(id, signal);
+            throwIfAborted(signal);
+            completeInteraction('focus', token);
+          } catch (error) {
+            cancelInteraction('focus', token);
+            throw error;
+          }
+        },
+        resize: (step, geometry, signal) => {
+          const token = beginInteraction('resize');
+          try {
+            throwIfAborted(signal);
+            host.resize(step, geometry, signal);
+            throwIfAborted(signal);
+            completeInteraction('resize', token);
+          } catch (error) {
+            cancelInteraction('resize', token);
+            throw error;
+          }
+        },
         setVisible: host.setVisible,
         cycleWindow: async () => {
           await host.invoke('diagnostics_cycle_window', {});
         },
         loseGraphicsContext: host.loseGraphicsContext,
-        resetMetrics: collector.reset,
-        snapshotMetrics: collector.snapshot,
+        resetMetrics: () => {
+          cancelInteractions();
+          collector?.reset();
+        },
+        snapshotMetrics: () => {
+          cancelInteractions();
+          return collector?.snapshot();
+        },
         sleep: host.sleep ?? sleepWithAbort,
         requestFrame: host.requestFrame,
         cancelFrame: host.cancelFrame,
@@ -152,6 +242,11 @@ export function createTauriStressHarness(
     } catch (error) {
       primaryError = error;
     } finally {
+      try {
+        cancelInteractions();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
       try {
         collector?.stop();
       } catch (error) {
