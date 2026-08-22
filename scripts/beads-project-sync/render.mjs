@@ -309,6 +309,14 @@ function normalizeSourceUrl(value) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function normalizeMirroredIssueUrl(value) {
+  return normalizeHttpUrl(value, 'mirroredIssueUrl');
+}
+
+/**
  * @param {string} path
  * @returns {string}
  */
@@ -364,7 +372,7 @@ function renderSourceLink(path, context) {
  */
 function renderMirroredDependencyLink(id, url) {
   const dependencyId = normalizeInlineText(id, 'dependency id');
-  const dependencyUrl = normalizeOptionalInlineText(url, 'mirroredIssueUrl');
+  const dependencyUrl = normalizeMirroredIssueUrl(url);
   if (!dependencyUrl) {
     return `\`${dependencyId}\``;
   }

@@ -41,7 +41,19 @@ const API_KEY_ASSIGNMENT_PATTERN =
 const CREDENTIAL_ASSIGNMENT_PATTERN =
   /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
-const HOME_PATH_PREFIX_PATTERN = /(^|[\s"'`(<=>:,])/u;
+const TOKEN_PATTERN = /\S+/gu;
+const PROTECTED_URL_PATTERN = /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`()\[\]{}<>]+/gu;
+const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
+const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
+const PROTECTED_URL_PLACEHOLDER_SUFFIX = '\u0000';
+const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
+  /file:\/\/\/(?:Users|home)\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+  /file:\/\/\/[A-Za-z]:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+];
+const HOME_PATH_GENERIC_PATH_PATTERNS = [
+  /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
+  /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+];
 
 /**
  * @param {string} message
@@ -49,14 +61,6 @@ const HOME_PATH_PREFIX_PATTERN = /(^|[\s"'`(<=>:,])/u;
  */
 function fail(message) {
   throw new Error(message);
-}
-
-/**
- * @param {string} value
- * @returns {string}
- */
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 /**
@@ -95,30 +99,39 @@ function normalizeHomeDirectories(config) {
 }
 
 /**
- * @param {string} value
- * @param {string} homeDirectory
- * @returns {string}
+ * @param {string | undefined} value
+ * @returns {boolean}
  */
-function replaceConfiguredHomeDirectory(value, homeDirectory) {
-  if (!homeDirectory) {
-    return value;
+function isHomePathSegmentCharacter(value) {
+  return value != null && HOME_PATH_SEGMENT_CHARACTER_PATTERN.test(value);
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasHomePathBoundary(value, index) {
+  if (index <= 0) {
+    return true;
   }
 
-  let sanitized = value;
-  const fileUriHomeDirectory = toFileUriHomeDirectory(homeDirectory);
-  if (fileUriHomeDirectory) {
-    const fileUriPattern = new RegExp(
-      `${HOME_PATH_PREFIX_PATTERN.source}${escapeRegExp(fileUriHomeDirectory)}(?=/|$)`,
-      'gu',
-    );
-    sanitized = sanitized.replace(fileUriPattern, (_, prefix) => `${prefix}file:///~`);
-  }
+  return !isHomePathSegmentCharacter(value[index - 1]);
+}
 
-  const pathPattern = new RegExp(
-    `${HOME_PATH_PREFIX_PATTERN.source}${escapeRegExp(homeDirectory)}(?=[/\\\\]|$)`,
-    'gu',
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasHomePathFollower(value, index) {
+  const character = value[index];
+  return (
+    character == null
+    || character === '/'
+    || character === '\\'
+    || !isHomePathSegmentCharacter(character)
   );
-  return sanitized.replace(pathPattern, (_, prefix) => `${prefix}~`);
 }
 
 /**
@@ -136,35 +149,192 @@ function toFileUriHomeDirectory(homeDirectory) {
 }
 
 /**
+ * @typedef {{
+ *   prefix: string,
+ *   replacement: string,
+ * }} HomeDirectoryMatcher
+ */
+
+/**
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {HomeDirectoryMatcher[]}
+ */
+function buildHomeDirectoryMatchers(config) {
+  const matchers = /** @type {HomeDirectoryMatcher[]} */ ([]);
+  for (const homeDirectory of normalizeHomeDirectories(config)) {
+    const fileUriHomeDirectory = toFileUriHomeDirectory(homeDirectory);
+    if (fileUriHomeDirectory) {
+      matchers.push({
+        prefix: fileUriHomeDirectory,
+        replacement: 'file:///~',
+      });
+    }
+    matchers.push({
+      prefix: homeDirectory,
+      replacement: '~',
+    });
+  }
+  return matchers;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function stripGitPlusPrefix(value) {
+  return value.replace(/^git\+/iu, '');
+}
+
+/**
+ * @typedef {{
+ *   protectedValue: string,
+ *   protectedUrls: string[],
+ * }} ProtectedUrlState
+ */
+
+/**
+ * @param {string} value
+ * @returns {ProtectedUrlState}
+ */
+function protectNonFileUrls(value) {
+  const protectedUrls = /** @type {string[]} */ ([]);
+  const protectedValue = value.replace(PROTECTED_URL_PATTERN, (match) => {
+    const scheme = stripGitPlusPrefix(match).split('://', 1)[0]?.toLowerCase();
+    if (scheme === 'file') {
+      return match;
+    }
+
+    const placeholder = `${PROTECTED_URL_PLACEHOLDER_PREFIX}${protectedUrls.length}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`;
+    protectedUrls.push(match);
+    return placeholder;
+  });
+
+  return {
+    protectedValue,
+    protectedUrls,
+  };
+}
+
+/**
+ * @param {string} value
+ * @param {readonly string[]} protectedUrls
+ * @returns {string}
+ */
+function restoreProtectedUrls(value, protectedUrls) {
+  let restored = value;
+
+  for (const [index, protectedUrl] of protectedUrls.entries()) {
+    restored = restored.replace(
+      `${PROTECTED_URL_PLACEHOLDER_PREFIX}${index}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`,
+      protectedUrl,
+    );
+  }
+
+  return restored;
+}
+
+/**
+ * @param {string} token
+ * @param {string} prefix
+ * @param {string} replacement
+ * @returns {string}
+ */
+function replaceExactHomePrefix(token, prefix, replacement) {
+  if (!prefix) {
+    return token;
+  }
+
+  let sanitized = '';
+  let cursor = 0;
+  let changed = false;
+
+  while (cursor < token.length) {
+    const start = token.indexOf(prefix, cursor);
+    if (start === -1) {
+      break;
+    }
+
+    const end = start + prefix.length;
+    if (hasHomePathBoundary(token, start) && hasHomePathFollower(token, end)) {
+      sanitized += token.slice(cursor, start) + replacement;
+      cursor = end;
+      changed = true;
+      continue;
+    }
+
+    sanitized += token.slice(cursor, start + 1);
+    cursor = start + 1;
+  }
+
+  return changed ? sanitized + token.slice(cursor) : token;
+}
+
+/**
+ * @param {string} token
+ * @param {RegExp} pattern
+ * @param {string} replacement
+ * @returns {string}
+ */
+function replaceGenericHomePrefixPattern(token, pattern, replacement) {
+  pattern.lastIndex = 0;
+
+  let sanitized = '';
+  let cursor = 0;
+  let changed = false;
+
+  for (const match of token.matchAll(pattern)) {
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+
+    const end = start + match[0].length;
+    if (!hasHomePathBoundary(token, start) || !hasHomePathFollower(token, end)) {
+      continue;
+    }
+
+    sanitized += token.slice(cursor, start) + replacement;
+    cursor = end;
+    changed = true;
+  }
+
+  return changed ? sanitized + token.slice(cursor) : token;
+}
+
+/**
+ * @param {string} token
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function redactHomeDirectoryToken(token, matchers) {
+  let sanitized = token;
+
+  for (const matcher of matchers) {
+    sanitized = replaceExactHomePrefix(sanitized, matcher.prefix, matcher.replacement);
+  }
+  for (const pattern of HOME_PATH_GENERIC_FILE_URI_PATTERNS) {
+    sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, 'file:///~');
+  }
+  for (const pattern of HOME_PATH_GENERIC_PATH_PATTERNS) {
+    sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, '~');
+  }
+
+  return sanitized;
+}
+
+/**
  * @param {string} value
  * @param {SanitizePublicTextConfig | null | undefined} config
  * @returns {string}
  */
 function redactHomeDirectories(value, config) {
-  let sanitized = value;
-
-  for (const homeDirectory of normalizeHomeDirectories(config)) {
-    sanitized = replaceConfiguredHomeDirectory(sanitized, homeDirectory);
-  }
-
-  sanitized = sanitized.replace(
-    /(^|[\s"'`(<=>:,])file:\/\/\/(?:Users|home)\/[^/\s]+(?=\/|$)/gu,
-    (_, prefix) => `${prefix}file:///~`,
-  );
-  sanitized = sanitized.replace(
-    /(^|[\s"'`(<=>:,])file:\/\/\/[A-Za-z]:\/Users\/[^/\s]+(?=\/|$)/gu,
-    (_, prefix) => `${prefix}file:///~`,
-  );
-  sanitized = sanitized.replace(
-    /(^|[\s"'`(<=>:,])(?:\/Users\/[^/\s]+|\/home\/[^/\s]+)(?=[/\\]|$)/gu,
-    (_, prefix) => `${prefix}~`,
-  );
-  sanitized = sanitized.replace(
-    /(^|[\s"'`(<=>:,])(?:[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^\\/\s]+)(?=(?:\/|\\)|$)/gu,
-    (_, prefix) => `${prefix}~`,
+  const matchers = buildHomeDirectoryMatchers(config);
+  const { protectedValue, protectedUrls } = protectNonFileUrls(value);
+  const sanitized = protectedValue.replace(TOKEN_PATTERN, (token) =>
+    redactHomeDirectoryToken(token, matchers)
   );
 
-  return sanitized;
+  return restoreProtectedUrls(sanitized, protectedUrls);
 }
 
 /**

@@ -81,8 +81,20 @@ describe('Beads project renderers', () => {
       'file:///~/AppData/Local',
     );
     expect(
+      sanitizePublicText('See [file:///Users/buns/Documents/GitHub/OpenCoven/psyche-build];'),
+    ).toBe('See [file:///~/Documents/GitHub/OpenCoven/psyche-build];');
+    expect(sanitizePublicText('{/Users/buns/Documents/GitHub/OpenCoven/psyche-build}')).toBe(
+      '{~/Documents/GitHub/OpenCoven/psyche-build}',
+    );
+    expect(sanitizePublicText(';/Users/buns/Documents/GitHub/OpenCoven/psyche-build;')).toBe(
+      ';~/Documents/GitHub/OpenCoven/psyche-build;',
+    );
+    expect(
       sanitizePublicText('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.'),
     ).toBe('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.');
+    expect(sanitizePublicText('Keep https://example.com/?path=/Users/buns/docs public.')).toBe(
+      'Keep https://example.com/?path=/Users/buns/docs public.',
+    );
 
     expect(() => assertNoPublishableSecrets('token = ghp_abcdefghijklmnopqrstuvwxyz123456')).toThrow(
       /GitHub token/i,
@@ -181,6 +193,60 @@ describe('Beads project renderers', () => {
     expect(rendered).toContain(
       `[${planDocPath}](https://github.com/OpenCoven/psyche-build/blob/f2f1da60/${planDocPath})`,
     );
+  });
+
+  it('sanitizes mirrored dependency issue URLs before rendering dependency links', () => {
+    const inventory = buildPublicInventory();
+    const blocked = inventory.find((bead) => bead.id === 'pb-blocked');
+
+    expect(blocked).toBeTruthy();
+
+    const rendered = renderIssueBody(
+      blocked!,
+      buildContext(inventory, {
+        mirroredIssueUrlsByBeadId: {
+          'pb-feature': `git+https://mirror-user:mirror-pass@ghe.example.com/OpenCoven/psyche-build-public/issues/2#mirror`,
+          'pb-in-progress': 'https://github.com/OpenCoven/psyche-build-public/issues/3',
+          'pb-closed': 'https://github.com/OpenCoven/psyche-build-public/issues/4',
+        },
+      }),
+    );
+
+    expect(rendered).toContain(
+      '- Parent: [#2](https://ghe.example.com/OpenCoven/psyche-build-public/issues/2#mirror) `pb-feature` — Model Beads project inventory',
+    );
+    expect(rendered).not.toContain('mirror-user');
+    expect(rendered).not.toContain('mirror-pass');
+    expect(rendered).not.toMatch(/https:\/\/[^)\s]*@/u);
+  });
+
+  it('omits invalid or secret-bearing mirrored dependency issue URLs from dependency links', () => {
+    const inventory = buildPublicInventory();
+    const blocked = inventory.find((bead) => bead.id === 'pb-blocked');
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+
+    expect(blocked).toBeTruthy();
+
+    const rendered = renderIssueBody(
+      blocked!,
+      buildContext(inventory, {
+        mirroredIssueUrlsByBeadId: {
+          'pb-feature': 'ssh://ghe.example.com/OpenCoven/psyche-build-public/issues/2',
+          'pb-in-progress': `https://ghe.example.com/OpenCoven/psyche-build-public/issues/3?access_token=${token}`,
+          'pb-closed': 'https://github.com/OpenCoven/psyche-build-public/issues/4',
+        },
+      }),
+    );
+
+    expect(rendered).toContain(
+      '- Parent: `pb-feature` — Model Beads project inventory',
+    );
+    expect(rendered).toContain(
+      '- Blocked by: `pb-in-progress` — Track in-progress beads',
+    );
+    expect(rendered).not.toContain('ssh://ghe.example.com/OpenCoven/psyche-build-public/issues/2');
+    expect(rendered).not.toContain(token);
+    expect(rendered).not.toContain('access_token=');
   });
 
   it('sanitizes repository and direct source URLs before rendering public links', () => {
