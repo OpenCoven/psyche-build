@@ -10,6 +10,10 @@ import {
 
 const fixturePath = new URL('./fixtures/beads-project-sync/issues.jsonl', import.meta.url);
 const issuesJsonl = readFileSync(fixturePath, 'utf8');
+const designDocPath =
+  'docs/superpowers/specs/2026-08-21-public-beads-project-design.md';
+const planDocPath =
+  'docs/superpowers/plans/2026-08-21-public-beads-project.md';
 
 function makeIssue(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === 'string' ? overrides.id : 'fixture-task';
@@ -51,7 +55,8 @@ describe('Beads project model', () => {
         id: 'pb-epic',
         title: 'Publish a public Beads inventory',
         description: '## Objective\nPublish a safe public snapshot of the Beads project.',
-        design: 'docs/superpowers/plans/2026-08-21-public-beads-project.md',
+        design: designDocPath,
+        specId: planDocPath,
         acceptanceCriteria: '- Normalize supported issue records.',
         notes: null,
         status: 'open',
@@ -101,6 +106,11 @@ describe('Beads project model', () => {
         closedAt: '2026-08-20T12:30:00Z',
       },
     ]);
+    expect(
+      beads.every(
+        (bead) => bead.design === designDocPath && bead.specId === planDocPath,
+      ),
+    ).toBe(true);
   });
 
   it('never exposes raw assignee values when a mapping is unavailable', () => {

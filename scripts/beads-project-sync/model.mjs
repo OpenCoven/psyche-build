@@ -204,7 +204,16 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
       'description',
       `Beads record "${id}" on line ${lineNumber}`,
     ),
-    design: normalizeOptionalString(record.spec_id, 'spec_id', `Beads record "${id}" on line ${lineNumber}`),
+    design: normalizeOptionalString(
+      record.design,
+      'design',
+      `Beads record "${id}" on line ${lineNumber}`,
+    ),
+    specId: normalizeOptionalString(
+      record.spec_id,
+      'spec_id',
+      `Beads record "${id}" on line ${lineNumber}`,
+    ),
     acceptanceCriteria: normalizeOptionalString(
       record.acceptance_criteria,
       'acceptance_criteria',
