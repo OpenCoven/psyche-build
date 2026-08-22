@@ -186,6 +186,102 @@ function stripGitPlusPrefix(value) {
 }
 
 /**
+ * @param {string} value
+ * @returns {string}
+ */
+function extractAbsoluteUrlBase(value) {
+  const queryIndex = value.indexOf('?');
+  const hashIndex = value.indexOf('#');
+  let end = value.length;
+
+  if (queryIndex !== -1) {
+    end = queryIndex;
+  }
+  if (hashIndex !== -1 && hashIndex < end) {
+    end = hashIndex;
+  }
+
+  return value.slice(0, end);
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeUrlComponent(value) {
+  if (!value) {
+    return value;
+  }
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function redactHomeDirectoriesInUrlComponent(value, matchers) {
+  const directlySanitized = redactHomeDirectoryToken(value, matchers);
+  if (directlySanitized !== value) {
+    return directlySanitized;
+  }
+
+  const decoded = decodeUrlComponent(value);
+  if (decoded === value) {
+    return value;
+  }
+
+  const decodedSanitized = redactHomeDirectoryToken(decoded, matchers);
+  return decodedSanitized !== decoded ? decodedSanitized : value;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function redactHttpUrlHomeDirectoryComponents(value, matchers) {
+  /** @type {URL} */
+  let url;
+  try {
+    url = new URL(stripGitPlusPrefix(value));
+  } catch {
+    return value;
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return value;
+  }
+
+  let changed = false;
+
+  if (url.search) {
+    const rawSearch = url.search.startsWith('?') ? url.search.slice(1) : url.search;
+    const sanitizedSearch = redactHomeDirectoriesInUrlComponent(rawSearch, matchers);
+    if (sanitizedSearch !== rawSearch) {
+      url.search = sanitizedSearch;
+      changed = true;
+    }
+  }
+
+  if (url.hash) {
+    const rawHash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
+    const sanitizedHash = redactHomeDirectoriesInUrlComponent(rawHash, matchers);
+    if (sanitizedHash !== rawHash) {
+      url.hash = sanitizedHash;
+      changed = true;
+    }
+  }
+
+  return changed ? `${extractAbsoluteUrlBase(value)}${url.search}${url.hash}` : value;
+}
+
+/**
  * @typedef {{
  *   protectedValue: string,
  *   protectedUrls: string[],
@@ -194,9 +290,10 @@ function stripGitPlusPrefix(value) {
 
 /**
  * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {ProtectedUrlState}
  */
-function protectNonFileUrls(value) {
+function protectNonFileUrls(value, matchers) {
   const protectedUrls = /** @type {string[]} */ ([]);
   const protectedValue = value.replace(PROTECTED_URL_PATTERN, (match) => {
     const scheme = stripGitPlusPrefix(match).split('://', 1)[0]?.toLowerCase();
@@ -205,7 +302,7 @@ function protectNonFileUrls(value) {
     }
 
     const placeholder = `${PROTECTED_URL_PLACEHOLDER_PREFIX}${protectedUrls.length}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`;
-    protectedUrls.push(match);
+    protectedUrls.push(redactHttpUrlHomeDirectoryComponents(match, matchers));
     return placeholder;
   });
 
@@ -329,7 +426,7 @@ function redactHomeDirectoryToken(token, matchers) {
  */
 function redactHomeDirectories(value, config) {
   const matchers = buildHomeDirectoryMatchers(config);
-  const { protectedValue, protectedUrls } = protectNonFileUrls(value);
+  const { protectedValue, protectedUrls } = protectNonFileUrls(value, matchers);
   const sanitized = protectedValue.replace(TOKEN_PATTERN, (token) =>
     redactHomeDirectoryToken(token, matchers)
   );

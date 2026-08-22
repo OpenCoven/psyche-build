@@ -1,7 +1,7 @@
 // @ts-check
 
 import { summarizeInventory } from './model.mjs';
-import { assertNoPublishableSecrets } from './sanitize.mjs';
+import { assertNoPublishableSecrets, sanitizePublicText } from './sanitize.mjs';
 
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
 
@@ -283,7 +283,10 @@ function normalizeHttpUrl(value, fieldName, options = {}) {
     url.hash = '';
   }
 
-  const href = url.toString();
+  const href = sanitizePublicText(url.toString());
+  if (href == null) {
+    return null;
+  }
   return options.trimTrailingSlash ? href.replace(/\/$/u, '') : href;
 }
 

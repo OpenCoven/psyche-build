@@ -93,7 +93,17 @@ describe('Beads project renderers', () => {
       sanitizePublicText('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.'),
     ).toBe('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.');
     expect(sanitizePublicText('Keep https://example.com/?path=/Users/buns/docs public.')).toBe(
-      'Keep https://example.com/?path=/Users/buns/docs public.',
+      'Keep https://example.com/?path=~/docs public.',
+    );
+    expect(sanitizePublicText('Keep https://example.com/#/home/alice/docs public.')).toBe(
+      'Keep https://example.com/#~/docs public.',
+    );
+    expect(
+      sanitizePublicText(
+        'Keep https://example.com/?path=%2FUsers%2Fbuns%2Fdocs#%2Fhome%2Falice%2Fdocs public.',
+      ),
+    ).toBe(
+      'Keep https://example.com/?path=~/docs#~/docs public.',
     );
 
     expect(() => assertNoPublishableSecrets('token = ghp_abcdefghijklmnopqrstuvwxyz123456')).toThrow(
@@ -205,18 +215,23 @@ describe('Beads project renderers', () => {
       blocked!,
       buildContext(inventory, {
         mirroredIssueUrlsByBeadId: {
-          'pb-feature': `git+https://mirror-user:mirror-pass@ghe.example.com/OpenCoven/psyche-build-public/issues/2#mirror`,
-          'pb-in-progress': 'https://github.com/OpenCoven/psyche-build-public/issues/3',
+          'pb-feature': 'https://mirror-user:mirror-pass@ghe.example.com/OpenCoven/psyche-build-public/issues/2?path=/Users/buns/private#mirror',
+          'pb-in-progress': 'https://github.com/OpenCoven/psyche-build-public/issues/3#/home/alice/file',
           'pb-closed': 'https://github.com/OpenCoven/psyche-build-public/issues/4',
         },
       }),
     );
 
     expect(rendered).toContain(
-      '- Parent: [#2](https://ghe.example.com/OpenCoven/psyche-build-public/issues/2#mirror) `pb-feature` — Model Beads project inventory',
+      '- Parent: [#2](https://ghe.example.com/OpenCoven/psyche-build-public/issues/2?path=~/private#mirror) `pb-feature` — Model Beads project inventory',
+    );
+    expect(rendered).toContain(
+      '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3#~/file) `pb-in-progress` — Track in-progress beads',
     );
     expect(rendered).not.toContain('mirror-user');
     expect(rendered).not.toContain('mirror-pass');
+    expect(rendered).not.toContain('/Users/buns/private');
+    expect(rendered).not.toContain('/home/alice/file');
     expect(rendered).not.toMatch(/https:\/\/[^)\s]*@/u);
   });
 
@@ -258,7 +273,7 @@ describe('Beads project renderers', () => {
     const renderedRepositoryLink = renderIssueBody(
       feature!,
       buildContext(inventory, {
-        sourceRepositoryUrl: 'git+https://mirror-user:mirror-pass@ghe.example.com/OpenCoven/psyche-build.git/',
+        sourceRepositoryUrl: 'https://mirror-user:mirror-pass@ghe.example.com/OpenCoven/psyche-build.git/',
       }),
     );
 
@@ -272,17 +287,19 @@ describe('Beads project renderers', () => {
     const renderedDirectSource = renderIssueBody(
       {
         ...feature!,
-        design: `https://docs-user:docs-pass@ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}#source`,
+        design: `https://docs-user:docs-pass@ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?path=/Users/buns/private#/home/alice/file`,
         specId: null,
       },
       buildContext(inventory, { sourceRepositoryUrl: null }),
     );
 
     expect(renderedDirectSource).toContain(
-      `- Design doc: https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}#source`,
+      `- Design doc: https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?path=~/private#~/file`,
     );
     expect(renderedDirectSource).not.toContain('docs-user');
     expect(renderedDirectSource).not.toContain('docs-pass');
+    expect(renderedDirectSource).not.toContain('/Users/buns/private');
+    expect(renderedDirectSource).not.toContain('/home/alice/file');
   });
 
   it('rejects secret-bearing repository and source URLs from public output', () => {
