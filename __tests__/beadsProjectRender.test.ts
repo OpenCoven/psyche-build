@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -19,6 +20,7 @@ const fixturePath = new URL('./fixtures/beads-project-sync/issues.jsonl', import
 const issuesJsonl = readFileSync(fixturePath, 'utf8');
 const designDocPath = 'docs/superpowers/specs/2026-08-21-public-beads-project-design.md';
 const planDocPath = 'docs/superpowers/plans/2026-08-21-public-beads-project.md';
+const runtimeHomeDirectory = os.homedir().replace(/[\\/]+$/gu, '').replace(/\\/gu, '/');
 
 function buildPublicInventory(): PublicBead[] {
   return parseBeadExport(issuesJsonl, {
@@ -95,15 +97,21 @@ describe('Beads project renderers', () => {
     expect(sanitizePublicText('Keep https://example.com/?path=/Users/buns/docs public.')).toBe(
       'Keep https://example.com/?path=~/docs public.',
     );
-    expect(sanitizePublicText('Keep https://example.com/#/home/alice/docs public.')).toBe(
+    expect(sanitizePublicText('Keep https://example.com/?route=/home/alice/docs public.')).toBe(
+      'Keep https://example.com/?route=/home/alice/docs public.',
+    );
+    expect(sanitizePublicText(`Keep https://example.com/#${runtimeHomeDirectory}/docs public.`)).toBe(
       'Keep https://example.com/#~/docs public.',
+    );
+    expect(sanitizePublicText('Keep https://example.com/#/home/alice/docs public.')).toBe(
+      'Keep https://example.com/#/home/alice/docs public.',
     );
     expect(
       sanitizePublicText(
         'Keep https://example.com/?path=%2FUsers%2Fbuns%2Fdocs#%2Fhome%2Falice%2Fdocs public.',
       ),
     ).toBe(
-      'Keep https://example.com/?path=~/docs#~/docs public.',
+      'Keep https://example.com/?path=~/docs#%2Fhome%2Falice%2Fdocs public.',
     );
 
     expect(() => assertNoPublishableSecrets('token = ghp_abcdefghijklmnopqrstuvwxyz123456')).toThrow(
@@ -226,12 +234,12 @@ describe('Beads project renderers', () => {
       '- Parent: [#2](https://ghe.example.com/OpenCoven/psyche-build-public/issues/2?path=~/private#mirror) `pb-feature` — Model Beads project inventory',
     );
     expect(rendered).toContain(
-      '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3#~/file) `pb-in-progress` — Track in-progress beads',
+      '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3#/home/alice/file) `pb-in-progress` — Track in-progress beads',
     );
     expect(rendered).not.toContain('mirror-user');
     expect(rendered).not.toContain('mirror-pass');
     expect(rendered).not.toContain('/Users/buns/private');
-    expect(rendered).not.toContain('/home/alice/file');
+    expect(rendered).toContain('/issues/3#/home/alice/file');
     expect(rendered).not.toMatch(/https:\/\/[^)\s]*@/u);
   });
 
@@ -294,12 +302,12 @@ describe('Beads project renderers', () => {
     );
 
     expect(renderedDirectSource).toContain(
-      `- Design doc: https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?path=~/private#~/file`,
+      `- Design doc: https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?path=~/private#/home/alice/file`,
     );
     expect(renderedDirectSource).not.toContain('docs-user');
     expect(renderedDirectSource).not.toContain('docs-pass');
     expect(renderedDirectSource).not.toContain('/Users/buns/private');
-    expect(renderedDirectSource).not.toContain('/home/alice/file');
+    expect(renderedDirectSource).toContain(`#/home/alice/file`);
   });
 
   it('rejects secret-bearing repository and source URLs from public output', () => {

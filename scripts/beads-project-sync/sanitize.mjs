@@ -54,6 +54,7 @@ const HOME_PATH_GENERIC_PATH_PATTERNS = [
   /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
   /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
 ];
+const URL_PATH_LIKE_QUERY_KEYS = new Set(['path', 'cwd', 'file', 'root', 'worktree']);
 
 /**
  * @param {string} message
@@ -162,6 +163,7 @@ function toFileUriHomeDirectory(homeDirectory) {
 function buildHomeDirectoryMatchers(config) {
   const matchers = /** @type {HomeDirectoryMatcher[]} */ ([]);
   for (const homeDirectory of normalizeHomeDirectories(config)) {
+    const slashNormalizedHomeDirectory = homeDirectory.replace(/\\/gu, '/');
     const fileUriHomeDirectory = toFileUriHomeDirectory(homeDirectory);
     if (fileUriHomeDirectory) {
       matchers.push({
@@ -173,6 +175,12 @@ function buildHomeDirectoryMatchers(config) {
       prefix: homeDirectory,
       replacement: '~',
     });
+    if (slashNormalizedHomeDirectory !== homeDirectory) {
+      matchers.push({
+        prefix: slashNormalizedHomeDirectory,
+        replacement: '~',
+      });
+    }
   }
   return matchers;
 }
@@ -221,12 +229,28 @@ function decodeUrlComponent(value) {
 }
 
 /**
+ * @typedef {{
+ *   allowGenericFileUriPatterns?: boolean,
+ *   allowGenericPathPatterns?: boolean,
+ * }} HomeDirectoryRedactionOptions
+ */
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isPathLikeUrlQueryKey(value) {
+  return URL_PATH_LIKE_QUERY_KEYS.has(decodeUrlComponent(value).trim().toLowerCase());
+}
+
+/**
  * @param {string} value
  * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {HomeDirectoryRedactionOptions} [options={}]
  * @returns {string}
  */
-function redactHomeDirectoriesInUrlComponent(value, matchers) {
-  const directlySanitized = redactHomeDirectoryToken(value, matchers);
+function redactHomeDirectoriesInUrlComponent(value, matchers, options = {}) {
+  const directlySanitized = redactHomeDirectoryToken(value, matchers, options);
   if (directlySanitized !== value) {
     return directlySanitized;
   }
@@ -236,8 +260,94 @@ function redactHomeDirectoriesInUrlComponent(value, matchers) {
     return value;
   }
 
-  const decodedSanitized = redactHomeDirectoryToken(decoded, matchers);
+  const decodedSanitized = redactHomeDirectoryToken(decoded, matchers, options);
   return decodedSanitized !== decoded ? decodedSanitized : value;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeUrlQuery(value, matchers) {
+  if (!value) {
+    return value;
+  }
+
+  let changed = false;
+  const sanitized = value.split('&').map((segment) => {
+    if (!segment) {
+      return segment;
+    }
+
+    const separatorIndex = segment.indexOf('=');
+    if (separatorIndex === -1) {
+      const sanitizedSegment = redactHomeDirectoriesInUrlComponent(segment, matchers, {
+        allowGenericFileUriPatterns: true,
+        allowGenericPathPatterns: false,
+      });
+      if (sanitizedSegment !== segment) {
+        changed = true;
+      }
+      return sanitizedSegment;
+    }
+
+    const key = segment.slice(0, separatorIndex);
+    const rawValue = segment.slice(separatorIndex + 1);
+    const sanitizedValue = redactHomeDirectoriesInUrlComponent(rawValue, matchers, {
+      allowGenericFileUriPatterns: true,
+      allowGenericPathPatterns: isPathLikeUrlQueryKey(key),
+    });
+    if (sanitizedValue !== rawValue) {
+      changed = true;
+      return `${key}=${sanitizedValue}`;
+    }
+    return segment;
+  }).join('&');
+
+  return changed ? sanitized : value;
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function looksLikeUrlParameterList(value) {
+  return value.includes('=') && !value.startsWith('/');
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeUrlHash(value, matchers) {
+  if (!value) {
+    return value;
+  }
+
+  const queryIndex = value.indexOf('?');
+  if (queryIndex === -1) {
+    if (looksLikeUrlParameterList(value)) {
+      return sanitizeUrlQuery(value, matchers);
+    }
+    return redactHomeDirectoriesInUrlComponent(value, matchers, {
+      allowGenericFileUriPatterns: true,
+      allowGenericPathPatterns: false,
+    });
+  }
+
+  const rawRoute = value.slice(0, queryIndex);
+  const rawQuery = value.slice(queryIndex + 1);
+  const sanitizedRoute = redactHomeDirectoriesInUrlComponent(rawRoute, matchers, {
+    allowGenericFileUriPatterns: true,
+    allowGenericPathPatterns: false,
+  });
+  const sanitizedQuery = sanitizeUrlQuery(rawQuery, matchers);
+
+  return sanitizedRoute !== rawRoute || sanitizedQuery !== rawQuery
+    ? `${sanitizedRoute}?${sanitizedQuery}`
+    : value;
 }
 
 /**
@@ -262,7 +372,7 @@ function redactHttpUrlHomeDirectoryComponents(value, matchers) {
 
   if (url.search) {
     const rawSearch = url.search.startsWith('?') ? url.search.slice(1) : url.search;
-    const sanitizedSearch = redactHomeDirectoriesInUrlComponent(rawSearch, matchers);
+    const sanitizedSearch = sanitizeUrlQuery(rawSearch, matchers);
     if (sanitizedSearch !== rawSearch) {
       url.search = sanitizedSearch;
       changed = true;
@@ -271,7 +381,7 @@ function redactHttpUrlHomeDirectoryComponents(value, matchers) {
 
   if (url.hash) {
     const rawHash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
-    const sanitizedHash = redactHomeDirectoriesInUrlComponent(rawHash, matchers);
+    const sanitizedHash = sanitizeUrlHash(rawHash, matchers);
     if (sanitizedHash !== rawHash) {
       url.hash = sanitizedHash;
       changed = true;
@@ -401,19 +511,28 @@ function replaceGenericHomePrefixPattern(token, pattern, replacement) {
 /**
  * @param {string} token
  * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {HomeDirectoryRedactionOptions} [options={}]
  * @returns {string}
  */
-function redactHomeDirectoryToken(token, matchers) {
+function redactHomeDirectoryToken(token, matchers, options = {}) {
   let sanitized = token;
+  const {
+    allowGenericFileUriPatterns = true,
+    allowGenericPathPatterns = true,
+  } = options;
 
   for (const matcher of matchers) {
     sanitized = replaceExactHomePrefix(sanitized, matcher.prefix, matcher.replacement);
   }
-  for (const pattern of HOME_PATH_GENERIC_FILE_URI_PATTERNS) {
-    sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, 'file:///~');
+  if (allowGenericFileUriPatterns) {
+    for (const pattern of HOME_PATH_GENERIC_FILE_URI_PATTERNS) {
+      sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, 'file:///~');
+    }
   }
-  for (const pattern of HOME_PATH_GENERIC_PATH_PATTERNS) {
-    sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, '~');
+  if (allowGenericPathPatterns) {
+    for (const pattern of HOME_PATH_GENERIC_PATH_PATTERNS) {
+      sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, '~');
+    }
   }
 
   return sanitized;
