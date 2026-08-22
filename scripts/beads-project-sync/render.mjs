@@ -1,6 +1,7 @@
 // @ts-check
 
 import { summarizeInventory } from './model.mjs';
+import { assertNoPublishableSecrets } from './sanitize.mjs';
 
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
 
@@ -19,6 +20,7 @@ const ISSUE_MARKER_PREFIX = '<!-- psyche-bead-sync:v1 bead-id=';
 const PROJECT_README_MARKER = '<!-- psyche-bead-sync:v1 project-readme -->';
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TYPE_SORT_ORDER = ['epic', 'feature', 'task'];
+const ABSOLUTE_URL_PATTERN = /^(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//iu;
 
 /**
  * @param {string} message
@@ -161,12 +163,149 @@ function normalizeRecordMap(value, fieldName) {
 }
 
 /**
+ * @typedef {{
+ *   stripDotGit?: boolean,
+ *   trimTrailingSlash?: boolean,
+ *   clearSearch?: boolean,
+ *   clearHash?: boolean,
+ * }} NormalizeHttpUrlOptions
+ */
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function stripGitPrefix(value) {
+  return value.replace(/^git\+/iu, '');
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function looksLikeAbsoluteUrl(value) {
+  return ABSOLUTE_URL_PATTERN.test(value);
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeUrlComponent(value) {
+  if (!value) {
+    return value;
+  }
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function containsPublishableSecret(value) {
+  try {
+    assertNoPublishableSecrets(value);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * @param {string} originalValue
+ * @param {URL} url
+ * @returns {boolean}
+ */
+function urlContainsPublishableSecrets(originalValue, url) {
+  return [
+    originalValue,
+    decodeUrlComponent(url.username),
+    decodeUrlComponent(url.password),
+    decodeUrlComponent(url.pathname),
+    decodeUrlComponent(url.search),
+    decodeUrlComponent(url.hash),
+  ].some((candidate) => candidate ? containsPublishableSecret(candidate) : false);
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @param {NormalizeHttpUrlOptions} [options={}]
+ * @returns {string | null}
+ */
+function normalizeHttpUrl(value, fieldName, options = {}) {
+  const normalized = normalizeOptionalInlineText(value, fieldName);
+  if (normalized == null || !looksLikeAbsoluteUrl(normalized)) {
+    return null;
+  }
+
+  const candidate = stripGitPrefix(normalized);
+
+  /** @type {URL} */
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return null;
+  }
+  if (urlContainsPublishableSecrets(normalized, url)) {
+    return null;
+  }
+
+  url.username = '';
+  url.password = '';
+
+  let pathname = url.pathname;
+  if (options.trimTrailingSlash) {
+    pathname = pathname.replace(/\/+$/u, '');
+  }
+  if (options.stripDotGit) {
+    pathname = pathname.replace(/\.git$/u, '');
+  }
+  if (!pathname) {
+    pathname = '/';
+  }
+  url.pathname = pathname;
+
+  if (options.clearSearch) {
+    url.search = '';
+  }
+  if (options.clearHash) {
+    url.hash = '';
+  }
+
+  const href = url.toString();
+  return options.trimTrailingSlash ? href.replace(/\/$/u, '') : href;
+}
+
+/**
  * @param {unknown} value
  * @returns {string | null}
  */
 function normalizeRepositoryUrl(value) {
-  const normalized = normalizeOptionalInlineText(value, 'sourceRepositoryUrl');
-  return normalized == null ? null : normalized.replace(/^git\+/u, '').replace(/\.git$/u, '').replace(/\/+$/u, '');
+  return normalizeHttpUrl(value, 'sourceRepositoryUrl', {
+    stripDotGit: true,
+    trimTrailingSlash: true,
+    clearSearch: true,
+    clearHash: true,
+  });
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function normalizeSourceUrl(value) {
+  return normalizeHttpUrl(value, 'sourcePath');
 }
 
 /**
@@ -201,8 +340,16 @@ function renderSourceLink(path, context) {
     return null;
   }
 
+  const normalizedSourceUrl = normalizeSourceUrl(normalizedPath);
+  if (normalizedSourceUrl) {
+    return normalizedSourceUrl;
+  }
+  if (looksLikeAbsoluteUrl(normalizedPath)) {
+    return null;
+  }
+
   const repositoryUrl = normalizeRepositoryUrl(context.sourceRepositoryUrl);
-  if (!repositoryUrl || normalizedPath.startsWith('/') || normalizedPath.includes('://')) {
+  if (!repositoryUrl || normalizedPath.startsWith('/')) {
     return normalizedPath;
   }
 
@@ -270,7 +417,7 @@ function renderDependenciesSection(bead, inventoryById, mirroredIssueUrlsByBeadI
     );
   }
 
-  for (const blockedById of bead.blockedByIds ?? []) {
+  for (const blockedById of [...(bead.blockedByIds ?? [])].sort(compareStrings)) {
     lines.push(
       renderDependencyLine(
         blockedById,

@@ -84,7 +84,7 @@ describe('Beads project model', () => {
         id: 'pb-blocked',
         type: 'task',
         parentId: 'pb-feature',
-        blockedByIds: ['pb-in-progress', 'pb-closed'],
+        blockedByIds: ['pb-closed', 'pb-in-progress'],
         blocked: true,
         githubAssignee: null,
       },
@@ -142,6 +142,29 @@ describe('Beads project model', () => {
     expect(index.dependentsByBlockerId.get('pb-closed')?.map((bead) => bead.id)).toEqual([
       'pb-blocked',
     ]);
+  });
+
+  it('sorts blockedByIds deterministically regardless of export dependency order', () => {
+    const dependencies = [
+      { issue_id: 'stable-order', depends_on_id: 'zeta', type: 'blocks' },
+      { issue_id: 'stable-order', depends_on_id: 'alpha', type: 'blocks' },
+      { issue_id: 'stable-order', depends_on_id: 'Ångström', type: 'blocks' },
+      { issue_id: 'stable-order', depends_on_id: 'parent-bead', type: 'parent-child' },
+      { issue_id: 'stable-order', depends_on_id: 'éclair', type: 'blocks' },
+    ];
+    const [forward] = parseBeadExport(toJsonl(makeIssue({
+      id: 'stable-order',
+      dependencies,
+    })), { assigneeMap: {} });
+    const [reversed] = parseBeadExport(toJsonl(makeIssue({
+      id: 'stable-order',
+      dependencies: [...dependencies].reverse(),
+    })), { assigneeMap: {} });
+
+    expect(forward.parentId).toBe('parent-bead');
+    expect(reversed.parentId).toBe('parent-bead');
+    expect(forward.blockedByIds).toEqual(['alpha', 'zeta', 'Ångström', 'éclair']);
+    expect(reversed.blockedByIds).toEqual(forward.blockedByIds);
   });
 
   it('filters active beads and summarizes inventory counts', () => {

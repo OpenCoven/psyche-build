@@ -78,6 +78,15 @@ function fail(message) {
 }
 
 /**
+ * @param {string} left
+ * @param {string} right
+ * @returns {number}
+ */
+function compareStrings(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
  * @param {unknown} value
  * @param {string} fieldName
  * @param {string} context
@@ -282,7 +291,10 @@ function normalizeDependencies(value, recordId, lineNumber) {
     );
   }
 
-  return { parentId, blockedByIds };
+  return {
+    parentId,
+    blockedByIds: blockedByIds.sort(compareStrings),
+  };
 }
 
 /**

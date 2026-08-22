@@ -17,6 +17,8 @@ import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
 
 const fixturePath = new URL('./fixtures/beads-project-sync/issues.jsonl', import.meta.url);
 const issuesJsonl = readFileSync(fixturePath, 'utf8');
+const designDocPath = 'docs/superpowers/specs/2026-08-21-public-beads-project-design.md';
+const planDocPath = 'docs/superpowers/plans/2026-08-21-public-beads-project.md';
 
 function buildPublicInventory(): PublicBead[] {
   return parseBeadExport(issuesJsonl, {
@@ -26,7 +28,10 @@ function buildPublicInventory(): PublicBead[] {
   }).map((bead) => toPublicBead(bead));
 }
 
-function buildContext(inventory: PublicBead[]): RenderContext {
+function buildContext(
+  inventory: PublicBead[],
+  overrides: Partial<RenderContext> = {},
+): RenderContext {
   const index = buildBeadIndex(inventory);
   return {
     inventoryById: index.byId,
@@ -39,6 +44,7 @@ function buildContext(inventory: PublicBead[]): RenderContext {
     sourceRepositoryUrl: 'https://github.com/OpenCoven/psyche-build',
     sourceRef: 'f2f1da60',
     inventoryTimestamp: '2026-08-22T20:00:00Z',
+    ...overrides,
   };
 }
 
@@ -118,8 +124,8 @@ describe('Beads project renderers', () => {
       id: 'pb-feature',
       title: 'Model Beads project inventory',
       description: 'Email <redacted-email> when the sync lands.',
-      design: 'docs/superpowers/specs/2026-08-21-public-beads-project-design.md',
-      specId: 'docs/superpowers/plans/2026-08-21-public-beads-project.md',
+      design: designDocPath,
+      specId: planDocPath,
       acceptanceCriteria: '- Expose hierarchy and blockers.\n- Keep assignee mapping safe.',
       notes: 'Local scratch output lived in ~/private/log.txt.',
       status: 'open',
@@ -170,11 +176,102 @@ describe('Beads project renderers', () => {
       'https://github.com/OpenCoven/psyche-build-public/issues/4',
     );
     expect(rendered).toContain(
-      '[docs/superpowers/specs/2026-08-21-public-beads-project-design.md](https://github.com/OpenCoven/psyche-build/blob/f2f1da60/docs/superpowers/specs/2026-08-21-public-beads-project-design.md)',
+      `[${designDocPath}](https://github.com/OpenCoven/psyche-build/blob/f2f1da60/${designDocPath})`,
     );
     expect(rendered).toContain(
-      '[docs/superpowers/plans/2026-08-21-public-beads-project.md](https://github.com/OpenCoven/psyche-build/blob/f2f1da60/docs/superpowers/plans/2026-08-21-public-beads-project.md)',
+      `[${planDocPath}](https://github.com/OpenCoven/psyche-build/blob/f2f1da60/${planDocPath})`,
     );
+  });
+
+  it('sanitizes repository and direct source URLs before rendering public links', () => {
+    const inventory = buildPublicInventory();
+    const [feature] = inventory.filter((bead) => bead.id === 'pb-feature');
+
+    expect(feature).toBeTruthy();
+
+    const renderedRepositoryLink = renderIssueBody(
+      feature!,
+      buildContext(inventory, {
+        sourceRepositoryUrl: 'git+https://mirror-user:mirror-pass@ghe.example.com/OpenCoven/psyche-build.git/',
+      }),
+    );
+
+    expect(renderedRepositoryLink).toContain(
+      `[${designDocPath}](https://ghe.example.com/OpenCoven/psyche-build/blob/f2f1da60/${designDocPath})`,
+    );
+    expect(renderedRepositoryLink).not.toContain('mirror-user');
+    expect(renderedRepositoryLink).not.toContain('mirror-pass');
+    expect(renderedRepositoryLink).not.toMatch(/https:\/\/[^)\s]*@/u);
+
+    const renderedDirectSource = renderIssueBody(
+      {
+        ...feature!,
+        design: `https://docs-user:docs-pass@ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}#source`,
+        specId: null,
+      },
+      buildContext(inventory, { sourceRepositoryUrl: null }),
+    );
+
+    expect(renderedDirectSource).toContain(
+      `- Design doc: https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}#source`,
+    );
+    expect(renderedDirectSource).not.toContain('docs-user');
+    expect(renderedDirectSource).not.toContain('docs-pass');
+  });
+
+  it('rejects secret-bearing repository and source URLs from public output', () => {
+    const inventory = buildPublicInventory();
+    const [feature] = inventory.filter((bead) => bead.id === 'pb-feature');
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+
+    expect(feature).toBeTruthy();
+
+    const rendered = renderIssueBody(
+      {
+        ...feature!,
+        design: `https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?access_token=${token}`,
+      },
+      buildContext(inventory, {
+        sourceRepositoryUrl: `git+https://x-access-token:${token}@github.com/OpenCoven/psyche-build.git`,
+      }),
+    );
+
+    expect(rendered).toContain('## Design');
+    expect(rendered).toContain(`- Plan: ${planDocPath}`);
+    expect(rendered).not.toContain('- Design doc: https://');
+    expect(rendered).not.toContain(token);
+    expect(rendered).not.toContain('x-access-token');
+    expect(rendered).not.toContain('access_token=');
+    expect(rendered).not.toContain('https://github.com/OpenCoven/psyche-build/blob/');
+  });
+
+  it('renders dependencies in stable order regardless of blockedByIds order', () => {
+    const inventory = buildPublicInventory();
+    const blocked = inventory.find((bead) => bead.id === 'pb-blocked');
+
+    expect(blocked).toBeTruthy();
+
+    const reversedBlocked: PublicBead = {
+      ...blocked!,
+      blockedByIds: [...blocked!.blockedByIds].reverse(),
+    };
+    const deterministicDependencies = [
+      '## Dependencies',
+      '- Parent: [#2](https://github.com/OpenCoven/psyche-build-public/issues/2) `pb-feature` — Model Beads project inventory',
+      '- Closed history: closed `pb-closed` — Preserve closed blocker history',
+      '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3) `pb-in-progress` — Track in-progress beads',
+    ].join('\n');
+
+    const rendered = renderIssueBody(blocked!, buildContext(inventory));
+    const renderedReversed = renderIssueBody(
+      reversedBlocked,
+      buildContext(
+        inventory.map((bead) => bead.id === reversedBlocked.id ? reversedBlocked : bead),
+      ),
+    );
+
+    expect(rendered).toContain(deterministicDependencies);
+    expect(renderedReversed).toContain(deterministicDependencies);
   });
 
   it('omits empty sections and escapes extra sync markers from source content', () => {
