@@ -1,18 +1,55 @@
+// @ts-check
+
 import { summarizeInventory } from './model.mjs';
+
+/** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
+
+/**
+ * @typedef {{
+ *   inventoryById?: ReadonlyMap<string, PublicBead> | Record<string, PublicBead>,
+ *   mirroredIssueUrlsByBeadId?: ReadonlyMap<string, string> | Record<string, string>,
+ *   sourceRepositoryUrl?: string | null,
+ *   sourceRef?: string | null,
+ *   inventoryTimestamp?: string | null,
+ *   projectName?: string | null,
+ * }} RenderContext
+ */
 
 const ISSUE_MARKER_PREFIX = '<!-- psyche-bead-sync:v1 bead-id=';
 const PROJECT_README_MARKER = '<!-- psyche-bead-sync:v1 project-readme -->';
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TYPE_SORT_ORDER = ['epic', 'feature', 'task'];
 
+/**
+ * @param {string} message
+ * @returns {never}
+ */
 function fail(message) {
   throw new Error(message);
 }
 
+/**
+ * @param {string} left
+ * @param {string} right
+ * @returns {number}
+ */
+function compareStrings(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function escapeGeneratedMarkers(value) {
   return value.replace(GENERATED_MARKER_PATTERN, '&lt;!-- psyche-bead-sync:v1');
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @returns {string}
+ */
 function normalizeInlineText(value, fieldName) {
   if (typeof value !== 'string') {
     fail(`${fieldName} must be a string`);
@@ -25,6 +62,11 @@ function normalizeInlineText(value, fieldName) {
   return normalized;
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @returns {string | null}
+ */
 function normalizeOptionalInlineText(value, fieldName) {
   if (value == null) {
     return null;
@@ -36,13 +78,21 @@ function normalizeOptionalInlineText(value, fieldName) {
   const normalized = escapeGeneratedMarkers(value.replace(/\s+/gu, ' ').trim());
   return normalized || null;
 }
-
+/**
+ * @param {string} line
+ * @returns {string}
+ */
 function normalizeHeadingLine(line) {
   return line.replace(/^(#{1,6})(?=\s)/u, (heading) => '#'.repeat(Math.min(heading.length + 1, 6)));
 }
 
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function promoteHeadingsOutsideCodeFences(value) {
   const lines = value.split('\n');
+  /** @type {string | null} */
   let activeFence = null;
 
   return lines.map((line) => {
@@ -65,6 +115,11 @@ function promoteHeadingsOutsideCodeFences(value) {
   }).join('\n');
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @returns {string | null}
+ */
 function normalizeMarkdownBlock(value, fieldName) {
   if (value == null) {
     return null;
@@ -86,6 +141,12 @@ function normalizeMarkdownBlock(value, fieldName) {
   return promoteHeadingsOutsideCodeFences(normalized);
 }
 
+/**
+ * @template TValue
+ * @param {ReadonlyMap<string, TValue> | Record<string, TValue> | null | undefined} value
+ * @param {string} fieldName
+ * @returns {Map<string, TValue>}
+ */
 function normalizeRecordMap(value, fieldName) {
   if (value == null) {
     return new Map();
@@ -94,20 +155,33 @@ function normalizeRecordMap(value, fieldName) {
     return new Map(value);
   }
   if (typeof value === 'object' && !Array.isArray(value)) {
-    return new Map(Object.entries(value));
+    return new Map(/** @type {[string, TValue][]} */ (Object.entries(value)));
   }
   fail(`${fieldName} must be an object or Map when present`);
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
 function normalizeRepositoryUrl(value) {
   const normalized = normalizeOptionalInlineText(value, 'sourceRepositoryUrl');
   return normalized == null ? null : normalized.replace(/^git\+/u, '').replace(/\.git$/u, '').replace(/\/+$/u, '');
 }
 
+/**
+ * @param {string} path
+ * @returns {string}
+ */
 function encodePath(path) {
   return path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
 }
 
+/**
+ * @param {string} title
+ * @param {string | null | undefined} content
+ * @returns {string | null}
+ */
 function renderSection(title, content) {
   if (!content) {
     return null;
@@ -116,6 +190,11 @@ function renderSection(title, content) {
   return `## ${title}\n${content}`;
 }
 
+/**
+ * @param {unknown} path
+ * @param {RenderContext} context
+ * @returns {string | null}
+ */
 function renderSourceLink(path, context) {
   const normalizedPath = normalizeOptionalInlineText(path, 'sourcePath');
   if (normalizedPath == null) {
@@ -131,6 +210,11 @@ function renderSourceLink(path, context) {
   return `[${normalizedPath}](${repositoryUrl}/blob/${encodePath(sourceRef)}/${encodePath(normalizedPath)})`;
 }
 
+/**
+ * @param {unknown} id
+ * @param {unknown} url
+ * @returns {string}
+ */
 function renderMirroredDependencyLink(id, url) {
   const dependencyId = normalizeInlineText(id, 'dependency id');
   const dependencyUrl = normalizeOptionalInlineText(url, 'mirroredIssueUrl');
@@ -146,6 +230,13 @@ function renderMirroredDependencyLink(id, url) {
   return `[\`${dependencyId}\`](${dependencyUrl})`;
 }
 
+/**
+ * @param {unknown} id
+ * @param {PublicBead | undefined} bead
+ * @param {unknown} url
+ * @param {string} prefix
+ * @returns {string}
+ */
 function renderDependencyLine(id, bead, url, prefix) {
   const dependencyId = normalizeInlineText(id, 'dependency id');
   const title = bead?.title ? normalizeInlineText(bead.title, 'dependency title') : null;
@@ -159,8 +250,14 @@ function renderDependencyLine(id, bead, url, prefix) {
   return `- ${prefix}: ${reference}${title ? ` — ${title}` : ''}`;
 }
 
+/**
+ * @param {PublicBead} bead
+ * @param {ReadonlyMap<string, PublicBead>} inventoryById
+ * @param {ReadonlyMap<string, string>} mirroredIssueUrlsByBeadId
+ * @returns {string | null}
+ */
 function renderDependenciesSection(bead, inventoryById, mirroredIssueUrlsByBeadId) {
-  const lines = [];
+  const lines = /** @type {string[]} */ ([]);
 
   if (bead.parentId) {
     lines.push(
@@ -187,17 +284,26 @@ function renderDependenciesSection(bead, inventoryById, mirroredIssueUrlsByBeadI
   return lines.length > 0 ? lines.join('\n') : null;
 }
 
+/**
+ * @param {PublicBead} bead
+ * @returns {string | null}
+ */
 function renderLabelsSection(bead) {
   const labels = Array.isArray(bead.labels)
     ? [...bead.labels]
       .map((label) => normalizeInlineText(label, 'label'))
-      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+      .sort(compareStrings)
     : [];
   return labels.length > 0 ? labels.map((label) => `- \`${label}\``).join('\n') : null;
 }
 
+/**
+ * @param {PublicBead} bead
+ * @param {RenderContext} context
+ * @returns {string | null}
+ */
 function renderDesignSection(bead, context) {
-  const lines = [];
+  const lines = /** @type {string[]} */ ([]);
   const designLink = renderSourceLink(bead.design, context);
   const planLink = renderSourceLink(bead.specId, context);
 
@@ -211,15 +317,19 @@ function renderDesignSection(bead, context) {
   return lines.length > 0 ? lines.join('\n') : null;
 }
 
+/**
+ * @param {PublicBead} bead
+ * @returns {string}
+ */
 function renderSourceMetadata(bead) {
-  const lines = [
+  const lines = /** @type {string[]} */ ([
     `- Source status: \`${normalizeInlineText(bead.status, 'status')}\``,
     `- Source type: \`${normalizeInlineText(bead.type, 'type')}\``,
     `- Source priority: P${Number(bead.priority)}`,
     `- Source blocked: ${bead.blocked ? 'yes' : 'no'}`,
     `- Created at: ${normalizeInlineText(bead.createdAt, 'createdAt')}`,
     `- Updated at: ${normalizeInlineText(bead.updatedAt, 'updatedAt')}`,
-  ];
+  ]);
 
   if (bead.closedAt) {
     lines.push(`- Closed at: ${normalizeInlineText(bead.closedAt, 'closedAt')}`);
@@ -228,6 +338,10 @@ function renderSourceMetadata(bead) {
   return lines.join('\n');
 }
 
+/**
+ * @param {Record<string, number | undefined>} typeCounts
+ * @returns {string}
+ */
 function renderTypeCountLines(typeCounts) {
   const keys = Object.keys(typeCounts).sort((left, right) => {
     const leftIndex = TYPE_SORT_ORDER.indexOf(left);
@@ -241,14 +355,18 @@ function renderTypeCountLines(typeCounts) {
       }
       return leftIndex - rightIndex;
     }
-    return left.localeCompare(right);
+    return compareStrings(left, right);
   });
 
   return keys.length > 0
-    ? keys.map((type) => `- ${type}: ${typeCounts[type]}`).join('\n')
+    ? keys.map((type) => `- ${type}: ${typeCounts[type] ?? 0}`).join('\n')
     : '- none';
 }
 
+/**
+ * @param {readonly PublicBead[]} inventory
+ * @returns {string}
+ */
 function renderPriorityCountLines(inventory) {
   const priorityCounts = new Map();
   for (const bead of inventory) {
@@ -262,13 +380,17 @@ function renderPriorityCountLines(inventory) {
     : '- none';
 }
 
+/**
+ * @param {readonly PublicBead[]} inventory
+ * @returns {string}
+ */
 function renderClosedHistory(inventory) {
   const closed = inventory
     .filter((bead) => bead.status === 'closed')
     .sort((left, right) => {
       const leftTimestamp = left.closedAt ?? left.updatedAt;
       const rightTimestamp = right.closedAt ?? right.updatedAt;
-      return rightTimestamp.localeCompare(leftTimestamp) || left.id.localeCompare(right.id);
+      return compareStrings(rightTimestamp, leftTimestamp) || compareStrings(left.id, right.id);
     });
 
   return closed.length > 0
@@ -279,22 +401,40 @@ function renderClosedHistory(inventory) {
     : '- No closed beads in this snapshot.';
 }
 
+/**
+ * @param {readonly PublicBead[]} inventory
+ * @param {RenderContext} context
+ * @returns {string}
+ */
 function resolveInventoryTimestamp(inventory, context) {
   const contextTimestamp = normalizeOptionalInlineText(context.inventoryTimestamp, 'inventoryTimestamp');
   if (contextTimestamp) {
     return contextTimestamp;
   }
 
-  const timestamps = inventory
-    .flatMap((bead) => [bead.updatedAt, bead.closedAt].filter(Boolean))
-    .map((timestamp) => normalizeInlineText(timestamp, 'inventory timestamp'));
-  return timestamps.sort((left, right) => right.localeCompare(left))[0] ?? 'unknown';
+  const timestamps = /** @type {string[]} */ ([]);
+  for (const bead of inventory) {
+    timestamps.push(normalizeInlineText(bead.updatedAt, 'inventory timestamp'));
+    if (bead.closedAt) {
+      timestamps.push(normalizeInlineText(bead.closedAt, 'inventory timestamp'));
+    }
+  }
+  return timestamps.sort((left, right) => compareStrings(right, left))[0] ?? 'unknown';
 }
 
+/**
+ * @param {PublicBead} bead
+ * @returns {string}
+ */
 export function renderIssueTitle(bead) {
   return `[${normalizeInlineText(bead.id, 'id')}] ${normalizeInlineText(bead.title, 'title')}`;
 }
 
+/**
+ * @param {PublicBead} bead
+ * @param {RenderContext} [context={}]
+ * @returns {string}
+ */
 export function renderIssueBody(bead, context = {}) {
   const inventoryById = normalizeRecordMap(context.inventoryById, 'inventoryById');
   const mirroredIssueUrlsByBeadId = normalizeRecordMap(
@@ -334,6 +474,11 @@ export function renderIssueBody(bead, context = {}) {
   return sections.filter(Boolean).join('\n\n');
 }
 
+/**
+ * @param {readonly PublicBead[]} inventory
+ * @param {RenderContext} [context={}]
+ * @returns {string}
+ */
 export function renderProjectReadme(inventory, context = {}) {
   if (!Array.isArray(inventory)) {
     fail('renderProjectReadme expected an inventory array');

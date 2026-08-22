@@ -248,6 +248,56 @@ describe('Beads project renderers', () => {
     expect(rendered).toContain('## Labels\n- `apple`\n- `zeta`\n- `Ångström`\n- `éclair`');
   });
 
+  it('renders README type counts and closed history with locale-independent deterministic ordering', () => {
+    const inventory = buildPublicInventory();
+    const [feature] = inventory.filter((bead) => bead.id === 'pb-feature');
+    const extendedInventory: PublicBead[] = [
+      ...inventory,
+      {
+        ...feature,
+        id: 'pb-Ångström',
+        title: 'Archive Å first',
+        status: 'closed',
+        priority: 2,
+        type: 'Ångström',
+        blocked: false,
+        parentId: null,
+        blockedByIds: [],
+        githubAssignee: null,
+        createdAt: '2026-08-21T09:00:00Z',
+        updatedAt: '2026-08-21T12:00:00Z',
+        closedAt: '2026-08-21T12:00:00Z',
+      },
+      {
+        ...feature,
+        id: 'pb-éclair',
+        title: 'Archive é second',
+        status: 'closed',
+        priority: 2,
+        type: 'éclair',
+        blocked: false,
+        parentId: null,
+        blockedByIds: [],
+        githubAssignee: null,
+        createdAt: '2026-08-21T09:30:00Z',
+        updatedAt: '2026-08-21T12:00:00Z',
+        closedAt: '2026-08-21T12:00:00Z',
+      },
+    ];
+
+    const rendered = renderProjectReadme(extendedInventory, buildContext(extendedInventory));
+
+    expect(rendered).toContain(
+      '## Type counts\n- epic: 1\n- feature: 1\n- task: 3\n- Ångström: 1\n- éclair: 1',
+    );
+    expect(rendered).toContain(
+      '## Closed history summary\n'
+        + '- `pb-Ångström` — Archive Å first (closed 2026-08-21T12:00:00Z)\n'
+        + '- `pb-éclair` — Archive é second (closed 2026-08-21T12:00:00Z)\n'
+        + '- `pb-closed` — Preserve closed blocker history (closed 2026-08-20T12:30:00Z)',
+    );
+  });
+
   it('renders deterministic project README content with counts, history, guide, and sync rules', () => {
     const inventory = buildPublicInventory();
     const context = buildContext(inventory);

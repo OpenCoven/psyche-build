@@ -1,4 +1,37 @@
+// @ts-check
+
 import os from 'node:os';
+
+/** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
+
+/**
+ * @typedef {{
+ *   homeDirectories?: readonly string[] | ReadonlySet<string>,
+ * }} SanitizePublicTextConfig
+ */
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   title: string,
+ *   description: string | null,
+ *   design: string | null,
+ *   specId: string | null,
+ *   acceptanceCriteria: string | null,
+ *   notes: string | null,
+ *   status: string,
+ *   priority: number,
+ *   type: string,
+ *   blocked: boolean,
+ *   labels: string[],
+ *   parentId: string | null,
+ *   blockedByIds: string[],
+ *   githubAssignee: string | null,
+ *   createdAt: string,
+ *   updatedAt: string,
+ *   closedAt: string | null,
+ * }} PublicBead
+ */
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
 const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/iu;
@@ -10,14 +43,26 @@ const CREDENTIAL_ASSIGNMENT_PATTERN =
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const HOME_PATH_PREFIX_PATTERN = /(^|[\s"'`(<=>:,])/u;
 
+/**
+ * @param {string} message
+ * @returns {never}
+ */
 function fail(message) {
   throw new Error(message);
 }
 
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+/**
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string[]}
+ */
 function normalizeHomeDirectories(config) {
   if (config == null) {
     return [os.homedir()].filter(Boolean);
@@ -49,6 +94,11 @@ function normalizeHomeDirectories(config) {
   return [...normalized].filter(Boolean).sort((left, right) => right.length - left.length);
 }
 
+/**
+ * @param {string} value
+ * @param {string} homeDirectory
+ * @returns {string}
+ */
 function replaceConfiguredHomeDirectory(value, homeDirectory) {
   if (!homeDirectory) {
     return value;
@@ -71,6 +121,10 @@ function replaceConfiguredHomeDirectory(value, homeDirectory) {
   return sanitized.replace(pathPattern, (_, prefix) => `${prefix}~`);
 }
 
+/**
+ * @param {string} homeDirectory
+ * @returns {string | null}
+ */
 function toFileUriHomeDirectory(homeDirectory) {
   if (/^[A-Za-z]:[\\/]/u.test(homeDirectory)) {
     return `file:///${homeDirectory.replace(/\\/gu, '/')}`;
@@ -81,6 +135,11 @@ function toFileUriHomeDirectory(homeDirectory) {
   return null;
 }
 
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string}
+ */
 function redactHomeDirectories(value, config) {
   let sanitized = value;
 
@@ -108,10 +167,18 @@ function redactHomeDirectories(value, config) {
   return sanitized;
 }
 
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function escapeGeneratedMarkers(value) {
   return value.replace(GENERATED_MARKER_PATTERN, '&lt;!-- psyche-bead-sync:v1');
 }
 
+/**
+ * @param {string} value
+ * @returns {string | null}
+ */
 function normalizeMultilineText(value) {
   const normalized = value
     .replace(/\r\n?/gu, '\n')
@@ -124,15 +191,38 @@ function normalizeMultilineText(value) {
   return normalized || null;
 }
 
-function sanitizeInlineText(value, fieldName, config, required = true) {
+/**
+ * @param {string | null | undefined} value
+ * @param {string} fieldName
+ * @param {SanitizePublicTextConfig} config
+ * @returns {string}
+ */
+function sanitizeRequiredInlineText(value, fieldName, config) {
   const sanitized = sanitizePublicText(value, config);
   const inline = sanitized == null ? null : sanitized.replace(/\s+/gu, ' ').trim();
-  if (required && !inline) {
+  if (!inline) {
     fail(`Public bead field "${fieldName}" must not be empty`);
   }
   return inline;
 }
 
+/**
+ * @param {string | null | undefined} value
+ * @param {string} fieldName
+ * @param {SanitizePublicTextConfig} config
+ * @returns {string | null}
+ */
+function sanitizeOptionalInlineText(value, fieldName, config) {
+  const sanitized = sanitizePublicText(value, config);
+  return sanitized == null ? null : sanitized.replace(/\s+/gu, ' ').trim() || null;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @param {SanitizePublicTextConfig} config
+ * @returns {string[]}
+ */
 function sanitizeStringList(value, fieldName, config) {
   if (value == null) {
     return [];
@@ -141,10 +231,10 @@ function sanitizeStringList(value, fieldName, config) {
     fail(`Public bead field "${fieldName}" must be an array`);
   }
 
-  const sanitized = [];
+  const sanitized = /** @type {string[]} */ ([]);
   const seen = new Set();
   for (const entry of value) {
-    const item = sanitizeInlineText(entry, fieldName, config);
+    const item = sanitizeRequiredInlineText(entry, fieldName, config);
     if (seen.has(item)) {
       continue;
     }
@@ -154,6 +244,10 @@ function sanitizeStringList(value, fieldName, config) {
   return sanitized;
 }
 
+/**
+ * @param {unknown} value
+ * @returns {number}
+ */
 function normalizePriority(value) {
   const priority = Number(value);
   if (!Number.isFinite(priority)) {
@@ -162,6 +256,9 @@ function normalizePriority(value) {
   return priority;
 }
 
+/**
+ * @param {string} value
+ */
 export function assertNoPublishableSecrets(value) {
   if (typeof value !== 'string') {
     fail('assertNoPublishableSecrets expected a string');
@@ -185,6 +282,11 @@ export function assertNoPublishableSecrets(value) {
   }
 }
 
+/**
+ * @param {string | null | undefined} value
+ * @param {SanitizePublicTextConfig} [config={}]
+ * @returns {string | null}
+ */
 export function sanitizePublicText(value, config = {}) {
   if (value == null) {
     return null;
@@ -201,29 +303,34 @@ export function sanitizePublicText(value, config = {}) {
   return normalizeMultilineText(sanitized);
 }
 
+/**
+ * @param {ParsedBead} bead
+ * @param {SanitizePublicTextConfig} [config={}]
+ * @returns {PublicBead}
+ */
 export function toPublicBead(bead, config = {}) {
   if (!bead || typeof bead !== 'object' || Array.isArray(bead)) {
     fail('toPublicBead expected a Beads record object');
   }
 
   return {
-    id: sanitizeInlineText(bead.id, 'id', config),
-    title: sanitizeInlineText(bead.title, 'title', config),
+    id: sanitizeRequiredInlineText(bead.id, 'id', config),
+    title: sanitizeRequiredInlineText(bead.title, 'title', config),
     description: sanitizePublicText(bead.description, config),
     design: sanitizePublicText(bead.design, config),
     specId: sanitizePublicText(bead.specId, config),
     acceptanceCriteria: sanitizePublicText(bead.acceptanceCriteria, config),
     notes: sanitizePublicText(bead.notes, config),
-    status: sanitizeInlineText(bead.status, 'status', config),
+    status: sanitizeRequiredInlineText(bead.status, 'status', config),
     priority: normalizePriority(bead.priority),
-    type: sanitizeInlineText(bead.type, 'type', config),
+    type: sanitizeRequiredInlineText(bead.type, 'type', config),
     blocked: bead.blocked === true,
     labels: sanitizeStringList(bead.labels, 'labels', config),
-    parentId: sanitizeInlineText(bead.parentId, 'parentId', config, false),
+    parentId: sanitizeOptionalInlineText(bead.parentId, 'parentId', config),
     blockedByIds: sanitizeStringList(bead.blockedByIds, 'blockedByIds', config),
-    githubAssignee: sanitizeInlineText(bead.githubAssignee, 'githubAssignee', config, false),
-    createdAt: sanitizeInlineText(bead.createdAt, 'createdAt', config),
-    updatedAt: sanitizeInlineText(bead.updatedAt, 'updatedAt', config),
-    closedAt: sanitizeInlineText(bead.closedAt, 'closedAt', config, false),
+    githubAssignee: sanitizeOptionalInlineText(bead.githubAssignee, 'githubAssignee', config),
+    createdAt: sanitizeRequiredInlineText(bead.createdAt, 'createdAt', config),
+    updatedAt: sanitizeRequiredInlineText(bead.updatedAt, 'updatedAt', config),
+    closedAt: sanitizeOptionalInlineText(bead.closedAt, 'closedAt', config),
   };
 }
