@@ -37,6 +37,34 @@ function normalizeOptionalInlineText(value, fieldName) {
   return normalized || null;
 }
 
+function normalizeHeadingLine(line) {
+  return line.replace(/^(#{1,6})(?=\s)/u, (heading) => '#'.repeat(Math.min(heading.length + 1, 6)));
+}
+
+function promoteHeadingsOutsideCodeFences(value) {
+  const lines = value.split('\n');
+  let activeFence = null;
+
+  return lines.map((line) => {
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})(.*)$/u);
+    if (fenceMatch) {
+      const [, marker, suffix] = fenceMatch;
+      if (activeFence == null) {
+        activeFence = marker;
+      } else if (
+        marker[0] === activeFence[0]
+        && marker.length >= activeFence.length
+        && /^[ \t]*$/u.test(suffix)
+      ) {
+        activeFence = null;
+      }
+      return line;
+    }
+
+    return activeFence == null ? normalizeHeadingLine(line) : line;
+  }).join('\n');
+}
+
 function normalizeMarkdownBlock(value, fieldName) {
   if (value == null) {
     return null;
@@ -55,7 +83,7 @@ function normalizeMarkdownBlock(value, fieldName) {
     return null;
   }
 
-  return normalized.replace(/^(#{1,6})(?=\s)/gmu, (heading) => '#'.repeat(Math.min(heading.length + 1, 6)));
+  return promoteHeadingsOutsideCodeFences(normalized);
 }
 
 function normalizeRecordMap(value, fieldName) {
@@ -161,7 +189,9 @@ function renderDependenciesSection(bead, inventoryById, mirroredIssueUrlsByBeadI
 
 function renderLabelsSection(bead) {
   const labels = Array.isArray(bead.labels)
-    ? [...bead.labels].map((label) => normalizeInlineText(label, 'label')).sort((left, right) => left.localeCompare(right))
+    ? [...bead.labels]
+      .map((label) => normalizeInlineText(label, 'label'))
+      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
     : [];
   return labels.length > 0 ? labels.map((label) => `- \`${label}\``).join('\n') : null;
 }

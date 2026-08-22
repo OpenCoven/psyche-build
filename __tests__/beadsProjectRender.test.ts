@@ -59,11 +59,36 @@ describe('Beads project renderers', () => {
     expect(sanitizePublicText('Linux path: /home/alice/private/notes.txt')).toBe(
       'Linux path: ~/private/notes.txt',
     );
+    expect(sanitizePublicText('cwd=/Users/buns/Documents/GitHub/OpenCoven/psyche-build')).toBe(
+      'cwd=~/Documents/GitHub/OpenCoven/psyche-build',
+    );
+    expect(sanitizePublicText('file:///Users/buns/Documents/GitHub/OpenCoven/psyche-build')).toBe(
+      'file:///~/Documents/GitHub/OpenCoven/psyche-build',
+    );
+    expect(sanitizePublicText('cwd=/home/alice/private/notes.txt')).toBe(
+      'cwd=~/private/notes.txt',
+    );
+    expect(sanitizePublicText('cwd=C:\\Users\\alice\\AppData\\Local')).toBe(
+      'cwd=~\\AppData\\Local',
+    );
+    expect(sanitizePublicText('file:///C:/Users/alice/AppData/Local')).toBe(
+      'file:///~/AppData/Local',
+    );
+    expect(
+      sanitizePublicText('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.'),
+    ).toBe('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.');
 
     expect(() => assertNoPublishableSecrets('token = ghp_abcdefghijklmnopqrstuvwxyz123456')).toThrow(
       /GitHub token/i,
     );
+    expect(() =>
+      assertNoPublishableSecrets('github_pat_abcdefghijklmnopqrstuvwxyz1234567890'),
+    ).toThrow(/GitHub token/i);
     expect(() => assertNoPublishableSecrets('apiKey = "live-secret-value"')).toThrow(/API key/i);
+    expect(() => assertNoPublishableSecrets('{"api_key":"live-secret-value"}')).toThrow(/API key/i);
+    expect(() => assertNoPublishableSecrets('{"token":"live-secret-value"}')).toThrow(
+      /credential assignment/i,
+    );
     expect(() =>
       assertNoPublishableSecrets(
         '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----',
@@ -177,6 +202,50 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain('## Dependencies');
     expect(rendered).not.toContain('## Labels');
     expect(rendered).toContain('&lt;!-- psyche-bead-sync:v1 bead-id=shadow -->');
+  });
+
+  it('normalizes headings outside fenced code blocks only', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        description: [
+          '# Outside heading',
+          '```ts',
+          '# Inside backtick fence',
+          '```',
+          '~~~md',
+          '## Inside tilde fence',
+          '~~~',
+          '## After fences',
+        ].join('\n'),
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(rendered).toContain('## Description\n## Outside heading');
+    expect(rendered).toContain('```ts\n# Inside backtick fence\n```');
+    expect(rendered).toContain('~~~md\n## Inside tilde fence\n~~~');
+    expect(rendered).toContain('\n### After fences');
+    expect(rendered).not.toContain('```ts\n## Inside backtick fence\n```');
+    expect(rendered).not.toContain('~~~md\n### Inside tilde fence\n~~~');
+  });
+
+  it('renders labels with locale-independent deterministic ordering', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        labels: ['éclair', 'zeta', 'Ångström', 'apple'],
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(rendered).toContain('## Labels\n- `apple`\n- `zeta`\n- `Ångström`\n- `éclair`');
   });
 
   it('renders deterministic project README content with counts, history, guide, and sync rules', () => {

@@ -1,13 +1,14 @@
 import os from 'node:os';
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
-const GITHUB_TOKEN_PATTERN = /\bgh[pousr]_[A-Za-z0-9_]+\b/iu;
+const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/iu;
 const PRIVATE_KEY_PATTERN = /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/iu;
 const API_KEY_ASSIGNMENT_PATTERN =
-  /\b(?:api[_-]?key|apikey|client[_-]?secret|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*(?:"[^"]+"|'[^']+'|[^\s,;]+)/iu;
+  /\b(?:api[_-]?key|apikey|client[_-]?secret|access[_-]?token|auth[_-]?token)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const CREDENTIAL_ASSIGNMENT_PATTERN =
-  /\b(?:github_token|token|secret|password|passwd)\b\s*[:=]\s*(?:"[^"]+"|'[^']+'|[^\s,;]+)/iu;
+  /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
+const HOME_PATH_PREFIX_PATTERN = /(^|[\s"'`(<=>:,])/u;
 
 function fail(message) {
   throw new Error(message);
@@ -53,11 +54,31 @@ function replaceConfiguredHomeDirectory(value, homeDirectory) {
     return value;
   }
 
-  const pattern = new RegExp(
-    `(^|[\\s"'(])${escapeRegExp(homeDirectory)}(?=[/\\\\]|$)`,
+  let sanitized = value;
+  const fileUriHomeDirectory = toFileUriHomeDirectory(homeDirectory);
+  if (fileUriHomeDirectory) {
+    const fileUriPattern = new RegExp(
+      `${HOME_PATH_PREFIX_PATTERN.source}${escapeRegExp(fileUriHomeDirectory)}(?=/|$)`,
+      'gu',
+    );
+    sanitized = sanitized.replace(fileUriPattern, (_, prefix) => `${prefix}file:///~`);
+  }
+
+  const pathPattern = new RegExp(
+    `${HOME_PATH_PREFIX_PATTERN.source}${escapeRegExp(homeDirectory)}(?=[/\\\\]|$)`,
     'gu',
   );
-  return value.replace(pattern, (_, prefix) => `${prefix}~`);
+  return sanitized.replace(pathPattern, (_, prefix) => `${prefix}~`);
+}
+
+function toFileUriHomeDirectory(homeDirectory) {
+  if (/^[A-Za-z]:[\\/]/u.test(homeDirectory)) {
+    return `file:///${homeDirectory.replace(/\\/gu, '/')}`;
+  }
+  if (homeDirectory.startsWith('/')) {
+    return `file://${homeDirectory}`;
+  }
+  return null;
 }
 
 function redactHomeDirectories(value, config) {
@@ -68,11 +89,19 @@ function redactHomeDirectories(value, config) {
   }
 
   sanitized = sanitized.replace(
-    /(^|[\s"'(])(?:\/Users\/[^/\s]+|\/home\/[^/\s]+)(?=\/|$)/gu,
+    /(^|[\s"'`(<=>:,])file:\/\/\/(?:Users|home)\/[^/\s]+(?=\/|$)/gu,
+    (_, prefix) => `${prefix}file:///~`,
+  );
+  sanitized = sanitized.replace(
+    /(^|[\s"'`(<=>:,])file:\/\/\/[A-Za-z]:\/Users\/[^/\s]+(?=\/|$)/gu,
+    (_, prefix) => `${prefix}file:///~`,
+  );
+  sanitized = sanitized.replace(
+    /(^|[\s"'`(<=>:,])(?:\/Users\/[^/\s]+|\/home\/[^/\s]+)(?=[/\\]|$)/gu,
     (_, prefix) => `${prefix}~`,
   );
   sanitized = sanitized.replace(
-    /(^|[\s"'(])(?:[A-Za-z]:\\Users\\[^\\/\s]+)(?=\\|$)/gu,
+    /(^|[\s"'`(<=>:,])(?:[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^\\/\s]+)(?=(?:\/|\\)|$)/gu,
     (_, prefix) => `${prefix}~`,
   );
 
