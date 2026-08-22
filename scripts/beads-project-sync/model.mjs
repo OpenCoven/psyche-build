@@ -68,6 +68,9 @@
  */
 
 const unsupportedRecordTypes = new Set(['infrastructure', 'memory', 'template', 'gate', 'wisp']);
+const BEAD_ID_SOURCE = '[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?';
+
+export const BEAD_ID_PATTERN = new RegExp(`^${BEAD_ID_SOURCE}$`, 'u');
 
 /**
  * @param {string} message
@@ -103,6 +106,20 @@ function normalizeRequiredString(value, fieldName, context) {
       fail(`${context} has an empty id`);
     }
     fail(`${context} has an empty "${fieldName}"`);
+  }
+  return normalized;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @param {string} context
+ * @returns {string}
+ */
+export function normalizeBeadId(value, fieldName, context) {
+  const normalized = normalizeRequiredString(value, fieldName, context);
+  if (!BEAD_ID_PATTERN.test(normalized)) {
+    fail(`${context} field "${fieldName}" must be a valid Bead id using only letters, digits, dots, or hyphens`);
   }
   return normalized;
 }
@@ -253,7 +270,14 @@ function normalizeDependencies(value, recordId, lineNumber) {
     const dependencyRecord = /** @type {RawDependencyRecord & Record<string, unknown>} */ (dependency);
     assertNoCurrentFields(dependencyRecord, `Beads dependency for "${recordId}" on line ${lineNumber}`);
 
-    if (dependencyRecord.issue_id != null && dependencyRecord.issue_id !== recordId) {
+    if (
+      dependencyRecord.issue_id != null
+      && normalizeBeadId(
+        dependencyRecord.issue_id,
+        'issue_id',
+        `Beads dependency for "${recordId}" on line ${lineNumber}`,
+      ) !== recordId
+    ) {
       fail(
         `Beads dependency for "${recordId}" on line ${lineNumber} targets issue_id "${dependencyRecord.issue_id}"`,
       );
@@ -264,7 +288,7 @@ function normalizeDependencies(value, recordId, lineNumber) {
       'type',
       `Beads dependency for "${recordId}" on line ${lineNumber}`,
     );
-    const dependsOnId = normalizeRequiredString(
+    const dependsOnId = normalizeBeadId(
       dependencyRecord.depends_on_id,
       'depends_on_id',
       `Beads dependency for "${recordId}" on line ${lineNumber}`,
@@ -323,7 +347,7 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
     fail(`Unsupported Beads record type "${recordType}" on line ${lineNumber}`);
   }
 
-  const id = normalizeRequiredString(beadRecord.id, 'id', `Beads record on line ${lineNumber}`);
+  const id = normalizeBeadId(beadRecord.id, 'id', `Beads record on line ${lineNumber}`);
   const issueType = normalizeRequiredString(
     beadRecord.issue_type,
     'issue_type',
@@ -463,19 +487,25 @@ export function buildBeadIndex(beads) {
   const dependentsByBlockerId = /** @type {Map<string, TBead[]>} */ (new Map());
 
   for (const bead of beads) {
-    if (!bead?.id) {
-      fail('buildBeadIndex expected beads with ids');
+    const beadId = normalizeBeadId(bead?.id, 'id', 'buildBeadIndex bead');
+    if (byId.has(beadId)) {
+      fail(`buildBeadIndex received duplicate id "${beadId}"`);
     }
-    if (byId.has(bead.id)) {
-      fail(`buildBeadIndex received duplicate id "${bead.id}"`);
-    }
-    byId.set(bead.id, bead);
+    byId.set(beadId, bead);
 
     if (bead.parentId) {
-      pushGrouped(childrenByParentId, bead.parentId, bead);
+      pushGrouped(
+        childrenByParentId,
+        normalizeBeadId(bead.parentId, 'parentId', `buildBeadIndex bead "${beadId}"`),
+        bead,
+      );
     }
     for (const blockedById of bead.blockedByIds ?? []) {
-      pushGrouped(dependentsByBlockerId, blockedById, bead);
+      pushGrouped(
+        dependentsByBlockerId,
+        normalizeBeadId(blockedById, 'blockedByIds entry', `buildBeadIndex bead "${beadId}"`),
+        bead,
+      );
     }
   }
 

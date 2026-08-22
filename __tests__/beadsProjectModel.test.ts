@@ -148,9 +148,9 @@ describe('Beads project model', () => {
     const dependencies = [
       { issue_id: 'stable-order', depends_on_id: 'zeta', type: 'blocks' },
       { issue_id: 'stable-order', depends_on_id: 'alpha', type: 'blocks' },
-      { issue_id: 'stable-order', depends_on_id: 'Ångström', type: 'blocks' },
+      { issue_id: 'stable-order', depends_on_id: 'beta.10', type: 'blocks' },
       { issue_id: 'stable-order', depends_on_id: 'parent-bead', type: 'parent-child' },
-      { issue_id: 'stable-order', depends_on_id: 'éclair', type: 'blocks' },
+      { issue_id: 'stable-order', depends_on_id: 'beta-02', type: 'blocks' },
     ];
     const [forward] = parseBeadExport(toJsonl(makeIssue({
       id: 'stable-order',
@@ -163,7 +163,7 @@ describe('Beads project model', () => {
 
     expect(forward.parentId).toBe('parent-bead');
     expect(reversed.parentId).toBe('parent-bead');
-    expect(forward.blockedByIds).toEqual(['alpha', 'zeta', 'Ångström', 'éclair']);
+    expect(forward.blockedByIds).toEqual(['alpha', 'beta-02', 'beta.10', 'zeta']);
     expect(reversed.blockedByIds).toEqual(forward.blockedByIds);
   });
 
@@ -212,6 +212,19 @@ describe('Beads project model', () => {
       ],
     })), { assigneeMap: {} })).toThrow(/multiple parents/i);
   });
+
+  it.each(['bad id', 'bad>id', 'bad]id'])(
+    'rejects invalid Bead ids that are unsafe for markers/titles: %s',
+    (id) => {
+      expect(() => parseBeadExport(toJsonl(makeIssue({ id })), { assigneeMap: {} })).toThrow(/valid Bead id/i);
+      expect(() => parseBeadExport(toJsonl(makeIssue({
+        id: 'safe-id',
+        dependencies: [
+          { issue_id: 'safe-id', depends_on_id: id, type: 'blocks' },
+        ],
+      })), { assigneeMap: {} })).toThrow(/valid Bead id/i);
+    },
+  );
 
   it.each(['infrastructure', 'memory', 'template', 'gate', 'wisp'])(
     'rejects unsupported %s records',

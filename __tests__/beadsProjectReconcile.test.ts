@@ -5,6 +5,7 @@ import {
   applyReconciliation,
   assertSafePlan,
   planReconciliation,
+  ReconciliationApplyError,
 } from '../scripts/beads-project-sync/reconcile.mjs';
 import {
   renderIssueBody,
@@ -353,6 +354,93 @@ describe('Beads project reconciliation', () => {
     expect(updateOps[0]?.body).toContain('Refresh the canonical mirror output.');
   });
 
+  it('reopens active beads by restoring archived project items before field updates', async () => {
+    const currentInventory = finalizeInventory([makeBead('pb-01')]);
+    const previousInventory = finalizeInventory([
+      makeBead('pb-01', {
+        status: 'closed',
+        updatedAt: '2026-08-22T01:00:00Z',
+        closedAt: '2026-08-22T01:00:00Z',
+      }),
+    ]);
+    const currentBead = currentInventory[0]!;
+    const previousBead = previousInventory[0]!;
+    const issueNumbers = new Map([['pb-01', 451]]);
+
+    const plan = planReconciliation({
+      inventory: currentInventory,
+      existingIssues: [
+        managedIssue(previousBead, previousInventory, issueNumbers, {
+          projectItem: {
+            id: 'item-451',
+            archived: true,
+            fields: desiredFields(previousBead),
+          },
+          state: 'closed',
+        }),
+      ],
+      readme: { body: canonicalReadmeBody(currentInventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations.map((operation) => operation.type)).toEqual([
+      'updateIssue',
+      'restoreItem',
+      'setFields',
+    ]);
+    expect(plan.summary.restoreItemCount).toBe(1);
+    expect(plan.operations[1]).toMatchObject({
+      beadId: 'pb-01',
+      itemId: 'item-451',
+      type: 'restoreItem',
+    });
+    expect(plan.operations[2]).toMatchObject({
+      beadId: 'pb-01',
+      fields: desiredFields(currentBead),
+      type: 'setFields',
+    });
+
+    const calls: string[] = [];
+    await applyReconciliation(plan, {
+      createIssue() {
+        throw new Error('createIssue should not be called');
+      },
+      updateIssue(operation) {
+        calls.push(`${operation.type}:${operation.issueNumber}`);
+      },
+      closeIssue() {
+        throw new Error('closeIssue should not be called');
+      },
+      ensureProjectItem() {
+        throw new Error('ensureProjectItem should not be called');
+      },
+      restoreItem(operation) {
+        calls.push(`${operation.type}:${operation.itemId}`);
+      },
+      setFields(operation) {
+        calls.push(`${operation.type}:${operation.itemId}`);
+      },
+      syncParent() {
+        throw new Error('syncParent should not be called');
+      },
+      syncBlocker() {
+        throw new Error('syncBlocker should not be called');
+      },
+      archiveItem() {
+        throw new Error('archiveItem should not be called');
+      },
+      updateReadme() {
+        throw new Error('updateReadme should not be called');
+      },
+    });
+
+    expect(calls).toEqual([
+      'updateIssue:451',
+      'restoreItem:item-451',
+      'setFields:item-451',
+    ]);
+  });
+
   it('closes newly closed beads, sets done fields, and archives project items', () => {
     const previousInventory = finalizeInventory([makeBead('pb-01')]);
     const currentInventory = finalizeInventory([
@@ -428,6 +516,27 @@ describe('Beads project reconciliation', () => {
     ).toThrow(/empty source/i);
   });
 
+  it('rejects invalid managed Bead ids instead of planning duplicate creates', () => {
+    const inventory = finalizeInventory([makeBead('pb-01')]);
+
+    expect(() =>
+      planReconciliation({
+        inventory,
+        existingIssues: [
+          {
+            number: 603,
+            title: '[pb]01] Ship pb-01',
+            body: null,
+            state: 'open',
+            renderHash: sha256(canonicalIssueBody(inventory[0]!, inventory)),
+          },
+        ],
+        readme: { body: canonicalReadmeBody(inventory) },
+        renderContext: baseContext,
+      }),
+    ).toThrow(/invalid managed Bead id prefix/i);
+  });
+
   it('guards mass-closing beyond the computed threshold unless overridden', () => {
     const fullInventory = finalizeInventory(
       Array.from({ length: 25 }, (_, index) => makeBead(`pb-${String(index + 1).padStart(2, '0')}`)),
@@ -499,6 +608,9 @@ describe('Beads project reconciliation', () => {
         calls.push({ issueNumber: operation.issueNumber, type: `${operation.type}:${operation.beadId}` });
         return { id: `item-${operation.issueNumber}` };
       },
+      restoreItem() {
+        throw new Error('restoreItem should not be called');
+      },
       setFields(operation) {
         calls.push({ itemId: operation.itemId, type: `${operation.type}:${operation.beadId}` });
       },
@@ -548,5 +660,75 @@ describe('Beads project reconciliation', () => {
     });
     expect(result.issueNumbersByBeadId.get('pb-03')).toBe(103);
     expect(result.projectItemIdsByBeadId.get('pb-02')).toBe('item-102');
+  });
+
+  it('throws a structured ReconciliationApplyError with partial progress when apply fails', async () => {
+    const inventory = finalizeInventory([makeBead('pb-01')]);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    let thrownError: unknown;
+    try {
+      await applyReconciliation(plan, {
+        createIssue() {
+          return { number: 901 };
+        },
+        updateIssue() {
+          throw new Error('updateIssue should not be called');
+        },
+        closeIssue() {
+          throw new Error('closeIssue should not be called');
+        },
+        ensureProjectItem(operation) {
+          return { id: `item-${operation.issueNumber}` };
+        },
+        restoreItem() {
+          throw new Error('restoreItem should not be called');
+        },
+        setFields() {
+          throw new Error('setFields exploded');
+        },
+        syncParent() {
+          throw new Error('syncParent should not be called');
+        },
+        syncBlocker() {
+          throw new Error('syncBlocker should not be called');
+        },
+        archiveItem() {
+          throw new Error('archiveItem should not be called');
+        },
+        updateReadme() {
+          throw new Error('updateReadme should not be called');
+        },
+      });
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(ReconciliationApplyError);
+    const applyError = thrownError as ReconciliationApplyError;
+    expect(applyError.message).toMatch(/failed during setFields for bead "pb-01"/i);
+    expect(applyError.failingOperation).toMatchObject({
+      beadId: 'pb-01',
+      itemId: 'item-901',
+      type: 'setFields',
+    });
+    expect(applyError.applied.map((entry) => entry.operation.type)).toEqual([
+      'createIssue',
+      'ensureProjectItem',
+    ]);
+    expect(applyError.applied[1]?.operation).toMatchObject({
+      beadId: 'pb-01',
+      issueNumber: 901,
+      type: 'ensureProjectItem',
+    });
+    expect(applyError.issueNumbersByBeadId.get('pb-01')).toBe(901);
+    expect(applyError.projectItemIdsByBeadId.get('pb-01')).toBe('item-901');
+    expect(applyError.cause).toBeInstanceOf(Error);
+    expect((applyError.cause as Error).message).toMatch(/setFields exploded/i);
   });
 });

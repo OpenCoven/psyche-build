@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 
-import { activeBeads, buildBeadIndex } from './model.mjs';
+import { activeBeads, buildBeadIndex, normalizeBeadId } from './model.mjs';
 import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render.mjs';
 
 /** @typedef {import('./render.mjs').RenderContext} RenderContext */
@@ -99,7 +99,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  */
 
 /**
- * @typedef {'createIssues' | 'updateIssues' | 'closeIssues' | 'ensureProjectItems' | 'setFields' | 'syncParents' | 'syncBlockers' | 'archiveItems' | 'updateReadme'} ReconciliationPhase
+ * @typedef {'createIssues' | 'updateIssues' | 'closeIssues' | 'ensureProjectItems' | 'restoreItems' | 'setFields' | 'syncParents' | 'syncBlockers' | 'archiveItems' | 'updateReadme'} ReconciliationPhase
  */
 
 /**
@@ -145,6 +145,15 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   beadId: string,
  *   issueNumber?: number,
  * }} EnsureProjectItemOperation
+ */
+
+/**
+ * @typedef {{
+ *   type: 'restoreItem',
+ *   phase: 'restoreItems',
+ *   beadId: string,
+ *   itemId?: string,
+ * }} RestoreItemOperation
  */
 
 /**
@@ -199,7 +208,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  */
 
 /**
- * @typedef {CreateIssueOperation | UpdateIssueOperation | CloseIssueOperation | EnsureProjectItemOperation | SetFieldsOperation | SyncParentOperation | SyncBlockerOperation | ArchiveItemOperation | UpdateReadmeOperation} ReconciliationOperation
+ * @typedef {CreateIssueOperation | UpdateIssueOperation | CloseIssueOperation | EnsureProjectItemOperation | RestoreItemOperation | SetFieldsOperation | SyncParentOperation | SyncBlockerOperation | ArchiveItemOperation | UpdateReadmeOperation} ReconciliationOperation
  */
 
 /**
@@ -214,6 +223,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   updateIssueCount: number,
  *   closeIssueCount: number,
  *   ensureProjectItemCount: number,
+ *   restoreItemCount: number,
  *   setFieldsCount: number,
  *   syncParentCount: number,
  *   syncBlockerCount: number,
@@ -260,6 +270,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   updateIssue: (operation: UpdateIssueOperation) => Awaitable<unknown>,
  *   closeIssue: (operation: CloseIssueOperation) => Awaitable<unknown>,
  *   ensureProjectItem: (operation: EnsureProjectItemOperation & { issueNumber: number }) => Awaitable<EnsureProjectItemResult>,
+ *   restoreItem: (operation: RestoreItemOperation & { itemId: string }) => Awaitable<unknown>,
  *   setFields: (operation: SetFieldsOperation & { itemId: string }) => Awaitable<unknown>,
  *   syncParent: (operation: SyncParentOperation & { issueNumber: number, parentIssueNumber: number | null }) => Awaitable<unknown>,
  *   syncBlocker: (operation: SyncBlockerOperation & { issueNumber: number, blockerIssueNumbers: number[] }) => Awaitable<unknown>,
@@ -283,12 +294,54 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  * }} AppliedReconciliationResult
  */
 
+/**
+ * @typedef {{
+ *   failingOperation: ReconciliationOperation,
+ *   applied: readonly AppliedReconciliationOperation[],
+ *   issueNumbersByBeadId: ReadonlyMap<string, number>,
+ *   projectItemIdsByBeadId: ReadonlyMap<string, string>,
+ *   cause?: unknown,
+ * }} ReconciliationApplyErrorDetails
+ */
+
+export class ReconciliationApplyError extends Error {
+  /** @type {ReconciliationOperation} */
+  failingOperation;
+
+  /** @type {AppliedReconciliationOperation[]} */
+  applied;
+
+  /** @type {Map<string, number>} */
+  issueNumbersByBeadId;
+
+  /** @type {Map<string, string>} */
+  projectItemIdsByBeadId;
+
+  /** @type {unknown} */
+  cause;
+
+  /**
+   * @param {string} message
+   * @param {ReconciliationApplyErrorDetails} details
+   */
+  constructor(message, details) {
+    super(message);
+    this.name = 'ReconciliationApplyError';
+    this.failingOperation = details.failingOperation;
+    this.applied = [...details.applied];
+    this.issueNumbersByBeadId = new Map(details.issueNumbersByBeadId);
+    this.projectItemIdsByBeadId = new Map(details.projectItemIdsByBeadId);
+    this.cause = details.cause;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 const README_PATH = 'README.md';
-const ISSUE_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1\s+bead-id=([^\s>]+)\s*-->/gu;
+const ISSUE_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1\s+bead-id=([^\r\n]*?)\s*-->/gu;
 const PROJECT_README_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1\s+project-readme\s*-->/u;
 const RENDER_HASH_COMMENT_PATTERN = /\n*<!--\s*psyche-bead-sync:v1\s+render-hash=([a-f0-9]{64})\s*-->\s*$/u;
 const RENDER_HASH_PATTERN = /<!--\s*psyche-bead-sync:v1\s+render-hash=([a-f0-9]{64})\s*-->\s*$/u;
-const ISSUE_TITLE_PREFIX_PATTERN = /^\[([^\]]+)\]\s/u;
+const ISSUE_TITLE_PREFIX_PATTERN = /^\[([^\r\n]+?)\]/u;
 
 /**
  * @param {string} message
@@ -556,15 +609,25 @@ function normalizeRenderHash(value, fieldName, context) {
 }
 
 /**
+ * @param {number} issueNumber
+ * @returns {string}
+ */
+function describeManagedIssueContext(issueNumber) {
+  return `Issue #${issueNumber}`;
+}
+
+/**
  * @param {string | null} body
+ * @param {string} context
  * @returns {string[]}
  */
-function extractIssueMarkers(body) {
+function extractIssueMarkers(body, context) {
   if (body == null) {
     return [];
   }
 
-  return [...body.matchAll(ISSUE_MARKER_PATTERN)].map((match) => match[1] ?? '').filter(Boolean);
+  return [...body.matchAll(ISSUE_MARKER_PATTERN)]
+    .map((match) => normalizeBeadId(match[1] ?? '', 'bead-id', context));
 }
 
 /**
@@ -581,14 +644,22 @@ function extractRenderHash(body) {
 
 /**
  * @param {string | null} title
+ * @param {string} context
  * @returns {string | null}
  */
-function extractBeadIdFromTitle(title) {
+function extractBeadIdFromTitle(title, context) {
   if (title == null) {
-    return null;
+    fail(`${context} title has an invalid managed Bead id prefix`);
   }
   const match = title.match(ISSUE_TITLE_PREFIX_PATTERN);
-  return match?.[1]?.trim() || null;
+  if (!match) {
+    fail(`${context} title has an invalid managed Bead id prefix`);
+  }
+  const beadId = normalizeBeadId(match[1] ?? '', 'title Bead id', context);
+  if (!title.startsWith(`[${beadId}] `)) {
+    fail(`${context} title has an invalid managed Bead id prefix`);
+  }
+  return beadId;
 }
 
 /**
@@ -763,7 +834,8 @@ function indexManagedIssues(existingIssues) {
   const managedIssuesByBeadId = /** @type {Map<string, ManagedIssueSnapshot>} */ (new Map());
 
   for (const issue of existingIssues) {
-    const markers = extractIssueMarkers(issue.body);
+    const issueContext = describeManagedIssueContext(issue.number);
+    const markers = extractIssueMarkers(issue.body, issueContext);
     if (markers.length > 1) {
       fail(`Issue #${issue.number} contains duplicate managed markers`);
     }
@@ -771,7 +843,7 @@ function indexManagedIssues(existingIssues) {
     const beadId = markers[0]
       ?? (
         issue.renderHash != null
-          ? extractBeadIdFromTitle(issue.title)
+          ? extractBeadIdFromTitle(issue.title, issueContext)
           : null
       );
     if (beadId == null) {
@@ -809,6 +881,7 @@ function buildIssueRenderContext(inventory, renderContext) {
  * @param {UpdateIssueOperation[]} updateIssues
  * @param {CloseIssueOperation[]} closeIssues
  * @param {EnsureProjectItemOperation[]} ensureProjectItems
+ * @param {RestoreItemOperation[]} restoreItems
  * @param {SetFieldsOperation[]} setFields
  * @param {SyncParentOperation[]} syncParents
  * @param {SyncBlockerOperation[]} syncBlockers
@@ -823,6 +896,7 @@ function buildSummary(
   updateIssues,
   closeIssues,
   ensureProjectItems,
+  restoreItems,
   setFields,
   syncParents,
   syncBlockers,
@@ -845,6 +919,7 @@ function buildSummary(
     updateIssueCount: updateIssues.length,
     closeIssueCount: closeIssues.length,
     ensureProjectItemCount: ensureProjectItems.length,
+    restoreItemCount: restoreItems.length,
     setFieldsCount: setFields.length,
     syncParentCount: syncParents.length,
     syncBlockerCount: syncBlockers.length,
@@ -878,6 +953,8 @@ export function planReconciliation(input) {
   const closeIssues = [];
   /** @type {EnsureProjectItemOperation[]} */
   const ensureProjectItems = [];
+  /** @type {RestoreItemOperation[]} */
+  const restoreItems = [];
   /** @type {SetFieldsOperation[]} */
   const setFields = [];
   /** @type {SyncParentOperation[]} */
@@ -937,6 +1014,15 @@ export function planReconciliation(input) {
         phase: 'ensureProjectItems',
         beadId: bead.id,
         issueNumber: existingIssue?.number,
+      });
+    }
+
+    if (existingIssue?.projectItem?.archived) {
+      restoreItems.push({
+        type: 'restoreItem',
+        phase: 'restoreItems',
+        beadId: bead.id,
+        itemId: existingIssue.projectItem.id,
       });
     }
 
@@ -1067,6 +1153,7 @@ export function planReconciliation(input) {
     ...updateIssues,
     ...closeIssues,
     ...ensureProjectItems,
+    ...restoreItems,
     ...setFields,
     ...syncParents,
     ...syncBlockers,
@@ -1085,6 +1172,7 @@ export function planReconciliation(input) {
       updateIssues,
       closeIssues,
       ensureProjectItems,
+      restoreItems,
       setFields,
       syncParents,
       syncBlockers,
@@ -1145,6 +1233,48 @@ function requireResolvedProjectItemId(projectItemIdsByBeadId, beadId, context) {
 }
 
 /**
+ * @param {ReconciliationOperation} operation
+ * @returns {string}
+ */
+function describeReconciliationOperationTarget(operation) {
+  if ('beadId' in operation) {
+    return `bead "${operation.beadId}"`;
+  }
+  return `README "${operation.path}"`;
+}
+
+/**
+ * @param {ReconciliationOperation} failingOperation
+ * @param {unknown} cause
+ * @param {readonly AppliedReconciliationOperation[]} applied
+ * @param {ReadonlyMap<string, number>} issueNumbersByBeadId
+ * @param {ReadonlyMap<string, string>} projectItemIdsByBeadId
+ * @returns {ReconciliationApplyError}
+ */
+function toReconciliationApplyError(
+  failingOperation,
+  cause,
+  applied,
+  issueNumbersByBeadId,
+  projectItemIdsByBeadId,
+) {
+  if (cause instanceof ReconciliationApplyError) {
+    return cause;
+  }
+
+  return new ReconciliationApplyError(
+    `applyReconciliation failed during ${failingOperation.type} for ${describeReconciliationOperationTarget(failingOperation)}`,
+    {
+      failingOperation,
+      applied,
+      issueNumbersByBeadId,
+      projectItemIdsByBeadId,
+      cause,
+    },
+  );
+}
+
+/**
  * @param {ReconciliationPlan} plan
  * @param {ReconciliationAdapters} adapters
  * @returns {Promise<AppliedReconciliationResult>}
@@ -1167,122 +1297,154 @@ export async function applyReconciliation(plan, adapters) {
   const applied = [];
 
   for (const operation of plan.operations) {
-    switch (operation.type) {
-      case 'createIssue': {
-        const createIssue = adapters.createIssue ?? fail('applyReconciliation requires adapters.createIssue');
-        const result = await createIssue(operation);
-        const issueNumber = normalizePositiveInteger(
-          result?.number,
-          'number',
-          `createIssue result for bead "${operation.beadId}"`,
-        );
-        issueNumbersByBeadId.set(operation.beadId, issueNumber);
-        applied.push({ operation, result });
-        break;
-      }
-      case 'updateIssue': {
-        const updateIssue = adapters.updateIssue ?? fail('applyReconciliation requires adapters.updateIssue');
-        const result = await updateIssue(operation);
-        issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
-        applied.push({ operation, result });
-        break;
-      }
-      case 'closeIssue': {
-        const closeIssue = adapters.closeIssue ?? fail('applyReconciliation requires adapters.closeIssue');
-        const result = await closeIssue(operation);
-        issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
-        applied.push({ operation, result });
-        break;
-      }
-      case 'ensureProjectItem': {
-        const ensureProjectItem =
-          adapters.ensureProjectItem ?? fail('applyReconciliation requires adapters.ensureProjectItem');
-        const issueNumber = operation.issueNumber
-          ?? requireResolvedIssueNumber(
-            issueNumbersByBeadId,
-            operation.beadId,
-            'ensureProjectItem operation',
+    /** @type {ReconciliationOperation} */
+    let failingOperation = operation;
+
+    try {
+      switch (operation.type) {
+        case 'createIssue': {
+          const createIssue = adapters.createIssue ?? fail('applyReconciliation requires adapters.createIssue');
+          const result = await createIssue(operation);
+          const issueNumber = normalizePositiveInteger(
+            result?.number,
+            'number',
+            `createIssue result for bead "${operation.beadId}"`,
           );
-        const resolvedOperation = {
-          ...operation,
-          issueNumber,
-        };
-        const result = await ensureProjectItem(resolvedOperation);
-        const itemId = normalizeRequiredTrimmedString(
-          result?.id,
-          'id',
-          `ensureProjectItem result for bead "${operation.beadId}"`,
-        );
-        projectItemIdsByBeadId.set(operation.beadId, itemId);
-        applied.push({ operation: resolvedOperation, result });
-        break;
-      }
-      case 'setFields': {
-        const setFieldsAdapter = adapters.setFields ?? fail('applyReconciliation requires adapters.setFields');
-        const itemId = operation.itemId
-          ?? requireResolvedProjectItemId(projectItemIdsByBeadId, operation.beadId, 'setFields operation');
-        const resolvedOperation = {
-          ...operation,
-          itemId,
-        };
-        const result = await setFieldsAdapter(resolvedOperation);
-        projectItemIdsByBeadId.set(operation.beadId, itemId);
-        applied.push({ operation: resolvedOperation, result });
-        break;
-      }
-      case 'syncParent': {
-        const syncParent = adapters.syncParent ?? fail('applyReconciliation requires adapters.syncParent');
-        const issueNumber = requireResolvedIssueNumber(issueNumbersByBeadId, operation.beadId, 'syncParent operation');
-        const parentIssueNumber = operation.parentBeadId == null
-          ? null
-          : requireResolvedIssueNumber(
-            issueNumbersByBeadId,
-            operation.parentBeadId,
-            'syncParent operation',
+          issueNumbersByBeadId.set(operation.beadId, issueNumber);
+          applied.push({ operation, result });
+          break;
+        }
+        case 'updateIssue': {
+          const updateIssue = adapters.updateIssue ?? fail('applyReconciliation requires adapters.updateIssue');
+          const result = await updateIssue(operation);
+          issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
+          applied.push({ operation, result });
+          break;
+        }
+        case 'closeIssue': {
+          const closeIssue = adapters.closeIssue ?? fail('applyReconciliation requires adapters.closeIssue');
+          const result = await closeIssue(operation);
+          issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
+          applied.push({ operation, result });
+          break;
+        }
+        case 'ensureProjectItem': {
+          const ensureProjectItem =
+            adapters.ensureProjectItem ?? fail('applyReconciliation requires adapters.ensureProjectItem');
+          const issueNumber = operation.issueNumber
+            ?? requireResolvedIssueNumber(
+              issueNumbersByBeadId,
+              operation.beadId,
+              'ensureProjectItem operation',
+            );
+          const resolvedOperation = {
+            ...operation,
+            issueNumber,
+          };
+          failingOperation = resolvedOperation;
+          const result = await ensureProjectItem(resolvedOperation);
+          const itemId = normalizeRequiredTrimmedString(
+            result?.id,
+            'id',
+            `ensureProjectItem result for bead "${operation.beadId}"`,
           );
-        const resolvedOperation = {
-          ...operation,
-          issueNumber,
-          parentIssueNumber,
-        };
-        const result = await syncParent(resolvedOperation);
-        applied.push({ operation: resolvedOperation, result });
-        break;
+          projectItemIdsByBeadId.set(operation.beadId, itemId);
+          applied.push({ operation: resolvedOperation, result });
+          break;
+        }
+        case 'restoreItem': {
+          const restoreItem = adapters.restoreItem ?? fail('applyReconciliation requires adapters.restoreItem');
+          const itemId = operation.itemId
+            ?? requireResolvedProjectItemId(projectItemIdsByBeadId, operation.beadId, 'restoreItem operation');
+          const resolvedOperation = {
+            ...operation,
+            itemId,
+          };
+          failingOperation = resolvedOperation;
+          const result = await restoreItem(resolvedOperation);
+          projectItemIdsByBeadId.set(operation.beadId, itemId);
+          applied.push({ operation: resolvedOperation, result });
+          break;
+        }
+        case 'setFields': {
+          const setFieldsAdapter = adapters.setFields ?? fail('applyReconciliation requires adapters.setFields');
+          const itemId = operation.itemId
+            ?? requireResolvedProjectItemId(projectItemIdsByBeadId, operation.beadId, 'setFields operation');
+          const resolvedOperation = {
+            ...operation,
+            itemId,
+          };
+          failingOperation = resolvedOperation;
+          const result = await setFieldsAdapter(resolvedOperation);
+          projectItemIdsByBeadId.set(operation.beadId, itemId);
+          applied.push({ operation: resolvedOperation, result });
+          break;
+        }
+        case 'syncParent': {
+          const syncParent = adapters.syncParent ?? fail('applyReconciliation requires adapters.syncParent');
+          const issueNumber = requireResolvedIssueNumber(issueNumbersByBeadId, operation.beadId, 'syncParent operation');
+          const parentIssueNumber = operation.parentBeadId == null
+            ? null
+            : requireResolvedIssueNumber(
+              issueNumbersByBeadId,
+              operation.parentBeadId,
+              'syncParent operation',
+            );
+          const resolvedOperation = {
+            ...operation,
+            issueNumber,
+            parentIssueNumber,
+          };
+          failingOperation = resolvedOperation;
+          const result = await syncParent(resolvedOperation);
+          applied.push({ operation: resolvedOperation, result });
+          break;
+        }
+        case 'syncBlocker': {
+          const syncBlocker = adapters.syncBlocker ?? fail('applyReconciliation requires adapters.syncBlocker');
+          const issueNumber = requireResolvedIssueNumber(issueNumbersByBeadId, operation.beadId, 'syncBlocker operation');
+          const blockerIssueNumbers = operation.blockerBeadIds
+            .map((blockedById) => requireResolvedIssueNumber(issueNumbersByBeadId, blockedById, 'syncBlocker operation'));
+          const resolvedOperation = {
+            ...operation,
+            issueNumber,
+            blockerIssueNumbers,
+          };
+          failingOperation = resolvedOperation;
+          const result = await syncBlocker(resolvedOperation);
+          applied.push({ operation: resolvedOperation, result });
+          break;
+        }
+        case 'archiveItem': {
+          const archiveItem = adapters.archiveItem ?? fail('applyReconciliation requires adapters.archiveItem');
+          const itemId = operation.itemId
+            ?? requireResolvedProjectItemId(projectItemIdsByBeadId, operation.beadId, 'archiveItem operation');
+          const resolvedOperation = {
+            ...operation,
+            itemId,
+          };
+          failingOperation = resolvedOperation;
+          const result = await archiveItem(resolvedOperation);
+          applied.push({ operation: resolvedOperation, result });
+          break;
+        }
+        case 'updateReadme': {
+          const updateReadme = adapters.updateReadme ?? fail('applyReconciliation requires adapters.updateReadme');
+          const result = await updateReadme(operation);
+          applied.push({ operation, result });
+          break;
+        }
+        default:
+          fail(`Unsupported reconciliation operation "${/** @type {{ type?: unknown }} */ (operation).type}"`);
       }
-      case 'syncBlocker': {
-        const syncBlocker = adapters.syncBlocker ?? fail('applyReconciliation requires adapters.syncBlocker');
-        const issueNumber = requireResolvedIssueNumber(issueNumbersByBeadId, operation.beadId, 'syncBlocker operation');
-        const blockerIssueNumbers = operation.blockerBeadIds
-          .map((blockedById) => requireResolvedIssueNumber(issueNumbersByBeadId, blockedById, 'syncBlocker operation'));
-        const resolvedOperation = {
-          ...operation,
-          issueNumber,
-          blockerIssueNumbers,
-        };
-        const result = await syncBlocker(resolvedOperation);
-        applied.push({ operation: resolvedOperation, result });
-        break;
-      }
-      case 'archiveItem': {
-        const archiveItem = adapters.archiveItem ?? fail('applyReconciliation requires adapters.archiveItem');
-        const itemId = operation.itemId
-          ?? requireResolvedProjectItemId(projectItemIdsByBeadId, operation.beadId, 'archiveItem operation');
-        const resolvedOperation = {
-          ...operation,
-          itemId,
-        };
-        const result = await archiveItem(resolvedOperation);
-        applied.push({ operation: resolvedOperation, result });
-        break;
-      }
-      case 'updateReadme': {
-        const updateReadme = adapters.updateReadme ?? fail('applyReconciliation requires adapters.updateReadme');
-        const result = await updateReadme(operation);
-        applied.push({ operation, result });
-        break;
-      }
-      default:
-        fail(`Unsupported reconciliation operation "${/** @type {{ type?: unknown }} */ (operation).type}"`);
+    } catch (error) {
+      throw toReconciliationApplyError(
+        failingOperation,
+        error,
+        applied,
+        issueNumbersByBeadId,
+        projectItemIdsByBeadId,
+      );
     }
   }
 

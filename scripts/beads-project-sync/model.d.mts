@@ -52,6 +52,14 @@ export interface InventorySummary<
   typeCounts: Partial<Record<TType, number>>;
 }
 
+export const BEAD_ID_PATTERN: RegExp;
+
+export function normalizeBeadId(
+  value: unknown,
+  fieldName: string,
+  context: string,
+): string;
+
 export function parseBeadExport(
   jsonl: string,
   config?: ParseBeadExportConfig,

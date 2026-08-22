@@ -443,7 +443,7 @@ describe('Beads project renderers', () => {
       ...inventory,
       {
         ...feature,
-        id: 'pb-Ångström',
+        id: 'pb-angstrom',
         title: 'Archive Å first',
         status: 'closed',
         priority: 2,
@@ -458,7 +458,7 @@ describe('Beads project renderers', () => {
       },
       {
         ...feature,
-        id: 'pb-éclair',
+        id: 'pb-eclair',
         title: 'Archive é second',
         status: 'closed',
         priority: 2,
@@ -480,8 +480,8 @@ describe('Beads project renderers', () => {
     );
     expect(rendered).toContain(
       '## Closed history summary\n'
-        + '- `pb-Ångström` — Archive Å first (closed 2026-08-21T12:00:00Z)\n'
-        + '- `pb-éclair` — Archive é second (closed 2026-08-21T12:00:00Z)\n'
+        + '- `pb-angstrom` — Archive Å first (closed 2026-08-21T12:00:00Z)\n'
+        + '- `pb-eclair` — Archive é second (closed 2026-08-21T12:00:00Z)\n'
         + '- `pb-closed` — Preserve closed blocker history (closed 2026-08-20T12:30:00Z)',
     );
   });

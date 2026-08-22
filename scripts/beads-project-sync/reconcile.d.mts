@@ -69,6 +69,7 @@ export type ReconciliationPhase =
   | 'updateIssues'
   | 'closeIssues'
   | 'ensureProjectItems'
+  | 'restoreItems'
   | 'setFields'
   | 'syncParents'
   | 'syncBlockers'
@@ -110,6 +111,13 @@ export interface EnsureProjectItemOperation {
   phase: 'ensureProjectItems';
   beadId: string;
   issueNumber?: number;
+}
+
+export interface RestoreItemOperation {
+  type: 'restoreItem';
+  phase: 'restoreItems';
+  beadId: string;
+  itemId?: string;
 }
 
 export interface SetFieldsOperation {
@@ -158,6 +166,7 @@ export type ReconciliationOperation =
   | UpdateIssueOperation
   | CloseIssueOperation
   | EnsureProjectItemOperation
+  | RestoreItemOperation
   | SetFieldsOperation
   | SyncParentOperation
   | SyncBlockerOperation
@@ -175,6 +184,7 @@ export interface ReconciliationSummary {
   updateIssueCount: number;
   closeIssueCount: number;
   ensureProjectItemCount: number;
+  restoreItemCount: number;
   setFieldsCount: number;
   syncParentCount: number;
   syncBlockerCount: number;
@@ -210,6 +220,7 @@ export interface ReconciliationAdapters {
   ensureProjectItem(
     operation: EnsureProjectItemOperation & { issueNumber: number },
   ): Awaitable<EnsureProjectItemResult>;
+  restoreItem(operation: RestoreItemOperation & { itemId: string }): Awaitable<unknown>;
   setFields(operation: SetFieldsOperation & { itemId: string }): Awaitable<unknown>;
   syncParent(
     operation: SyncParentOperation & {
@@ -236,6 +247,24 @@ export interface AppliedReconciliationResult {
   applied: AppliedReconciliationOperation[];
   issueNumbersByBeadId: Map<string, number>;
   projectItemIdsByBeadId: Map<string, string>;
+}
+
+export interface ReconciliationApplyErrorDetails {
+  failingOperation: ReconciliationOperation;
+  applied: readonly AppliedReconciliationOperation[];
+  issueNumbersByBeadId: ReadonlyMap<string, number>;
+  projectItemIdsByBeadId: ReadonlyMap<string, string>;
+  cause?: unknown;
+}
+
+export class ReconciliationApplyError extends Error {
+  readonly failingOperation: ReconciliationOperation;
+  readonly applied: readonly AppliedReconciliationOperation[];
+  readonly issueNumbersByBeadId: ReadonlyMap<string, number>;
+  readonly projectItemIdsByBeadId: ReadonlyMap<string, string>;
+  readonly cause: unknown;
+
+  constructor(message: string, details: ReconciliationApplyErrorDetails);
 }
 
 export function planReconciliation(input: PlanReconciliationInput): ReconciliationPlan;
