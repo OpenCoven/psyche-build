@@ -716,62 +716,42 @@ function isEscapedCharacter(value, index) {
 
 /**
  * @typedef {{
- *   contentStart: number,
  *   contentEnd: number,
  * }} LocalPathEnclosure
  */
 
 /**
  * @param {string} value
+ * @param {number} pathStart
  * @param {number} markerIndex
  * @returns {LocalPathEnclosure | null}
  */
-function findLocalPathEnclosure(value, markerIndex) {
-  const lineStart = value.lastIndexOf('\n', markerIndex - 1) + 1;
-  /** @type {{ delimiter: string, start: number } | null} */
-  let quote = null;
-  const brackets = /** @type {{ delimiter: string, start: number }[]} */ ([]);
-
-  for (let index = lineStart; index < markerIndex; index += 1) {
-    const character = value[index];
-    if (quote) {
-      if (character === quote.delimiter && !isEscapedCharacter(value, index)) {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (LOCAL_PATH_QUOTE_DELIMITERS.has(character) && !isEscapedCharacter(value, index)) {
-      quote = { delimiter: character, start: index };
-      continue;
-    }
-
-    const closingDelimiter = LOCAL_PATH_OPENING_DELIMITERS.get(character);
-    if (closingDelimiter) {
-      brackets.push({ delimiter: closingDelimiter, start: index });
-      continue;
-    }
-
-    if (
-      brackets.length > 0
-      && character === brackets[brackets.length - 1]?.delimiter
-    ) {
-      brackets.pop();
-    }
+function findLocalPathEnclosure(value, pathStart, markerIndex) {
+  const openingIndex = pathStart - 1;
+  const openingDelimiter = value[openingIndex];
+  if (
+    openingDelimiter == null
+    || isEscapedCharacter(value, openingIndex)
+  ) {
+    return null;
   }
 
-  const active = quote ?? brackets[brackets.length - 1];
-  if (!active) {
+  const closingDelimiter = LOCAL_PATH_OPENING_DELIMITERS.get(openingDelimiter)
+    ?? (
+      LOCAL_PATH_QUOTE_DELIMITERS.has(openingDelimiter)
+        ? openingDelimiter
+        : null
+    );
+  if (!closingDelimiter) {
     return null;
   }
 
   for (let index = markerIndex; index < value.length && value[index] !== '\n'; index += 1) {
     if (
-      value[index] === active.delimiter
+      value[index] === closingDelimiter
       && !isEscapedCharacter(value, index)
     ) {
       return {
-        contentStart: active.start + 1,
         contentEnd: index,
       };
     }
@@ -1020,12 +1000,11 @@ function redactLocalOperationalPaths(value) {
       break;
     }
 
-    const enclosure = findLocalPathEnclosure(value, markerIndex);
-    const lowerBound = Math.max(cursor, enclosure?.contentStart ?? 0);
     const pathStart = Math.max(
       cursor,
-      findLocalOperationalPathStart(value, markerIndex, lowerBound),
+      findLocalOperationalPathStart(value, markerIndex, cursor),
     );
+    const enclosure = findLocalPathEnclosure(value, pathStart, markerIndex);
     const pathEnd = enclosure?.contentEnd
       ?? findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex);
     sanitized += `${value.slice(cursor, pathStart)}<redacted-local-path>`;

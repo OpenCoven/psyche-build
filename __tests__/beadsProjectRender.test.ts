@@ -164,19 +164,24 @@ describe('Beads project renderers', () => {
   it('redacts complete delimiter-aware operational paths', () => {
     expect(
       sanitizePublicText(
-        'Open `~/.worktrees/public-beads-project/secret roadmap.md` next.',
+        'Open `~/.worktrees/public-beads-project/秘密 roadmap.md` next.',
       ),
     ).toBe('Open `<redacted-local-path>` next.');
     expect(
       sanitizePublicText(
-        'Plan: ".psyche/worktrees/public-beads-project/secret roadmap.md"; keep this note.',
+        'Plan: ".psyche/worktrees/public-beads-project/秘密 roadmap.md"; keep this note.',
       ),
     ).toBe('Plan: "<redacted-local-path>"; keep this note.');
     expect(
       sanitizePublicText(
-        'Plan: [~/.copilot/session-state/run-1/secret roadmap.md] follows.',
+        'Plan: [~/.copilot/session-state/run-1/秘密 roadmap.md] follows.',
       ),
     ).toBe('Plan: [<redacted-local-path>] follows.');
+    expect(
+      sanitizePublicText(
+        "Plan: '.psyche/worktrees/public-beads-project/秘密 roadmap.md'; keep this note.",
+      ),
+    ).toBe("Plan: '<redacted-local-path>'; keep this note.");
     expect(
       sanitizePublicText(
         'Plan: /opt/repos/.psyche/worktrees/public-beads-project/秘密/roadmap.md. Keep this sentence.',
@@ -190,6 +195,11 @@ describe('Beads project renderers', () => {
   });
 
   it('preserves prose and path-like names outside operational path boundaries', () => {
+    expect(
+      sanitizePublicText(
+        "Don't expose .worktrees/project/plan.md; it isn't public.",
+      ),
+    ).toBe("Don't expose <redacted-local-path>; it isn't public.");
     expect(
       sanitizePublicText(
         'Keep the release note before .worktrees/project/plan.md and the explanation after it.',
