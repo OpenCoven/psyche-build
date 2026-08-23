@@ -184,6 +184,11 @@ describe('Beads project renderers', () => {
     ).toBe("Plan: '<redacted-local-path>'; keep this note.");
     expect(
       sanitizePublicText(
+        "Plan: '.psyche/worktrees/x/O'Reilly secret.md'; keep this note.",
+      ),
+    ).toBe("Plan: '<redacted-local-path>'; keep this note.");
+    expect(
+      sanitizePublicText(
         'Plan: /opt/repos/.psyche/worktrees/public-beads-project/秘密/roadmap.md. Keep this sentence.',
       ),
     ).toBe('Plan: <redacted-local-path>. Keep this sentence.');

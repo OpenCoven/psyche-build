@@ -750,6 +750,11 @@ function findLocalPathEnclosure(value, pathStart, markerIndex) {
     if (
       value[index] === closingDelimiter
       && !isEscapedCharacter(value, index)
+      && !(
+        openingDelimiter === "'"
+        && isLocalPathComponentCharacter(value[index - 1])
+        && isLocalPathComponentCharacter(value[index + 1])
+      )
     ) {
       return {
         contentEnd: index,
