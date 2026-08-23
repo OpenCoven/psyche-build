@@ -1,7 +1,7 @@
 # Psyche Build support matrix
 
 **Status:** Active release contract  
-**Applies to:** planned `v0.0.1` unless a later release document supersedes it  
+**Applies to:** planned `v0.0.1` unless a later release document supersedes it
 **Roadmap:** [ROADMAP.md](./ROADMAP.md)
 
 This document defines what Psyche Build may claim as supported. A feature is
