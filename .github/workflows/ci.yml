@@ -2,245 +2,47 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main, feat/gpu-accelerated-ade]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: v001-docs-repair-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  publish-v001-support-contract:
-    if: github.repository == 'OpenCoven/psyche-build' && github.event.pull_request.head.ref == 'docs/v0.0.1-public-release'
+  changes:
+    name: Classify changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
+    outputs:
+      desktop: ${{ steps.classifier.outputs.desktop }}
+      ios: ${{ steps.classifier.outputs.ios }}
+      typescript: ${{ steps.classifier.outputs.typescript }}
     steps:
-      - name: Check out the exact PR branch
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: docs/v0.0.1-public-release
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Reconcile with current main without carrying temporary CI
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch --no-tags origin main
-          if ! git merge --no-edit origin/main; then
-            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-            if [[ ${#conflicts[@]} -ne 1 || "${conflicts[0]}" != ".github/workflows/ci.yml" ]]; then
-              printf 'unexpected merge conflicts:\n'
-              printf '  %s\n' "${conflicts[@]}"
-              exit 1
-            fi
-            git checkout --theirs .github/workflows/ci.yml
-            git add .github/workflows/ci.yml
-            git commit --no-edit
-          fi
+      - id: classifier
+        name: Classify changed validation paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/classify-ci-changes.sh
 
-      - name: Replace pending release claims with retained public evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def replace_once(text: str, old: str, new: str, label: str) -> str:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected one match, found {count}')
-              return text.replace(old, new, 1)
-
-          readme_path = Path('README.md')
-          readme = readme_path.read_text()
-          readme = replace_once(
-              readme,
-              """When the `v0.0.1` GitHub Release and tap Cask are available, the only public
-          macOS installation path is:
-          """,
-              """Psyche Build `v0.0.1` is publicly available for macOS through the native
-          Homebrew Cask:
-          """,
-              'README distribution status',
-          )
-          readme_path.write_text(readme)
-
-          support_path = Path('docs/SUPPORT-MATRIX.md')
-          support = support_path.read_text()
-          support = replace_once(
-              support,
-              '**Applies to:** planned `v0.0.1` unless a later release document supersedes it',
-              '**Applies to:** released `v0.0.1` unless a later release document supersedes it',
-              'support applies-to status',
-          )
-          support = replace_once(
-              support,
-              '| macOS native application | **Planned public supported surface** after #194 closes | Signed and notarized Apple Silicon and Intel DMGs, checksums, stable GitHub Release, and native Homebrew Cask |',
-              '| macOS native application | **Supported** | Signed, notarized, and stapled Apple Silicon and Intel DMGs, checksums, stable GitHub Release, and native Homebrew Cask |',
-              'macOS support row',
-          )
-          support = replace_once(
-              support,
-              """Until [#194](https://github.com/OpenCoven/psyche-build/issues/194)
-          closes with retained distribution evidence, public copy must describe the
-          macOS installation path as pending rather than already available.
-          """,
-              """Psyche Build `v0.0.1` is publicly available through
-          `brew install --cask opencoven/tap/psyche-build`. Protected release run
-          `32629730508` published the signed/notarized/stapled dual-architecture DMGs
-          and `SHA256SUMS`; Homebrew tap run `32633573331` independently passed native
-          Apple Silicon and Intel audit, install, trust validation, launch, no-op
-          upgrade, uninstall, reinstall, zap, and cleanup coverage.
-          """,
-              'pending public-copy paragraph',
-          )
-          support = replace_once(
-              support,
-              """The product contract keeps iOS-only failures off an explicitly selected
-          desktop-only macOS release while retaining shared validation and every iOS gate
-          for coordinated releases. The offline workflow contract is implemented, but
-          [#203](https://github.com/OpenCoven/psyche-build/issues/203) remains open pending
-          live desktop-only dry-run evidence: both `build-macos` matrix jobs must succeed,
-          `upload-ios` is `skipped`, `publish` succeeds after `release` environment
-          approval, and the Homebrew notification succeeds. Until that evidence is
-          retained, the macOS-only path is not live-ready; iOS remains a separate planned
-          surface rather than a macOS prerequisite.
-          """,
-              """The product contract keeps iOS-only failures off an explicitly selected
-          desktop-only macOS release while retaining shared validation and every iOS gate
-          for coordinated releases. [#203](https://github.com/OpenCoven/psyche-build/issues/203)
-          closed after protected run `32629730508` proved both macOS build jobs and
-          publication succeed while iOS-only verification and TestFlight are deliberately
-          skipped. iOS remains a separate planned surface rather than a macOS prerequisite.
-          """,
-              'desktop-only live-evidence paragraph',
-          )
-          prior = 'Supported after release acceptance / source-supported'
-          count = support.count(prior)
-          if count < 1:
-              raise SystemExit('expected at least one pre-release capability status')
-          support = support.replace(prior, 'Supported / source-supported')
-          support = replace_once(
-              support,
-              """[#203](https://github.com/OpenCoven/psyche-build/issues/203) is separately P0
-          because it requires live proof that the offline workflow contract works under
-          protected release conditions; it does not make iOS a product prerequisite.
-          """,
-              """[#203](https://github.com/OpenCoven/psyche-build/issues/203) is complete:
-          protected production evidence proves desktop-only publication remains independent
-          of iOS-only verification and distribution. That evidence does not change iOS into
-          a supported `v0.0.1` product surface.
-          """,
-              'completed #203 note',
-          )
-          support_path.write_text(support)
-
-          roadmap_path = Path('docs/ROADMAP.md')
-          roadmap = roadmap_path.read_text()
-          roadmap = replace_once(
-              roadmap,
-              '**Last reconciled:** 2026-08-22',
-              '**Last reconciled:** 2026-08-23',
-              'roadmap reconciliation date',
-          )
-          roadmap = replace_once(
-              roadmap,
-              """The immediate objective is narrower: publish the first credible macOS release
-          without making iOS completion, broad architecture cleanup, cloud
-          infrastructure, or future Threads/AgentFS convergence product prerequisites.
-          Accidental workflow coupling is treated as a release-infrastructure defect,
-          not as a reason to expand the supported surface.
-          """,
-              """The first credible macOS release is now public. The immediate objective is to
-          stabilize that supported path and advance independently scoped post-release work
-          without making iOS completion, broad architecture cleanup, cloud infrastructure,
-          or future Threads/AgentFS convergence retroactive release prerequisites.
-          Accidental workflow coupling remains a release-infrastructure defect, not a reason
-          to expand the supported surface.
-          """,
-              'roadmap immediate objective',
-          )
-          roadmap = replace_once(
-              roadmap,
-              """- the signed macOS application is the only planned public binary
-            distribution;
-          """,
-              """- the signed, notarized, and stapled macOS application is the supported public
-            binary distribution for `v0.0.1`;
-          """,
-              'roadmap supported binary bullet',
-          )
-          roadmap = replace_once(
-              roadmap,
-              '| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | P0 | Release infrastructure | Offline contract tests pass and a live protected desktop-only dry run proves both macOS builds and publication without iOS gates |',
-              '| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | Complete | Release infrastructure | Closed with protected run `32629730508`: shared/macOS validation and publication succeeded while iOS-only gates were skipped |',
-              'roadmap #203 outcome row',
-          )
-          roadmap = replace_once(
-              roadmap,
-              '| [#194 — ship macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | P0 | Release | Signed/notarized dual-architecture artifacts and Homebrew installation are independently verified |',
-              '| [#194 — ship macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | Delivered | Release | Public dual-architecture release and native Homebrew lifecycle evidence are complete; tracker closure waits only on #31 governance |',
-              'roadmap #194 outcome row',
-          )
-          roadmap = replace_once(
-              roadmap,
-              '| [#191 — siderail project closing](https://github.com/OpenCoven/psyche-build/pull/191) | macOS release | Candidate | Rebase on the selected release base, rerun required checks, verify no unresolved current review findings, then merge before candidate freeze |',
-              '| [#191 — siderail project closing](https://github.com/OpenCoven/psyche-build/pull/191) | macOS release | Merged into release base | Included in the accepted `v0.0.1` source before protected publication |',
-              'roadmap #191 disposition row',
-          )
-          roadmap = replace_once(
-              roadmap,
-              """After #191 and any proven P0 fix land, freeze the release candidate. A later
-          change may enter the candidate only when it names the failed acceptance case it
-          repairs and the full candidate gate is rerun.
-          """,
-              """The accepted candidate was frozen, repaired only for observed release-path
-          failures, and published as `v0.0.1`. Future changes now enter a later release train
-          and must name their owning outcome and retained acceptance evidence.
-          """,
-              'candidate freeze status',
-          )
-          stage2_anchor = """**Exit gate:** the documented Homebrew command installs and launches the exact
-          signed application represented by the public GitHub Release.
-          """
-          roadmap = replace_once(
-              roadmap,
-              stage2_anchor,
-              stage2_anchor + """
-          **Delivery status:** complete for `v0.0.1`. Protected run `32629730508`
-          published the exact release assets, and Homebrew run `32633573331` passed the
-          native Apple Silicon and Intel lifecycle matrix. #31 remains open only for its
-          administrator-enforcement governance criterion.
-          """,
-              'stage 2 delivery status',
-          )
-          roadmap = replace_once(
-              roadmap,
-              """The offline workflow contract is implemented: explicitly selected desktop-only
-          releases skip iOS-only verification and distribution while shared validation
-          remains mandatory, and coordinated releases retain every iOS gate. #203 remains
-          open pending live desktop-only dry-run evidence: both `build-macos` matrix jobs
-          must succeed, `upload-ios` is `skipped`, `publish` succeeds after `release`
-          environment approval, and the Homebrew notification succeeds. Until that
-          evidence is retained, the macOS-only path is not live-ready—not because iOS is
-          part of the macOS supported surface, but because protected release behavior has
-          not yet been observed.
-          """,
-              """The offline and protected workflow contracts are proven: explicitly selected
-          desktop-only releases skip iOS-only verification and distribution while shared
-          validation remains mandatory, and coordinated releases retain every iOS gate.
-          Protected run `32629730508` supplied the live evidence required by #203, so the
-          macOS path is no longer coupled to iOS readiness. The companion train remains an
-          independent planned surface under #200.
-          """,
-              'stage 3 desktop-only status',
-          )
-          roadmap_path.write_text(roadmap)
-          PY
+  quality:
+    name: Quality
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
@@ -249,26 +51,437 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install and verify documentation contracts
+      - name: Install tmux
+        run: brew install tmux
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run repository tests
+        run: pnpm test
+
+  desktop-web:
+    name: Desktop web
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
         shell: bash
         run: |
           set -euo pipefail
-          pnpm install --frozen-lockfile
+          test "$CHANGES_RESULT" = success
+          if [ "$DESKTOP_REQUIRED" != true ]; then
+            echo "Desktop web validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged desktop web surface
+        if: needs.changes.outputs.desktop != 'true'
+        run: echo "Desktop web validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.desktop == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.desktop == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify platform-neutral desktop contracts
+        if: needs.changes.outputs.desktop == 'true'
+        run: pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts
+
+      - name: Build desktop web bundles
+        if: needs.changes.outputs.desktop == 'true'
+        run: pnpm --dir native/desktop/psyche-build-tauri build:web
+
+  rust-test:
+    name: Rust tests
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$DESKTOP_REQUIRED" != true ]; then
+            echo "Desktop Rust validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged desktop Rust surface
+        if: needs.changes.outputs.desktop != 'true'
+        run: echo "Desktop Rust validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Format and test desktop Rust
+        if: needs.changes.outputs.desktop == 'true'
+        run: |
+          set -euo pipefail
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
+          cargo fmt --manifest-path "$MANIFEST" --check
+          cargo test --manifest-path "$MANIFEST" --locked
+
+  desktop-check:
+    name: Desktop check (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - windows-2025
+          - ubuntu-24.04
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$DESKTOP_REQUIRED" != true ]; then
+            echo "Desktop cargo check is not required for this change set."
+          fi
+
+      - name: Skip unchanged desktop check surface
+        if: needs.changes.outputs.desktop != 'true'
+        run: echo "Desktop cargo check skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        if: needs.changes.outputs.desktop == 'true'
+        with:
+          toolchain: 1.95.0
+
+      - name: Install Tauri Linux prerequisites
+        if: runner.os == 'Linux' && needs.changes.outputs.desktop == 'true'
+        timeout-minutes: 20
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install \
+            --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Check desktop runtime
+        if: needs.changes.outputs.desktop == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
+          cargo check --manifest-path "$MANIFEST" --locked
+
+  typescript-rust:
+    name: TypeScript and Rust
+    needs: [changes, quality, desktop-web, rust-test, desktop-check]
+    if: always()
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          DESKTOP_WEB_RESULT: ${{ needs.desktop-web.result }}
+          RUST_TEST_RESULT: ${{ needs.rust-test.result }}
+          DESKTOP_CHECK_RESULT: ${{ needs.desktop-check.result }}
+          TYPESCRIPT_REQUIRED: ${{ needs.changes.outputs.typescript }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          test "$QUALITY_RESULT" = success
+          for result in "$DESKTOP_WEB_RESULT" "$RUST_TEST_RESULT" "$DESKTOP_CHECK_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done
+          if [ "$TYPESCRIPT_REQUIRED" != true ]; then
+            echo "TypeScript validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged TypeScript surface
+        if: needs.changes.outputs.typescript != 'true'
+        run: echo "TypeScript validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.typescript == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.typescript == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.typescript == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.typescript == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify TypeScript, docs, and package surfaces
+        if: needs.changes.outputs.typescript == 'true'
+        run: |
+          set -euo pipefail
           pnpm docs:focus:check
           pnpm --dir docs build
           pnpm typecheck
-          git diff --check
-          grep -Fq 'brew install --cask opencoven/tap/psyche-build' README.md
-          grep -Fq '| macOS native application | **Supported** |' docs/SUPPORT-MATRIX.md
-          ! grep -Fq '#203 remains open' docs/SUPPORT-MATRIX.md docs/ROADMAP.md
+          pnpm build
+          pnpm smoke:pack
 
-      - name: Commit only the validated documentation changes
+  ios-core:
+    name: iOS Core
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'
+    runs-on: macos-15
+    timeout-minutes: 50
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          IOS_REQUIRED: ${{ needs.changes.outputs.ios }}
         shell: bash
         run: |
           set -euo pipefail
-          git checkout origin/main -- .github/workflows/ci.yml
-          git rm -f .github/workflows/publish-v001-support-contract.yml
-          git add .github/workflows/ci.yml README.md docs/SUPPORT-MATRIX.md docs/ROADMAP.md
-          git diff --cached --check
-          git commit -m "docs(release): mark v0.0.1 macOS support public"
-          git push origin HEAD:docs/v0.0.1-public-release
+          test "$CHANGES_RESULT" = success
+          if [ "$IOS_REQUIRED" != true ]; then
+            echo "iOS Core validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged iOS Core surface
+        if: needs.changes.outputs.ios != 'true'
+        run: echo "iOS Core validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.ios == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.ios == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.ios == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.ios == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Require pinned Xcode
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - uses: ./.github/actions/setup-xcodegen
+        if: needs.changes.outputs.ios == 'true'
+
+      - name: Require iOS 26.2 iPhone 16 Pro simulator
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/available-simulators.json"
+          if ! jq -e '
+            .devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"]
+            | any(.name == "iPhone 16 Pro" and .isAvailable == true)
+          ' "$RUNNER_TEMP/available-simulators.json" >/dev/null; then
+            echo "::error::iOS 26.2 iPhone 16 Pro simulator is unavailable"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+      - name: Generate and verify the iOS project
+        if: needs.changes.outputs.ios == 'true'
+        run: pnpm ios:project:check
+
+      - name: Test iOS Core
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheCore \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
+
+  ios-app:
+    name: iOS app
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          IOS_REQUIRED: ${{ needs.changes.outputs.ios }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [ "$IOS_REQUIRED" != true ]; then
+            echo "iOS app validation is not required for this change set."
+          fi
+
+      - name: Skip unchanged iOS app surface
+        if: needs.changes.outputs.ios != 'true'
+        run: echo "iOS app validation skipped."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: needs.changes.outputs.ios == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: needs.changes.outputs.ios == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: needs.changes.outputs.ios == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        if: needs.changes.outputs.ios == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Require pinned Xcode
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - uses: ./.github/actions/setup-xcodegen
+        if: needs.changes.outputs.ios == 'true'
+
+      - name: Require iOS 26.2 iPhone 16 Pro simulator
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/available-simulators.json"
+          if ! jq -e '
+            .devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"]
+            | any(.name == "iPhone 16 Pro" and .isAvailable == true)
+          ' "$RUNNER_TEMP/available-simulators.json" >/dev/null; then
+            echo "::error::iOS 26.2 iPhone 16 Pro simulator is unavailable"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+      - name: Generate and verify the iOS project
+        if: needs.changes.outputs.ios == 'true'
+        run: pnpm ios:project:check
+
+      - name: Build the iOS app
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-build-derived-data"
+
+      - name: Run iOS app and UI tests
+        if: needs.changes.outputs.ios == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data"
+
+  ios:
+    name: iOS
+    needs: [changes, ios-core, ios-app]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require successful applicable iOS validation
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          IOS_CORE_RESULT: ${{ needs.ios-core.result }}
+          IOS_APP_RESULT: ${{ needs.ios-app.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          for result in "$IOS_CORE_RESULT" "$IOS_APP_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

@@ -21,8 +21,8 @@
 
 ## Distribution
 
-When the `v0.0.1` GitHub Release and tap Cask are available, the only public
-macOS installation path is:
+Psyche Build `v0.0.1` is publicly available for macOS through the native
+Homebrew Cask:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build

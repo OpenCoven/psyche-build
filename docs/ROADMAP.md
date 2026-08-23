@@ -2,7 +2,7 @@
 
 **Status:** Active  
 **Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-08-22
+**Last reconciled:** 2026-08-23
 **Execution control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)
 
 This is the canonical public roadmap for Psyche Build. It translates the
@@ -22,11 +22,12 @@ recoverable familiar work. The current product proves that foundation through
 projects, terminal panes, isolated worktrees, explicit integrations, bounded
 control, and companion surfaces.
 
-The immediate objective is narrower: publish the first credible macOS release
-without making iOS completion, broad architecture cleanup, cloud
-infrastructure, or future Threads/AgentFS convergence product prerequisites.
-Accidental workflow coupling is treated as a release-infrastructure defect,
-not as a reason to expand the supported surface.
+The first credible macOS release is now public. The immediate objective is to
+stabilize that supported path and advance independently scoped post-release work
+without making iOS completion, broad architecture cleanup, cloud infrastructure,
+or future Threads/AgentFS convergence retroactive release prerequisites.
+Accidental workflow coupling remains a release-infrastructure defect, not a reason
+to expand the supported surface.
 
 ## Tracker and identity contract
 
@@ -57,8 +58,8 @@ identity and Threads convergence is tracked in
 The detailed contract lives in [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md).
 For `v0.0.1`:
 
-- the signed macOS application is the only planned public binary
-  distribution;
+- the signed, notarized, and stapled macOS application is the supported public
+  binary distribution for `v0.0.1`;
 - the TUI/Node CLI remains a supported source-development interface and is not
   a separate npm release;
 - iOS is a planned internal companion beta with no live TestFlight availability
@@ -119,8 +120,8 @@ Community train:
 | [#195 — authoritative roadmap](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Roadmap | All active work has one owner, one delivery target, explicit dependencies, and an evidence location |
 | [#196 — release reliability baseline](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Reliability | Every supported release-path capability is executable and proven, absent, or explicitly deferred |
 | [#31 — protected release credentials](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Release | Required desktop secrets and protections are verified without exposing values |
-| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | P0 | Release infrastructure | Offline contract tests pass and a live protected desktop-only dry run proves both macOS builds and publication without iOS gates |
-| [#194 — ship macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | P0 | Release | Signed/notarized dual-architecture artifacts and Homebrew installation are independently verified |
+| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | Complete | Release infrastructure | Closed with protected run `32629730508`: shared/macOS validation and publication succeeded while iOS-only gates were skipped |
+| [#194 — ship macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | Delivered | Release | Public dual-architecture release and native Homebrew lifecycle evidence are complete; tracker closure waits only on #31 governance |
 | [#200 — iOS companion delivery](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | iOS | Physical distributed build connects, restores authoritative state, and executes only wired scoped actions |
 | [#199 — operations and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and representative failures recover deterministically with retained evidence |
 | [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Entry points compose capability modules while public commands, schemas, persistence, and behavior remain compatible |
@@ -135,14 +136,14 @@ its owning outcome remain the live status sources.
 | Pull request | Train | Disposition | Required next gate |
 |---|---|---|---|
 | [#202 — canonical release-first roadmap](https://github.com/OpenCoven/psyche-build/pull/202) | Roadmap/control | Current implementation | Resolve every current review finding, pass required CI on the final head, and merge; afterward this row remains the delivery record for the canonical roadmap |
-| [#191 — siderail project closing](https://github.com/OpenCoven/psyche-build/pull/191) | macOS release | Candidate | Rebase on the selected release base, rerun required checks, verify no unresolved current review findings, then merge before candidate freeze |
+| [#191 — siderail project closing](https://github.com/OpenCoven/psyche-build/pull/191) | macOS release | Merged into release base | Included in the accepted `v0.0.1` source before protected publication |
 | [#190 — graphics acceleration reporting](https://github.com/OpenCoven/psyche-build/pull/190) | Post-release diagnostics | Defer from `v0.0.1` unless acceptance proves it is required | Resolve startup callback-safety and unavailable-invoke retry findings; integrate through #199's bounded diagnostic contract |
 | [#192 — mobile ritual controls](https://github.com/OpenCoven/psyche-build/pull/192) | iOS | Blocked | Wire the real mobile executor and publish rituals through the production workspace provider; prove the live host path before merge |
 | [#193 — Bonjour connection flow](https://github.com/OpenCoven/psyche-build/pull/193) | iOS | Blocked | Make workspace readiness atomic, complete required CI, and pass physical same-LAN acceptance before merge |
 
-After #191 and any proven P0 fix land, freeze the release candidate. A later
-change may enter the candidate only when it names the failed acceptance case it
-repairs and the full candidate gate is rerun.
+The accepted candidate was frozen, repaired only for observed release-path
+failures, and published as `v0.0.1`. Future changes now enter a later release train
+and must name their owning outcome and retained acceptance evidence.
 
 ## Stage 0 — reconcile control state
 
@@ -180,6 +181,11 @@ clean-machine matrix in [RELEASE-ACCEPTANCE.md](./RELEASE-ACCEPTANCE.md).
 **Exit gate:** the documented Homebrew command installs and launches the exact
 signed application represented by the public GitHub Release.
 
+**Delivery status:** complete for `v0.0.1`. Protected run `32629730508`
+published the exact release assets, and Homebrew run `32633573331` passed the
+native Apple Silicon and Intel lifecycle matrix. #31 remains open only for its
+administrator-enforcement governance criterion.
+
 - close #203 only after the implemented desktop-only contract has live
   protected-release evidence;
 - provision protected signing, notarization, GitHub, and Homebrew credentials;
@@ -198,15 +204,12 @@ signed application represented by the public GitHub Release.
 **Intended release relationship:** independent of Stage 2 unless a shared
 macOS contract is proven defective.
 
-The offline workflow contract is implemented: explicitly selected desktop-only
-releases skip iOS-only verification and distribution while shared validation
-remains mandatory, and coordinated releases retain every iOS gate. #203 remains
-open pending live desktop-only dry-run evidence: both `build-macos` matrix jobs
-must succeed, `upload-ios` is `skipped`, `publish` succeeds after `release`
-environment approval, and the Homebrew notification succeeds. Until that
-evidence is retained, the macOS-only path is not live-ready—not because iOS is
-part of the macOS supported surface, but because protected release behavior has
-not yet been observed.
+The offline and protected workflow contracts are proven: explicitly selected
+desktop-only releases skip iOS-only verification and distribution while shared
+validation remains mandatory, and coordinated releases retain every iOS gate.
+Protected run `32629730508` supplied the live evidence required by #203, so the
+macOS path is no longer coupled to iOS readiness. The companion train remains an
+independent planned surface under #200.
 
 - finish atomic host readiness and physical same-LAN acceptance in #193;
 - finish production ritual publication/execution and full live-path proof in
