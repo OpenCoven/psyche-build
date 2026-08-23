@@ -70,6 +70,13 @@ function shouldPublishRelease(condition: string, input: {
   ios: 'success' | 'failure' | 'cancelled' | 'skipped';
   desktopOnly: boolean;
 }): boolean {
+  const hasExplicitAlwaysStatusCheck = /\balways\(\)/.test(condition);
+  if (
+    !hasExplicitAlwaysStatusCheck &&
+    [input.verify, input.macos, input.ios].some((result) => result !== 'success')
+  ) {
+    return false;
+  }
   const resolved = condition
     .replace(/always\(\)/g, 'true')
     .replace(/needs\.verify\.result/g, JSON.stringify(input.verify))
@@ -242,6 +249,25 @@ describe('macOS release workflow contract', () => {
       expect(shouldPublishRelease(condition, { verify, macos, ios, desktopOnly })).toBe(expected);
     },
   );
+
+  it('requires always() to schedule desktop-only publish after upload-ios is skipped', () => {
+    const condition = workflowJobCondition(workflowJobSource(workflowSource(), 'publish'));
+    const skippedUpload = {
+      verify: 'success',
+      macos: 'success',
+      ios: 'skipped',
+      desktopOnly: true,
+    } as const;
+
+    expect(condition).toMatch(/^always\(\)\s*&&/);
+    expect(shouldPublishRelease(condition, skippedUpload)).toBe(true);
+    expect(
+      shouldPublishRelease(condition.replace(/^always\(\)\s*&&\s*/, ''), skippedUpload),
+    ).toBe(false);
+    expect(
+      shouldPublishRelease(condition.replace(/^always\(\)/, 'true'), skippedUpload),
+    ).toBe(false);
+  });
 
   it('isolates iOS distribution credentials to the upload job skipped by desktop-only mode', () => {
     const workflow = workflowSource();
