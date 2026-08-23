@@ -275,6 +275,24 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain('pnpm install --frozen-lockfile');
   });
 
+  it('initializes failure artifacts before checkout and finalizes the failed phase', () => {
+    const workflow = beadsWorkflowSource();
+    const initializeArtifacts = workflow.indexOf('- name: Initialize sync artifacts');
+    const checkout = workflow.indexOf('- name: Checkout repository');
+
+    expect(initializeArtifacts).toBeGreaterThanOrEqual(0);
+    expect(checkout).toBeGreaterThan(initializeArtifacts);
+    expect(workflow).toContain('"phase":"checkout"');
+    expect(workflow).toContain('"outcome":"pending"');
+    expect(workflow).toContain('- name: Finalize sync artifacts');
+    expect(workflow).toContain('CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}');
+    expect(workflow).toContain('DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}');
+    expect(workflow).toContain('SYNC_OUTCOME: ${{ steps.sync_beads.outcome }}');
+    expect(workflow).toContain("summary['phase'] = phase");
+    expect(workflow).toContain("summary['outcome'] = outcome");
+    expect(workflow).toContain("summary['stepOutcomes'] = step_outcomes");
+  });
+
   it('scopes the token to sync and always uploads sanitized JSON diagnostics', () => {
     const workflow = beadsWorkflowSource();
 
@@ -289,6 +307,7 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain(
       'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
     );
-    expect(workflow).toContain('if-no-files-found: error');
+    expect(workflow).toContain('if-no-files-found: warn');
+    expect(workflow).not.toContain('if-no-files-found: error');
   });
 });
