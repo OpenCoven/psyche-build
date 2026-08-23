@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.0.1] - 2026-08-23
+
 ### Performance
 
 - The direct-distributed macOS desktop app now opts its Tauri WKWebViews into
@@ -76,17 +78,6 @@
 
 - Added [Bridge and daemon security model](./docs/BRIDGE-SECURITY.md).
 
-## [0.0.1] - 2026-08-03
-
-> **Publication status:** this is the `0.0.1` release-candidate record, not
-> evidence that a public or internal distribution is currently available.
-> Public macOS/Homebrew availability remains pending
-> [#194](https://github.com/OpenCoven/psyche-build/issues/194). Internal
-> TestFlight availability remains pending
-> [#200](https://github.com/OpenCoven/psyche-build/issues/200). Before tagging,
-> the release commit must update this notice and date to match verified
-> distribution evidence.
-
 ### Orchestration
 
 - Run parallel coding agents in isolated git worktrees and tmux lanes, with clear orchestration for review, handoff, and completion.
@@ -107,7 +98,7 @@
 
 ### Distribution targets
 
-- The planned public macOS release consists of signed and notarized dual-architecture DMGs, checksums, and a Homebrew Cask that points to those exact verified assets.
+- The public macOS release consists of signed and notarized dual-architecture DMGs, checksums, and a Homebrew Cask that points to those exact verified assets.
 - The planned iOS delivery is an independently gated internal TestFlight companion for authorized OpenCoven testers.
 
 ### TestFlight: What to Test

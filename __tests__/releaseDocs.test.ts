@@ -92,6 +92,22 @@ function releaseEnvironmentSecretNames(runbook: string): string[] {
 }
 
 describe('v0.0.1 release documentation contract', () => {
+  it('finalizes the first-release changelog without claiming TestFlight availability', async () => {
+    const changelog = await readFile('CHANGELOG.md', 'utf8');
+    const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/);
+    const release = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
+
+    expect(unreleased?.[1].trim()).toBe('');
+    expect(release).not.toBeNull();
+    expect(release?.[1]).toContain('### Performance');
+    expect(release?.[1]).toContain('### Security');
+    expect(release?.[1]).toContain('### Reliability');
+    expect(release?.[1]).toContain('### Documentation');
+    expect(release?.[1]).toMatch(/internal distribution remains pending #200\./i);
+    expect(changelog).not.toMatch(/release-candidate record/i);
+    expect(changelog).not.toMatch(/Public macOS\/Homebrew availability remains pending/i);
+  });
+
   it('parses an aligned Markdown secret table without weakening exact-name checks', () => {
     expect(
       releaseEnvironmentSecretNames(`  | Secret | Purpose |\n | :--- | ---: |\n  |   \`ONE_SECRET\`   | first |\n | \`TWO_SECRET\` | second |`),

@@ -540,7 +540,7 @@ describe('ControlClient over the socket transport', () => {
 
   it('isolates task-bound browser action receipts when different tasks reuse the same caller key', async () => {
     const projectRoot = await workspaceProjectRoot('psyche-ctl-idempotency-receipts');
-    const endpoint = path.join(process.cwd(), '.c', `ctl-${randomBytes(4).toString('hex')}.sock`);
+    const endpoint = socketPath();
     const harness = await createTaskScopedControlHarness({ projectRoot, endpoint });
     cleanups.push(() => harness.server.close());
 
