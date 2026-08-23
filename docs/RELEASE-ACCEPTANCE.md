@@ -2,7 +2,8 @@
 
 **Status:** Required gate for the planned public macOS `v0.0.1` release  
 **Owning outcomes:** [#196](https://github.com/OpenCoven/psyche-build/issues/196),
-[#31](https://github.com/OpenCoven/psyche-build/issues/31), and
+[#31](https://github.com/OpenCoven/psyche-build/issues/31),
+[#203](https://github.com/OpenCoven/psyche-build/issues/203), and
 [#194](https://github.com/OpenCoven/psyche-build/issues/194)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)
 
@@ -45,6 +46,8 @@ release-evidence/
     <candidate-sha>/
       manifest.json
       automated-gates.txt
+      operator-smoke.txt
+      compatibility-evidence.md
       clean-machine-macos.md
       lifecycle-and-recovery.md
       signatures.txt
@@ -69,10 +72,10 @@ release-evidence/
 - explicit confirmation that captured evidence was reviewed for secrets and
   unnecessary user data.
 
-## Automated repository gate
+## Exact-candidate automated gate
 
-Run the repository's canonical commands on the exact candidate. At minimum,
-retain results for:
+The protected release workflow currently runs these repository commands on the
+exact tagged candidate:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -81,23 +84,83 @@ pnpm --dir docs build
 pnpm test
 pnpm typecheck
 pnpm build
-pnpm smoke
 pnpm smoke:pack
 ```
 
-Also retain:
+It also retains:
 
 - Rust formatting, locked tests, and checks for the Tauri manifest;
 - canonical desktop-web bundle generation and parity validation;
-- supported macOS, Windows, and Linux compilation checks;
-- iOS project-generation and shared-contract checks when the changed surface
-  requires them;
 - release-version coherence checks;
-- diff and generated-file cleanliness.
+- diff and generated-file cleanliness;
+- iOS validation in full coordinated-release mode.
 
-An iOS-only failure blocks the iOS train. It blocks the macOS release only when
-it demonstrates a defect in a shared contract or implementation required by
-macOS.
+The command list in this section must stay aligned with the actual release
+workflow. A required check that is not executed there must be classified in a
+separate evidence section with its concrete environment and invocation.
+
+## Tmux-equipped operator smoke
+
+`pnpm smoke` requires a working `tmux` environment and is not currently run by
+the release workflow. Run it separately on a tmux-equipped supported macOS
+machine against the exact candidate checkout and retain its output:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm smoke
+```
+
+- [ ] Record the candidate SHA, Node/pnpm/tmux versions, machine architecture,
+  command, exit status, and sanitized output.
+- [ ] Confirm the smoke run uses the exact candidate rather than an arbitrary
+  development tree.
+- [ ] Treat a failure as a release blocker until the test is fixed or the
+  support claim it protects is explicitly removed.
+
+## Platform compatibility evidence
+
+The public artifact gate is macOS-specific. Windows and Linux remain
+compile-only targets, so their evidence may come from either:
+
+1. a successful matrix run on the exact candidate; or
+2. the nearest successful ancestor whose relevant desktop/Rust/package source
+   tree is byte-identical to the candidate.
+
+When using a source-equivalent ancestor:
+
+- [ ] record its SHA and workflow URL;
+- [ ] retain a path-scoped diff proving that no Windows/Linux-relevant source,
+  manifest, lockfile, build script, workflow input, or generated artifact
+  changed between that SHA and the candidate;
+- [ ] rerun the matrix on the exact candidate whenever any relevant path
+  changed or the equivalence proof is uncertain.
+
+Documentation-only change classification is not itself proof that a future
+source candidate remains compatible.
+
+## macOS and iOS release-train separation
+
+The intended contract is that an iOS-only failure blocks the iOS train and
+blocks macOS only when it demonstrates a defect in a shared contract or
+implementation required by macOS.
+
+The current release workflow does not yet enforce that contract: its verify job
+runs iOS simulator and project/app tests unconditionally, and the macOS build
+jobs depend on verify. [#203](https://github.com/OpenCoven/psyche-build/issues/203)
+is therefore P0 and must close before publication.
+
+Required #203 evidence:
+
+- [ ] desktop-only mode skips only iOS-specific setup, simulator, project, app,
+  UI-test, credential, archive, and upload work;
+- [ ] shared protocol/schema validation required by macOS still runs;
+- [ ] full release mode continues to require iOS validation and upload/reuse;
+- [ ] a desktop-only dry run reaches both macOS build jobs and the publication
+  condition when iOS-only validation is unavailable;
+- [ ] a failed shared or macOS check still prevents publication.
+
+Until that evidence exists, do not describe desktop-only independence as an
+implemented workflow property.
 
 ## Clean-machine macOS matrix
 
@@ -159,15 +222,25 @@ Record commands and observed outcomes.
   scoped leases, approvals where required, canonical receipts, idempotency,
   and revocation behavior.
 
-### Diagnostics
+### Current error and diagnostic surfaces
 
-- [ ] Generate the release-minimum diagnostic output.
-- [ ] Confirm it is bounded by size/time/count.
-- [ ] Confirm it excludes tokens, credentials, raw prompts, unrestricted
-  terminal output, repository contents, environment variables, infrastructure
-  secrets, and unnecessary full user paths.
-- [ ] Confirm a user or operator can identify version, platform, relevant
-  lifecycle state, and a next action from the output.
+The first macOS release does **not** claim the versioned, bounded support bundle
+owned by #199. Do not invent a nonexistent command or schema to satisfy this
+gate.
+
+For the current release surface:
+
+- [ ] Verify visible app errors identify the failed operation and a safe next
+  action without dumping credentials, raw prompts, unrestricted terminal
+  output, repository contents, environment variables, or infrastructure
+  secrets.
+- [ ] Verify release version and source provenance are available through the
+  accepted application/release evidence path.
+- [ ] For the source-supported CLI, run `node ./psyche doctor --json` only as a
+  local operator diagnostic. It may contain local configuration paths, so do
+  not attach raw output; retain a reviewed/redacted summary instead.
+- [ ] Record the full support-bundle capability as explicitly deferred to #199
+  in public limitations and evidence.
 
 ### Update, uninstall, and reinstall
 
@@ -257,16 +330,21 @@ Verify:
 
 The candidate may be published only when:
 
-1. every required automated gate passes on the exact SHA;
-2. every supported capability in the support matrix has executable evidence;
-3. every clean-machine and integrity item is complete or explicitly
+1. every required exact-candidate automated gate passes;
+2. tmux-equipped smoke and compatibility evidence are retained under the
+   procedures above;
+3. #203 proves desktop-only workflow independence without skipping shared
+   validation;
+4. every supported capability in the support matrix has executable evidence;
+5. every clean-machine and integrity item is complete or explicitly
    inapplicable;
-4. every known limitation is reflected in public copy;
-5. no current review finding, ambiguous consequential effect, or unowned P0
+6. every known limitation is reflected in public copy;
+7. no current review finding, ambiguous consequential effect, or unowned P0
    blocker remains;
-6. protected credentials and release rules are verified;
-7. an independent verifier reproduces the public Homebrew install and launch.
+8. protected credentials and release rules are verified;
+9. an independent verifier reproduces the public Homebrew install and launch.
 
 Close #196 when the acceptance baseline is complete. Close #31 when the
-credential and protection gate is complete. Close #194 only after the public
-GitHub Release and Homebrew path are independently verified.
+credential and protection gate is complete. Close #203 when the workflow
+contract and dry-run evidence pass. Close #194 only after the public GitHub
+Release and Homebrew path are independently verified.
