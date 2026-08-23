@@ -10,8 +10,13 @@
 <p align="center">
   <a href="https://github.com/OpenCoven/psyche-build/releases"><strong>Releases</strong></a>
   ·
+  <a href="https://github.com/orgs/OpenCoven/projects/11"><strong>Roadmap</strong></a>
+  ·
   <a href="https://github.com/OpenCoven/psyche-build/issues"><strong>Issues</strong></a>
 </p>
+
+GitHub is the public planning mirror; [Beads](./.beads/README.md) remains the
+authoritative source for issue and roadmap state.
 
 ---
 

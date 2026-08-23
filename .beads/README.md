@@ -9,6 +9,12 @@ GitHub and expect those changes to persist. The next sync restores Beads state.
 Make planning changes with `bd`; the sync never imports GitHub changes into
 Beads and leaves unmanaged GitHub issues alone.
 
+GitHub preserves issue body edit history, and the sync cannot purge individual
+revisions. Sanitize content before its first publication. If sensitive material
+is published accidentally, remediation requires explicit approval to delete and
+recreate the issue, or assistance from GitHub Support. Keep sensitive details
+and affected issue identifiers out of public updates.
+
 Psyche Build currently standardizes automation on Beads CLI **1.2.2**.
 
 ## Daily Beads commands
@@ -74,11 +80,13 @@ or an artifact.
 
 ## Token and workflow configuration
 
-`BEADS_PROJECT_TOKEN` should be a fine-grained token scoped to the
-`OpenCoven/psyche-build` repository with repository **Issues: read and write**
-and organization **Projects: read and write** permissions (plus the implicit
-metadata read permission). Store the automation token only as the repository
-Actions secret named `BEADS_PROJECT_TOKEN`.
+`BEADS_PROJECT_TOKEN` remains a manual fine-grained token setup; the workflow
+does not create or rotate it. Scope it to the `OpenCoven/psyche-build`
+repository with repository **Issues: read and write** and organization
+**Projects: read and write** permissions (plus the implicit metadata read
+permission). Store the automation token only as the repository Actions secret
+named `BEADS_PROJECT_TOKEN`. Scheduled sync must remain disabled until that
+secret is set.
 
 ### Required one-time bootstrap gate
 
