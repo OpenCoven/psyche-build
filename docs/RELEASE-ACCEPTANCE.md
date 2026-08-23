@@ -140,27 +140,44 @@ source candidate remains compatible.
 
 ## macOS and iOS release-train separation
 
-The intended contract is that an iOS-only failure blocks the iOS train and
-blocks macOS only when it demonstrates a defect in a shared contract or
-implementation required by macOS.
+The implemented workflow contract makes iOS/TestFlight a separate,
+non-blocking train only when an operator explicitly selects desktop-only mode.
+Tag pushes and manual full releases remain coordinated: an iOS-only failure
+blocks them. Shared protocol/schema, TypeScript, package, Rust, and Tauri
+validation remains mandatory for both modes, so a shared failure still blocks
+macOS publication.
 
-The current release workflow does not yet enforce that contract: its verify job
-runs iOS simulator and project/app tests unconditionally, and the macOS build
-jobs depend on verify. [#203](https://github.com/OpenCoven/psyche-build/issues/203)
-is therefore P0 and must close before publication.
+Use one of these exact auditable manual invocations against the existing
+immutable tag:
+
+```sh
+gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false
+gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true
+```
+
+Tag pushes have no desktop-only input and always resolve `desktop_only` to
+`false`; they must not silently select the macOS-only path.
 
 Required #203 evidence:
 
-- [ ] desktop-only mode skips only iOS-specific setup, simulator, project, app,
+- [x] offline workflow-contract tests prove desktop-only mode skips only
+  iOS-specific setup, simulator, project, app,
   UI-test, credential, archive, and upload work;
-- [ ] shared protocol/schema validation required by macOS still runs;
-- [ ] full release mode continues to require iOS validation and upload/reuse;
+- [x] offline workflow-contract tests prove shared protocol/schema validation
+  required by macOS still runs;
+- [x] offline workflow-contract tests prove full release mode continues to
+  require iOS validation and upload/reuse;
 - [ ] a desktop-only dry run reaches both macOS build jobs and the publication
   condition when iOS-only validation is unavailable;
-- [ ] a failed shared or macOS check still prevents publication.
+- [x] offline result-gating tests prove a failed shared or macOS check prevents
+  publication.
 
-Until that evidence exists, do not describe desktop-only independence as an
-implemented workflow property.
+For the live dry run, retain the workflow run URL, exact release SHA, resolved
+`desktop_only=true` output, `verify` result, both `build-macos` results,
+`upload-ios=skipped`, `publish` result, and Homebrew notification result. Also
+retain the protected-environment approval receipt and the signed/notarized DMG
+and checksum evidence. Do not close #203 or claim live release readiness until
+that dry-run evidence exists.
 
 ## Clean-machine macOS matrix
 

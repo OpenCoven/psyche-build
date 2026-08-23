@@ -241,6 +241,34 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain(
       'Tag pushes always run the coordinated macOS and internal TestFlight release',
     );
+    expect(runbook).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
+    );
+    expect(runbook).toMatch(/shared protocol\/schema validation[\s\S]{0,180}(?:mandatory|required)/i);
+    expect(runbook).toMatch(/retain[\s\S]{0,240}workflow run URL[\s\S]{0,160}release SHA/i);
+  });
+
+  it('records the implemented desktop-only workflow contract and dry-run evidence', async () => {
+    const acceptance = await readFile('docs/RELEASE-ACCEPTANCE.md', 'utf8');
+
+    expect(acceptance).not.toContain('The current release workflow does not yet enforce that contract');
+    expect(acceptance).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true',
+    );
+    expect(acceptance).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
+    );
+    expect(acceptance).toMatch(/iOS\/TestFlight[\s\S]{0,160}(?:separate|non-blocking)/i);
+    for (const evidence of [
+      'workflow run URL',
+      'release SHA',
+      'desktop_only',
+      'build-macos',
+      'upload-ios',
+      'publish',
+    ]) {
+      expect(acceptance).toContain(evidence);
+    }
   });
 
   it('validates and tags the exact clean fetched origin/main commit', async () => {
