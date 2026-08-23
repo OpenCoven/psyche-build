@@ -68,3 +68,5 @@ jobs:
           git add __tests__/releaseWorkflow.test.ts
           git commit -m "test(release): tolerate equivalent notify conditions"
           git push origin HEAD:fix/desktop-release-homebrew-notify
+
+# This second branch push intentionally exercises the already-present one-shot workflow.
