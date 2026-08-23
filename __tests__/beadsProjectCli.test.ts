@@ -487,6 +487,12 @@ describe('Beads project sync CLI', () => {
         inProgress: 1,
       },
       appliedOperationCount: 0,
+      operationCounts: {
+        createIssue: 4,
+        updateIssue: 0,
+        closeIssue: 0,
+      },
+      closureCandidates: [],
       projectUrl: null,
     });
     expect(JSON.parse(result.stdout).plannedOperationCount).toBeGreaterThan(0);
@@ -714,7 +720,13 @@ describe('Beads project sync CLI', () => {
 
   it('lets --allow-mass-close override only the configured close threshold', async () => {
     const existingIssues = Array.from({ length: 6 }, (_, index) =>
-      managedIssue(`historical-${index + 1}`, index + 1)
+      ({
+        ...managedIssue(`historical-${index + 1}`, index + 1),
+        title: `[historical-${index + 1}] Review closure ${index + 1}`
+          + (index === 0 ? ` ${token}` : ''),
+        body: `<!-- psyche-bead-sync:v1 bead-id=historical-${index + 1} -->\n`
+          + `Private body content ${index + 1}`,
+      })
     );
     const guardedGh = createFakeGh({ existingIssues });
     const guarded = await runCli(
@@ -728,6 +740,32 @@ describe('Beads project sync CLI', () => {
     expect(guarded.exitCode).toBe(1);
     expect(guardedGh.writes).toEqual([]);
     expect(guarded.stderr).toMatch(/Refusing to close 6 managed issues; limit is 5/);
+    expect(JSON.parse(guarded.stdout)).toMatchObject({
+      mode: 'dry-run',
+      plannedOperationCount: expect.any(Number),
+      appliedOperationCount: 0,
+      operationCounts: {
+        closeIssue: 6,
+        setFields: 10,
+        archiveItem: 6,
+      },
+      closureCandidates: Array.from({ length: 6 }, (_, index) => {
+        const title = `[historical-${index + 1}] Review closure ${index + 1}`;
+        return {
+          beadId: `historical-${index + 1}`,
+          issueNumber: index + 1,
+          issueTitle: index === 0 ? `${title} <redacted>` : title,
+        };
+      }),
+      failure: {
+        kind: 'mass-close-safety',
+        closeIssueCount: 6,
+        maxCloseCount: 5,
+        cause: expect.stringMatching(/Refusing to close 6 managed issues; limit is 5/),
+      },
+    });
+    expect(guarded.stdout).not.toContain('Private body content');
+    expect(guarded.stdout).not.toContain(token);
 
     const overrideGh = createFakeGh({ existingIssues });
     const overridden = await runCli(
@@ -740,6 +778,21 @@ describe('Beads project sync CLI', () => {
 
     expect(overridden.exitCode).toBe(0);
     expect(overrideGh.writes).toEqual([]);
+    expect(JSON.parse(overridden.stdout)).toMatchObject({
+      operationCounts: {
+        closeIssue: 6,
+      },
+      closureCandidates: Array.from({ length: 6 }, (_, index) => {
+        const title = `[historical-${index + 1}] Review closure ${index + 1}`;
+        return {
+          beadId: `historical-${index + 1}`,
+          issueNumber: index + 1,
+          issueTitle: index === 0 ? `${title} <redacted>` : title,
+        };
+      }),
+    });
+    expect(overridden.stdout).not.toContain('Private body content');
+    expect(overridden.stdout).not.toContain(token);
     expect(JSON.parse(overridden.stdout).warnings).toContain(
       'Mass-close safety threshold overridden for this run.',
     );

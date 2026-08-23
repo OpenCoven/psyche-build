@@ -7,6 +7,8 @@ const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
 const beadsProjectSyncWorkflowPath = path.resolve(
   '.github/workflows/beads-project-sync.yml',
 );
+const beadsReadmePath = path.resolve('.beads/README.md');
+const contributingPath = path.resolve('CONTRIBUTING.md');
 const packageJsonPath = path.resolve('package.json');
 
 function workflowSource(): string {
@@ -291,6 +293,29 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain("summary['phase'] = phase");
     expect(workflow).toContain("summary['outcome'] = outcome");
     expect(workflow).toContain("summary['stepOutcomes'] = step_outcomes");
+  });
+
+  it('normalizes cancellation during sync to cancelled status and outcome', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow).toMatch(
+      /if outcome == 'cancelled':\n\s+summary\['status'\] = 'cancelled'\n\s+summary\['outcome'\] = 'cancelled'/,
+    );
+  });
+
+  it('requires the documented one-time provisioning bootstrap before merge or enablement', () => {
+    const workflow = beadsWorkflowSource();
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    expect(workflow).not.toContain('--provision');
+    expect(beadsReadme).toContain(
+      'node scripts/sync-beads-project.mjs --apply --provision',
+    );
+    expect(beadsReadme).toMatch(/must not be merged or enabled until.*bootstrap.*succeeds/is);
+    expect(contributing).toMatch(
+      /merge and schedule\s+enablement are blocked until.*bootstrap.*succeeds/is,
+    );
   });
 
   it('scopes the token to sync and always uploads sanitized JSON diagnostics', () => {

@@ -55,13 +55,21 @@ import { createExecFileRun, loadBeadsSource } from './source.mjs';
  *   inventory: ReturnType<typeof summarizeInventory>,
  *   plannedOperationCount: number,
  *   appliedOperationCount: number,
+ *   operationCounts: import('./reconcile.mjs').ReconciliationOperationCounts,
+ *   closureCandidates: import('./reconcile.mjs').ReconciliationClosureCandidate[],
  *   warnings: string[],
  *   projectUrl: string | null,
  *   failure?: {
+ *     kind: 'apply',
  *     failingOperation: Record<string, string | number | readonly number[] | null>,
  *     cause: string,
  *     resolvedIssueNumbersByBeadId?: Record<string, number>,
  *     resolvedProjectItemIdsByBeadId?: Record<string, string>,
+ *   } | {
+ *     kind: 'mass-close-safety',
+ *     cause: string,
+ *     closeIssueCount: number,
+ *     maxCloseCount: number,
  *   },
  * }} CliSummary
  */
@@ -136,23 +144,35 @@ export function parseCliOptions(argv) {
 }
 
 /**
+ * @param {string} value
+ * @param {readonly string[]} secrets
+ * @returns {string}
+ */
+function redactSecrets(value, secrets) {
+  let sanitized = value;
+  for (const secret of secrets) {
+    if (secret) {
+      sanitized = sanitized.split(secret).join('<redacted>');
+    }
+  }
+  return sanitized
+    .replace(/(?:github_pat|gh[pousr])_[A-Za-z0-9_]+/gu, '<redacted>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, '******');
+}
+
+/**
  * @param {unknown} error
  * @param {readonly string[]} [secrets]
  * @returns {string}
  */
 function errorMessage(error, secrets = []) {
-  let message = error instanceof Error && error.message.trim()
+  const message = error instanceof Error && error.message.trim()
     ? error.message
     : typeof error === 'string' && error.trim()
       ? error
       : 'Unknown Beads Project sync failure';
 
-  for (const secret of secrets) {
-    if (secret) {
-      message = message.split(secret).join('<redacted>');
-    }
-  }
-  return message
+  return redactSecrets(message, secrets)
     .replace(/(?:github_pat|gh[pousr])_[A-Za-z0-9_]+/gu, '<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer <redacted>')
     .replace(/\{[\s\S]*\}/gu, '<record redacted>')
@@ -214,6 +234,7 @@ function summarizeApplyFailure(error, secrets) {
   const resolvedIssueNumbersByBeadId = sortedRecord(error.issueNumbersByBeadId);
   const resolvedProjectItemIdsByBeadId = sortedRecord(error.projectItemIdsByBeadId);
   return {
+    kind: /** @type {const} */ ('apply'),
     failingOperation: summarizeFailingOperation(error.failingOperation),
     cause: errorMessage(error.cause, secrets),
     ...(Object.keys(resolvedIssueNumbersByBeadId).length === 0
@@ -263,13 +284,36 @@ function massCloseLimit(managedOpenCount, massClose) {
  * @param {import('./reconcile.mjs').ReconciliationPlan} plan
  * @param {{minimum: number, fraction: number}} massClose
  * @param {boolean} allowMassClose
+ * @returns {number}
  */
 function validatePlanSafety(plan, massClose, allowMassClose) {
+  const maxCloseCount = allowMassClose
+    ? Number.MAX_SAFE_INTEGER
+    : massCloseLimit(plan.summary.managedOpenCount, massClose);
   assertSafePlan(plan, {
-    maxCloseCount: allowMassClose
-      ? Number.MAX_SAFE_INTEGER
-      : massCloseLimit(plan.summary.managedOpenCount, massClose),
+    maxCloseCount,
   });
+  return maxCloseCount;
+}
+
+/**
+ * @param {import('./reconcile.mjs').ReconciliationPlan} plan
+ * @param {readonly string[]} secrets
+ */
+function summarizePlan(plan, secrets) {
+  return {
+    plannedOperationCount: plan.operations.length,
+    operationCounts: { ...plan.summary.operationCounts },
+    closureCandidates: plan.summary.closureCandidates.map((candidate) => ({
+      ...candidate,
+      issueTitle: candidate.issueTitle == null
+        ? null
+        : redactSecrets(candidate.issueTitle, secrets)
+          .replace(/\s+/gu, ' ')
+          .trim()
+          .slice(0, 256),
+    })),
+  };
 }
 
 /**
@@ -363,7 +407,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       writeSummary({
         mode: options.mode,
         inventory: inventorySummary,
-        plannedOperationCount: plan.operations.length,
+        ...summarizePlan(plan, diagnosticSecrets),
         appliedOperationCount: 0,
         warnings,
         projectUrl: null,
@@ -418,7 +462,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         writeSummary({
           mode: options.mode,
           inventory: inventorySummary,
-          plannedOperationCount: firstRunPlan.operations.length,
+          ...summarizePlan(firstRunPlan, diagnosticSecrets),
           appliedOperationCount: 0,
           warnings,
           projectUrl: url,
@@ -438,7 +482,31 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       readme: project == null ? null : { body: project.readme },
       renderContext,
     });
-    validatePlanSafety(plan, config.massClose, options.allowMassClose);
+    const url = project == null
+      ? null
+      : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
+    try {
+      validatePlanSafety(plan, config.massClose, options.allowMassClose);
+    } catch (error) {
+      const maxCloseCount = massCloseLimit(plan.summary.managedOpenCount, config.massClose);
+      const failure = {
+        kind: /** @type {const} */ ('mass-close-safety'),
+        cause: errorMessage(error, diagnosticSecrets),
+        closeIssueCount: plan.summary.closeIssueCount,
+        maxCloseCount,
+      };
+      stderr.write(`Beads Project sync safety check failed: ${failure.cause}\n`);
+      writeSummary({
+        mode: options.mode,
+        inventory: inventorySummary,
+        ...summarizePlan(plan, diagnosticSecrets),
+        appliedOperationCount: 0,
+        warnings,
+        projectUrl: url,
+        failure,
+      }, stdout);
+      return 1;
+    }
 
     if (options.mode === 'dry-run') {
       if (!project) {
@@ -448,7 +516,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       writeSummary({
         mode: options.mode,
         inventory: inventorySummary,
-        plannedOperationCount: plan.operations.length,
+        ...summarizePlan(plan, diagnosticSecrets),
         appliedOperationCount: 0,
         warnings,
         projectUrl: project == null
@@ -463,9 +531,6 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       await gh.ensureFields();
       await gh.ensureViews();
     }
-    const url = project == null
-      ? null
-      : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
     let applied;
     try {
       applied = await applyReconciliation(plan, gh);
@@ -478,7 +543,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       writeSummary({
         mode: options.mode,
         inventory: inventorySummary,
-        plannedOperationCount: plan.operations.length,
+        ...summarizePlan(plan, diagnosticSecrets),
         appliedOperationCount: error.applied.length,
         warnings,
         projectUrl: url,
@@ -490,7 +555,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     writeSummary({
       mode: options.mode,
       inventory: inventorySummary,
-      plannedOperationCount: plan.operations.length,
+      ...summarizePlan(plan, diagnosticSecrets),
       appliedOperationCount: applied.applied.length,
       warnings,
       projectUrl: url,

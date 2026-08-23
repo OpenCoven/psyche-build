@@ -107,10 +107,17 @@ The check is read-only. Applying requires the maintainer-only
 the repository. The repository Actions secret needs repository Issues
 read/write and organization Projects read/write permissions.
 
-The daily `.github/workflows/beads-project-sync.yml` run applies automatically.
-Use workflow dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an
+The workflow intentionally does not provision the Project. Task 8 must first
+complete the one-time maintainer command
+`node scripts/sync-beads-project.mjs --apply --provision`; merge and schedule
+enablement are blocked until that bootstrap succeeds and the marked public
+Project is verified.
+
+After that gate is satisfied, the daily
+`.github/workflows/beads-project-sync.yml` run applies automatically. Use
+workflow dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an
 exception guard override and should be enabled only after reviewing a dry-run
-artifact.
+artifact, including its operation-kind counts and body-free closure candidates.
 
 During a Beads version or schema migration, designate one sole migrator and
 stop other bootstrap/migration-capable processes until the migrated Dolt state

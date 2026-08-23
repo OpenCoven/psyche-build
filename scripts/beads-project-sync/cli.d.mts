@@ -1,5 +1,9 @@
 import type { createGhClient, GhClient } from './github.mjs';
 import type { InventorySummary } from './model.mjs';
+import type {
+  ReconciliationClosureCandidate,
+  ReconciliationOperationCounts,
+} from './reconcile.mjs';
 import type { ExecFileRun } from './source.mjs';
 
 export type CliMode = 'dry-run' | 'apply' | 'provision';
@@ -39,13 +43,21 @@ export interface CliSummary {
   inventory: InventorySummary;
   plannedOperationCount: number;
   appliedOperationCount: number;
+  operationCounts: ReconciliationOperationCounts;
+  closureCandidates: ReconciliationClosureCandidate[];
   warnings: string[];
   projectUrl: string | null;
   failure?: {
+    kind: 'apply';
     failingOperation: Record<string, string | number | readonly number[] | null>;
     cause: string;
     resolvedIssueNumbersByBeadId?: Record<string, number>;
     resolvedProjectItemIdsByBeadId?: Record<string, string>;
+  } | {
+    kind: 'mass-close-safety';
+    cause: string;
+    closeIssueCount: number;
+    maxCloseCount: number;
   };
 }
 

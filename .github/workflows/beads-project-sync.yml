@@ -298,7 +298,11 @@ jobs:
               )
 
           summary['phase'] = phase
-          summary['outcome'] = outcome
+          if outcome == 'cancelled':
+              summary['status'] = 'cancelled'
+              summary['outcome'] = 'cancelled'
+          else:
+              summary['outcome'] = outcome
           summary['stepOutcomes'] = step_outcomes
           summary_path.write_text(
               f'{json.dumps(summary, indent=2, sort_keys=True)}\n',

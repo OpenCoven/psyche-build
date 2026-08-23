@@ -173,6 +173,25 @@ export type ReconciliationOperation =
   | ArchiveItemOperation
   | UpdateReadmeOperation;
 
+export interface ReconciliationOperationCounts {
+  createIssue: number;
+  updateIssue: number;
+  closeIssue: number;
+  ensureProjectItem: number;
+  restoreItem: number;
+  setFields: number;
+  syncParent: number;
+  syncBlocker: number;
+  archiveItem: number;
+  updateReadme: number;
+}
+
+export interface ReconciliationClosureCandidate {
+  beadId: string;
+  issueNumber: number;
+  issueTitle: string | null;
+}
+
 export interface ReconciliationSummary {
   sourceTotal: number;
   sourceActive: number;
@@ -190,6 +209,8 @@ export interface ReconciliationSummary {
   syncBlockerCount: number;
   archiveItemCount: number;
   updateReadmeCount: number;
+  operationCounts: ReconciliationOperationCounts;
+  closureCandidates: ReconciliationClosureCandidate[];
 }
 
 export interface ReconciliationPlan {

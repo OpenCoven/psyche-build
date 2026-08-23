@@ -78,6 +78,22 @@ and organization **Projects: read and write** permissions (plus the implicit
 metadata read permission). Store the automation token only as the repository
 Actions secret named `BEADS_PROJECT_TOKEN`.
 
+### Required one-time bootstrap gate
+
+The sync workflow intentionally does not provision GitHub Project
+infrastructure. Task 8 must run the following maintainer bootstrap successfully:
+
+```bash
+export BEADS_PROJECT_TOKEN="<load from your password manager>"
+node scripts/sync-beads-project.mjs --apply --provision
+```
+
+`.github/workflows/beads-project-sync.yml` must not be merged or enabled until
+that one-time bootstrap succeeds and the marked public Project is verified.
+Keep its schedule disabled until then; a normal workflow apply fails safely
+when no marked Project exists.
+
+After the bootstrap gate is satisfied,
 `.github/workflows/beads-project-sync.yml` applies the mirror every day at
 03:17 UTC. Maintainers can also use **Actions → Beads Project Sync → Run
 workflow**:
@@ -87,11 +103,13 @@ workflow**:
 - Scheduled runs always apply and never enable the override.
 
 Every run uploads a sanitized `summary.json` and `diagnostics.log`, including
-failed runs.
+failed runs. The summary reports counts by operation kind and body-free closure
+candidates with Bead ID, issue number, and public issue title when available.
 
 The guard normally refuses to close more than the greater of five managed
 issues or 25% of currently open managed issues. Run a dry-run first and inspect
-its artifact before manually enabling `allow_mass_close`.
+its artifact before manually enabling `allow_mass_close`; a refused run still
+publishes the same reviewable summary.
 
 Project view names, layouts, and filters are automated. GitHub does not expose
 all view grouping and sorting controls through the API used here, so a

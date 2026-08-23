@@ -223,6 +223,29 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
 
 /**
  * @typedef {{
+ *   createIssue: number,
+ *   updateIssue: number,
+ *   closeIssue: number,
+ *   ensureProjectItem: number,
+ *   restoreItem: number,
+ *   setFields: number,
+ *   syncParent: number,
+ *   syncBlocker: number,
+ *   archiveItem: number,
+ *   updateReadme: number,
+ * }} ReconciliationOperationCounts
+ */
+
+/**
+ * @typedef {{
+ *   beadId: string,
+ *   issueNumber: number,
+ *   issueTitle: string | null,
+ * }} ReconciliationClosureCandidate
+ */
+
+/**
+ * @typedef {{
  *   sourceTotal: number,
  *   sourceActive: number,
  *   sourceClosed: number,
@@ -239,6 +262,8 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   syncBlockerCount: number,
  *   archiveItemCount: number,
  *   updateReadmeCount: number,
+ *   operationCounts: ReconciliationOperationCounts,
+ *   closureCandidates: ReconciliationClosureCandidate[],
  * }} ReconciliationSummary
  */
 
@@ -959,6 +984,23 @@ function buildSummary(
   const managedOpenCount = [...managedIssuesByBeadId.values()]
     .filter((issue) => issue.state !== 'closed')
     .length;
+  const operationCounts = {
+    createIssue: createIssues.length,
+    updateIssue: updateIssues.length,
+    closeIssue: closeIssues.length,
+    ensureProjectItem: ensureProjectItems.length,
+    restoreItem: restoreItems.length,
+    setFields: setFields.length,
+    syncParent: syncParents.length,
+    syncBlocker: syncBlockers.length,
+    archiveItem: archiveItems.length,
+    updateReadme: updateReadmeOperations.length,
+  };
+  const closureCandidates = closeIssues.map((operation) => ({
+    beadId: operation.beadId,
+    issueNumber: operation.issueNumber,
+    issueTitle: managedIssuesByBeadId.get(operation.beadId)?.title ?? null,
+  }));
 
   return {
     sourceTotal: inventory.length,
@@ -977,6 +1019,8 @@ function buildSummary(
     syncBlockerCount: syncBlockers.length,
     archiveItemCount: archiveItems.length,
     updateReadmeCount: updateReadmeOperations.length,
+    operationCounts,
+    closureCandidates,
   };
 }
 

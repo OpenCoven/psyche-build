@@ -597,7 +597,12 @@ describe('Beads project reconciliation', () => {
     const currentInventory = fullInventory.slice(0, 17);
     const issueNumbers = activeIssueNumbersByBeadId(fullInventory, 701);
 
-    const existingIssues = fullInventory.map((bead) => managedIssue(bead, fullInventory, issueNumbers));
+    const existingIssues = fullInventory.map((bead, index) => managedIssue(
+      bead,
+      fullInventory,
+      issueNumbers,
+      index === 24 ? { title: null } : {},
+    ));
     const plan = planReconciliation({
       inventory: currentInventory,
       existingIssues,
@@ -608,6 +613,31 @@ describe('Beads project reconciliation', () => {
     expect(plan.summary.managedOpenCount).toBe(25);
     expect(plan.summary.closeIssueCount).toBe(8);
     expect(plan.summary.defaultMaxCloseCount).toBe(7);
+    expect(plan.summary.operationCounts).toEqual({
+      createIssue: 0,
+      updateIssue: 0,
+      closeIssue: 8,
+      ensureProjectItem: 0,
+      restoreItem: 0,
+      setFields: 8,
+      syncParent: 0,
+      syncBlocker: 0,
+      archiveItem: 8,
+      updateReadme: 0,
+    });
+    expect(plan.summary.closureCandidates).toEqual(
+      Array.from({ length: 8 }, (_, index) => {
+        const beadId = `pb-${String(index + 18).padStart(2, '0')}`;
+        return {
+          beadId,
+          issueNumber: 718 + index,
+          issueTitle: index === 7 ? null : `[${beadId}] Ship ${beadId}`,
+        };
+      }),
+    );
+    expect(plan.summary.closureCandidates.every(
+      (candidate) => !Object.hasOwn(candidate, 'body'),
+    )).toBe(true);
     expect(() => assertSafePlan(plan)).toThrow(/close 8 managed issues.*limit is 7/i);
     expect(() => assertSafePlan(plan, { maxCloseCount: 8 })).not.toThrow();
   });
