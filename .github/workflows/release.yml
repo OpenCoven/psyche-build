@@ -908,6 +908,7 @@ jobs:
   notify-homebrew:
     name: Notify OpenCoven Homebrew tap
     needs: publish
+    if: always() && needs.publish.result == 'success'
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
