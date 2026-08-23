@@ -18,6 +18,7 @@ export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
  *   projectTitle: string,
  *   projectMarker: string,
  *   issueMarker: string,
+ *   legacyProjectMarkers?: readonly string[],
  *   assigneeMap: Record<string, string>,
  *   massClose: {
  *     minimum: number,
@@ -36,6 +37,20 @@ function fail(message) {
 
 /**
  * @param {unknown} value
+ * @param {string} fieldName
+ * @returns {readonly string[]}
+ */
+function machineMarkers(value, fieldName) {
+  if (!Array.isArray(value)) {
+    fail(`"${fieldName}" must be an array`);
+  }
+  return Object.freeze([
+    ...new Set(value.map((marker) => machineMarker(marker, fieldName))),
+  ]);
+}
+
+/**
+ * @param {unknown} value
  * @param {string} context
  * @returns {Record<string, unknown>}
  */
@@ -48,16 +63,17 @@ function record(value, context) {
 
 /**
  * @param {Record<string, unknown>} value
- * @param {readonly string[]} allowedKeys
+ * @param {readonly string[]} requiredKeys
  * @param {string} context
+ * @param {readonly string[]} [optionalKeys]
  */
-function assertExactKeys(value, allowedKeys, context) {
-  const allowed = new Set(allowedKeys);
+function assertExactKeys(value, requiredKeys, context, optionalKeys = []) {
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
   const unknown = Object.keys(value).filter((key) => !allowed.has(key));
   if (unknown.length > 0) {
     fail(`${context} contains unknown field "${unknown[0]}"`);
   }
-  const missing = allowedKeys.filter((key) => !(key in value));
+  const missing = requiredKeys.filter((key) => !(key in value));
   if (missing.length > 0) {
     fail(`${context} is missing field "${missing[0]}"`);
   }
@@ -137,10 +153,13 @@ export function parseSyncConfig(value) {
     'issueMarker',
     'assigneeMap',
     'massClose',
-  ], 'root');
+  ], 'root', ['legacyProjectMarkers']);
 
   const projectMarker = machineMarker(input.projectMarker, 'projectMarker');
   const issueMarker = machineMarker(input.issueMarker, 'issueMarker');
+  const legacyProjectMarkers = 'legacyProjectMarkers' in input
+    ? machineMarkers(input.legacyProjectMarkers, 'legacyProjectMarkers')
+    : null;
 
   return Object.freeze({
     owner: requiredString(input.owner, 'owner'),
@@ -148,6 +167,7 @@ export function parseSyncConfig(value) {
     projectTitle: requiredString(input.projectTitle, 'projectTitle'),
     projectMarker,
     issueMarker,
+    ...(legacyProjectMarkers == null ? {} : { legacyProjectMarkers }),
     assigneeMap: Object.freeze(assigneeMap(input.assigneeMap)),
     massClose: Object.freeze(massClose(input.massClose)),
   });

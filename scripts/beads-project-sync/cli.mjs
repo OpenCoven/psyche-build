@@ -336,7 +336,10 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       sourceRef: env.GITHUB_SHA?.trim() || 'main',
       projectMarker: config.projectMarker,
       issueMarker: config.issueMarker,
-      legacyProjectMarkers: LEGACY_PROJECT_MARKERS,
+      legacyProjectMarkers: [
+        ...LEGACY_PROJECT_MARKERS,
+        ...(config.legacyProjectMarkers ?? []),
+      ],
       legacyIssueMarkers: LEGACY_ISSUE_MARKERS,
     };
     const warnings = [];
@@ -375,7 +378,10 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       token,
       projectMarker: config.projectMarker,
       issueMarker: config.issueMarker,
-      legacyProjectMarkers: LEGACY_PROJECT_MARKERS,
+      legacyProjectMarkers: [
+        ...LEGACY_PROJECT_MARKERS,
+        ...(config.legacyProjectMarkers ?? []),
+      ],
       legacyIssueMarkers: LEGACY_ISSUE_MARKERS,
     });
     await gh.verifyAccess();

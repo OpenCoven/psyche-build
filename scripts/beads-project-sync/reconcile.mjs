@@ -7,10 +7,10 @@ import {
   DEFAULT_ISSUE_MARKER,
   DEFAULT_PROJECT_MARKER,
   LEGACY_ISSUE_MARKERS,
-  LEGACY_PROJECT_MARKERS,
   markerPattern,
   normalizeMarker,
   recognizedMarkers,
+  recognizedProjectMarkers as resolveRecognizedProjectMarkers,
   renderHashMarker,
 } from './markers.mjs';
 import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render.mjs';
@@ -612,9 +612,9 @@ function resolveMarkerContext(context) {
   return {
     projectMarker,
     issueMarker,
-    recognizedProjectMarkers: recognizedMarkers(
+    recognizedProjectMarkers: resolveRecognizedProjectMarkers(
       projectMarker,
-      context.legacyProjectMarkers ?? LEGACY_PROJECT_MARKERS,
+      context.legacyProjectMarkers,
       'planReconciliation projectMarker',
     ),
     recognizedIssueMarkers: recognizedMarkers(

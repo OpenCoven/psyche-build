@@ -520,6 +520,32 @@ describe('createGhClient', () => {
     expect(payload.query).toMatch(/\breadme\b/u);
   });
 
+  it('discovers the default-marked Project when a custom project marker is configured', async () => {
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-default',
+        number: 9,
+        title: 'Existing Public Beads',
+        readme: `${PROJECT_README_MARKER}\n# Existing Public Beads`,
+        public: true,
+        url: 'https://github.com/orgs/OpenCoven/projects/9',
+      }]),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      projectMarker: 'custom-project-sync:v2',
+      legacyProjectMarkers: ['prior-project-sync:v1'],
+    });
+
+    await expect(client.discoverProject()).resolves.toMatchObject({
+      id: 'P-default',
+      number: 9,
+    });
+  });
+
   it('migrates a legacy marked Project instead of creating a duplicate Project', async () => {
     const legacyProject = {
       id: 'P-legacy',

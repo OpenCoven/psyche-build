@@ -9,6 +9,7 @@ import {
   normalizeMarker,
   projectReadmeMarker,
   recognizedMarkers,
+  recognizedProjectMarkers,
 } from './markers.mjs';
 
 export const PROJECT_README_MARKER = projectReadmeMarker(DEFAULT_PROJECT_MARKER);
@@ -945,9 +946,9 @@ export function createGhClient(options) {
     options.issueMarker ?? DEFAULT_ISSUE_MARKER,
     'issueMarker',
   );
-  const recognizedProjectMarkerValues = recognizedMarkers(
+  const recognizedProjectMarkerValues = recognizedProjectMarkers(
     projectMarker,
-    options.legacyProjectMarkers ?? LEGACY_PROJECT_MARKERS,
+    options.legacyProjectMarkers,
     'projectMarker',
   );
   const recognizedIssueMarkerValues = recognizedMarkers(

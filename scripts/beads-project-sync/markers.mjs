@@ -51,6 +51,23 @@ export function recognizedMarkers(current, legacy, context) {
 }
 
 /**
+ * @param {unknown} current
+ * @param {unknown} legacy
+ * @param {string} context
+ * @returns {string[]}
+ */
+export function recognizedProjectMarkers(current, legacy, context) {
+  if (legacy != null && !Array.isArray(legacy)) {
+    throw new Error(`${context} legacy markers must be an array`);
+  }
+  return recognizedMarkers(current, [
+    DEFAULT_PROJECT_MARKER,
+    ...LEGACY_PROJECT_MARKERS,
+    ...(legacy ?? []),
+  ], context);
+}
+
+/**
  * @param {string} marker
  * @returns {string}
  */

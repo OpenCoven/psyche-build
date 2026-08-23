@@ -4,6 +4,7 @@ export interface BeadsProjectSyncConfig {
   projectTitle: string;
   projectMarker: string;
   issueMarker: string;
+  legacyProjectMarkers?: readonly string[];
   assigneeMap: Readonly<Record<string, string>>;
   massClose: {
     readonly minimum: number;

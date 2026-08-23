@@ -1,4 +1,11 @@
-import { access, readFile, writeFile } from 'node:fs/promises';
+import {
+  access,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -252,11 +259,13 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'custom-project-sync:v2',
       issueMarker: 'custom-issue-sync:v2',
+      legacyProjectMarkers: ['prior-project-sync:v1'],
       assigneeMap: {},
       massClose: { minimum: 5, fraction: 0.25 },
     })).toMatchObject({
       projectMarker: 'custom-project-sync:v2',
       issueMarker: 'custom-issue-sync:v2',
+      legacyProjectMarkers: ['prior-project-sync:v1'],
     });
 
     expect(() => parseSyncConfig({
@@ -320,7 +329,9 @@ describe('Beads source adapter', () => {
         options: { cwd: repositoryRoot },
       },
     ]);
-    expect(prefixes).toEqual([join(tmpdir(), 'psyche-beads-project-sync-')]);
+    expect(prefixes).toEqual([
+      join(await realpath(tmpdir()), 'psyche-beads-project-sync-'),
+    ]);
     expect(relative(repositoryRoot, temporaryDirectory)).toMatch(/^\.\./u);
     expect(removed).toEqual([temporaryDirectory]);
     expect(calls.flatMap((call) => call.args)).not.toContain('update');
@@ -505,6 +516,32 @@ describe('Beads project sync CLI', () => {
     }]);
     expect(relative(repositoryRoot, outputPath)).toMatch(/^\.\./u);
     await expect(access(dirname(outputPath))).rejects.toThrow();
+  });
+
+  it('keeps raw exports outside the repository when TMPDIR points inside it', async () => {
+    const fixture = await readFile(fixturePath, 'utf8');
+    const hostileTemporaryRoot = await mkdtemp(join(repositoryRoot, '.hostile-tmp-'));
+    let outputPath = '';
+    vi.stubEnv('TMPDIR', hostileTemporaryRoot);
+
+    try {
+      const result = await runCli(['--dry-run'], {
+        run: async (_command, args) => {
+          const outputIndex = args.indexOf('-o');
+          outputPath = args[outputIndex + 1] ?? '';
+          await writeFile(outputPath, fixture, 'utf8');
+          return { stdout: '', stderr: '', exitCode: 0 };
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(relative(repositoryRoot, outputPath)).toMatch(/^\.\./u);
+      expect(relative(hostileTemporaryRoot, outputPath)).toMatch(/^\.\./u);
+      await expect(access(dirname(outputPath))).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(hostileTemporaryRoot, { recursive: true, force: true });
+    }
   });
 
   it('uses credentials for read-only remote discovery during dry-run', async () => {

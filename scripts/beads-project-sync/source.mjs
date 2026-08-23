@@ -4,10 +4,18 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import {
   mkdtemp as nodeMakeTemporaryDirectory,
   readFile as nodeReadFile,
+  realpath as nodeRealpath,
   rm as nodeRemove,
 } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { platform, tmpdir } from 'node:os';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 
 const TERMINATION_SIGNALS = /** @type {const} */ (['SIGHUP', 'SIGINT', 'SIGTERM']);
 
@@ -76,6 +84,78 @@ function errorMessage(error) {
   return error instanceof Error && error.message.trim()
     ? error.message.trim()
     : 'unknown error';
+}
+
+/**
+ * @param {string} parent
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function containsPath(parent, candidate) {
+  const pathFromParent = relative(parent, candidate);
+  return pathFromParent === ''
+    || (
+      pathFromParent !== '..'
+      && !pathFromParent.startsWith(`..${sep}`)
+      && !isAbsolute(pathFromParent)
+    );
+}
+
+/**
+ * @returns {string[]}
+ */
+function systemTemporaryRootFallbacks() {
+  if (platform() === 'win32') {
+    return [join(process.env.SystemRoot ?? 'C:\\Windows', 'Temp')];
+  }
+  return ['/tmp', '/var/tmp'];
+}
+
+/**
+ * @param {string} cwd
+ * @returns {Promise<string>}
+ */
+async function safeTemporaryRoot(cwd) {
+  let canonicalCwd;
+  try {
+    canonicalCwd = await nodeRealpath(resolve(cwd));
+  } catch (error) {
+    throw new Error(
+      `Unable to canonicalize Beads source working directory "${cwd}": ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  const rejected = [];
+  for (const candidate of [...new Set([tmpdir(), ...systemTemporaryRootFallbacks()])]) {
+    if (!isAbsolute(candidate)) {
+      rejected.push(`"${candidate}" is not absolute`);
+      continue;
+    }
+
+    let canonicalRoot;
+    try {
+      canonicalRoot = await nodeRealpath(candidate);
+    } catch (error) {
+      rejected.push(`"${candidate}" cannot be canonicalized: ${errorMessage(error)}`);
+      continue;
+    }
+
+    if (dirname(canonicalRoot) === canonicalRoot) {
+      rejected.push(`"${candidate}" resolves to a filesystem root`);
+      continue;
+    }
+    if (containsPath(canonicalCwd, canonicalRoot)) {
+      rejected.push(`"${candidate}" resolves inside the working directory`);
+      continue;
+    }
+    return canonicalRoot;
+  }
+
+  throw new Error(
+    `Unable to find a safe system temporary directory outside "${canonicalCwd}": `
+    + rejected.join('; '),
+  );
 }
 
 /**
@@ -232,9 +312,18 @@ export async function loadBeadsSource(options) {
   }
   const makeTemporaryDirectory = options.makeTemporaryDirectory ?? nodeMakeTemporaryDirectory;
   const remove = options.remove ?? nodeRemove;
-  const temporaryDirectory = await makeTemporaryDirectory(
-    join(tmpdir(), 'psyche-beads-project-sync-'),
-  );
+  const temporaryRoot = await safeTemporaryRoot(options.cwd);
+  let temporaryDirectory;
+  try {
+    temporaryDirectory = await makeTemporaryDirectory(
+      join(temporaryRoot, 'psyche-beads-project-sync-'),
+    );
+  } catch (error) {
+    throw new Error(
+      `Unable to create Beads raw export directory under "${temporaryRoot}": ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
   const outputPath = join(temporaryDirectory, 'issues.jsonl');
   const cleanup = createCleanup(temporaryDirectory, remove);
   const disposeSignalCleanup = installSignalCleanup(

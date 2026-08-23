@@ -11,6 +11,12 @@ export function recognizedMarkers(
   context: string,
 ): string[];
 
+export function recognizedProjectMarkers(
+  current: unknown,
+  legacy: unknown,
+  context: string,
+): string[];
+
 export function projectReadmeMarker(marker: string): string;
 
 export function issueBeadMarker(marker: string, beadId: string): string;
