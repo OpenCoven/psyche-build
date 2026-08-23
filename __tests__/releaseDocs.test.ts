@@ -97,6 +97,7 @@ describe('v0.0.1 release documentation contract', () => {
     const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/);
     const release = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
 
+    expect(unreleased).not.toBeNull();
     expect(unreleased?.[1].trim()).toBe('');
     expect(release).not.toBeNull();
     expect(release?.[1]).toContain('### Performance');
