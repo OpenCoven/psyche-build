@@ -2,7 +2,7 @@
 
 **Status:** Active  
 **Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-08-22  
+**Last reconciled:** 2026-08-22
 **Execution control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)
 
 This is the canonical public roadmap for Psyche Build. It translates the
