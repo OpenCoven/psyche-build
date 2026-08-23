@@ -48,9 +48,7 @@ npm run preview
 
 ## `v0.0.1` distribution contract
 
-After [the public macOS release outcome](https://github.com/OpenCoven/psyche-build/issues/194)
-closes with retained acceptance evidence, the public macOS installation path
-is:
+After the v0.0.1 macOS release is published and [#194](https://github.com/OpenCoven/psyche-build/issues/194) closes with retained acceptance evidence, the public macOS installation path is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
