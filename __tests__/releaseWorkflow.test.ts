@@ -397,6 +397,9 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('Published release assets and notes match the verified build output');
     expect(workflow).toContain('notify-homebrew:');
     expect(workflow).toContain('needs: publish');
+    expect(workflowJobSource(workflow, 'notify-homebrew')).toContain(
+      "if: always() && needs.publish.result == 'success'",
+    );
     expect(workflow).toContain('event_type: "psyche-build-release"');
     expect(workflow).toContain('secrets.HOMEBREW_TAP_TOKEN');
     expect(workflow).toContain('Missing required release environment secret HOMEBREW_TAP_TOKEN');
