@@ -41,13 +41,15 @@ Until [#194](https://github.com/OpenCoven/psyche-build/issues/194)
 closes with retained distribution evidence, public copy must describe the
 macOS installation path as pending rather than already available.
 
-The intended product contract keeps iOS-only failures off the macOS release
-critical path. The current release workflow does not yet enforce that contract
-because its verify job runs iOS checks unconditionally. Closing
-[#203](https://github.com/OpenCoven/psyche-build/issues/203) is therefore a P0
-macOS release blocker. Until #203 closes, the workflow coupling is a known
-implementation fact rather than evidence that iOS is a supported or required
-macOS surface.
+The product contract keeps iOS-only failures off an explicitly selected
+desktop-only macOS release while retaining shared validation and every iOS gate
+for coordinated releases. The offline workflow contract is implemented, but
+[#203](https://github.com/OpenCoven/psyche-build/issues/203) remains open pending
+live desktop-only dry-run evidence: both `build-macos` matrix jobs must succeed,
+`upload-ios` is `skipped`, `publish` succeeds after `release` environment
+approval, and the Homebrew notification succeeds. Until that evidence is
+retained, the macOS-only path is not live-ready; iOS remains a separate planned
+surface rather than a macOS prerequisite.
 
 ## Core capability contract
 
@@ -160,8 +162,8 @@ shared defect in the supported macOS path:
 - complete Threads and AgentFS convergence.
 
 [#203](https://github.com/OpenCoven/psyche-build/issues/203) is separately P0
-because it removes an accidental workflow dependency; it does not make iOS a
-product prerequisite.
+because it requires live proof that the offline workflow contract works under
+protected release conditions; it does not make iOS a product prerequisite.
 
 ## Changing this contract
 

@@ -119,7 +119,7 @@ Community train:
 | [#195 — authoritative roadmap](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Roadmap | All active work has one owner, one delivery target, explicit dependencies, and an evidence location |
 | [#196 — release reliability baseline](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Reliability | Every supported release-path capability is executable and proven, absent, or explicitly deferred |
 | [#31 — protected release credentials](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Release | Required desktop secrets and protections are verified without exposing values |
-| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | P0 | Release infrastructure | Desktop-only verification skips iOS-only gates while retaining shared validation and full-mode regression coverage |
+| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | P0 | Release infrastructure | Offline contract tests pass and a live protected desktop-only dry run proves both macOS builds and publication without iOS gates |
 | [#194 — ship macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | P0 | Release | Signed/notarized dual-architecture artifacts and Homebrew installation are independently verified |
 | [#200 — iOS companion delivery](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | iOS | Physical distributed build connects, restores authoritative state, and executes only wired scoped actions |
 | [#199 — operations and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and representative failures recover deterministically with retained evidence |
@@ -180,8 +180,8 @@ clean-machine matrix in [RELEASE-ACCEPTANCE.md](./RELEASE-ACCEPTANCE.md).
 **Exit gate:** the documented Homebrew command installs and launches the exact
 signed application represented by the public GitHub Release.
 
-- close #203 so desktop-only verification no longer depends on iOS-only
-  simulator, build, test, or distribution gates;
+- close #203 only after the implemented desktop-only contract has live
+  protected-release evidence;
 - provision protected signing, notarization, GitHub, and Homebrew credentials;
 - enforce release branch, environment, reviewer, and immutable-tag rules;
 - create a verified signed annotated tag from the accepted `main` SHA;
@@ -198,11 +198,15 @@ signed application represented by the public GitHub Release.
 **Intended release relationship:** independent of Stage 2 unless a shared
 macOS contract is proven defective.
 
-The current release workflow does not yet enforce that relationship because
-its verify job runs iOS checks unconditionally. #203 is the explicit P0
-infrastructure blocker that must remove this accidental coupling before #194
-closes. Until then, the workflow coupling is a known implementation defect—not
-a product decision that iOS is part of the macOS supported surface.
+The offline workflow contract is implemented: explicitly selected desktop-only
+releases skip iOS-only verification and distribution while shared validation
+remains mandatory, and coordinated releases retain every iOS gate. #203 remains
+open pending live desktop-only dry-run evidence: both `build-macos` matrix jobs
+must succeed, `upload-ios` is `skipped`, `publish` succeeds after `release`
+environment approval, and the Homebrew notification succeeds. Until that
+evidence is retained, the macOS-only path is not live-ready—not because iOS is
+part of the macOS supported surface, but because protected release behavior has
+not yet been observed.
 
 - finish atomic host readiness and physical same-LAN acceptance in #193;
 - finish production ritual publication/execution and full live-path proof in

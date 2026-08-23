@@ -271,6 +271,33 @@ describe('v0.0.1 release documentation contract', () => {
     }
   });
 
+  it('keeps canonical support and roadmap docs aligned with the implemented offline contract', async () => {
+    const canonicalDocs = await Promise.all(
+      ['docs/SUPPORT-MATRIX.md', 'docs/ROADMAP.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of canonicalDocs) {
+      expect(source, filePath).not.toMatch(/verify job runs iOS checks unconditionally/i);
+      expect(source, filePath).not.toMatch(/workflow coupling is a known implementation (?:fact|defect)/i);
+      expect(source, filePath).toMatch(/offline workflow contract is implemented/i);
+      expect(source, filePath).toMatch(
+        /(?:\[#203\]\([^)]*\)|#203)\s+remains\s+open\s+pending\s+live desktop-only dry-run evidence/i,
+      );
+      for (const [label, evidence] of [
+        ['both build-macos matrix jobs', /both\s+`build-macos` matrix jobs/i],
+        ['upload-ios skipped', /`upload-ios` is `skipped`/i],
+        ['publish', /`publish`/i],
+        ['release environment approval', /`release`\s+environment\s+approval/i],
+        ['Homebrew notification', /Homebrew notification/i],
+      ] as const) {
+        expect(source, `${filePath}: ${label}`).toMatch(evidence);
+      }
+    }
+  });
+
   it('validates and tags the exact clean fetched origin/main commit', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
     const orderedCommands = [
