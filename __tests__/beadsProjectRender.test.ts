@@ -113,6 +113,18 @@ describe('Beads project renderers', () => {
     ).toBe(
       'Keep https://example.com/?path=~/docs#%2Fhome%2Falice%2Fdocs public.',
     );
+    expect(sanitizePublicText('Plan: ~/.copilot/session-state/run-1/plan.md')).toBe(
+      'Plan: <redacted-local-path>',
+    );
+    expect(sanitizePublicText('Plan: .copilot/session-state/run-1/plan.md')).toBe(
+      'Plan: <redacted-local-path>',
+    );
+    expect(
+      sanitizePublicText('Checkout .worktrees/mobile-multiproject-cockpit before continuing.'),
+    ).toBe('Checkout <redacted-local-path> before continuing.');
+    expect(
+      sanitizePublicText('/Users/buns/.copilot/session-state/run-1/plan.md'),
+    ).toBe('<redacted-local-path>');
 
     expect(() => assertNoPublishableSecrets('token = ghp_abcdefghijklmnopqrstuvwxyz123456')).toThrow(
       /GitHub token/i,
@@ -193,6 +205,8 @@ describe('Beads project renderers', () => {
     expect(rendered).toContain('## Labels');
     expect(rendered).toContain('## Source metadata');
     expect(rendered).toContain('## Authority notice');
+    expect(rendered).toContain('generated public mirror of a Beads record');
+    expect(rendered).not.toContain('private Beads');
     expect(rendered).toContain(
       '[#2](https://github.com/OpenCoven/psyche-build-public/issues/2) `pb-feature` — Model Beads project inventory',
     );
@@ -290,7 +304,7 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain('access_token=');
   });
 
-  it('sanitizes repository and direct source URLs before rendering public links', () => {
+  it('links only normalized repository-relative design and plan paths', () => {
     const inventory = buildPublicInventory();
     const [feature] = inventory.filter((bead) => bead.id === 'pb-feature');
 
@@ -310,22 +324,47 @@ describe('Beads project renderers', () => {
     expect(renderedRepositoryLink).not.toContain('mirror-pass');
     expect(renderedRepositoryLink).not.toMatch(/https:\/\/[^)\s]*@/u);
 
-    const renderedDirectSource = renderIssueBody(
-      {
-        ...feature!,
-        design: `https://docs-user:docs-pass@ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?path=/Users/buns/private#/home/alice/file`,
-        specId: null,
-      },
-      buildContext(inventory, { sourceRepositoryUrl: null }),
+    for (const unsafePath of [
+      '~/.copilot/session-state/run-1/plan.md',
+      '.copilot/session-state/run-1/plan.md',
+      '.worktrees/mobile-multiproject-cockpit/docs/spec.md',
+      '../outside/plan.md',
+      './docs/plan.md',
+      'docs/~scratch/plan.md',
+      '/Users/buns/private/plan.md',
+      'C:\\Users\\buns\\private\\plan.md',
+      'file:/Users/buns/private/plan.md',
+      `https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}`,
+    ]) {
+      const renderedUnsafeSource = renderIssueBody(
+        {
+          ...feature!,
+          design: unsafePath,
+          specId: unsafePath,
+        },
+        buildContext(inventory),
+      );
+
+      expect(renderedUnsafeSource).not.toContain(unsafePath);
+      expect(renderedUnsafeSource).not.toContain('## Design');
+      expect(renderedUnsafeSource).not.toContain('/blob/f2f1da60/~');
+      expect(renderedUnsafeSource).not.toContain('/blob/f2f1da60/.copilot');
+      expect(renderedUnsafeSource).not.toContain('/blob/f2f1da60/.worktrees');
+    }
+
+    const sanitizedUnsafeSource = toPublicBead({
+      ...feature!,
+      design: '~/.copilot/session-state/run-1/plan.md',
+      specId: '.worktrees/mobile-multiproject-cockpit/docs/spec.md',
+    });
+    const renderedSanitizedSource = renderIssueBody(
+      sanitizedUnsafeSource,
+      buildContext(inventory),
     );
 
-    expect(renderedDirectSource).toContain(
-      `- Design doc: https://ghe.example.com/OpenCoven/psyche-build/blob/main/${designDocPath}?path=~/private#/home/alice/file`,
-    );
-    expect(renderedDirectSource).not.toContain('docs-user');
-    expect(renderedDirectSource).not.toContain('docs-pass');
-    expect(renderedDirectSource).not.toContain('/Users/buns/private');
-    expect(renderedDirectSource).toContain(`#/home/alice/file`);
+    expect(renderedSanitizedSource).not.toContain('## Design');
+    expect(renderedSanitizedSource).not.toContain('<redacted-local-path>');
+    expect(renderedSanitizedSource).not.toContain('/blob/f2f1da60/');
   });
 
   it('rejects secret-bearing repository and source URLs from public output', () => {
@@ -514,7 +553,8 @@ describe('Beads project renderers', () => {
     expect(countMatches(rendered, '<!-- psyche-beads-project-sync:v1 project-readme -->')).toBe(1);
     expect(rendered).toContain('# Public Beads inventory');
     expect(rendered).toContain('generated public tracking snapshot');
-    expect(rendered).toContain('The private Beads project remains authoritative');
+    expect(rendered).toContain('The Beads project remains authoritative');
+    expect(rendered).not.toContain('private Beads');
     expect(rendered).toContain('- Inventory timestamp: 2026-08-22T20:00:00Z');
     expect(rendered).toContain('- Active beads: 4');
     expect(rendered).toContain('- Closed beads: 1');

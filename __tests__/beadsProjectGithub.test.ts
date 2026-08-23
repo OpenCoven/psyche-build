@@ -1102,6 +1102,8 @@ describe('createGhClient', () => {
       success({}),
       success({}),
       success({}),
+      success({}),
+      success({}),
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
     await client.discoverProject();
@@ -1127,6 +1129,13 @@ describe('createGhClient', () => {
         sourceUpdated: '2026-08-22T12:30:00Z',
       },
     });
+    await client.setFields({
+      itemId: 'ITEM-42',
+      fields: {
+        parentGoal: null,
+        sourceUpdated: '2026-08-23',
+      },
+    });
 
     expect(runner.calls[2]).toEqual({
       command: 'gh',
@@ -1150,6 +1159,8 @@ describe('createGhClient', () => {
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-type', '--single-select-option-id', 'O-feature'],
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-parent', '--text', 'Public launch'],
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-updated', '--date', '2026-08-22'],
+      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-parent', '--clear'],
+      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-updated', '--date', '2026-08-23'],
     ]);
   });
 

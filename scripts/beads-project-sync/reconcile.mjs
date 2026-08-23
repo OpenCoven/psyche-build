@@ -843,6 +843,8 @@ function buildDesiredFields(beadId, bead) {
     priority: Number(bead.priority),
     blocked: Boolean(bead.blocked),
     done: bead.status === 'closed',
+    parentGoal: bead.parentId ?? null,
+    sourceUpdated: bead.updatedAt.slice(0, 10),
   };
 }
 

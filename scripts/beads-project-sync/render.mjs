@@ -31,6 +31,7 @@ const GENERATED_MARKER_PATTERN =
   /<!--\s*[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,199})\s+(?:bead-id=|project-readme|render-hash=)/giu;
 const TYPE_SORT_ORDER = ['epic', 'feature', 'task'];
 const ABSOLUTE_URL_PATTERN = /^(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//iu;
+const UNSAFE_REPOSITORY_PATH_SEGMENTS = new Set(['..', '.copilot', '.worktrees']);
 
 /**
  * @param {string} message
@@ -317,14 +318,6 @@ function normalizeRepositoryUrl(value) {
  * @param {unknown} value
  * @returns {string | null}
  */
-function normalizeSourceUrl(value) {
-  return normalizeHttpUrl(value, 'sourcePath');
-}
-
-/**
- * @param {unknown} value
- * @returns {string | null}
- */
 function normalizeMirroredIssueUrl(value) {
   return normalizeHttpUrl(value, 'mirroredIssueUrl');
 }
@@ -335,6 +328,41 @@ function normalizeMirroredIssueUrl(value) {
  */
 function encodePath(path) {
   return path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function normalizeRepositoryRelativePath(value) {
+  const normalized = normalizeOptionalInlineText(value, 'sourcePath');
+  if (
+    normalized == null
+    || looksLikeAbsoluteUrl(normalized)
+    || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(normalized)
+    || normalized.startsWith('/')
+    || normalized.startsWith('\\')
+    || normalized.includes('~')
+    || normalized.includes('\\')
+    || normalized.includes('?')
+    || normalized.includes('#')
+    || normalized.includes('<redacted-local-path>')
+  ) {
+    return null;
+  }
+
+  const segments = normalized.split('/');
+  if (
+    segments.some((segment) =>
+      !segment
+      || segment === '.'
+      || UNSAFE_REPOSITORY_PATH_SEGMENTS.has(segment.toLowerCase())
+    )
+  ) {
+    return null;
+  }
+
+  return normalized;
 }
 
 /**
@@ -356,21 +384,13 @@ function renderSection(title, content) {
  * @returns {string | null}
  */
 function renderSourceLink(path, context) {
-  const normalizedPath = normalizeOptionalInlineText(path, 'sourcePath');
+  const normalizedPath = normalizeRepositoryRelativePath(path);
   if (normalizedPath == null) {
     return null;
   }
 
-  const normalizedSourceUrl = normalizeSourceUrl(normalizedPath);
-  if (normalizedSourceUrl) {
-    return normalizedSourceUrl;
-  }
-  if (looksLikeAbsoluteUrl(normalizedPath)) {
-    return null;
-  }
-
   const repositoryUrl = normalizeRepositoryUrl(context.sourceRepositoryUrl);
-  if (!repositoryUrl || normalizedPath.startsWith('/')) {
+  if (!repositoryUrl) {
     return normalizedPath;
   }
 
@@ -640,7 +660,7 @@ export function renderIssueBody(bead, context = {}) {
     renderSection('Source metadata', renderSourceMetadata(bead)),
     renderSection(
       'Authority notice',
-      'This issue body is a generated public mirror of a private Beads record. The Beads source remains authoritative, and manual edits here will be overwritten by the next sync.',
+      'This issue body is a generated public mirror of a Beads record. The Beads source remains authoritative, and manual edits here will be overwritten by the next sync.',
     ),
   ];
 
@@ -666,7 +686,7 @@ export function renderProjectReadme(inventory, context = {}) {
   const sections = [
     projectReadmeMarker(projectMarker),
     `# ${title}`,
-    'This README is a generated public tracking snapshot for mirrored Beads work. The private Beads project remains authoritative, so update the source Bead instead of editing this README.',
+    'This README is a generated public tracking snapshot for mirrored Beads work. The Beads project remains authoritative, so update the source Bead instead of editing this README.',
     renderSection('Inventory snapshot', [
       `- Inventory timestamp: ${resolveInventoryTimestamp(inventory, context)}`,
       `- Total beads: ${summary.total}`,
@@ -691,7 +711,7 @@ export function renderProjectReadme(inventory, context = {}) {
     ].join('\n')),
     renderSection(
       'Authority',
-      'The private Beads project remains authoritative. Public GitHub issues and this README are generated mirrors managed by Psyche Build.',
+      'The Beads project remains authoritative. Public GitHub issues and this README are generated mirrors managed by Psyche Build.',
     ),
   ];
 

@@ -42,6 +42,8 @@ const CREDENTIAL_ASSIGNMENT_PATTERN =
   /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
+const LOCAL_OPERATIONAL_PATH_PATTERN =
+  /(?:~[\\/][^\s"'`()\[\]{}<>;,:]*?(?:\.copilot|\.worktrees)|(?:^|[^A-Za-z0-9._~-])(?:\.copilot(?:[\\/]session-state)?|\.worktrees))(?:[\\/][^\s"'`()\[\]{}<>;,:]*)?/giu;
 const PROTECTED_URL_PATTERN = /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`()\[\]{}<>]+/gu;
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
 const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
@@ -557,6 +559,21 @@ function redactHomeDirectories(value, config) {
  * @param {string} value
  * @returns {string}
  */
+function redactLocalOperationalPaths(value) {
+  return value.replace(LOCAL_OPERATIONAL_PATH_PATTERN, (match) => {
+    const lower = match.toLowerCase();
+    const pathStart = ['~/', '~\\', '.copilot', '.worktrees']
+      .map((prefix) => lower.indexOf(prefix))
+      .filter((index) => index >= 0)
+      .sort((left, right) => left - right)[0] ?? 0;
+    return `${match.slice(0, pathStart)}<redacted-local-path>`;
+  });
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
 function escapeGeneratedMarkers(value) {
   return value.replace(GENERATED_MARKER_PATTERN, '&lt;!-- psyche-bead-sync:v1');
 }
@@ -684,6 +701,7 @@ export function sanitizePublicText(value, config = {}) {
   let sanitized = value.replace(/\r\n?/gu, '\n');
   sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
   sanitized = redactHomeDirectories(sanitized, config);
+  sanitized = redactLocalOperationalPaths(sanitized);
   assertNoPublishableSecrets(sanitized);
   sanitized = escapeGeneratedMarkers(sanitized);
   return normalizeMultilineText(sanitized);

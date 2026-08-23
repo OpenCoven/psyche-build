@@ -85,7 +85,12 @@ function canonicalReadmeBody(inventory: readonly PublicBead[]): string {
   return renderProjectReadme(inventory, baseContext);
 }
 
-function desiredFields(bead: Pick<PublicBead, 'id' | 'status' | 'type' | 'priority' | 'blocked'>): FieldMap {
+function desiredFields(
+  bead: Pick<
+    PublicBead,
+    'id' | 'status' | 'type' | 'priority' | 'blocked' | 'parentId' | 'updatedAt'
+  >,
+): FieldMap {
   return {
     beadId: bead.id,
     status: bead.status,
@@ -93,6 +98,8 @@ function desiredFields(bead: Pick<PublicBead, 'id' | 'status' | 'type' | 'priori
     priority: bead.priority,
     blocked: bead.blocked,
     done: bead.status === 'closed',
+    parentGoal: bead.parentId,
+    sourceUpdated: bead.updatedAt.slice(0, 10),
   };
 }
 
@@ -360,6 +367,84 @@ describe('Beads project reconciliation', () => {
     expect(plan.operations).toEqual([]);
     expect(plan.summary.updateIssueCount).toBe(0);
     expect(plan.summary.updateReadmeCount).toBe(0);
+  });
+
+  it('repairs blank Parent Goal and Source Updated fields and is idempotent afterward', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-parent', {
+        title: 'Stable parent goal',
+        type: 'epic',
+        updatedAt: '2026-08-21T10:00:00Z',
+      }),
+      makeBead('pb-child', {
+        parentId: 'pb-parent',
+        updatedAt: '2026-08-22T12:30:00Z',
+      }),
+    ]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 301);
+    const blankMetadataIssues = inventory.map((bead) => managedIssue(
+      bead,
+      inventory,
+      issueNumbers,
+      {
+        projectItem: {
+          id: `item-${issueNumbers.get(bead.id)}`,
+          archived: false,
+          fields: {
+            beadId: bead.id,
+            status: bead.status,
+            type: bead.type,
+            priority: bead.priority,
+            blocked: bead.blocked,
+            done: false,
+          },
+        },
+      },
+    ));
+
+    const repairPlan = planReconciliation({
+      inventory,
+      existingIssues: blankMetadataIssues,
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(repairPlan.operations).toEqual([
+      expect.objectContaining({
+        type: 'setFields',
+        beadId: 'pb-child',
+        fields: expect.objectContaining({
+          parentGoal: 'pb-parent',
+          sourceUpdated: '2026-08-22',
+        }),
+      }),
+      expect.objectContaining({
+        type: 'setFields',
+        beadId: 'pb-parent',
+        fields: expect.objectContaining({
+          parentGoal: null,
+          sourceUpdated: '2026-08-21',
+        }),
+      }),
+    ]);
+
+    const repairedIssues = inventory.map((bead) =>
+      managedIssue(bead, inventory, issueNumbers, {
+        projectItem: {
+          id: `item-${issueNumbers.get(bead.id)}`,
+          archived: false,
+          fields: desiredFields(bead),
+        },
+      })
+    );
+    const secondPlan = planReconciliation({
+      inventory,
+      existingIssues: repairedIssues,
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(secondPlan.operations).toEqual([]);
   });
 
   it('updates managed issues when canonical content changes', () => {
