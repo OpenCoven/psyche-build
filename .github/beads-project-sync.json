@@ -1,0 +1,12 @@
+{
+  "owner": "OpenCoven",
+  "repository": "psyche-build",
+  "projectTitle": "Psyche Build: Goals & Implementation",
+  "projectMarker": "psyche-beads-project-sync:v1",
+  "issueMarker": "psyche-bead-sync:v1",
+  "assigneeMap": {},
+  "massClose": {
+    "minimum": 5,
+    "fraction": 0.25
+  }
+}
