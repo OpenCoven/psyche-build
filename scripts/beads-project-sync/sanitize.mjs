@@ -44,7 +44,19 @@ const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
 const PROTECTED_URL_PATTERN = /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`()\[\]{}<>]+/gu;
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
-const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%+@-]/u;
+const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
+const LOCAL_PATH_FILE_EXTENSION_PATTERN =
+  /(?:^|[^.\s])\.[\p{L}\p{N}][\p{L}\p{N}_-]{0,15}$/u;
+const LOCAL_PATH_OPENING_DELIMITERS = new Map([
+  ['(', ')'],
+  ['[', ']'],
+  ['{', '}'],
+  ['<', '>'],
+]);
+const LOCAL_PATH_CLOSING_DELIMITERS = new Set(
+  [...LOCAL_PATH_OPENING_DELIMITERS.values()],
+);
+const LOCAL_PATH_QUOTE_DELIMITERS = new Set(['"', "'", '`']);
 const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
 const PROTECTED_URL_PLACEHOLDER_SUFFIX = '\u0000';
 const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
@@ -622,31 +634,59 @@ function findLocalPathComponent(value, component, fromIndex = 0) {
 
 /**
  * @param {string} value
+ * @param {readonly string[]} components
+ * @param {number} [fromIndex=0]
+ * @returns {number}
+ */
+function findLocalPathComponentSequence(value, components, fromIndex = 0) {
+  const [firstComponent, ...remainingComponents] = components;
+  if (!firstComponent) {
+    return -1;
+  }
+
+  let start = findLocalPathComponent(value, firstComponent, fromIndex);
+  while (start >= 0) {
+    let cursor = start + firstComponent.length;
+    let matched = true;
+
+    for (const component of remainingComponents) {
+      if (!isPathSeparator(value[cursor])) {
+        matched = false;
+        break;
+      }
+
+      cursor += 1;
+      const end = cursor + component.length;
+      if (
+        value.slice(cursor, end).toLowerCase() !== component
+        || !hasLocalPathComponentEnd(value, end)
+      ) {
+        matched = false;
+        break;
+      }
+      cursor = end;
+    }
+
+    if (matched) {
+      return start;
+    }
+    start = findLocalPathComponent(value, firstComponent, start + 1);
+  }
+
+  return -1;
+}
+
+/**
+ * @param {string} value
  * @param {number} [fromIndex=0]
  * @returns {number}
  */
 function findLocalOperationalPathMarker(value, fromIndex = 0) {
   const candidates = [
-    findLocalPathComponent(value, '.copilot', fromIndex),
     findLocalPathComponent(value, '.worktrees', fromIndex),
+    findLocalPathComponentSequence(value, ['.copilot', 'session-state'], fromIndex),
+    findLocalPathComponentSequence(value, ['.psyche', 'worktrees'], fromIndex),
   ];
-  let psycheIndex = findLocalPathComponent(value, '.psyche', fromIndex);
-
-  while (psycheIndex >= 0) {
-    const separatorIndex = psycheIndex + '.psyche'.length;
-    if (isPathSeparator(value[separatorIndex])) {
-      const worktreesIndex = separatorIndex + 1;
-      const worktreesEnd = worktreesIndex + 'worktrees'.length;
-      if (
-        value.slice(worktreesIndex, worktreesEnd).toLowerCase() === 'worktrees'
-        && hasLocalPathComponentEnd(value, worktreesEnd)
-      ) {
-        candidates.push(psycheIndex);
-        break;
-      }
-    }
-    psycheIndex = findLocalPathComponent(value, '.psyche', psycheIndex + 1);
-  }
 
   return candidates
     .filter((index) => index >= 0)
@@ -662,24 +702,184 @@ export function containsLocalOperationalPath(value) {
 }
 
 /**
- * @param {string} token
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function isEscapedCharacter(value, index) {
+  let backslashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
+    backslashCount += 1;
+  }
+  return backslashCount % 2 === 1;
+}
+
+/**
+ * @typedef {{
+ *   contentStart: number,
+ *   contentEnd: number,
+ * }} LocalPathEnclosure
+ */
+
+/**
+ * @param {string} value
+ * @param {number} markerIndex
+ * @returns {LocalPathEnclosure | null}
+ */
+function findLocalPathEnclosure(value, markerIndex) {
+  const lineStart = value.lastIndexOf('\n', markerIndex - 1) + 1;
+  /** @type {{ delimiter: string, start: number } | null} */
+  let quote = null;
+  const brackets = /** @type {{ delimiter: string, start: number }[]} */ ([]);
+
+  for (let index = lineStart; index < markerIndex; index += 1) {
+    const character = value[index];
+    if (quote) {
+      if (character === quote.delimiter && !isEscapedCharacter(value, index)) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (LOCAL_PATH_QUOTE_DELIMITERS.has(character) && !isEscapedCharacter(value, index)) {
+      quote = { delimiter: character, start: index };
+      continue;
+    }
+
+    const closingDelimiter = LOCAL_PATH_OPENING_DELIMITERS.get(character);
+    if (closingDelimiter) {
+      brackets.push({ delimiter: closingDelimiter, start: index });
+      continue;
+    }
+
+    if (
+      brackets.length > 0
+      && character === brackets[brackets.length - 1]?.delimiter
+    ) {
+      brackets.pop();
+    }
+  }
+
+  const active = quote ?? brackets[brackets.length - 1];
+  if (!active) {
+    return null;
+  }
+
+  for (let index = markerIndex; index < value.length && value[index] !== '\n'; index += 1) {
+    if (
+      value[index] === active.delimiter
+      && !isEscapedCharacter(value, index)
+    ) {
+      return {
+        contentStart: active.start + 1,
+        contentEnd: index,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isLocalPathStartBoundary(value) {
+  return (
+    value == null
+    || /\s/u.test(value)
+    || value === '='
+    || value === ':'
+    || LOCAL_PATH_OPENING_DELIMITERS.has(value)
+    || LOCAL_PATH_QUOTE_DELIMITERS.has(value)
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} markerIndex
+ * @returns {boolean}
+ */
+function isConnectedLocalPathPrefix(value, pathStart, markerIndex) {
+  for (let index = pathStart; index < markerIndex; index += 1) {
+    if (!/\s/u.test(value[index])) {
+      continue;
+    }
+
+    let nextContentStart = index;
+    while (
+      nextContentStart < markerIndex
+      && /\s/u.test(value[nextContentStart])
+    ) {
+      nextContentStart += 1;
+    }
+    const remainingPrefix = value.slice(nextContentStart, markerIndex);
+    if (!remainingPrefix.includes('/') && !remainingPrefix.includes('\\')) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * @param {string} value
+ * @param {number} lowerBound
  * @param {number} markerIndex
  * @returns {number}
  */
-function findLocalOperationalPathStart(token, markerIndex) {
-  let start = markerIndex;
+function findExplicitLocalPathStart(value, lowerBound, markerIndex) {
+  for (let index = lowerBound; index < markerIndex; index += 1) {
+    const character = value[index];
+    const previous = value[index - 1];
+    const next = value[index + 1];
 
-  while (start > 0) {
-    const previous = token[start - 1];
-    if (isPathSeparator(previous) || isLocalPathComponentCharacter(previous)) {
-      start -= 1;
+    if (!isLocalPathStartBoundary(index === lowerBound ? undefined : previous)) {
       continue;
     }
     if (
-      previous === ':'
-      && start === 2
-      && /^[A-Za-z]$/u.test(token[0] ?? '')
+      (character === '~' && isPathSeparator(next))
+      || isPathSeparator(character)
+      || (
+        /^[A-Za-z]$/u.test(character)
+        && value[index + 1] === ':'
+        && isPathSeparator(value[index + 2])
+      )
+      || (
+        character === '.'
+        && (
+          isPathSeparator(next)
+          || (next === '.' && isPathSeparator(value[index + 2]))
+        )
+      )
     ) {
+      if (isConnectedLocalPathPrefix(value, index, markerIndex)) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {number} markerIndex
+ * @param {number} [lowerBound=0]
+ * @returns {number}
+ */
+function findLocalOperationalPathStart(value, markerIndex, lowerBound = 0) {
+  const explicitStart = findExplicitLocalPathStart(value, lowerBound, markerIndex);
+  if (explicitStart >= 0) {
+    return explicitStart;
+  }
+
+  let start = markerIndex;
+
+  while (start > lowerBound) {
+    const previous = value[start - 1];
+    if (isPathSeparator(previous) || isLocalPathComponentCharacter(previous)) {
       start -= 1;
       continue;
     }
@@ -690,45 +890,120 @@ function findLocalOperationalPathStart(token, markerIndex) {
 }
 
 /**
- * @param {string} token
- * @param {number} markerIndex
- * @returns {number}
+ * @param {string} value
+ * @returns {boolean}
  */
-function findLocalOperationalPathEnd(token, markerIndex) {
-  let end = markerIndex;
-  while (
-    end < token.length
-    && (
-      isPathSeparator(token[end])
-      || isLocalPathComponentCharacter(token[end])
-    )
-  ) {
-    end += 1;
-  }
-  return end;
+function hasLikelyLocalPathFileExtension(value) {
+  const finalComponent = value.split(/[\\/]/u).at(-1) ?? '';
+  return LOCAL_PATH_FILE_EXTENSION_PATTERN.test(finalComponent);
 }
 
 /**
- * @param {string} token
- * @returns {string}
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} whitespaceStart
+ * @param {number} nextContentStart
+ * @returns {boolean}
  */
-function redactLocalOperationalPathToken(token) {
-  let sanitized = '';
-  let cursor = 0;
-
-  while (cursor < token.length) {
-    const markerIndex = findLocalOperationalPathMarker(token, cursor);
-    if (markerIndex < 0) {
+function shouldContinueUnquotedLocalPath(
+  value,
+  pathStart,
+  whitespaceStart,
+  nextContentStart,
+) {
+  let nextContentEnd = nextContentStart;
+  while (nextContentEnd < value.length) {
+    const character = value[nextContentEnd];
+    if (
+      /\s/u.test(character)
+      || character === ','
+      || character === ';'
+      || character === '!'
+      || character === '?'
+      || character === ':'
+      || LOCAL_PATH_CLOSING_DELIMITERS.has(character)
+      || LOCAL_PATH_QUOTE_DELIMITERS.has(character)
+    ) {
       break;
     }
-
-    const pathStart = Math.max(cursor, findLocalOperationalPathStart(token, markerIndex));
-    const pathEnd = findLocalOperationalPathEnd(token, markerIndex);
-    sanitized += `${token.slice(cursor, pathStart)}<redacted-local-path>`;
-    cursor = pathEnd;
+    if (
+      character === '.'
+      && (
+        value[nextContentEnd + 1] == null
+        || /\s/u.test(value[nextContentEnd + 1])
+        || LOCAL_PATH_CLOSING_DELIMITERS.has(value[nextContentEnd + 1])
+      )
+    ) {
+      break;
+    }
+    nextContentEnd += 1;
   }
 
-  return cursor > 0 ? sanitized + token.slice(cursor) : token;
+  const currentPath = value.slice(pathStart, whitespaceStart);
+  const nextContent = value.slice(nextContentStart, nextContentEnd);
+  return (
+    nextContent.includes('/')
+    || nextContent.includes('\\')
+    || (
+      !hasLikelyLocalPathFileExtension(currentPath)
+      && hasLikelyLocalPathFileExtension(nextContent)
+    )
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} markerIndex
+ * @returns {number}
+ */
+function findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex) {
+  let end = markerIndex;
+
+  while (end < value.length) {
+    const character = value[end];
+    const next = value[end + 1];
+
+    if (character === '\n' || character === '\r') {
+      break;
+    }
+    if (
+      character === ','
+      || character === ';'
+      || character === '!'
+      || character === '?'
+      || LOCAL_PATH_CLOSING_DELIMITERS.has(character)
+      || LOCAL_PATH_QUOTE_DELIMITERS.has(character)
+      || (
+        (character === '.' || character === ':')
+        && (
+          next == null
+          || /\s/u.test(next)
+          || LOCAL_PATH_CLOSING_DELIMITERS.has(next)
+        )
+      )
+    ) {
+      break;
+    }
+    if (/\s/u.test(character)) {
+      const whitespaceStart = end;
+      while (end < value.length && value[end] !== '\n' && /\s/u.test(value[end])) {
+        end += 1;
+      }
+      if (
+        end >= value.length
+        || value[end] === '\n'
+        || !shouldContinueUnquotedLocalPath(value, pathStart, whitespaceStart, end)
+      ) {
+        return whitespaceStart;
+      }
+      continue;
+    }
+
+    end += 1;
+  }
+
+  return end;
 }
 
 /**
@@ -736,7 +1011,28 @@ function redactLocalOperationalPathToken(token) {
  * @returns {string}
  */
 function redactLocalOperationalPaths(value) {
-  return value.replace(TOKEN_PATTERN, redactLocalOperationalPathToken);
+  let sanitized = '';
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const markerIndex = findLocalOperationalPathMarker(value, cursor);
+    if (markerIndex < 0) {
+      break;
+    }
+
+    const enclosure = findLocalPathEnclosure(value, markerIndex);
+    const lowerBound = Math.max(cursor, enclosure?.contentStart ?? 0);
+    const pathStart = Math.max(
+      cursor,
+      findLocalOperationalPathStart(value, markerIndex, lowerBound),
+    );
+    const pathEnd = enclosure?.contentEnd
+      ?? findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex);
+    sanitized += `${value.slice(cursor, pathStart)}<redacted-local-path>`;
+    cursor = pathEnd;
+  }
+
+  return cursor > 0 ? sanitized + value.slice(cursor) : value;
 }
 
 /**

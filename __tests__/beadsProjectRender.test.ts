@@ -161,6 +161,58 @@ describe('Beads project renderers', () => {
     ).toThrow(/private key/i);
   });
 
+  it('redacts complete delimiter-aware operational paths', () => {
+    expect(
+      sanitizePublicText(
+        'Open `~/.worktrees/public-beads-project/secret roadmap.md` next.',
+      ),
+    ).toBe('Open `<redacted-local-path>` next.');
+    expect(
+      sanitizePublicText(
+        'Plan: ".psyche/worktrees/public-beads-project/secret roadmap.md"; keep this note.',
+      ),
+    ).toBe('Plan: "<redacted-local-path>"; keep this note.');
+    expect(
+      sanitizePublicText(
+        'Plan: [~/.copilot/session-state/run-1/secret roadmap.md] follows.',
+      ),
+    ).toBe('Plan: [<redacted-local-path>] follows.');
+    expect(
+      sanitizePublicText(
+        'Plan: /opt/repos/.psyche/worktrees/public-beads-project/秘密/roadmap.md. Keep this sentence.',
+      ),
+    ).toBe('Plan: <redacted-local-path>. Keep this sentence.');
+    expect(
+      sanitizePublicText(
+        'Checkout .worktrees/public-beads-project/secret roadmap.md before continuing.',
+      ),
+    ).toBe('Checkout <redacted-local-path> before continuing.');
+  });
+
+  it('preserves prose and path-like names outside operational path boundaries', () => {
+    expect(
+      sanitizePublicText(
+        'Keep the release note before .worktrees/project/plan.md and the explanation after it.',
+      ),
+    ).toBe(
+      'Keep the release note before <redacted-local-path> and the explanation after it.',
+    );
+    expect(
+      sanitizePublicText(
+        'Keep /public/example and .worktrees/project/plan.md as separate references.',
+      ),
+    ).toBe(
+      'Keep /public/example and <redacted-local-path> as separate references.',
+    );
+    expect(
+      sanitizePublicText(
+        'Keep .worktrees-inspired prose, .copilot/session-stateful notes, and docs/.psyche/worktrees-notes.md public.',
+      ),
+    ).toBe(
+      'Keep .worktrees-inspired prose, .copilot/session-stateful notes, and docs/.psyche/worktrees-notes.md public.',
+    );
+  });
+
   it('allowlists public bead fields and sanitizes bead text', () => {
     const parsedFeature = parseBeadExport(issuesJsonl, {
       assigneeMap: {
