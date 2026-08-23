@@ -157,8 +157,8 @@ unreconciled pull request, or blocked write in the authoritative task tracker.
   reference without rewriting its history;
 - keep owners, priorities, dependencies, and evidence links current;
 - keep the support matrix aligned with actual distribution and runtime proof;
-- remove legacy product metadata, including the remaining `openclaw` package
-  keyword, before candidate freeze.
+- remove legacy ecosystem product metadata and obsolete keywords before
+  candidate freeze.
 
 ## Stage 1 — establish the macOS release baseline
 
