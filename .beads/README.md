@@ -1,81 +1,102 @@
-# Beads - AI-Native Issue Tracking
+# Beads in Psyche Build
 
-Welcome to Beads! This repository uses **Beads** for issue tracking - a modern, AI-native tool designed to live directly in your codebase alongside your code.
+Beads is the authoritative issue and planning store for this repository. The
+public GitHub Project is a one-way, sanitized mirror for readers who do not use
+the Beads CLI.
 
-## What is Beads?
+Do not edit mirrored issue titles, bodies, fields, relationships, or state in
+GitHub and expect those changes to persist. The next sync restores Beads state.
+Make planning changes with `bd`; the sync never imports GitHub changes into
+Beads and leaves unmanaged GitHub issues alone.
 
-Beads is issue tracking that lives in your repo, making it perfect for AI coding agents and developers who want their issues close to their code. No web UI required - everything works through the CLI and integrates seamlessly with git.
+Psyche Build currently standardizes automation on Beads CLI **1.2.2**.
 
-**Learn more:** [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
-
-## Quick Start
-
-### Essential Commands
+## Daily Beads commands
 
 ```bash
-# Create new issues
-bd create "Add user authentication"
-
-# View all issues
+bd create "Describe the work"
 bd list
-
-# View issue details
 bd show <issue-id>
-
-# Update issue status
 bd update <issue-id> --claim
 bd update <issue-id> --status done
-
-# Sync with Dolt remote
+bd dolt pull
 bd dolt push
 ```
 
-### Working with Issues
+## Sole migrator rule
 
-Issues in Beads are:
-- **Git-native**: Stored in Dolt database with version control and branching
-- **AI-friendly**: CLI-first design works perfectly with AI coding agents
-- **Branch-aware**: Issues can follow your branch workflow
-- **Sync-ready**: Uses Dolt remotes for backup and team sharing
+Only one designated maintainer checkout or automation process may migrate the
+Beads schema. Before changing Beads versions or running a migration, stop other
+bootstrap/migration-capable jobs, complete and push the migration from the sole
+migrator, then let every other checkout pull the resulting Dolt state. Never
+run competing migrations from separate clones or worktrees.
 
-## Why Beads?
+The Project sync workflow is serialized with the `beads-project-sync`
+concurrency group. Coordinate any local apply with it because apply mode runs
+`bd bootstrap --yes` before exporting.
 
-✨ **AI-Native Design**
-- Built specifically for AI-assisted development workflows
-- CLI-first interface works seamlessly with AI coding agents
-- No context switching to web UIs
+## Local Project export, check, and apply
 
-🚀 **Developer Focused**
-- Issues live in your repo, right next to your code
-- Works offline, syncs when you push
-- Fast, lightweight, and stays out of your way
-
-🔧 **Git Integration**
-- Dolt-native sync via bd dolt push / bd dolt pull
-- Branch-aware issue tracking
-- Dolt-native three-way merge resolution
-
-## Get Started with Beads
-
-Try Beads in your own projects:
+Raw Beads exports can contain non-public fields. Keep them outside the
+repository and delete them when finished:
 
 ```bash
-# Install Beads
-curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
-
-# Initialize in your repo
-bd init
-
-# Create your first issue
-bd create "Try out Beads"
+mkdir -p "$HOME/.local/state/psyche-build"
+export BEADS_EXPORT="$HOME/.local/state/psyche-build/issues.jsonl"
+bd --readonly export -o "$BEADS_EXPORT"
 ```
 
-## Learn More
+Check the live Beads database with no GitHub writes:
 
-- **Documentation**: [github.com/steveyegge/beads/docs](https://github.com/steveyegge/beads/tree/main/docs)
-- **Quick Start Guide**: Run `bd quickstart`
-- **Examples**: [github.com/steveyegge/beads/examples](https://github.com/steveyegge/beads/tree/main/examples)
+```bash
+pnpm beads:project:check
+```
 
----
+With `BEADS_PROJECT_TOKEN` exported, the check compares against the current
+Project. Without it, the command produces a first-run plan without contacting
+GitHub. A saved export can be checked explicitly:
 
-*Beads: Issue tracking that moves at the speed of thought* ⚡
+```bash
+node scripts/sync-beads-project.mjs --dry-run --inventory-file "$BEADS_EXPORT"
+```
+
+Applying is a maintainer operation:
+
+```bash
+export BEADS_PROJECT_TOKEN="<load from your password manager>"
+pnpm beads:project:sync
+```
+
+Never store the token in the repository, Beads configuration, command history,
+or an artifact.
+
+## Token and workflow configuration
+
+`BEADS_PROJECT_TOKEN` should be a fine-grained token scoped to the
+`OpenCoven/psyche-build` repository with repository **Issues: read and write**
+and organization **Projects: read and write** permissions (plus the implicit
+metadata read permission). Store the automation token only as the repository
+Actions secret named `BEADS_PROJECT_TOKEN`.
+
+`.github/workflows/beads-project-sync.yml` applies the mirror every day at
+03:17 UTC. Maintainers can also use **Actions → Beads Project Sync → Run
+workflow**:
+
+- `dry_run: true` selects a read-only plan; the default applies.
+- `allow_mass_close: true` overrides only the close-count guard.
+- Scheduled runs always apply and never enable the override.
+
+Every run uploads a sanitized `summary.json` and `diagnostics.log`, including
+failed runs.
+
+The guard normally refuses to close more than the greater of five managed
+issues or 25% of currently open managed issues. Run a dry-run first and inspect
+its artifact before manually enabling `allow_mass_close`.
+
+Project view names, layouts, and filters are automated. GitHub does not expose
+all view grouping and sorting controls through the API used here, so a
+maintainer may configure preferred grouping/sorting once in the Project UI
+after provisioning; sync preserves those manual display settings.
+
+Learn more about Beads at
+[github.com/gastownhall/beads](https://github.com/gastownhall/beads).

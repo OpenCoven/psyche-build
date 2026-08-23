@@ -4,6 +4,9 @@ import { describe, expect, it } from 'vitest';
 
 const workflowPath = path.resolve('.github/workflows/ci.yml');
 const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
+const beadsProjectSyncWorkflowPath = path.resolve(
+  '.github/workflows/beads-project-sync.yml',
+);
 const packageJsonPath = path.resolve('package.json');
 
 function workflowSource(): string {
@@ -50,6 +53,10 @@ describe('pull request CI workflow contract', () => {
   it('pins Node, pnpm, Rust, and every third-party action', () => {
     const workflow = workflowSource();
     const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8');
+    const beadsProjectSyncWorkflow = readFileSync(
+      beadsProjectSyncWorkflowPath,
+      'utf8',
+    );
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
       packageManager?: string;
     };
@@ -57,7 +64,7 @@ describe('pull request CI workflow contract', () => {
 
     expect(workflow).toContain('node-version: 24');
     expect(packageJson.packageManager).toMatch(/^pnpm@\d+\.\d+\.\d+$/);
-    for (const source of [workflow, releaseWorkflow]) {
+    for (const source of [workflow, releaseWorkflow, beadsProjectSyncWorkflow]) {
       expect(source).not.toMatch(/pnpm\/action-setup@[^\n]+\n\s+with:\n\s+version:/);
     }
     expect(workflow).toContain('toolchain: 1.95.0');
@@ -68,8 +75,11 @@ describe('pull request CI workflow contract', () => {
     expect(checkoutCount).toBeGreaterThan(0);
     expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
 
-    const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
-      ([, action]) => action,
+    const actionUses = [workflow, releaseWorkflow, beadsProjectSyncWorkflow].flatMap(
+      (source) =>
+        [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
+          ([, action]) => action,
+        ),
     );
     expect(actionUses.length).toBeGreaterThan(0);
     for (const action of actionUses) {
@@ -207,5 +217,78 @@ describe('pull request CI workflow contract', () => {
       .toHaveLength(3);
     expect(workflow).toContain('test');
     expect(workflow).toContain('build');
+  });
+});
+
+describe('Beads Project sync workflow contract', () => {
+  function beadsWorkflowSource(): string {
+    return readFileSync(beadsProjectSyncWorkflowPath, 'utf8');
+  }
+
+  it('schedules serialized applies and exposes guarded manual controls', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow).toContain('name: Beads Project Sync');
+    expect(workflow).toContain('- cron: "17 3 * * *"');
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toMatch(
+      /dry_run:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
+    );
+    expect(workflow).toMatch(
+      /allow_mass_close:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
+    );
+    expect(workflow).toContain('contents: read');
+    expect(workflow).toContain('group: beads-project-sync');
+    expect(workflow).toContain('cancel-in-progress: false');
+    expect(workflow).toContain('runs-on: ubuntu-24.04');
+    expect(workflow).toContain('args=(--apply)');
+    expect(workflow).toContain('args=(--dry-run)');
+    expect(workflow).toContain('args+=(--allow-mass-close)');
+    expect(workflow).toContain('"${args[@]}"');
+    expect(workflow).toContain(
+      "github.event_name == 'workflow_dispatch' && inputs.dry_run",
+    );
+    expect(workflow).toContain(
+      "github.event_name == 'workflow_dispatch' && inputs.allow_mass_close",
+    );
+  });
+
+  it('uses pinned setup and a checksum-verified Beads 1.2.2 binary', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow).toContain(
+      'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
+    );
+    expect(workflow).toContain(
+      'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1',
+    );
+    expect(workflow).toContain(
+      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+    );
+    expect(workflow).toContain('node-version: 24');
+    expect(workflow).toContain('version="1.2.2"');
+    expect(workflow).toContain(
+      'checksum="8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"',
+    );
+    expect(workflow).toContain('sha256sum --check --strict');
+    expect(workflow).not.toMatch(/curl[^\n]*\|\s*(?:ba)?sh/u);
+    expect(workflow).toContain('pnpm install --frozen-lockfile');
+  });
+
+  it('scopes the token to sync and always uploads sanitized JSON diagnostics', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow.match(/^\s+BEADS_PROJECT_TOKEN:/gm) ?? []).toHaveLength(1);
+    expect(workflow.match(/secrets\.BEADS_PROJECT_TOKEN/g) ?? []).toHaveLength(1);
+    expect(workflow).toContain('Sync command did not emit a valid JSON summary');
+    expect(workflow).toContain("JSON.parse(rawSummary)");
+    expect(workflow).toContain("split(token).join('<redacted>')");
+    expect(workflow).toContain('summary.json');
+    expect(workflow).toContain('diagnostics.log');
+    expect(workflow).toContain('if: always()');
+    expect(workflow).toContain(
+      'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+    );
+    expect(workflow).toContain('if-no-files-found: error');
   });
 });

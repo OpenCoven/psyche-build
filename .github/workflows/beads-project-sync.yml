@@ -1,0 +1,195 @@
+name: Beads Project Sync
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan the sync without writing to GitHub"
+        required: false
+        type: boolean
+        default: false
+      allow_mass_close:
+        description: "Override the managed-issue mass-close safety limit"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beads-project-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync public Beads Project
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Beads CLI 1.2.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.2.2"
+          archive="beads_${version}_linux_amd64.tar.gz"
+          archive_path="$RUNNER_TEMP/$archive"
+          install_dir="$RUNNER_TEMP/beads-$version"
+          checksum="8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
+
+          curl --fail --location --silent --show-error \
+            "https://github.com/gastownhall/beads/releases/download/v${version}/${archive}" \
+            --output "$archive_path"
+          printf '%s  %s\n' "$checksum" "$archive_path" | sha256sum --check --strict
+          mkdir -p "$install_dir" "$HOME/.local/bin"
+          tar -xzf "$archive_path" -C "$install_dir"
+          install -m 0755 "$install_dir/bd" "$HOME/.local/bin/bd"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version | grep -E '^bd version v?1\.2\.2([[:space:]]|$)'
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Beads to the public Project
+        env:
+          BEADS_PROJECT_TOKEN: ${{ secrets.BEADS_PROJECT_TOKEN }}
+          MANUAL_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          MANUAL_ALLOW_MASS_CLOSE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_mass_close }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$RUNNER_TEMP/beads-project-sync"
+          raw_summary="$RUNNER_TEMP/beads-project-summary.raw"
+          raw_diagnostics="$RUNNER_TEMP/beads-project-diagnostics.raw"
+          summary_path="$artifact_dir/summary.json"
+          diagnostics_path="$artifact_dir/diagnostics.log"
+          mkdir -p "$artifact_dir"
+
+          args=(--apply)
+          mode="apply"
+          if [[ "$MANUAL_DRY_RUN" == "true" ]]; then
+            args=(--dry-run)
+            mode="dry-run"
+          fi
+          if [[ "$MANUAL_ALLOW_MASS_CLOSE" == "true" ]]; then
+            args+=(--allow-mass-close)
+          fi
+
+          printf '{"mode":"%s","status":"failed","exitCode":1,"failure":{"cause":"Sync step ended before structured results were finalized."}}\n' \
+            "$mode" >"$summary_path"
+          printf 'Sync step ended before diagnostics were finalized.\n' >"$diagnostics_path"
+
+          if node scripts/sync-beads-project.mjs "${args[@]}" \
+            >"$raw_summary" 2>"$raw_diagnostics"; then
+            sync_exit_code=0
+          else
+            sync_exit_code=$?
+          fi
+
+          if SYNC_MODE="$mode" \
+            SYNC_EXIT_CODE="$sync_exit_code" \
+            RAW_SUMMARY_PATH="$raw_summary" \
+            RAW_DIAGNOSTICS_PATH="$raw_diagnostics" \
+            SUMMARY_PATH="$summary_path" \
+            DIAGNOSTICS_PATH="$diagnostics_path" \
+            node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+
+          const token = process.env.BEADS_PROJECT_TOKEN ?? '';
+          const exitCode = Number.parseInt(process.env.SYNC_EXIT_CODE ?? '1', 10);
+          const redact = (value) => {
+            let sanitized = value;
+            if (token) {
+              sanitized = sanitized.split(token).join('<redacted>');
+            }
+            return sanitized
+              .replace(/\b(?:github_pat|gh[pousr])_[A-Za-z0-9_]+\b/gu, '<redacted>')
+              .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer <redacted>');
+          };
+          const sanitizeValue = (value) => {
+            if (typeof value === 'string') {
+              return redact(value);
+            }
+            if (Array.isArray(value)) {
+              return value.map(sanitizeValue);
+            }
+            if (value && typeof value === 'object') {
+              return Object.fromEntries(
+                Object.entries(value).map(([key, item]) => [key, sanitizeValue(item)]),
+              );
+            }
+            return value;
+          };
+
+          const rawSummary = readFileSync(process.env.RAW_SUMMARY_PATH, 'utf8').trim();
+          let summary;
+          let validSummary = true;
+          try {
+            summary = JSON.parse(rawSummary);
+            if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
+              throw new Error('Summary must be a JSON object');
+            }
+          } catch {
+            validSummary = false;
+            summary = {
+              mode: process.env.SYNC_MODE,
+              status: exitCode === 0 ? 'invalid-summary' : 'failed',
+              exitCode,
+              failure: {
+                cause: 'Sync command did not emit a valid JSON summary; see diagnostics.log.',
+              },
+            };
+          }
+
+          const diagnostics = redact(
+            readFileSync(process.env.RAW_DIAGNOSTICS_PATH, 'utf8'),
+          ).trim();
+          writeFileSync(
+            process.env.SUMMARY_PATH,
+            `${JSON.stringify(sanitizeValue(summary), null, 2)}\n`,
+          );
+          writeFileSync(
+            process.env.DIAGNOSTICS_PATH,
+            `${diagnostics || 'No diagnostics were emitted.'}\n`,
+          );
+
+          if (!validSummary && exitCode === 0) {
+            process.exitCode = 2;
+          }
+          NODE
+          then
+            summary_exit_code=0
+          else
+            summary_exit_code=$?
+          fi
+
+          rm -f "$raw_summary" "$raw_diagnostics"
+          cat "$diagnostics_path" >&2
+
+          if (( sync_exit_code != 0 )); then
+            exit "$sync_exit_code"
+          fi
+          exit "$summary_exit_code"
+
+      - name: Upload sync summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beads-project-sync-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/beads-project-sync
+          if-no-files-found: error
+          retention-days: 14

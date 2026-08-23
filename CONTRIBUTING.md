@@ -89,6 +89,34 @@ In DEV mode, source switching is available from the pane menu (`[DEV] Use as Sou
 
 This keeps the dev session stable while still using pane-per-branch isolation.
 
+## Beads Planning and Public Project
+
+Beads is the authoritative planning store. The public GitHub Project is a
+one-way sanitized mirror, so update work with `bd` rather than editing mirrored
+GitHub issues or Project fields. Unmanaged GitHub issues are not touched.
+
+Common local mirror commands are:
+
+```bash
+pnpm beads:project:check
+pnpm beads:project:sync
+```
+
+The check is read-only. Applying requires the maintainer-only
+`BEADS_PROJECT_TOKEN`; load it from a password manager rather than storing it in
+the repository. The repository Actions secret needs repository Issues
+read/write and organization Projects read/write permissions.
+
+The daily `.github/workflows/beads-project-sync.yml` run applies automatically.
+Use workflow dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an
+exception guard override and should be enabled only after reviewing a dry-run
+artifact.
+
+During a Beads version or schema migration, designate one sole migrator and
+stop other bootstrap/migration-capable processes until the migrated Dolt state
+has been pushed. See [`.beads/README.md`](.beads/README.md) for export commands,
+token setup, guard thresholds, workflow operation, and Project view notes.
+
 ## Bootstrap Behavior
 
 `pnpm dev` generates hook docs before compiling. Hook documentation is generated from source into `src/utils/generated-agents-doc.ts`.
