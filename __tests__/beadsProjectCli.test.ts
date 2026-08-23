@@ -1,8 +1,9 @@
-import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { access, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   parseSyncConfig,
@@ -22,6 +23,7 @@ import type {
 import type {
   ExecFileRun,
   ExecFileRunOptions,
+  SignalProcess,
 } from '../scripts/beads-project-sync/source.mjs';
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -37,7 +39,19 @@ interface CapturedCli {
 
 interface FakeGhOptions {
   existingIssues?: readonly Record<string, unknown>[];
+  failSetFields?: Error;
   project?: ProjectContext | null;
+}
+
+interface FakeClientOptions {
+  run: ExecFileRun;
+  owner: string;
+  repo: string;
+  token: string;
+  projectMarker?: string;
+  issueMarker?: string;
+  legacyProjectMarkers?: readonly string[];
+  legacyIssueMarkers?: readonly string[];
 }
 
 function streamCapture() {
@@ -72,6 +86,8 @@ function managedIssue(beadId: string, number: number) {
 
 function createFakeGh(options: FakeGhOptions = {}) {
   const calls: string[] = [];
+  const clientOptions: FakeClientOptions[] = [];
+  const provisionReadmes: string[] = [];
   const writes: string[] = [];
   let nextIssueNumber = 100;
   const project = options.project === undefined
@@ -110,14 +126,15 @@ function createFakeGh(options: FakeGhOptions = {}) {
       writes.push('ensureViews');
       return [];
     },
-    async provisionProject() {
+    async provisionProject(input: { readme: string }) {
       writes.push('provisionProject');
+      provisionReadmes.push(input.readme);
       return {
         project: {
           id: 'PVT_created',
           number: 13,
           title: 'Psyche Build: Goals & Implementation',
-          readme: '<!-- psyche-bead-sync:v1 project-readme -->',
+          readme: input.readme,
           public: true,
           url: 'https://github.com/orgs/OpenCoven/projects/13',
         },
@@ -147,6 +164,9 @@ function createFakeGh(options: FakeGhOptions = {}) {
     },
     async setFields() {
       writes.push('setFields');
+      if (options.failSetFields) {
+        throw options.failSetFields;
+      }
     },
     async syncParent() {
       writes.push('syncParent');
@@ -162,7 +182,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
     },
   } as unknown as GhClient;
 
-  return { calls, client, writes };
+  return { calls, client, clientOptions, provisionReadmes, writes };
 }
 
 async function runCli(
@@ -170,6 +190,7 @@ async function runCli(
   options: {
     env?: Readonly<Record<string, string | undefined>>;
     fakeGh?: ReturnType<typeof createFakeGh>;
+    run?: ExecFileRun;
   } = {},
 ): Promise<CapturedCli> {
   const stdout = streamCapture();
@@ -180,7 +201,9 @@ async function runCli(
     configPath,
     cwd: repositoryRoot,
     env: options.env ?? {},
-    createGhClient() {
+    run: options.run,
+    createGhClient(options: FakeClientOptions) {
+      fakeGh.clientOptions.push(options);
       return fakeGh.client;
     },
     stdout: stdout.stream,
@@ -221,10 +244,37 @@ describe('Beads project sync configuration', () => {
       massClose: { minimum: 5, fraction: 2 },
     })).toThrow(/fraction/i);
   });
+
+  it('accepts safe configured markers and rejects comment-breaking markers', () => {
+    expect(parseSyncConfig({
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'custom-project-sync:v2',
+      issueMarker: 'custom-issue-sync:v2',
+      assigneeMap: {},
+      massClose: { minimum: 5, fraction: 0.25 },
+    })).toMatchObject({
+      projectMarker: 'custom-project-sync:v2',
+      issueMarker: 'custom-issue-sync:v2',
+    });
+
+    expect(() => parseSyncConfig({
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'custom--project',
+      issueMarker: 'custom-issue-sync:v2',
+      assigneeMap: {},
+      massClose: { minimum: 5, fraction: 0.25 },
+    })).toThrow(/safe machine marker/i);
+  });
 });
 
 describe('Beads source adapter', () => {
-  it('bootstraps then performs only a readonly export through the injected runner', async () => {
+  it.each(['apply', 'provision'] as const)(
+    'bootstraps for %s then performs only a readonly export outside the worktree',
+    async (mode) => {
     const fixture = await readFile(fixturePath, 'utf8');
     const calls: Array<{
       command: string;
@@ -236,11 +286,17 @@ describe('Beads source adapter', () => {
       return { stdout: '', stderr: '', exitCode: 0 };
     };
     const removed: string[] = [];
+    const prefixes: string[] = [];
+    const temporaryDirectory = join(tmpdir(), `psyche-beads-project-sync-${mode}-test`);
 
     await expect(loadBeadsSource({
       cwd: repositoryRoot,
+      mode,
       run,
-      makeTemporaryDirectory: async () => join(repositoryRoot, '.beads-project-sync-test'),
+      makeTemporaryDirectory: async (prefix) => {
+        prefixes.push(prefix);
+        return temporaryDirectory;
+      },
       readFile: async () => fixture,
       remove: async (path) => {
         removed.push(path);
@@ -259,14 +315,129 @@ describe('Beads source adapter', () => {
           '--readonly',
           'export',
           '-o',
-          join(repositoryRoot, '.beads-project-sync-test', 'issues.jsonl'),
+          join(temporaryDirectory, 'issues.jsonl'),
         ],
         options: { cwd: repositoryRoot },
       },
     ]);
-    expect(removed).toEqual([join(repositoryRoot, '.beads-project-sync-test')]);
+    expect(prefixes).toEqual([join(tmpdir(), 'psyche-beads-project-sync-')]);
+    expect(relative(repositoryRoot, temporaryDirectory)).toMatch(/^\.\./u);
+    expect(removed).toEqual([temporaryDirectory]);
     expect(calls.flatMap((call) => call.args)).not.toContain('update');
     expect(calls.flatMap((call) => call.args)).not.toContain('close');
+    },
+  );
+
+  it('dry-runs with only readonly export and gives explicit bootstrap guidance on missing DBs', async () => {
+    const calls: Array<{command: string; args: readonly string[]}> = [];
+    const temporaryDirectory = join(tmpdir(), 'psyche-beads-project-sync-dry-test');
+    const removed: string[] = [];
+
+    await expect(loadBeadsSource({
+      cwd: repositoryRoot,
+      mode: 'dry-run',
+      run: async (command, args) => {
+        calls.push({ command, args: [...args] });
+        return {
+          stdout: '',
+          stderr: 'no beads database found',
+          exitCode: 1,
+        };
+      },
+      makeTemporaryDirectory: async () => temporaryDirectory,
+      remove: async (path) => {
+        removed.push(path);
+      },
+    })).rejects.toThrow(/bd bootstrap --yes/i);
+
+    expect(calls).toEqual([{
+      command: 'bd',
+      args: ['--readonly', 'export', '-o', join(temporaryDirectory, 'issues.jsonl')],
+    }]);
+    expect(removed).toEqual([temporaryDirectory]);
+  });
+
+  it('cleans the OS-temp raw export when reading the completed export fails', async () => {
+    const temporaryDirectory = join(tmpdir(), 'psyche-beads-project-sync-read-failure');
+    const removed: string[] = [];
+
+    await expect(loadBeadsSource({
+      cwd: repositoryRoot,
+      mode: 'dry-run',
+      run: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+      makeTemporaryDirectory: async () => temporaryDirectory,
+      readFile: async () => {
+        throw new Error('raw export read failed');
+      },
+      remove: async (path) => {
+        removed.push(path);
+      },
+    })).rejects.toThrow(/raw export read failed/i);
+
+    expect(removed).toEqual([temporaryDirectory]);
+  });
+
+  it('best-effort cleans an active raw export before re-raising termination signals', async () => {
+    const fixture = await readFile(fixturePath, 'utf8');
+    const temporaryDirectory = join(tmpdir(), 'psyche-beads-project-sync-signal');
+    const handlers = new Map<NodeJS.Signals, () => void>();
+    const kills: Array<{pid: number; signal: NodeJS.Signals}> = [];
+    const removed: string[] = [];
+    let resolveSignalRegistration!: () => void;
+    const signalRegistered = new Promise<void>((resolve) => {
+      resolveSignalRegistration = resolve;
+    });
+    let resolveExport!: (result: {
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    }) => void;
+    const exportResult = new Promise<{
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    }>((resolve) => {
+      resolveExport = resolve;
+    });
+    const signalProcess: SignalProcess = {
+      pid: 4242,
+      on(signal, listener) {
+        handlers.set(signal, listener);
+        if (signal === 'SIGTERM') {
+          resolveSignalRegistration();
+        }
+      },
+      off(signal, listener) {
+        if (handlers.get(signal) === listener) {
+          handlers.delete(signal);
+        }
+      },
+      kill(pid, signal) {
+        kills.push({ pid, signal });
+      },
+    };
+
+    const loading = loadBeadsSource({
+      cwd: repositoryRoot,
+      mode: 'dry-run',
+      run: async () => exportResult,
+      makeTemporaryDirectory: async () => temporaryDirectory,
+      readFile: async () => fixture,
+      remove: async (path) => {
+        removed.push(path);
+      },
+      signalProcess,
+    });
+
+    await signalRegistered;
+    handlers.get('SIGTERM')?.();
+    await vi.waitFor(() => {
+      expect(removed).toEqual([temporaryDirectory]);
+      expect(kills).toEqual([{ pid: 4242, signal: 'SIGTERM' }]);
+    });
+    resolveExport({ stdout: '', stderr: '', exitCode: 0 });
+    await expect(loading).resolves.toBe(fixture);
+    expect(removed).toEqual([temporaryDirectory]);
   });
 });
 
@@ -313,6 +484,29 @@ describe('Beads project sync CLI', () => {
     );
   });
 
+  it('dry-runs raw source with exactly one readonly bd export and cleans its OS temp directory', async () => {
+    const fixture = await readFile(fixturePath, 'utf8');
+    const calls: Array<{command: string; args: readonly string[]}> = [];
+    let outputPath = '';
+    const run: ExecFileRun = async (command, args) => {
+      calls.push({ command, args: [...args] });
+      const outputIndex = args.indexOf('-o');
+      outputPath = args[outputIndex + 1] ?? '';
+      await writeFile(outputPath, fixture, 'utf8');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    };
+
+    const result = await runCli(['--dry-run'], { run });
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toEqual([{
+      command: 'bd',
+      args: ['--readonly', 'export', '-o', outputPath],
+    }]);
+    expect(relative(repositoryRoot, outputPath)).toMatch(/^\.\./u);
+    await expect(access(dirname(outputPath))).rejects.toThrow();
+  });
+
   it('uses credentials for read-only remote discovery during dry-run', async () => {
     const fakeGh = createFakeGh();
     const result = await runCli(
@@ -326,6 +520,14 @@ describe('Beads project sync CLI', () => {
     expect(result.exitCode).toBe(0);
     expect(fakeGh.calls).toEqual(['verifyAccess', 'discoverProject', 'listManagedIssues']);
     expect(fakeGh.writes).toEqual([]);
+    expect(fakeGh.clientOptions).toEqual([
+      expect.objectContaining({
+        projectMarker: 'psyche-beads-project-sync:v1',
+        issueMarker: 'psyche-bead-sync:v1',
+        legacyProjectMarkers: ['psyche-bead-sync:v1'],
+        legacyIssueMarkers: ['psyche-bead-sync:v1'],
+      }),
+    ]);
     expect(JSON.parse(result.stdout).projectUrl).toBe(
       'https://github.com/orgs/OpenCoven/projects/12',
     );
@@ -357,6 +559,12 @@ describe('Beads project sync CLI', () => {
     expect(created.exitCode).toBe(0);
     expect(absentProject.calls).toEqual(['verifyAccess', 'discoverProject']);
     expect(absentProject.writes).toEqual(['provisionProject']);
+    expect(absentProject.provisionReadmes[0]).toContain(
+      '<!-- psyche-beads-project-sync:v1 project-readme -->',
+    );
+    expect(absentProject.provisionReadmes[0]).not.toContain(
+      '<!-- psyche-bead-sync:v1 project-readme -->',
+    );
     expect(JSON.parse(created.stdout)).toMatchObject({
       mode: 'provision',
       appliedOperationCount: 0,
@@ -391,7 +599,7 @@ describe('Beads project sync CLI', () => {
     expect(result.exitCode).toBe(0);
     expect(fakeGh.writes[0]).toBe('provisionProject');
     expect(fakeGh.writes).toContain('createIssue');
-    expect(fakeGh.writes.at(-1)).toBe('updateReadme');
+    expect(fakeGh.writes).not.toContain('updateReadme');
     expect(summary.mode).toBe('apply');
     expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
     expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/13');
@@ -416,6 +624,55 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes.at(-1)).toBe('updateReadme');
     expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
     expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/12');
+  });
+
+  it('reports structured sanitized partial progress when reconciliation apply fails', async () => {
+    const leakedRecord = {
+      token,
+      body: 'private full issue record',
+      title: 'do not print this record',
+    };
+    const fakeGh = createFakeGh({
+      failSetFields: new Error(`setFields exploded ${token} ${JSON.stringify(leakedRecord)}`),
+    });
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    const summary = JSON.parse(result.stdout);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(summary).toMatchObject({
+      mode: 'apply',
+      plannedOperationCount: expect.any(Number),
+      appliedOperationCount: expect.any(Number),
+      projectUrl: 'https://github.com/orgs/OpenCoven/projects/12',
+      failure: {
+        failingOperation: {
+          type: 'setFields',
+          phase: 'setFields',
+          beadId: expect.any(String),
+          itemId: expect.any(String),
+        },
+        cause: expect.stringContaining('<redacted>'),
+        resolvedIssueNumbersByBeadId: expect.any(Object),
+        resolvedProjectItemIdsByBeadId: expect.any(Object),
+      },
+    });
+    expect(summary.appliedOperationCount).toBeGreaterThan(0);
+    expect(summary.appliedOperationCount).toBeLessThan(summary.plannedOperationCount);
+    expect(result.stderr).toMatch(/failed after \d+ of \d+ operations/i);
+    expect(result.stderr).toMatch(/failing operation.*setFields/i);
+    expect(result.stderr).toMatch(/resolved issue numbers/i);
+    expect(result.stderr).toMatch(/resolved project item IDs/i);
+    expect(`${result.stdout}${result.stderr}`).not.toContain(token);
+    expect(`${result.stdout}${result.stderr}`).not.toContain(leakedRecord.body);
+    expect(`${result.stdout}${result.stderr}`).not.toContain(leakedRecord.title);
+    expect(summary.failure.failingOperation).not.toHaveProperty('fields');
   });
 
   it('lets --allow-mass-close override only the configured close threshold', async () => {

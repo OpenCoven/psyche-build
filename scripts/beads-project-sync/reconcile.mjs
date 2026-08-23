@@ -3,6 +3,16 @@
 import { createHash } from 'node:crypto';
 
 import { activeBeads, buildBeadIndex, normalizeBeadId } from './model.mjs';
+import {
+  DEFAULT_ISSUE_MARKER,
+  DEFAULT_PROJECT_MARKER,
+  LEGACY_ISSUE_MARKERS,
+  LEGACY_PROJECT_MARKERS,
+  markerPattern,
+  normalizeMarker,
+  recognizedMarkers,
+  renderHashMarker,
+} from './markers.mjs';
 import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render.mjs';
 
 /** @typedef {import('./render.mjs').RenderContext} RenderContext */
@@ -337,10 +347,6 @@ export class ReconciliationApplyError extends Error {
 }
 
 const README_PATH = 'README.md';
-const ISSUE_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1\s+bead-id=([^\r\n]*?)\s*-->/gu;
-const PROJECT_README_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1\s+project-readme\s*-->/u;
-const RENDER_HASH_COMMENT_PATTERN = /\n*<!--\s*psyche-bead-sync:v1\s+render-hash=([a-f0-9]{64})\s*-->\s*$/u;
-const RENDER_HASH_PATTERN = /<!--\s*psyche-bead-sync:v1\s+render-hash=([a-f0-9]{64})\s*-->\s*$/u;
 const ISSUE_TITLE_PREFIX_PATTERN = /^\[([^\r\n]+?)\]/u;
 
 /**
@@ -592,6 +598,34 @@ function normalizeRenderContext(value) {
 }
 
 /**
+ * @param {Omit<RenderContext, 'inventoryById' | 'mirroredIssueUrlsByBeadId'>} context
+ */
+function resolveMarkerContext(context) {
+  const projectMarker = normalizeMarker(
+    context.projectMarker ?? DEFAULT_PROJECT_MARKER,
+    'planReconciliation projectMarker',
+  );
+  const issueMarker = normalizeMarker(
+    context.issueMarker ?? DEFAULT_ISSUE_MARKER,
+    'planReconciliation issueMarker',
+  );
+  return {
+    projectMarker,
+    issueMarker,
+    recognizedProjectMarkers: recognizedMarkers(
+      projectMarker,
+      context.legacyProjectMarkers ?? LEGACY_PROJECT_MARKERS,
+      'planReconciliation projectMarker',
+    ),
+    recognizedIssueMarkers: recognizedMarkers(
+      issueMarker,
+      context.legacyIssueMarkers ?? LEGACY_ISSUE_MARKERS,
+      'planReconciliation issueMarker',
+    ),
+  };
+}
+
+/**
  * @param {unknown} value
  * @param {string} fieldName
  * @param {string} context
@@ -619,26 +653,32 @@ function describeManagedIssueContext(issueNumber) {
 /**
  * @param {string | null} body
  * @param {string} context
+ * @param {readonly string[]} issueMarkers
  * @returns {string[]}
  */
-function extractIssueMarkers(body, context) {
+function extractIssueMarkers(body, context, issueMarkers) {
   if (body == null) {
     return [];
   }
 
-  return [...body.matchAll(ISSUE_MARKER_PATTERN)]
+  return [...body.matchAll(markerPattern(
+    issueMarkers,
+    'bead-id=([^\\r\\n]*?)',
+    'gu',
+  ))]
     .map((match) => normalizeBeadId(match[1] ?? '', 'bead-id', context));
 }
 
 /**
  * @param {string | null} body
+ * @param {readonly string[]} markers
  * @returns {string | null}
  */
-function extractRenderHash(body) {
+function extractRenderHash(body, markers) {
   if (body == null) {
     return null;
   }
-  const match = body.match(RENDER_HASH_PATTERN);
+  const match = body.match(markerPattern(markers, 'render-hash=([a-f0-9]{64})'));
   return match?.[1] ?? null;
 }
 
@@ -664,18 +704,26 @@ function extractBeadIdFromTitle(title, context) {
 
 /**
  * @param {string} body
+ * @param {readonly string[]} markers
  * @returns {string}
  */
-function stripRenderHashComment(body) {
-  return body.replace(RENDER_HASH_COMMENT_PATTERN, '');
+function stripRenderHashComment(body, markers) {
+  return body.replace(
+    new RegExp(`\\n*${markerPattern(
+      markers,
+      'render-hash=([a-f0-9]{64})',
+    ).source}\\s*$`, 'u'),
+    '',
+  );
 }
 
 /**
  * @param {string} body
+ * @param {readonly string[]} markers
  * @returns {string}
  */
-function normalizeCanonicalBody(body) {
-  return stripRenderHashComment(body).replace(/\s+$/u, '');
+function normalizeCanonicalBody(body, markers) {
+  return stripRenderHashComment(body, markers).replace(/\s+$/u, '');
 }
 
 /**
@@ -689,10 +737,11 @@ function hashRenderedBody(body) {
 /**
  * @param {string} body
  * @param {string} renderHash
+ * @param {string} marker
  * @returns {string}
  */
-function attachRenderHash(body, renderHash) {
-  return `${body}\n\n<!-- psyche-bead-sync:v1 render-hash=${renderHash} -->`;
+function attachRenderHash(body, renderHash, marker) {
+  return `${body}\n\n${renderHashMarker(marker, renderHash)}`;
 }
 
 /**
@@ -713,29 +762,31 @@ function hasDesiredFieldValues(currentFields, desiredFields) {
  * @param {IssueSnapshot} issue
  * @param {string} desiredBody
  * @param {string} desiredRenderHash
+ * @param {readonly string[]} issueMarkers
  * @returns {boolean}
  */
-function hasCurrentRenderedBody(issue, desiredBody, desiredRenderHash) {
+function hasCurrentRenderedBody(issue, desiredBody, desiredRenderHash, issueMarkers) {
   if (issue.body != null) {
-    return normalizeCanonicalBody(issue.body) === desiredBody;
+    return normalizeCanonicalBody(issue.body, issueMarkers) === desiredBody;
   }
 
-  return (issue.renderHash ?? extractRenderHash(issue.body)) === desiredRenderHash;
+  return (issue.renderHash ?? extractRenderHash(issue.body, issueMarkers)) === desiredRenderHash;
 }
 
 /**
  * @param {ReadmeSnapshot} readme
  * @param {string} desiredBody
  * @param {string} desiredRenderHash
+ * @param {readonly string[]} projectMarkers
  * @returns {boolean}
  */
-function hasCurrentReadme(readme, desiredBody, desiredRenderHash) {
+function hasCurrentReadme(readme, desiredBody, desiredRenderHash, projectMarkers) {
   if (readme.body != null) {
-    return PROJECT_README_MARKER_PATTERN.test(readme.body)
-      && normalizeCanonicalBody(readme.body) === desiredBody;
+    return markerPattern(projectMarkers, 'project-readme').test(readme.body)
+      && normalizeCanonicalBody(readme.body, projectMarkers) === desiredBody;
   }
 
-  return (readme.renderHash ?? extractRenderHash(readme.body)) === desiredRenderHash;
+  return (readme.renderHash ?? extractRenderHash(readme.body, projectMarkers)) === desiredRenderHash;
 }
 
 /**
@@ -828,14 +879,15 @@ function normalizePlanInput(input) {
 
 /**
  * @param {readonly IssueSnapshot[]} existingIssues
+ * @param {readonly string[]} issueMarkers
  * @returns {Map<string, ManagedIssueSnapshot>}
  */
-function indexManagedIssues(existingIssues) {
+function indexManagedIssues(existingIssues, issueMarkers) {
   const managedIssuesByBeadId = /** @type {Map<string, ManagedIssueSnapshot>} */ (new Map());
 
   for (const issue of existingIssues) {
     const issueContext = describeManagedIssueContext(issue.number);
-    const markers = extractIssueMarkers(issue.body, issueContext);
+    const markers = extractIssueMarkers(issue.body, issueContext, issueMarkers);
     if (markers.length > 1) {
       fail(`Issue #${issue.number} contains duplicate managed markers`);
     }
@@ -934,13 +986,17 @@ function buildSummary(
  */
 export function planReconciliation(input) {
   const normalizedInput = normalizePlanInput(input);
+  const markerContext = resolveMarkerContext(normalizedInput.renderContext ?? {});
   const inventory = [...normalizedInput.inventory];
   if (inventory.length === 0) {
     fail('planReconciliation cannot reconcile an empty source inventory');
   }
 
   const inventoryIndex = buildBeadIndex(inventory);
-  const managedIssuesByBeadId = indexManagedIssues(normalizedInput.existingIssues ?? []);
+  const managedIssuesByBeadId = indexManagedIssues(
+    normalizedInput.existingIssues ?? [],
+    markerContext.recognizedIssueMarkers,
+  );
   const issueRenderContext = buildIssueRenderContext(inventory, normalizedInput.renderContext ?? {});
   const sortedActiveBeads = activeBeads(inventory).slice().sort((left, right) => compareStrings(left.id, right.id));
   const activeBeadIds = new Set(sortedActiveBeads.map((bead) => bead.id));
@@ -970,7 +1026,7 @@ export function planReconciliation(input) {
     const existingIssue = managedIssuesByBeadId.get(bead.id);
     const renderedBody = renderIssueBody(bead, issueRenderContext);
     const renderHash = hashRenderedBody(renderedBody);
-    const managedBody = attachRenderHash(renderedBody, renderHash);
+    const managedBody = attachRenderHash(renderedBody, renderHash, markerContext.issueMarker);
     const title = renderIssueTitle(bead);
     const assignee = bead.githubAssignee ?? null;
 
@@ -990,7 +1046,12 @@ export function planReconciliation(input) {
         existingIssue.title !== title
         || existingIssue.assignee !== assignee
         || existingIssue.state === 'closed'
-        || !hasCurrentRenderedBody(existingIssue, renderedBody, renderHash)
+        || !hasCurrentRenderedBody(
+          existingIssue,
+          renderedBody,
+          renderHash,
+          markerContext.recognizedIssueMarkers,
+        )
       );
 
       if (issueNeedsUpdate) {
@@ -1138,12 +1199,17 @@ export function planReconciliation(input) {
 
   const renderedReadmeBody = renderProjectReadme(inventory, normalizedInput.renderContext ?? {});
   const readmeRenderHash = hashRenderedBody(renderedReadmeBody);
-  if (!hasCurrentReadme(normalizedInput.readme ?? normalizeReadmeSnapshot(null, 'plan'), renderedReadmeBody, readmeRenderHash)) {
+  if (!hasCurrentReadme(
+    normalizedInput.readme ?? normalizeReadmeSnapshot(null, 'plan'),
+    renderedReadmeBody,
+    readmeRenderHash,
+    markerContext.recognizedProjectMarkers,
+  )) {
     updateReadmeOperations.push({
       type: 'updateReadme',
       phase: 'updateReadme',
       path: (normalizedInput.readme ?? normalizeReadmeSnapshot(null, 'plan')).path,
-      body: attachRenderHash(renderedReadmeBody, readmeRenderHash),
+      body: attachRenderHash(renderedReadmeBody, readmeRenderHash, markerContext.projectMarker),
       renderHash: readmeRenderHash,
     });
   }

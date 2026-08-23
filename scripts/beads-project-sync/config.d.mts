@@ -11,8 +11,8 @@ export interface BeadsProjectSyncConfig {
   };
 }
 
-export const SUPPORTED_PROJECT_MARKER: 'psyche-beads-project-sync:v1';
-export const SUPPORTED_ISSUE_MARKER: 'psyche-bead-sync:v1';
+export const SUPPORTED_PROJECT_MARKER: typeof import('./markers.mjs').DEFAULT_PROJECT_MARKER;
+export const SUPPORTED_ISSUE_MARKER: typeof import('./markers.mjs').DEFAULT_ISSUE_MARKER;
 
 export function parseSyncConfig(value: unknown): BeadsProjectSyncConfig;
 

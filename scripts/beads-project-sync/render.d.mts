@@ -7,6 +7,10 @@ export interface RenderContext {
   sourceRef?: string | null;
   inventoryTimestamp?: string | null;
   projectName?: string | null;
+  projectMarker?: string | null;
+  issueMarker?: string | null;
+  legacyProjectMarkers?: readonly string[];
+  legacyIssueMarkers?: readonly string[];
 }
 
 export function renderIssueTitle(bead: PublicBead): string;

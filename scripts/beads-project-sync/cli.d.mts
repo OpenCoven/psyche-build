@@ -25,6 +25,10 @@ export interface CliDependencies {
     owner: string;
     repo: string;
     token: string;
+    projectMarker?: string;
+    issueMarker?: string;
+    legacyProjectMarkers?: readonly string[];
+    legacyIssueMarkers?: readonly string[];
   }) => GhClient);
   stdout?: WritableStream;
   stderr?: WritableStream;
@@ -37,6 +41,12 @@ export interface CliSummary {
   appliedOperationCount: number;
   warnings: string[];
   projectUrl: string | null;
+  failure?: {
+    failingOperation: Record<string, string | number | readonly number[] | null>;
+    cause: string;
+    resolvedIssueNumbersByBeadId?: Record<string, number>;
+    resolvedProjectItemIdsByBeadId?: Record<string, string>;
+  };
 }
 
 export function parseCliOptions(argv: readonly string[]): CliOptions;

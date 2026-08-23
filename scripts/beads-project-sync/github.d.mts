@@ -157,7 +157,8 @@ export class GhClientError extends Error {
   constructor(kind: string, message: string, status?: number);
 }
 
-export const PROJECT_README_MARKER: '<!-- psyche-bead-sync:v1 project-readme -->';
+export const PROJECT_README_MARKER: string;
+export const LEGACY_PROJECT_README_MARKER: string;
 export const PROJECT_VIEWS: readonly ProjectViewDefinition[];
 
 export interface GhClient {
@@ -243,4 +244,8 @@ export function createGhClient(options: {
   owner: string;
   repo: string;
   token: string;
+  projectMarker?: string;
+  issueMarker?: string;
+  legacyProjectMarkers?: readonly string[];
+  legacyIssueMarkers?: readonly string[];
 }): GhClient;

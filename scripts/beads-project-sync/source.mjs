@@ -7,6 +7,9 @@ import {
   rm as nodeRemove,
 } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+const TERMINATION_SIGNALS = /** @type {const} */ (['SIGHUP', 'SIGINT', 'SIGTERM']);
 
 /**
  * @typedef {{
@@ -22,6 +25,20 @@ import { join } from 'node:path';
  *   stderr: string,
  *   exitCode: number,
  * }} ExecFileRunResult
+ */
+
+/**
+ * @typedef {'dry-run' | 'apply' | 'provision'} BeadsSourceMode
+ */
+
+/**
+ * @typedef {{
+ *   pid: number,
+ *   exitCode?: string | number | null,
+ *   on(signal: NodeJS.Signals, listener: () => void): unknown,
+ *   off(signal: NodeJS.Signals, listener: () => void): unknown,
+ *   kill(pid: number, signal: NodeJS.Signals): unknown,
+ * }} SignalProcess
  */
 
 /**
@@ -49,6 +66,16 @@ function stringValue(value) {
     return value;
   }
   return value == null ? '' : String(value);
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function errorMessage(error) {
+  return error instanceof Error && error.message.trim()
+    ? error.message.trim()
+    : 'unknown error';
 }
 
 /**
@@ -120,13 +147,75 @@ export async function exportBeads(options) {
 }
 
 /**
+ * @param {string} directory
+ * @param {(path: string, options: {recursive: true, force: true}) => Promise<unknown>} remove
+ */
+function createCleanup(directory, remove) {
+  /** @type {Promise<void> | null} */
+  let cleanupPromise = null;
+  return () => {
+    cleanupPromise ??= Promise.resolve(
+      remove(directory, { recursive: true, force: true }),
+    ).then(() => undefined);
+    return cleanupPromise;
+  };
+}
+
+/**
+ * @param {() => Promise<void>} cleanup
+ * @param {SignalProcess} signalProcess
+ * @returns {() => void}
+ */
+function installSignalCleanup(cleanup, signalProcess) {
+  let disposed = false;
+  let handlingSignal = false;
+  /** @type {Map<NodeJS.Signals, () => void>} */
+  const handlers = new Map();
+
+  const dispose = () => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    for (const [signal, handler] of handlers) {
+      signalProcess.off(signal, handler);
+    }
+  };
+
+  for (const signal of TERMINATION_SIGNALS) {
+    const handler = () => {
+      if (handlingSignal) {
+        return;
+      }
+      handlingSignal = true;
+      void cleanup()
+        .catch(() => undefined)
+        .finally(() => {
+          dispose();
+          try {
+            signalProcess.kill(signalProcess.pid, signal);
+          } catch {
+            signalProcess.exitCode = 1;
+          }
+        });
+    };
+    handlers.set(signal, handler);
+    signalProcess.on(signal, handler);
+  }
+
+  return dispose;
+}
+
+/**
  * @param {{
  *   cwd: string,
+ *   mode?: BeadsSourceMode,
  *   inventoryFile?: string | null,
  *   run?: ExecFileRun,
  *   makeTemporaryDirectory?: (prefix: string) => Promise<string>,
  *   readFile?: (path: string, encoding: 'utf8') => Promise<string>,
  *   remove?: (path: string, options: {recursive: true, force: true}) => Promise<unknown>,
+ *   signalProcess?: SignalProcess,
  * }} options
  * @returns {Promise<string>}
  */
@@ -137,18 +226,41 @@ export async function loadBeadsSource(options) {
   }
 
   const run = options.run ?? createExecFileRun();
+  const mode = options.mode ?? 'apply';
+  if (!['dry-run', 'apply', 'provision'].includes(mode)) {
+    fail(`Unsupported Beads source mode "${mode}"`);
+  }
   const makeTemporaryDirectory = options.makeTemporaryDirectory ?? nodeMakeTemporaryDirectory;
   const remove = options.remove ?? nodeRemove;
   const temporaryDirectory = await makeTemporaryDirectory(
-    join(options.cwd, '.beads-project-sync-'),
+    join(tmpdir(), 'psyche-beads-project-sync-'),
   );
   const outputPath = join(temporaryDirectory, 'issues.jsonl');
+  const cleanup = createCleanup(temporaryDirectory, remove);
+  const disposeSignalCleanup = installSignalCleanup(
+    cleanup,
+    options.signalProcess ?? process,
+  );
 
   try {
-    await bootstrapBeads({ cwd: options.cwd, run });
-    await exportBeads({ cwd: options.cwd, run, outputPath });
+    if (mode !== 'dry-run') {
+      await bootstrapBeads({ cwd: options.cwd, run });
+    }
+    try {
+      await exportBeads({ cwd: options.cwd, run, outputPath });
+    } catch (error) {
+      if (mode === 'dry-run') {
+        throw new Error(
+          `${errorMessage(error)}. Dry-run source loading is read-only and will not initialize Beads. `
+          + 'If the database is missing or uninitialized, run `bd bootstrap --yes` and retry.',
+          { cause: error },
+        );
+      }
+      throw error;
+    }
     return await readFile(outputPath, 'utf8');
   } finally {
-    await remove(temporaryDirectory, { recursive: true, force: true });
+    disposeSignalCleanup();
+    await cleanup();
   }
 }

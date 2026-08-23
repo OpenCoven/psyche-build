@@ -213,6 +213,24 @@ describe('Beads project renderers', () => {
     );
   });
 
+  it('renders configured issue and Project markers instead of hardcoded defaults', () => {
+    const inventory = buildPublicInventory();
+    const feature = inventory.find((bead) => bead.id === 'pb-feature');
+    expect(feature).toBeTruthy();
+    const markerContext = buildContext(inventory, {
+      issueMarker: 'custom-issue-sync:v2',
+      projectMarker: 'custom-project-sync:v2',
+    });
+
+    const issue = renderIssueBody(feature!, markerContext);
+    const readme = renderProjectReadme(inventory, markerContext);
+
+    expect(issue).toContain('<!-- custom-issue-sync:v2 bead-id=pb-feature -->');
+    expect(issue).not.toContain('<!-- psyche-bead-sync:v1 bead-id=pb-feature -->');
+    expect(readme).toContain('<!-- custom-project-sync:v2 project-readme -->');
+    expect(readme).not.toContain('<!-- psyche-bead-sync:v1 project-readme -->');
+  });
+
   it('sanitizes mirrored dependency issue URLs before rendering dependency links', () => {
     const inventory = buildPublicInventory();
     const blocked = inventory.find((bead) => bead.id === 'pb-blocked');
@@ -493,7 +511,7 @@ describe('Beads project renderers', () => {
     const rendered = renderProjectReadme(inventory, context);
 
     expect(rendered).toBe(renderProjectReadme(inventory, context));
-    expect(countMatches(rendered, '<!-- psyche-bead-sync:v1 project-readme -->')).toBe(1);
+    expect(countMatches(rendered, '<!-- psyche-beads-project-sync:v1 project-readme -->')).toBe(1);
     expect(rendered).toContain('# Public Beads inventory');
     expect(rendered).toContain('generated public tracking snapshot');
     expect(rendered).toContain('The private Beads project remains authoritative');

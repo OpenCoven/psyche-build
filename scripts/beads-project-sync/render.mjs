@@ -1,6 +1,13 @@
 // @ts-check
 
 import { summarizeInventory } from './model.mjs';
+import {
+  DEFAULT_ISSUE_MARKER,
+  DEFAULT_PROJECT_MARKER,
+  issueBeadMarker,
+  normalizeMarker,
+  projectReadmeMarker,
+} from './markers.mjs';
 import { assertNoPublishableSecrets, sanitizePublicText } from './sanitize.mjs';
 
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
@@ -13,12 +20,15 @@ import { assertNoPublishableSecrets, sanitizePublicText } from './sanitize.mjs';
  *   sourceRef?: string | null,
  *   inventoryTimestamp?: string | null,
  *   projectName?: string | null,
+ *   projectMarker?: string | null,
+ *   issueMarker?: string | null,
+ *   legacyProjectMarkers?: readonly string[],
+ *   legacyIssueMarkers?: readonly string[],
  * }} RenderContext
  */
 
-const ISSUE_MARKER_PREFIX = '<!-- psyche-bead-sync:v1 bead-id=';
-const PROJECT_README_MARKER = '<!-- psyche-bead-sync:v1 project-readme -->';
-const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
+const GENERATED_MARKER_PATTERN =
+  /<!--\s*[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,199})\s+(?:bead-id=|project-readme|render-hash=)/giu;
 const TYPE_SORT_ORDER = ['epic', 'feature', 'task'];
 const ABSOLUTE_URL_PATTERN = /^(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//iu;
 
@@ -44,7 +54,7 @@ function compareStrings(left, right) {
  * @returns {string}
  */
 function escapeGeneratedMarkers(value) {
-  return value.replace(GENERATED_MARKER_PATTERN, '&lt;!-- psyche-bead-sync:v1');
+  return value.replace(GENERATED_MARKER_PATTERN, (match) => match.replace('<!--', '&lt;!--'));
 }
 
 /**
@@ -600,10 +610,15 @@ export function renderIssueBody(bead, context = {}) {
     'mirroredIssueUrlsByBeadId',
   );
 
+  const issueMarker = normalizeMarker(
+    context.issueMarker ?? DEFAULT_ISSUE_MARKER,
+    'renderIssueBody issueMarker',
+  );
+  const beadId = normalizeInlineText(bead.id, 'id');
   const sections = [
-    `${ISSUE_MARKER_PREFIX}${normalizeInlineText(bead.id, 'id')} -->`,
+    issueBeadMarker(issueMarker, beadId),
     renderSection('Bead', [
-      `- ID: \`${normalizeInlineText(bead.id, 'id')}\``,
+      `- ID: \`${beadId}\``,
       `- Type: \`${normalizeInlineText(bead.type, 'type')}\``,
       `- Status: \`${normalizeInlineText(bead.status, 'status')}\``,
       `- Priority: P${Number(bead.priority)}`,
@@ -644,8 +659,12 @@ export function renderProjectReadme(inventory, context = {}) {
 
   const summary = summarizeInventory(inventory);
   const title = normalizeOptionalInlineText(context.projectName, 'projectName') ?? 'Public Beads inventory';
+  const projectMarker = normalizeMarker(
+    context.projectMarker ?? DEFAULT_PROJECT_MARKER,
+    'renderProjectReadme projectMarker',
+  );
   const sections = [
-    PROJECT_README_MARKER,
+    projectReadmeMarker(projectMarker),
     `# ${title}`,
     'This README is a generated public tracking snapshot for mirrored Beads work. The private Beads project remains authoritative, so update the source Bead instead of editing this README.',
     renderSection('Inventory snapshot', [

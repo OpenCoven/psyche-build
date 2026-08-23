@@ -18,6 +18,16 @@ export type ExecFileRun = (
   options: ExecFileRunOptions,
 ) => ExecFileRunResult | Promise<ExecFileRunResult>;
 
+export type BeadsSourceMode = 'dry-run' | 'apply' | 'provision';
+
+export interface SignalProcess {
+  pid: number;
+  exitCode?: string | number | null;
+  on(signal: NodeJS.Signals, listener: () => void): unknown;
+  off(signal: NodeJS.Signals, listener: () => void): unknown;
+  kill(pid: number, signal: NodeJS.Signals): unknown;
+}
+
 export type ExecFileImplementation = (
   file: string,
   args: readonly string[],
@@ -44,6 +54,7 @@ export function exportBeads(options: {
 
 export function loadBeadsSource(options: {
   cwd: string;
+  mode?: BeadsSourceMode;
   inventoryFile?: string | null;
   run?: ExecFileRun;
   makeTemporaryDirectory?: (prefix: string) => Promise<string>;
@@ -52,4 +63,5 @@ export function loadBeadsSource(options: {
     path: string,
     options: { recursive: true; force: true },
   ) => Promise<unknown>;
+  signalProcess?: SignalProcess;
 }): Promise<string>;

@@ -2,8 +2,14 @@
 
 import { readFile as nodeReadFile } from 'node:fs/promises';
 
-export const SUPPORTED_PROJECT_MARKER = 'psyche-beads-project-sync:v1';
-export const SUPPORTED_ISSUE_MARKER = 'psyche-bead-sync:v1';
+import {
+  DEFAULT_ISSUE_MARKER,
+  DEFAULT_PROJECT_MARKER,
+  normalizeMarker,
+} from './markers.mjs';
+
+export const SUPPORTED_PROJECT_MARKER = DEFAULT_PROJECT_MARKER;
+export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
 
 /**
  * @typedef {{
@@ -71,6 +77,20 @@ function requiredString(value, fieldName) {
 
 /**
  * @param {unknown} value
+ * @param {string} fieldName
+ * @returns {string}
+ */
+function machineMarker(value, fieldName) {
+  const marker = requiredString(value, fieldName);
+  try {
+    return normalizeMarker(marker, `"${fieldName}"`);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : `"${fieldName}" is invalid`);
+  }
+}
+
+/**
+ * @param {unknown} value
  * @returns {Record<string, string>}
  */
 function assigneeMap(value) {
@@ -119,14 +139,8 @@ export function parseSyncConfig(value) {
     'massClose',
   ], 'root');
 
-  const projectMarker = requiredString(input.projectMarker, 'projectMarker');
-  if (projectMarker !== SUPPORTED_PROJECT_MARKER) {
-    fail(`"projectMarker" must be "${SUPPORTED_PROJECT_MARKER}"`);
-  }
-  const issueMarker = requiredString(input.issueMarker, 'issueMarker');
-  if (issueMarker !== SUPPORTED_ISSUE_MARKER) {
-    fail(`"issueMarker" must be "${SUPPORTED_ISSUE_MARKER}"`);
-  }
+  const projectMarker = machineMarker(input.projectMarker, 'projectMarker');
+  const issueMarker = machineMarker(input.issueMarker, 'issueMarker');
 
   return Object.freeze({
     owner: requiredString(input.owner, 'owner'),

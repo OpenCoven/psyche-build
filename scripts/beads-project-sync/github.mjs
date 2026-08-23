@@ -1,6 +1,18 @@
 // @ts-check
 
-export const PROJECT_README_MARKER = '<!-- psyche-bead-sync:v1 project-readme -->';
+import {
+  DEFAULT_ISSUE_MARKER,
+  DEFAULT_PROJECT_MARKER,
+  LEGACY_ISSUE_MARKERS,
+  LEGACY_PROJECT_MARKERS,
+  markerPattern,
+  normalizeMarker,
+  projectReadmeMarker,
+  recognizedMarkers,
+} from './markers.mjs';
+
+export const PROJECT_README_MARKER = projectReadmeMarker(DEFAULT_PROJECT_MARKER);
+export const LEGACY_PROJECT_README_MARKER = projectReadmeMarker(LEGACY_PROJECT_MARKERS[0]);
 
 export const PROJECT_VIEWS = Object.freeze([
   Object.freeze({ name: 'Overview', layout: 'TABLE_LAYOUT', filter: '' }),
@@ -17,8 +29,6 @@ const API_HEADERS = Object.freeze([
   '-H',
   'X-GitHub-Api-Version: 2026-03-10',
 ]);
-const ISSUE_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1\s+bead-id=([^\r\n]*?)\s*-->/gu;
-const RENDER_HASH_PATTERN = /<!--\s*psyche-bead-sync:v1\s+render-hash=([a-f0-9]{64})\s*-->\s*$/u;
 const SAFE_OWNER_REPO_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$/u;
 const SAFE_BEAD_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,199})$/u;
 const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/giu;
@@ -793,10 +803,15 @@ function normalizeUrl(value) {
 /**
  * @param {string} body
  * @param {number} issueNumber
+ * @param {readonly string[]} issueMarkers
  * @returns {string | null}
  */
-function extractBeadId(body, issueNumber) {
-  const markers = [...body.matchAll(ISSUE_MARKER_PATTERN)];
+function extractBeadId(body, issueNumber, issueMarkers) {
+  const markers = [...body.matchAll(markerPattern(
+    issueMarkers,
+    'bead-id=([^\\r\\n]*?)',
+    'gu',
+  ))];
   if (markers.length > 1) {
     throw new GhClientError('marker', `Issue #${issueNumber} contains duplicate managed markers`);
   }
@@ -808,6 +823,15 @@ function extractBeadId(body, issueNumber) {
     throw new GhClientError('marker', `Issue #${issueNumber} contains an invalid managed Bead id`);
   }
   return id;
+}
+
+/**
+ * @param {string} body
+ * @param {readonly string[]} markers
+ * @returns {string | null}
+ */
+function extractRenderHash(body, markers) {
+  return body.match(markerPattern(markers, 'render-hash=([a-f0-9]{64})'))?.[1] ?? null;
 }
 
 /**
@@ -891,7 +915,16 @@ function normalizeFieldMap(rawFields) {
 }
 
 /**
- * @param {{run: GhRun, owner: string, repo: string, token: string}} options
+ * @param {{
+ *   run: GhRun,
+ *   owner: string,
+ *   repo: string,
+ *   token: string,
+ *   projectMarker?: string,
+ *   issueMarker?: string,
+ *   legacyProjectMarkers?: readonly string[],
+ *   legacyIssueMarkers?: readonly string[],
+ * }} options
  */
 export function createGhClient(options) {
   if (typeof options !== 'object' || options == null) {
@@ -904,6 +937,26 @@ export function createGhClient(options) {
   const owner = requiredString(options.owner, 'owner');
   const repo = requiredString(options.repo, 'repo');
   const token = requiredString(options.token, 'token');
+  const projectMarker = normalizeMarker(
+    options.projectMarker ?? DEFAULT_PROJECT_MARKER,
+    'projectMarker',
+  );
+  const issueMarker = normalizeMarker(
+    options.issueMarker ?? DEFAULT_ISSUE_MARKER,
+    'issueMarker',
+  );
+  const recognizedProjectMarkerValues = recognizedMarkers(
+    projectMarker,
+    options.legacyProjectMarkers ?? LEGACY_PROJECT_MARKERS,
+    'projectMarker',
+  );
+  const recognizedIssueMarkerValues = recognizedMarkers(
+    issueMarker,
+    options.legacyIssueMarkers ?? LEGACY_ISSUE_MARKERS,
+    'issueMarker',
+  );
+  const currentProjectReadmeMarker = projectReadmeMarker(projectMarker);
+  const recognizedProjectReadmeMarkers = recognizedProjectMarkerValues.map(projectReadmeMarker);
   if (!SAFE_OWNER_REPO_PATTERN.test(owner) || !SAFE_OWNER_REPO_PATTERN.test(repo)) {
     fail('owner and repo must be safe GitHub path segments');
   }
@@ -1129,7 +1182,7 @@ export function createGhClient(options) {
         continue;
       }
       const number = positiveInteger(issue.number, 'issue number');
-      if (extractBeadId(stringOrEmpty(issue.body), number) === beadId) {
+      if (extractBeadId(stringOrEmpty(issue.body), number, recognizedIssueMarkerValues) === beadId) {
         matches.push(issue);
       }
     }
@@ -1261,7 +1314,7 @@ export function createGhClient(options) {
       }
       const number = positiveInteger(issue.number, 'issue number');
       const body = stringOrEmpty(issue.body);
-      const beadId = extractBeadId(body, number);
+      const beadId = extractBeadId(body, number, recognizedIssueMarkerValues);
       if (beadId == null) {
         continue;
       }
@@ -1276,7 +1329,7 @@ export function createGhClient(options) {
 
       const assignees = array(issue.assignees);
       const firstAssignee = record(assignees[0]);
-      const renderHash = body.match(RENDER_HASH_PATTERN)?.[1] ?? null;
+      const renderHash = extractRenderHash(body, recognizedIssueMarkerValues);
       managed.push({
         beadId,
         number,
@@ -1416,7 +1469,9 @@ export function createGhClient(options) {
    */
   async function discoverProject() {
     const matches = (await discoverProjects())
-      .filter((project) => project.readme.includes(PROJECT_README_MARKER));
+      .filter((project) => recognizedProjectReadmeMarkers.some(
+        (marker) => project.readme.includes(marker),
+      ));
     if (matches.length > 1) {
       throw new GhClientError('marker', 'Multiple GitHub Projects contain the managed README marker');
     }
@@ -1478,7 +1533,7 @@ export function createGhClient(options) {
   async function ensureProject(input) {
     const title = requiredString(input?.title, 'project title');
     const readme = requiredString(input?.readme, 'project README');
-    if (!readme.includes(PROJECT_README_MARKER)) {
+    if (!readme.includes(currentProjectReadmeMarker)) {
       fail('project README must contain the managed marker');
     }
 
@@ -1750,7 +1805,7 @@ export function createGhClient(options) {
       labels: labelsFromBody(body),
       ...(operation?.assignee === undefined ? {} : { assignees: assignee ? [assignee] : [] }),
     };
-    const bodyBeadId = extractBeadId(body, 1);
+    const bodyBeadId = extractBeadId(body, 1, [issueMarker]);
     const beadId = requiredString(operation?.beadId ?? bodyBeadId, 'managed Bead id');
     if (!SAFE_BEAD_ID_PATTERN.test(beadId) || bodyBeadId !== beadId) {
       fail('createIssue requires one matching managed Bead id marker');
@@ -2242,7 +2297,7 @@ export function createGhClient(options) {
   async function updateReadme(operation) {
     const project = requireProject();
     const readme = requiredString(operation?.body, 'project README');
-    if (!readme.includes(PROJECT_README_MARKER)) {
+    if (!readme.includes(currentProjectReadmeMarker)) {
       fail('project README must contain the managed marker');
     }
     await graphql(UPDATE_PROJECT_MUTATION, {

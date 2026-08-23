@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   createGhClient,
+  LEGACY_PROJECT_README_MARKER,
   PROJECT_README_MARKER,
   PROJECT_VIEWS,
 } from '../scripts/beads-project-sync/github.mjs';
@@ -267,6 +268,38 @@ describe('createGhClient', () => {
     ).rejects.toThrow(/duplicate managed bead id.*pb-6/i);
   });
 
+  it('discovers legacy issue markers when a new issue marker is configured', async () => {
+    const runner = createRunner([
+      success([{
+        number: 8,
+        title: '[pb-legacy] Legacy managed issue',
+        body: managedBody('pb-legacy'),
+        state: 'open',
+        assignees: [],
+      }]),
+      projectDiscovery([]),
+      httpError(404, 'parent not found'),
+      success([]),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      projectMarker: 'custom-project-sync:v2',
+      issueMarker: 'custom-issue-sync:v2',
+      legacyProjectMarkers: ['psyche-bead-sync:v1'],
+      legacyIssueMarkers: ['psyche-bead-sync:v1'],
+    });
+
+    await expect(client.listManagedIssues()).resolves.toEqual([
+      expect.objectContaining({
+        beadId: 'pb-legacy',
+        number: 8,
+      }),
+    ]);
+  });
+
   it('loads paginated project items, custom fields, parents, and blockers from GitHub fixtures', async () => {
     const firstBody = [
       '<!-- psyche-bead-sync:v1 bead-id=pb-1 -->',
@@ -485,6 +518,89 @@ describe('createGhClient', () => {
     expect(payload.variables).toEqual({ owner, repo, cursor: null });
     expect(payload.query).toMatch(/projectsV2\(first:\s*100,\s*after:\s*\$cursor\)/u);
     expect(payload.query).toMatch(/\breadme\b/u);
+  });
+
+  it('migrates a legacy marked Project instead of creating a duplicate Project', async () => {
+    const legacyProject = {
+      id: 'P-legacy',
+      number: 11,
+      title: 'Legacy Public Beads',
+      readme: `${LEGACY_PROJECT_README_MARKER}\n# Legacy Public Beads`,
+      public: true,
+      url: 'https://github.com/orgs/OpenCoven/projects/11',
+    };
+    const desiredReadme = '<!-- custom-project-sync:v2 project-readme -->\n# Public Beads';
+    const runner = createRunner([
+      projectDiscovery([legacyProject]),
+      success({
+        data: {
+          updateProjectV2: {
+            projectV2: {
+              ...legacyProject,
+              readme: desiredReadme,
+            },
+          },
+        },
+      }),
+      linkedRepositoriesPage([{ id: 'REPO_node' }]),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      projectMarker: 'custom-project-sync:v2',
+      issueMarker: 'custom-issue-sync:v2',
+      legacyProjectMarkers: ['psyche-bead-sync:v1'],
+      legacyIssueMarkers: ['psyche-bead-sync:v1'],
+    });
+
+    await expect(client.ensureProject({
+      title: 'Public Beads',
+      readme: desiredReadme,
+    })).resolves.toMatchObject({
+      id: 'P-legacy',
+      readme: desiredReadme,
+    });
+    expect(runner.calls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
+    )).toBe(false);
+    expect(runner.calls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation UpdateManagedProject')
+    )).toBe(true);
+  });
+
+  it('rejects separate current and legacy marked Projects as ambiguous', async () => {
+    const runner = createRunner([
+      projectDiscovery([
+        {
+          id: 'P-current',
+          number: 12,
+          title: 'Current',
+          readme: '<!-- custom-project-sync:v2 project-readme -->',
+          public: true,
+        },
+        {
+          id: 'P-legacy',
+          number: 13,
+          title: 'Legacy',
+          readme: LEGACY_PROJECT_README_MARKER,
+          public: true,
+        },
+      ]),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      projectMarker: 'custom-project-sync:v2',
+      issueMarker: 'custom-issue-sync:v2',
+      legacyProjectMarkers: ['psyche-bead-sync:v1'],
+      legacyIssueMarkers: ['psyche-bead-sync:v1'],
+    });
+
+    await expect(client.discoverProject()).rejects.toThrow(/multiple github projects/i);
   });
 
   it('creates an absent Project, sets it public, links the repository, and updates the README', async () => {

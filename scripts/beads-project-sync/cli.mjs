@@ -9,7 +9,12 @@ import {
   applyReconciliation,
   assertSafePlan,
   planReconciliation,
+  ReconciliationApplyError,
 } from './reconcile.mjs';
+import {
+  LEGACY_ISSUE_MARKERS,
+  LEGACY_PROJECT_MARKERS,
+} from './markers.mjs';
 import { toPublicBead } from './sanitize.mjs';
 import { createExecFileRun, loadBeadsSource } from './source.mjs';
 
@@ -52,6 +57,12 @@ import { createExecFileRun, loadBeadsSource } from './source.mjs';
  *   appliedOperationCount: number,
  *   warnings: string[],
  *   projectUrl: string | null,
+ *   failure?: {
+ *     failingOperation: Record<string, string | number | readonly number[] | null>,
+ *     cause: string,
+ *     resolvedIssueNumbersByBeadId?: Record<string, number>,
+ *     resolvedProjectItemIdsByBeadId?: Record<string, string>,
+ *   },
  * }} CliSummary
  */
 
@@ -126,13 +137,117 @@ export function parseCliOptions(argv) {
 
 /**
  * @param {unknown} error
+ * @param {readonly string[]} [secrets]
  * @returns {string}
  */
-function errorMessage(error) {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.replace(/github_pat_[A-Za-z0-9_]+/gu, '<redacted>');
+function errorMessage(error, secrets = []) {
+  let message = error instanceof Error && error.message.trim()
+    ? error.message
+    : typeof error === 'string' && error.trim()
+      ? error
+      : 'Unknown Beads Project sync failure';
+
+  for (const secret of secrets) {
+    if (secret) {
+      message = message.split(secret).join('<redacted>');
+    }
   }
-  return 'Unknown Beads Project sync failure';
+  return message
+    .replace(/(?:github_pat|gh[pousr])_[A-Za-z0-9_]+/gu, '<redacted>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer <redacted>')
+    .replace(/\{[\s\S]*\}/gu, '<record redacted>')
+    .replace(/\[[\s\S]*\]/gu, '<record redacted>')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 500);
+}
+
+/**
+ * @param {import('./reconcile.mjs').ReconciliationOperation} operation
+ * @returns {Record<string, string | number | readonly number[] | null>}
+ */
+function summarizeFailingOperation(operation) {
+  /** @type {Record<string, string | number | readonly number[] | null>} */
+  const summary = {
+    type: operation.type,
+    phase: operation.phase,
+  };
+  for (const key of [
+    'beadId',
+    'issueNumber',
+    'itemId',
+    'path',
+    'parentIssueNumber',
+    'blockerIssueNumbers',
+  ]) {
+    if (key in operation) {
+      const value = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (operation))[key];
+      if (
+        typeof value === 'string'
+        || typeof value === 'number'
+        || value === null
+        || (Array.isArray(value) && value.every((item) => typeof item === 'number'))
+      ) {
+        summary[key] = value;
+      }
+    }
+  }
+  return summary;
+}
+
+/**
+ * @template {number | string} TValue
+ * @param {ReadonlyMap<string, TValue>} values
+ * @returns {Record<string, TValue>}
+ */
+function sortedRecord(values) {
+  return Object.fromEntries(
+    [...values.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+  );
+}
+
+/**
+ * @param {ReconciliationApplyError} error
+ * @param {readonly string[]} secrets
+ */
+function summarizeApplyFailure(error, secrets) {
+  const resolvedIssueNumbersByBeadId = sortedRecord(error.issueNumbersByBeadId);
+  const resolvedProjectItemIdsByBeadId = sortedRecord(error.projectItemIdsByBeadId);
+  return {
+    failingOperation: summarizeFailingOperation(error.failingOperation),
+    cause: errorMessage(error.cause, secrets),
+    ...(Object.keys(resolvedIssueNumbersByBeadId).length === 0
+      ? {}
+      : { resolvedIssueNumbersByBeadId }),
+    ...(Object.keys(resolvedProjectItemIdsByBeadId).length === 0
+      ? {}
+      : { resolvedProjectItemIdsByBeadId }),
+  };
+}
+
+/**
+ * @param {ReconciliationApplyError} error
+ * @param {number} plannedOperationCount
+ * @param {ReturnType<typeof summarizeApplyFailure>} failure
+ * @param {WritableStream} stderr
+ */
+function writeApplyFailureDiagnostics(error, plannedOperationCount, failure, stderr) {
+  stderr.write(
+    `Beads Project sync apply failed after ${error.applied.length} of `
+    + `${plannedOperationCount} operations.\n`,
+  );
+  stderr.write(`Failing operation: ${JSON.stringify(failure.failingOperation)}\n`);
+  if (failure.resolvedIssueNumbersByBeadId) {
+    stderr.write(
+      `Resolved issue numbers: ${JSON.stringify(failure.resolvedIssueNumbersByBeadId)}\n`,
+    );
+  }
+  if (failure.resolvedProjectItemIdsByBeadId) {
+    stderr.write(
+      `Resolved project item IDs: ${JSON.stringify(failure.resolvedProjectItemIdsByBeadId)}\n`,
+    );
+  }
+  stderr.write(`Cause: ${failure.cause}\n`);
 }
 
 /**
@@ -187,6 +302,8 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
   const env = dependencies.env ?? process.env;
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
+  /** @type {string[]} */
+  const diagnosticSecrets = [];
 
   try {
     const options = parseCliOptions(argv);
@@ -194,6 +311,9 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       dependencies.configPath ?? join(cwd, '.github/beads-project-sync.json'),
     );
     const token = env.BEADS_PROJECT_TOKEN?.trim() || null;
+    if (token) {
+      diagnosticSecrets.push(token);
+    }
     if (options.mode !== 'dry-run' && !token) {
       fail(`BEADS_PROJECT_TOKEN is required for --${options.mode}`);
     }
@@ -201,6 +321,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     const run = dependencies.run ?? createExecFileRun();
     const jsonl = await loadBeadsSource({
       cwd,
+      mode: options.mode,
       inventoryFile: options.inventoryFile,
       run,
     });
@@ -213,6 +334,10 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       projectName: config.projectTitle,
       sourceRepositoryUrl: `https://github.com/${config.owner}/${config.repository}`,
       sourceRef: env.GITHUB_SHA?.trim() || 'main',
+      projectMarker: config.projectMarker,
+      issueMarker: config.issueMarker,
+      legacyProjectMarkers: LEGACY_PROJECT_MARKERS,
+      legacyIssueMarkers: LEGACY_ISSUE_MARKERS,
     };
     const warnings = [];
 
@@ -248,6 +373,10 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       owner: config.owner,
       repo: config.repository,
       token,
+      projectMarker: config.projectMarker,
+      issueMarker: config.issueMarker,
+      legacyProjectMarkers: LEGACY_PROJECT_MARKERS,
+      legacyIssueMarkers: LEGACY_ISSUE_MARKERS,
     });
     await gh.verifyAccess();
     let project = await gh.discoverProject();
@@ -328,10 +457,29 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       await gh.ensureFields();
       await gh.ensureViews();
     }
-    const applied = await applyReconciliation(plan, gh);
     const url = project == null
       ? null
       : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
+    let applied;
+    try {
+      applied = await applyReconciliation(plan, gh);
+    } catch (error) {
+      if (!(error instanceof ReconciliationApplyError)) {
+        throw error;
+      }
+      const failure = summarizeApplyFailure(error, diagnosticSecrets);
+      writeApplyFailureDiagnostics(error, plan.operations.length, failure, stderr);
+      writeSummary({
+        mode: options.mode,
+        inventory: inventorySummary,
+        plannedOperationCount: plan.operations.length,
+        appliedOperationCount: error.applied.length,
+        warnings,
+        projectUrl: url,
+        failure,
+      }, stdout);
+      return 1;
+    }
     stderr.write(`Applied ${applied.applied.length} Beads Project reconciliation operations.\n`);
     writeSummary({
       mode: options.mode,
@@ -343,7 +491,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     }, stdout);
     return 0;
   } catch (error) {
-    stderr.write(`Beads Project sync failed: ${errorMessage(error)}\n`);
+    stderr.write(`Beads Project sync failed: ${errorMessage(error, diagnosticSecrets)}\n`);
     return 1;
   }
 }

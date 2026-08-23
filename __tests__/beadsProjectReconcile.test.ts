@@ -257,6 +257,59 @@ describe('Beads project reconciliation', () => {
     expect(() => assertSafePlan(plan)).not.toThrow();
   });
 
+  it('recognizes legacy markers and plans in-place migration to configured markers', () => {
+    const inventory = finalizeInventory([makeBead('pb-legacy')]);
+    const legacyPlan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: {
+        ...baseContext,
+        projectMarker: 'psyche-bead-sync:v1',
+        issueMarker: 'psyche-bead-sync:v1',
+      },
+    });
+    const legacyIssue = legacyPlan.operations.find(
+      (operation) => operation.type === 'createIssue',
+    );
+    const legacyReadme = legacyPlan.operations.find(
+      (operation) => operation.type === 'updateReadme',
+    );
+    expect(legacyIssue?.type).toBe('createIssue');
+    expect(legacyReadme?.type).toBe('updateReadme');
+
+    const migrated = planReconciliation({
+      inventory,
+      existingIssues: [{
+        number: 42,
+        title: legacyIssue?.type === 'createIssue' ? legacyIssue.title : null,
+        body: legacyIssue?.type === 'createIssue' ? legacyIssue.body : null,
+        state: 'open',
+      }],
+      readme: {
+        body: legacyReadme?.type === 'updateReadme' ? legacyReadme.body : null,
+      },
+      renderContext: {
+        ...baseContext,
+        projectMarker: 'custom-project-sync:v2',
+        issueMarker: 'custom-issue-sync:v2',
+        legacyProjectMarkers: ['psyche-bead-sync:v1'],
+        legacyIssueMarkers: ['psyche-bead-sync:v1'],
+      },
+    });
+
+    expect(migrated.managedIssuesByBeadId.get('pb-legacy')?.number).toBe(42);
+    expect(migrated.summary.createIssueCount).toBe(0);
+    expect(migrated.summary.updateIssueCount).toBe(1);
+    expect(migrated.summary.updateReadmeCount).toBe(1);
+    expect(migrated.operations.find(
+      (operation) => operation.type === 'updateIssue',
+    )?.body).toContain('<!-- custom-issue-sync:v2 bead-id=pb-legacy -->');
+    expect(migrated.operations.find(
+      (operation) => operation.type === 'updateReadme',
+    )?.body).toContain('<!-- custom-project-sync:v2 project-readme -->');
+  });
+
   it('plans no mutations on a matching second run by using current bodies or render hashes', () => {
     const inventory = finalizeInventory([
       makeBead('pb-03', {
