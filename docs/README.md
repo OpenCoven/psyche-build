@@ -111,7 +111,7 @@ TestFlight, and public App Store distribution are unavailable. See the
 ## Contributing
 
 - [Contributing guide](../CONTRIBUTING.md)
-- [Test guide](../__tests__/README.md)
+- [Repository test guide](https://github.com/OpenCoven/psyche-build/blob/main/__tests__/README.md)
 
 When a change alters support status, roadmap dependencies, or release evidence,
 update the relevant active delivery document and owning GitHub issue in the
