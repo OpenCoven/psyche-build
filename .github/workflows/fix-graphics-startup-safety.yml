@@ -251,3 +251,5 @@ jobs:
             __tests__/tauriGraphicsDiagnostics.test.ts
           git commit -m "fix(graphics): keep startup diagnostics non-blocking"
           git push origin HEAD:feat/graphics-evidence-diagnostics
+
+# Trigger the one-shot repair after the workflow file exists on this branch.
