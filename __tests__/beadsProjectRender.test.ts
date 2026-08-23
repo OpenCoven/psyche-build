@@ -192,6 +192,16 @@ describe('Beads project renderers', () => {
         'Checkout .worktrees/public-beads-project/secret roadmap.md before continuing.',
       ),
     ).toBe('Checkout <redacted-local-path> before continuing.');
+    expect(
+      sanitizePublicText(
+        "Open .worktrees/public-beads-project/O'Reilly secret.md next.",
+      ),
+    ).toBe('Open <redacted-local-path> next.');
+    expect(
+      sanitizePublicText(
+        "Open .worktrees/public-beads-project/secret O'Reilly.md next.",
+      ),
+    ).toBe('Open <redacted-local-path> next.');
   });
 
   it('preserves prose and path-like names outside operational path boundaries', () => {

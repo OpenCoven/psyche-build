@@ -902,7 +902,6 @@ function shouldContinueUnquotedLocalPath(
       || character === '?'
       || character === ':'
       || LOCAL_PATH_CLOSING_DELIMITERS.has(character)
-      || LOCAL_PATH_QUOTE_DELIMITERS.has(character)
     ) {
       break;
     }
@@ -953,7 +952,6 @@ function findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex) {
       || character === '!'
       || character === '?'
       || LOCAL_PATH_CLOSING_DELIMITERS.has(character)
-      || LOCAL_PATH_QUOTE_DELIMITERS.has(character)
       || (
         (character === '.' || character === ':')
         && (
