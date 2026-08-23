@@ -78,6 +78,15 @@
 
 ## [0.0.1] - 2026-08-03
 
+> **Publication status:** this is the `0.0.1` release-candidate record, not
+> evidence that a public or internal distribution is currently available.
+> Public macOS/Homebrew availability remains pending
+> [#194](https://github.com/OpenCoven/psyche-build/issues/194). Internal
+> TestFlight availability remains pending
+> [#200](https://github.com/OpenCoven/psyche-build/issues/200). Before tagging,
+> the release commit must update this notice and date to match verified
+> distribution evidence.
+
 ### Orchestration
 
 - Run parallel coding agents in isolated git worktrees and tmux lanes, with clear orchestration for review, handoff, and completion.
@@ -94,11 +103,12 @@
 ### iOS Cockpit
 
 - iOS cockpit foundation for protocol and connection work, with compact navigation for smaller screens.
-- The current iOS experience is demo-first while the remote-control workflow matures.
+- The current iOS experience is demo-first while the remote-control workflow matures; source and simulator behavior do not establish live TestFlight availability.
 
-### Release Integrity
+### Distribution targets
 
-- Signed and notarized dual-architecture macOS DMGs with checksums, internal TestFlight distribution, and Homebrew availability.
+- The planned public macOS release consists of signed and notarized dual-architecture DMGs, checksums, and a Homebrew Cask that points to those exact verified assets.
+- The planned iOS delivery is an independently gated internal TestFlight companion for authorized OpenCoven testers.
 
 ### TestFlight: What to Test
 
@@ -114,5 +124,5 @@
 
 ### Known Limitations
 
-- iOS builds are distributed internally through TestFlight only.
+- This repository does not currently claim a live TestFlight build; internal distribution remains pending #200.
 - There is no Windows or Linux application in this release.
