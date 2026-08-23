@@ -385,6 +385,9 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
 /**
  * @typedef {{
  *   command?: unknown,
+ *   code?: unknown,
+ *   kind?: unknown,
+ *   name?: unknown,
  *   status?: unknown,
  *   statusCode?: unknown,
  *   exitCode?: unknown,
@@ -538,6 +541,41 @@ function isRetryable(error) {
 }
 
 /**
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isTransportFailure(error) {
+  if (errorStatus(error) != null) {
+    return false;
+  }
+
+  const candidate = /** @type {ErrorLike} */ (error ?? {});
+  if (candidate.kind === 'transport' || candidate.name === 'AbortError') {
+    return true;
+  }
+
+  const code = stringOrEmpty(candidate.code).toUpperCase();
+  if ([
+    'ABORT_ERR',
+    'ECONNABORTED',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETRESET',
+    'ENETUNREACH',
+    'EPIPE',
+    'ETIMEDOUT',
+    'UND_ERR_ABORTED',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_SOCKET',
+  ].includes(code)) {
+    return true;
+  }
+
+  return /(?:\b(?:ECONNRESET|ETIMEDOUT|aborted)\b|socket hang up|connection (?:was )?(?:closed|reset)|timed? out|timeout|unexpected eof|network error|fetch failed|broken pipe)/iu
+    .test(errorDetail(error));
+}
+
+/**
  * @param {number} attempt
  * @returns {Promise<void>}
  */
@@ -554,7 +592,11 @@ function toClientError(error) {
   if (error instanceof GhClientError) {
     return error;
   }
-  return new GhClientError('github', errorDetail(error), errorStatus(error));
+  return new GhClientError(
+    isTransportFailure(error) ? 'transport' : 'github',
+    errorDetail(error),
+    errorStatus(error),
+  );
 }
 
 /**
@@ -968,7 +1010,7 @@ export function createGhClient(options) {
     try {
       return await mutate();
     } catch (error) {
-      if (!isRetryable(error)) {
+      if (!isRetryable(error) && !isTransportFailure(error)) {
         throw toClientError(error);
       }
 

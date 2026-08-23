@@ -65,7 +65,7 @@ export interface ManagedIssueSnapshot {
     archived: boolean;
     fields: ProjectFieldValues;
   } | null;
-  parentIssueNumber: null;
+  parentIssueNumber: number | null;
   blockerIssueNumbers: number[];
   url?: string;
 }

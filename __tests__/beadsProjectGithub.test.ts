@@ -9,6 +9,7 @@ import type {
   GhRun,
   GhRunOptions,
   GhRunResult,
+  ManagedIssueSnapshot,
 } from '../scripts/beads-project-sync/github.mjs';
 import type { ReconciliationAdapters } from '../scripts/beads-project-sync/reconcile.mjs';
 
@@ -130,6 +131,23 @@ function linkedRepositoriesPage(
 }
 
 describe('createGhClient', () => {
+  it('allows managed issue snapshots to include a parent issue number', () => {
+    const snapshot: ManagedIssueSnapshot = {
+      beadId: 'pb-child',
+      number: 2,
+      title: 'Child',
+      body: managedBody('pb-child'),
+      state: 'open',
+      assignee: null,
+      renderHash: null,
+      projectItem: null,
+      parentIssueNumber: 1,
+      blockerIssueNumbers: [],
+    };
+
+    expect(snapshot.parentIssueNumber).toBe(1);
+  });
+
   it('verifies gh authentication plus repository and organization access with safe argument arrays', async () => {
     const runner = createRunner([success(''), success({ id: 1 }), success({ id: 2 })]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
@@ -556,6 +574,36 @@ describe('createGhClient', () => {
 
     await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
       id: 'P-applied',
+      readme,
+      public: true,
+    });
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject'),
+    )).toHaveLength(1);
+  });
+
+  it('re-reads a newly created Project after an applied-then-transport failure', async () => {
+    const readme = `${PROJECT_README_MARKER}\n# Public Beads`;
+    const transportFailure = Object.assign(new Error('request failed'), { code: 'ECONNRESET' });
+    const created = {
+      id: 'P-transport-applied',
+      number: 19,
+      title: 'Public Beads',
+      readme: '',
+      public: false,
+    };
+    const runner = createRunner([
+      projectDiscovery([]),
+      transportFailure,
+      projectDiscovery([created]),
+      success({ data: { updateProjectV2: { projectV2: { ...created, readme, public: true } } } }),
+      linkedRepositoriesPage([]),
+      success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
+      id: 'P-transport-applied',
       readme,
       public: true,
     });
@@ -1238,6 +1286,57 @@ describe('createGhClient', () => {
     expect(runner.calls[1]?.args).toContain(
       `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
     );
+  });
+
+  it('re-reads issue identity after an applied-then-transport failure without repeating the POST', async () => {
+    const transportFailure = Object.assign(new Error('request failed'), { code: 'ETIMEDOUT' });
+    const body = managedBody('pb-transport-applied');
+    const runner = createRunner([
+      transportFailure,
+      success([{
+        number: 78,
+        node_id: 'ISSUE-78',
+        title: '[pb-transport-applied] Applied',
+        body,
+        state: 'open',
+        html_url: `https://github.com/${owner}/${repo}/issues/78`,
+      }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.createIssue({
+      beadId: 'pb-transport-applied',
+      title: '[pb-transport-applied] Applied',
+      body,
+    })).resolves.toMatchObject({ number: 78 });
+    expect(runner.calls.filter((call) => call.args.includes('--method')
+      && call.args.includes('POST'))).toHaveLength(1);
+    expect(runner.calls[1]?.args).toContain(
+      `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
+    );
+  });
+
+  it.each([
+    Object.assign(new Error('request failed'), { code: 'ECONNRESET' }),
+    Object.assign(new Error('request failed'), { code: 'ETIMEDOUT' }),
+    new Error('ECONNRESET'),
+    new Error('ETIMEDOUT'),
+    new Error('socket hang up'),
+    new Error('aborted'),
+    Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
+  ])('surfaces structured ambiguity when transport failure %s cannot be verified', async (failure) => {
+    const runner = createRunner([failure, success([])]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.createIssue({
+      beadId: 'pb-transport-unknown',
+      title: '[pb-transport-unknown] Unknown',
+      body: managedBody('pb-transport-unknown'),
+    })).rejects.toMatchObject({
+      kind: 'ambiguous',
+      status: undefined,
+    });
+    expect(runner.calls).toHaveLength(2);
   });
 
   it('surfaces structured ambiguity when a retryable issue create cannot be verified', async () => {
