@@ -47,35 +47,27 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import re
           from pathlib import Path
 
           source_path = Path('native/desktop/psyche-build-tauri/web/runtime/graphics-diagnostics.ts')
           source = source_path.read_text()
 
-          old_catch = """  } catch (error) {
-            (deps.reportError ?? defaultReportError)(error, 'collect runtime graphics report');
-            return null;
-          }
-          """
-          new_catch = """  } catch (error) {
+          source, catch_count = re.subn(
+              r"(?m)^  } catch \(error\) \{\n    \(deps\.reportError \?\? defaultReportError\)\(error, 'collect runtime graphics report'\);\n    return null;\n  }$",
+              """  } catch (error) {
             safelyReportRuntimeGraphicsError(deps, error);
             return null;
-          }
-          """
-          if source.count(old_catch) != 1:
-              raise SystemExit(f'expected one report-error catch block, found {source.count(old_catch)}')
-          source = source.replace(old_catch, new_catch, 1)
+          }""",
+              source,
+              count=1,
+          )
+          if catch_count != 1:
+              raise SystemExit(f'expected one report-error catch block, found {catch_count}')
 
-          old_ensure = """  if (!startupState.inFlight) {
-            startupState.inFlight = collectRuntimeGraphicsReport(deps).then((report) => {
-              if (report) (deps.log ?? defaultLog)('[psyche:graphics]', report);
-              return report;
-            });
-          }
-
-          return startupState.inFlight;
-          """
-          new_ensure = """  if (!startupState.inFlight) {
+          source, ensure_count = re.subn(
+              r"(?ms)^  if \(!startupState\.inFlight\) \{\n    startupState\.inFlight = collectRuntimeGraphicsReport\(deps\)\.then\(\(report\) => \{\n      if \(report\) \(deps\.log \?\? defaultLog\)\('\[psyche:graphics\]', report\);\n      return report;\n    \}\);\n  \}\n\n  return startupState\.inFlight;$",
+              """  if (!startupState.inFlight) {
             const invoke = deps.invoke ?? defaultInvoke();
             // Tauri installs its global bridge after the module can begin loading.
             // A missing default invoke is retryable and must not be cached.
@@ -87,11 +79,12 @@ jobs:
             });
           }
 
-          return startupState.inFlight;
-          """
-          if source.count(old_ensure) != 1:
-              raise SystemExit(f'expected one startup cache block, found {source.count(old_ensure)}')
-          source = source.replace(old_ensure, new_ensure, 1)
+          return startupState.inFlight;""",
+              source,
+              count=1,
+          )
+          if ensure_count != 1:
+              raise SystemExit(f'expected one startup cache block, found {ensure_count}')
 
           helper_anchor = "function defaultLog(label: '[psyche:graphics]', report: RuntimeGraphicsReport): void {\n"
           helpers = """function safelyReportRuntimeGraphicsError(
