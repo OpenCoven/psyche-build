@@ -19,6 +19,14 @@ import {
   listWorktreeRecoveryMarkers,
 } from '../../src/services/WorktreeRecoveryMarker.js';
 
+// These tests provide their own tmux effect boundary and exercise bridge
+// transaction semantics, not the machine-wide live-pane guard. Keep rollback
+// assertions isolated from unrelated tmux servers started by parallel suites.
+vi.mock('../../src/services/LiveTmuxWorktreeGuard.js', () => ({
+  inspectLiveTmuxWorktreeConsumers: () => ({ state: 'safe' }),
+  describeLiveTmuxWorktreeGuard: () => 'no live tmux pane is using the worktree',
+}));
+
 let root: string;
 let nextMockPaneId = 9;
 const mockTmuxServerIdentity = {
