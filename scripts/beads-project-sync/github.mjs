@@ -138,6 +138,24 @@ mutation LinkManagedProject($projectId: ID!, $repositoryId: ID!) {
 }
 `.trim();
 
+const DISCOVER_LINKED_REPOSITORIES_QUERY = `
+query DiscoverLinkedProjectRepositories($projectId: ID!, $cursor: String) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      repositories(first: 100, after: $cursor) {
+        nodes {
+          id
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+`.trim();
+
 const DISCOVER_FIELDS_QUERY = `
 query DiscoverManagedProjectFields($projectId: ID!, $cursor: String) {
   node(id: $projectId) {
@@ -257,6 +275,59 @@ mutation UpdateManagedProjectView($input: UpdateProjectV2ViewInput!) {
       name
       layout
       filter
+    }
+  }
+}
+`.trim();
+
+const DISCOVER_ITEMS_QUERY = `
+query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      items(first: 100, after: $cursor, archivedStates: [ARCHIVED, NOT_ARCHIVED]) {
+        nodes {
+          id
+          isArchived
+          content {
+            ... on Issue {
+              id
+              url
+            }
+          }
+          fieldValues(first: 100) {
+            nodes {
+              ... on ProjectV2ItemFieldDateValue {
+                date
+                field {
+                  ... on ProjectV2FieldCommon {
+                    name
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
+                field {
+                  ... on ProjectV2FieldCommon {
+                    name
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldTextValue {
+                text
+                field {
+                  ... on ProjectV2FieldCommon {
+                    name
+                  }
+                }
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
     }
   }
 }
@@ -622,6 +693,63 @@ function normalizeView(raw) {
 
 /**
  * @param {string} body
+ * @returns {string}
+ */
+function statusFromBody(body) {
+  return body.match(/^- Status:\s*`([^`\r\n]+)`\s*$/imu)?.[1]?.trim().toLowerCase() || 'open';
+}
+
+/**
+ * @param {unknown} rawValues
+ * @param {string} issueBody
+ * @returns {Record<string, string | number | boolean | null>}
+ */
+function normalizeProjectItemFields(rawValues, issueBody) {
+  /** @type {Record<string, string | number | boolean | null>} */
+  const fields = {};
+
+  for (const rawValue of array(record(rawValues).nodes)) {
+    const value = record(rawValue);
+    const fieldName = stringOrEmpty(record(value.field).name);
+    if (fieldName === 'Bead ID' && typeof value.text === 'string') {
+      fields.beadId = value.text;
+    } else if (fieldName === 'Parent Goal' && typeof value.text === 'string') {
+      fields.parentGoal = value.text;
+    } else if (fieldName === 'Source Updated' && typeof value.date === 'string') {
+      fields.sourceUpdated = value.date;
+    } else if (fieldName === 'Priority' && typeof value.name === 'string') {
+      const match = value.name.match(/^P([0-4])$/u);
+      if (match) {
+        fields.priority = Number(match[1]);
+      }
+    } else if (fieldName === 'Bead Type' && typeof value.name === 'string') {
+      fields.type = value.name.toLowerCase();
+    } else if (fieldName === 'Status' && typeof value.name === 'string') {
+      fields.blocked = value.name === 'Blocked';
+      fields.done = value.name === 'Done';
+      fields.status = {
+        Backlog: 'open',
+        Ready: 'ready',
+        'In Progress': 'in_progress',
+        Blocked: statusFromBody(issueBody),
+        Done: 'closed',
+      }[value.name] ?? value.name.toLowerCase();
+    }
+  }
+
+  return fields;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizeUrl(value) {
+  return typeof value === 'string' ? value.replace(/\/+$/u, '') : '';
+}
+
+/**
+ * @param {string} body
  * @param {number} issueNumber
  * @returns {string | null}
  */
@@ -748,6 +876,8 @@ export function createGhClient(options) {
   let repositoryId = null;
   /** @type {Map<number, number>} */
   const issueDatabaseIds = new Map();
+  /** @type {ProjectContext[]} */
+  let lastDiscoveredProjects = [];
 
   /**
    * @template TValue
@@ -770,24 +900,34 @@ export function createGhClient(options) {
 
   /**
    * @param {readonly string[]} args
+   * @param {string | undefined} stdin
+   * @returns {Promise<GhRunResult>}
+   */
+  async function runGhOnce(args, stdin) {
+    const runOptions = {
+      env: { GH_TOKEN: token },
+      ...(stdin === undefined ? {} : { stdin }),
+    };
+    const result = normalizeRunResult(await run('gh', args, runOptions));
+    if ((result.exitCode ?? 0) !== 0) {
+      throw Object.assign(
+        new Error(result.stderr || `GitHub command exited with code ${result.exitCode}`),
+        { exitCode: result.exitCode, stderr: result.stderr },
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Safe reads and exact-value updates may retry because repeating them cannot
+   * create a second GitHub resource or relationship.
+   *
+   * @param {readonly string[]} args
    * @param {string | undefined} [stdin]
    * @returns {Promise<GhRunResult>}
    */
   async function runGh(args, stdin) {
-    return withRetry(async () => {
-      const runOptions = {
-        env: { GH_TOKEN: token },
-        ...(stdin === undefined ? {} : { stdin }),
-      };
-      const result = normalizeRunResult(await run('gh', args, runOptions));
-      if ((result.exitCode ?? 0) !== 0) {
-        throw Object.assign(
-          new Error(result.stderr || `GitHub command exited with code ${result.exitCode}`),
-          { exitCode: result.exitCode, stderr: result.stderr },
-        );
-      }
-      return result;
-    });
+    return withRetry(() => runGhOnce(args, stdin));
   }
 
   /**
@@ -805,11 +945,88 @@ export function createGhClient(options) {
       ...API_HEADERS,
       ...(body === undefined ? [] : ['--input', '-']),
     ];
-    const result = await runGh(
-      args,
-      body === undefined ? undefined : `${JSON.stringify(body)}\n`,
-    );
-    return parseJson(result.stdout, `${method} ${endpoint}`);
+    const execute = method === 'GET' || method === 'PATCH' ? runGh : runGhOnce;
+    try {
+      const result = await execute(
+        args,
+        body === undefined ? undefined : `${JSON.stringify(body)}\n`,
+      );
+      return parseJson(result.stdout, `${method} ${endpoint}`);
+    } catch (error) {
+      throw toClientError(error);
+    }
+  }
+
+  /**
+   * @template TValue
+   * @param {string} description
+   * @param {() => Promise<TValue>} mutate
+   * @param {() => Promise<TValue | null>} reread
+   * @returns {Promise<TValue>}
+   */
+  async function ambiguousMutation(description, mutate, reread) {
+    try {
+      return await mutate();
+    } catch (error) {
+      if (!isRetryable(error)) {
+        throw toClientError(error);
+      }
+
+      try {
+        const applied = await reread();
+        if (applied != null) {
+          return applied;
+        }
+      } catch {
+        throw new GhClientError(
+          'ambiguous',
+          `${description} may have succeeded, but its identity could not be verified`,
+          errorStatus(error),
+        );
+      }
+
+      throw new GhClientError(
+        'ambiguous',
+        `${description} may have succeeded, but no matching identity was found`,
+        errorStatus(error),
+      );
+    }
+  }
+
+  /**
+   * @param {string} endpoint
+   * @returns {Promise<unknown | null>}
+   */
+  async function getOrNull(endpoint) {
+    try {
+      return await rest('GET', endpoint);
+    } catch (error) {
+      if (errorStatus(error) === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * @param {string} query
+   * @param {Record<string, unknown>} variables
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function graphqlOnce(query, variables) {
+    const result = normalizeRunResult(await run('gh', ['api', 'graphql', '--input', '-'], {
+      env: { GH_TOKEN: token },
+      stdin: `${JSON.stringify({ query, variables })}\n`,
+    }));
+    if ((result.exitCode ?? 0) !== 0) {
+      throw Object.assign(
+        new Error(result.stderr || `GitHub GraphQL command exited with code ${result.exitCode}`),
+        { exitCode: result.exitCode, stderr: result.stderr },
+      );
+    }
+    const payload = parseJsonObject(result.stdout, 'GitHub GraphQL');
+    assertNoGraphqlErrors(payload);
+    return payload;
   }
 
   /**
@@ -818,21 +1035,7 @@ export function createGhClient(options) {
    * @returns {Promise<Record<string, unknown>>}
    */
   async function graphql(query, variables) {
-    return withRetry(async () => {
-      const result = normalizeRunResult(await run('gh', ['api', 'graphql', '--input', '-'], {
-        env: { GH_TOKEN: token },
-        stdin: `${JSON.stringify({ query, variables })}\n`,
-      }));
-      if ((result.exitCode ?? 0) !== 0) {
-        throw Object.assign(
-          new Error(result.stderr || `GitHub GraphQL command exited with code ${result.exitCode}`),
-          { exitCode: result.exitCode, stderr: result.stderr },
-        );
-      }
-      const payload = parseJsonObject(result.stdout, 'GitHub GraphQL');
-      assertNoGraphqlErrors(payload);
-      return payload;
-    });
+    return withRetry(() => graphqlOnce(query, variables));
   }
 
   /**
@@ -873,10 +1076,139 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {string} beadId
+   * @returns {Promise<Record<string, unknown> | null>}
+   */
+  async function findIssueByBeadId(beadId) {
+    const matches = [];
+    for (const rawIssue of await listRepositoryIssues()) {
+      const issue = record(rawIssue);
+      if (issue.pull_request != null) {
+        continue;
+      }
+      const number = positiveInteger(issue.number, 'issue number');
+      if (extractBeadId(stringOrEmpty(issue.body), number) === beadId) {
+        matches.push(issue);
+      }
+    }
+    if (matches.length > 1) {
+      throw new GhClientError('marker', `Duplicate managed Bead id "${beadId}"`);
+    }
+    return matches[0] ?? null;
+  }
+
+  /**
+   * @returns {Promise<Record<string, unknown>[]>}
+   */
+  async function listProjectItems() {
+    const project = requireProject();
+    const items = [];
+    let cursor = null;
+
+    for (;;) {
+      const payload = await graphql(DISCOVER_ITEMS_QUERY, {
+        projectId: project.id,
+        cursor,
+      });
+      const data = record(payload.data);
+      const node = record(data.node);
+      const connection = record(node.items);
+      for (const rawItem of array(connection.nodes)) {
+        items.push(record(rawItem));
+      }
+      const pageInfo = record(connection.pageInfo);
+      if (pageInfo.hasNextPage !== true) {
+        return items;
+      }
+      cursor = requiredString(pageInfo.endCursor, 'project item page cursor');
+    }
+  }
+
+  /**
+   * @param {string} issueUrl
+   * @returns {Promise<Record<string, unknown> | null>}
+   */
+  async function findProjectItemByIssueUrl(issueUrl) {
+    const normalizedIssueUrl = normalizeUrl(issueUrl);
+    const matches = (await listProjectItems()).filter((rawItem) =>
+      normalizeUrl(record(record(rawItem).content).url) === normalizedIssueUrl);
+    if (matches.length > 1) {
+      throw new GhClientError('project', `Issue "${normalizedIssueUrl}" has multiple Project items`);
+    }
+    return matches[0] ?? null;
+  }
+
+  /**
+   * @param {number} issueNumber
+   * @returns {Promise<number[]>}
+   */
+  async function listBlockerIssueNumbers(issueNumber) {
+    const blockers = [];
+    for (let page = 1; ; page += 1) {
+      const pageItems = array(await rest(
+        'GET',
+        `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by?per_page=100&page=${page}`,
+      ));
+      for (const rawBlocker of pageItems) {
+        blockers.push(positiveInteger(record(rawBlocker).number, 'blocker issue number'));
+      }
+      if (pageItems.length < 100) {
+        return [...new Set(blockers)].sort((left, right) => left - right);
+      }
+    }
+  }
+
+  /**
+   * @param {string} endpoint
+   * @param {number} databaseId
+   * @returns {Promise<Record<string, unknown> | null>}
+   */
+  async function findIssueInConnection(endpoint, databaseId) {
+    const matches = [];
+    for (let page = 1; ; page += 1) {
+      const pageItems = array(await rest(
+        'GET',
+        `${endpoint}?per_page=100&page=${page}`,
+      ));
+      for (const rawIssue of pageItems) {
+        const issue = record(rawIssue);
+        if (issue.id === databaseId) {
+          matches.push(issue);
+        }
+      }
+      if (pageItems.length < 100) {
+        break;
+      }
+    }
+    if (matches.length > 1) {
+      throw new GhClientError('relationship', `GitHub returned duplicate issue id ${databaseId}`);
+    }
+    return matches[0] ?? null;
+  }
+
+  /**
    * @returns {Promise<Record<string, unknown>[]>}
    */
   async function listManagedIssues() {
     const rawIssues = await listRepositoryIssues();
+    /** @type {Array<{
+     *   beadId: string,
+     *   number: number,
+     *   issueNodeId?: string,
+     *   title: string | null,
+     *   body: string | null,
+     *   state: string,
+     *   assignee: string | null,
+     *   renderHash: string | null,
+     *   projectItem: {
+     *     id: string,
+     *     archived: boolean,
+     *     fields: Record<string, string | number | boolean | null>,
+     *   } | null,
+     *   parentIssueNumber: number | null,
+     *   blockerIssueNumbers: number[],
+     *   url?: string,
+     * }>} */
     const managed = [];
     const seen = new Map();
 
@@ -906,6 +1238,7 @@ export function createGhClient(options) {
       managed.push({
         beadId,
         number,
+        ...(typeof issue.node_id === 'string' ? { issueNodeId: issue.node_id } : {}),
         title: typeof issue.title === 'string' ? issue.title : null,
         body: typeof issue.body === 'string' ? issue.body : null,
         state: typeof issue.state === 'string' ? issue.state : 'open',
@@ -916,6 +1249,56 @@ export function createGhClient(options) {
         blockerIssueNumbers: [],
         ...(typeof issue.html_url === 'string' ? { url: issue.html_url } : {}),
       });
+    }
+
+    if (!projectContext) {
+      await discoverProject();
+    }
+
+    if (projectContext) {
+      const byNodeId = new Map();
+      const byUrl = new Map();
+      for (const rawItem of await listProjectItems()) {
+        const item = record(rawItem);
+        const content = record(item.content);
+        const nodeId = stringOrEmpty(content.id);
+        const url = normalizeUrl(content.url);
+        if (!nodeId && !url) {
+          continue;
+        }
+        if ((nodeId && byNodeId.has(nodeId)) || (url && byUrl.has(url))) {
+          throw new GhClientError('project', 'A managed issue has multiple GitHub Project items');
+        }
+        if (nodeId) {
+          byNodeId.set(nodeId, item);
+        }
+        if (url) {
+          byUrl.set(url, item);
+        }
+      }
+
+      for (const issue of managed) {
+        const item = (issue.issueNodeId ? byNodeId.get(issue.issueNodeId) : null)
+          ?? (issue.url ? byUrl.get(normalizeUrl(issue.url)) : null);
+        if (item) {
+          issue.projectItem = {
+            id: requiredString(item.id, 'project item id'),
+            archived: item.isArchived === true,
+            fields: normalizeProjectItemFields(record(item.fieldValues), issue.body ?? ''),
+          };
+        }
+      }
+    }
+
+    for (const issue of managed) {
+      const parent = record(await getOrNull(
+        `repos/${owner}/${repo}/issues/${issue.number}/parent`,
+      ));
+      issue.parentIssueNumber = parent.number == null
+        ? null
+        : positiveInteger(parent.number, 'parent issue number');
+      issue.blockerIssueNumbers = await listBlockerIssueNumbers(issue.number);
+      delete issue.issueNodeId;
     }
 
     return managed;
@@ -951,10 +1334,10 @@ export function createGhClient(options) {
   }
 
   /**
-   * @returns {Promise<ProjectContext | null>}
+   * @returns {Promise<ProjectContext[]>}
    */
-  async function discoverProject() {
-    const matches = [];
+  async function discoverProjects() {
+    const projectsFound = [];
     let cursor = null;
 
     for (;;) {
@@ -973,10 +1356,7 @@ export function createGhClient(options) {
       }
 
       for (const rawProject of array(projects.nodes)) {
-        const project = normalizeProject(rawProject);
-        if (project.readme.includes(PROJECT_README_MARKER)) {
-          matches.push(project);
-        }
+        projectsFound.push(normalizeProject(rawProject));
       }
 
       if (pageInfo.hasNextPage !== true) {
@@ -985,11 +1365,68 @@ export function createGhClient(options) {
       cursor = requiredString(pageInfo.endCursor, 'project page cursor');
     }
 
+    lastDiscoveredProjects = projectsFound;
+    return projectsFound;
+  }
+
+  /**
+   * @returns {Promise<ProjectContext | null>}
+   */
+  async function discoverProject() {
+    const matches = (await discoverProjects())
+      .filter((project) => project.readme.includes(PROJECT_README_MARKER));
     if (matches.length > 1) {
       throw new GhClientError('marker', 'Multiple GitHub Projects contain the managed README marker');
     }
     projectContext = matches[0] ?? null;
     return projectContext;
+  }
+
+  /**
+   * @param {string} projectId
+   * @returns {Promise<boolean>}
+   */
+  async function isProjectLinkedToRepository(projectId) {
+    if (!repositoryId) {
+      throw new GhClientError('permission', 'Unable to resolve repository access');
+    }
+    let cursor = null;
+    for (;;) {
+      const payload = await graphql(DISCOVER_LINKED_REPOSITORIES_QUERY, {
+        projectId,
+        cursor,
+      });
+      const connection = record(record(record(payload.data).node).repositories);
+      if (array(connection.nodes).some((rawRepository) => record(rawRepository).id === repositoryId)) {
+        return true;
+      }
+      const pageInfo = record(connection.pageInfo);
+      if (pageInfo.hasNextPage !== true) {
+        return false;
+      }
+      cursor = requiredString(pageInfo.endCursor, 'linked repository page cursor');
+    }
+  }
+
+  /**
+   * @param {ProjectContext} project
+   * @returns {Promise<void>}
+   */
+  async function ensureProjectLinked(project) {
+    if (!repositoryId) {
+      throw new GhClientError('permission', 'Unable to resolve repository access');
+    }
+    if (await isProjectLinkedToRepository(project.id)) {
+      return;
+    }
+    await ambiguousMutation(
+      `Repository link for Project "${project.id}"`,
+      () => graphqlOnce(LINK_PROJECT_MUTATION, {
+        projectId: project.id,
+        repositoryId,
+      }),
+      async () => await isProjectLinkedToRepository(project.id) ? {} : null,
+    );
   }
 
   /**
@@ -1014,16 +1451,31 @@ export function createGhClient(options) {
         const updatedData = record(record(updatedPayload.data).updateProjectV2);
         projectContext = normalizeProject(updatedData.projectV2);
       }
+      await ensureProjectLinked(requireProject());
       return requireProject();
     }
 
     if (!organizationId || !repositoryId) {
       throw new GhClientError('permission', 'Unable to resolve organization or repository access');
     }
-    const createdPayload = await graphql(CREATE_PROJECT_MUTATION, {
-      ownerId: organizationId,
-      title,
-    });
+    const priorProjectIds = new Set(lastDiscoveredProjects.map((project) => project.id));
+    const createdPayload = await ambiguousMutation(
+      `Project create for "${title}"`,
+      () => graphqlOnce(CREATE_PROJECT_MUTATION, {
+        ownerId: organizationId,
+        title,
+      }),
+      async () => {
+        const candidates = (await discoverProjects()).filter((project) =>
+          project.title === title && !priorProjectIds.has(project.id));
+        if (candidates.length > 1) {
+          throw new GhClientError('ambiguous', `Multiple newly created Projects are named "${title}"`);
+        }
+        return candidates[0] == null
+          ? null
+          : { data: { createProjectV2: { projectV2: candidates[0] } } };
+      },
+    );
     const createdData = record(record(createdPayload.data).createProjectV2);
     const created = normalizeProject(createdData.projectV2);
 
@@ -1044,10 +1496,7 @@ export function createGhClient(options) {
       public: true,
     };
 
-    await graphql(LINK_PROJECT_MUTATION, {
-      projectId: created.id,
-      repositoryId,
-    });
+    await ensureProjectLinked(requireProject());
     return requireProject();
   }
 
@@ -1095,16 +1544,32 @@ export function createGhClient(options) {
     for (const definition of FIELD_DEFINITIONS) {
       const field = current.get(definition.name);
       if (!field) {
-        await graphql(CREATE_FIELD_MUTATION, {
-          input: {
-            projectId: project.id,
-            name: definition.name,
-            dataType: definition.dataType,
-            ...(definition.options.length > 0
-              ? { singleSelectOptions: definition.options.map((option) => ({ ...option })) }
-              : {}),
+        await ambiguousMutation(
+          `Project field create for "${definition.name}"`,
+          () => graphqlOnce(CREATE_FIELD_MUTATION, {
+            input: {
+              projectId: project.id,
+              name: definition.name,
+              dataType: definition.dataType,
+              ...(definition.options.length > 0
+                ? { singleSelectOptions: definition.options.map((option) => ({ ...option })) }
+                : {}),
+            },
+          }),
+          async () => {
+            const discovered = (await discoverFields()).get(definition.name);
+            if (!discovered) {
+              return null;
+            }
+            if (discovered.dataType && discovered.dataType !== definition.dataType) {
+              throw new GhClientError(
+                'validation',
+                `Project field "${definition.name}" has type ${discovered.dataType}; expected ${definition.dataType}`,
+              );
+            }
+            return {};
           },
-        });
+        );
         changed = true;
         continue;
       }
@@ -1178,8 +1643,39 @@ export function createGhClient(options) {
     for (const desired of PROJECT_VIEWS) {
       const existing = byName.get(desired.name);
       if (!existing) {
-        await graphql(CREATE_VIEW_MUTATION, {
-          input: { projectId: project.id, ...desired },
+        const createdPayload = await ambiguousMutation(
+          `Project view create for "${desired.name}"`,
+          () => graphqlOnce(CREATE_VIEW_MUTATION, {
+            input: {
+              projectId: project.id,
+              name: desired.name,
+              layout: desired.layout,
+            },
+          }),
+          async () => {
+            const matches = (await discoverViews())
+              .filter((view) => view.name === desired.name);
+            if (matches.length > 1) {
+              throw new GhClientError(
+                'ambiguous',
+                `Multiple Project views are named "${desired.name}"`,
+              );
+            }
+            return matches[0] == null
+              ? null
+              : { data: { createProjectV2View: { projectV2View: matches[0] } } };
+          },
+        );
+        const createdData = record(record(createdPayload.data).createProjectV2View);
+        const created = normalizeView(createdData.projectV2View);
+        if (!created) {
+          throw new GhClientError('response', `GitHub did not return created view "${desired.name}"`);
+        }
+        await graphql(UPDATE_VIEW_MUTATION, {
+          input: {
+            viewId: created.id,
+            filter: desired.filter,
+          },
         });
         changed = true;
         continue;
@@ -1187,7 +1683,6 @@ export function createGhClient(options) {
       if (existing.layout !== desired.layout || existing.filter !== desired.filter) {
         await graphql(UPDATE_VIEW_MUTATION, {
           input: {
-            projectId: project.id,
             viewId: existing.id,
             ...desired,
           },
@@ -1213,7 +1708,16 @@ export function createGhClient(options) {
       labels: labelsFromBody(body),
       ...(operation?.assignee === undefined ? {} : { assignees: assignee ? [assignee] : [] }),
     };
-    const created = record(await rest('POST', `repos/${owner}/${repo}/issues`, payload));
+    const bodyBeadId = extractBeadId(body, 1);
+    const beadId = requiredString(operation?.beadId ?? bodyBeadId, 'managed Bead id');
+    if (!SAFE_BEAD_ID_PATTERN.test(beadId) || bodyBeadId !== beadId) {
+      fail('createIssue requires one matching managed Bead id marker');
+    }
+    const created = record(await ambiguousMutation(
+      `Issue create for Bead "${beadId}"`,
+      () => rest('POST', `repos/${owner}/${repo}/issues`, payload),
+      () => findIssueByBeadId(beadId),
+    ));
     return {
       ...created,
       number: positiveInteger(created.number, 'created issue number'),
@@ -1299,18 +1803,29 @@ export function createGhClient(options) {
   async function ensureProjectItem(operation) {
     const project = requireProject();
     const issueNumber = issueNumberFrom(operation);
-    const result = await runGh([
-      'project',
-      'item-add',
-      String(project.number),
-      '--owner',
-      owner,
-      '--url',
-      `https://github.com/${owner}/${repo}/issues/${issueNumber}`,
-      '--format',
-      'json',
-    ]);
-    const item = parseJsonObject(result.stdout, 'gh project item-add');
+    const issueUrl = `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
+    const existing = await findProjectItemByIssueUrl(issueUrl);
+    if (existing) {
+      return { id: requiredString(existing.id, 'project item id') };
+    }
+    const item = await ambiguousMutation(
+      `Project item add for issue #${issueNumber}`,
+      async () => {
+        const result = await runGhOnce([
+          'project',
+          'item-add',
+          String(project.number),
+          '--owner',
+          owner,
+          '--url',
+          issueUrl,
+          '--format',
+          'json',
+        ], undefined);
+        return parseJsonObject(result.stdout, 'gh project item-add');
+      },
+      () => findProjectItemByIssueUrl(issueUrl),
+    );
     const id = requiredString(item.id ?? record(item.item).id, 'project item id');
     return { id };
   }
@@ -1425,16 +1940,16 @@ export function createGhClient(options) {
   async function setFields(operation) {
     const itemId = requiredString(operation?.itemId, 'project item id');
     const values = record(operation?.fields);
+    /** @type {{field: ProjectFieldContext, valueArgs: string[]}[]} */
     const updates = [];
 
     if (Object.hasOwn(values, 'beadId')) {
       const field = requireField('Bead ID');
       const value = values.beadId;
-      updates.push(editProjectField(
-        itemId,
+      updates.push({
         field,
-        value == null ? ['--clear'] : ['--text', requiredString(value, 'Bead ID')],
-      ));
+        valueArgs: value == null ? ['--clear'] : ['--text', requiredString(value, 'Bead ID')],
+      });
     }
     if (
       Object.hasOwn(values, 'status')
@@ -1442,51 +1957,59 @@ export function createGhClient(options) {
       || Object.hasOwn(values, 'done')
     ) {
       const field = requireField('Status');
-      updates.push(editProjectField(itemId, field, [
-        '--single-select-option-id',
-        requireOption('Status', desiredStatus(values)),
-      ]));
+      updates.push({
+        field,
+        valueArgs: [
+          '--single-select-option-id',
+          requireOption('Status', desiredStatus(values)),
+        ],
+      });
     }
     if (Object.hasOwn(values, 'priority')) {
       const field = requireField('Priority');
-      updates.push(editProjectField(itemId, field, [
-        '--single-select-option-id',
-        requireOption('Priority', desiredPriority(values.priority)),
-      ]));
+      updates.push({
+        field,
+        valueArgs: [
+          '--single-select-option-id',
+          requireOption('Priority', desiredPriority(values.priority)),
+        ],
+      });
     }
     if (Object.hasOwn(values, 'type')) {
       const field = requireField('Bead Type');
-      updates.push(editProjectField(itemId, field, [
-        '--single-select-option-id',
-        requireOption('Bead Type', desiredType(values.type)),
-      ]));
+      updates.push({
+        field,
+        valueArgs: [
+          '--single-select-option-id',
+          requireOption('Bead Type', desiredType(values.type)),
+        ],
+      });
     }
     if (Object.hasOwn(values, 'parentGoal')) {
       const field = requireField('Parent Goal');
-      updates.push(editProjectField(
-        itemId,
+      updates.push({
         field,
-        values.parentGoal == null
+        valueArgs: values.parentGoal == null
           ? ['--clear']
           : ['--text', requiredString(values.parentGoal, 'Parent Goal')],
-      ));
+      });
     }
     if (Object.hasOwn(values, 'sourceUpdated')) {
       const field = requireField('Source Updated');
       if (values.sourceUpdated == null) {
-        updates.push(editProjectField(itemId, field, ['--clear']));
+        updates.push({ field, valueArgs: ['--clear'] });
       } else {
         const timestamp = requiredString(values.sourceUpdated, 'Source Updated');
         const date = timestamp.slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
           fail('Source Updated must start with an ISO date');
         }
-        updates.push(editProjectField(itemId, field, ['--date', date]));
+        updates.push({ field, valueArgs: ['--date', date] });
       }
     }
 
     for (const update of updates) {
-      await update;
+      await editProjectField(itemId, update.field, update.valueArgs);
     }
   }
 
@@ -1516,10 +2039,11 @@ export function createGhClient(options) {
   async function addSubIssue(operation) {
     const parentIssueNumber = positiveInteger(operation?.parentIssueNumber, 'parent issue number');
     const subIssueId = positiveInteger(operation?.subIssueId, 'sub-issue database id');
-    return rest(
-      'POST',
-      `repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issues`,
-      { sub_issue_id: subIssueId },
+    const endpoint = `repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issues`;
+    return ambiguousMutation(
+      `Sub-issue relationship add for parent #${parentIssueNumber}`,
+      () => rest('POST', endpoint, { sub_issue_id: subIssueId }),
+      () => findIssueInConnection(endpoint, subIssueId),
     );
   }
 
@@ -1544,10 +2068,11 @@ export function createGhClient(options) {
   async function addBlockedBy(operation) {
     const issueNumber = positiveInteger(operation?.issueNumber, 'issue number');
     const blockerIssueId = positiveInteger(operation?.blockerIssueId, 'blocker issue database id');
-    return rest(
-      'POST',
-      `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by`,
-      { issue_id: blockerIssueId },
+    const endpoint = `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by`;
+    return ambiguousMutation(
+      `Blocked-by relationship add for issue #${issueNumber}`,
+      () => rest('POST', endpoint, { issue_id: blockerIssueId }),
+      () => findIssueInConnection(endpoint, blockerIssueId),
     );
   }
 

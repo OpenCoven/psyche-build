@@ -60,7 +60,11 @@ export interface ManagedIssueSnapshot {
   state: string;
   assignee: string | null;
   renderHash: string | null;
-  projectItem: null;
+  projectItem: {
+    id: string;
+    archived: boolean;
+    fields: ProjectFieldValues;
+  } | null;
   parentIssueNumber: null;
   blockerIssueNumbers: number[];
   url?: string;

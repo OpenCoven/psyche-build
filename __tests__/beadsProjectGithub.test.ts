@@ -36,6 +36,10 @@ function success(value: unknown = {}): GhRunResult {
   };
 }
 
+function httpError(status: number, message: string): Error {
+  return Object.assign(new Error(`HTTP ${status} ${message}`), { status });
+}
+
 function createRunner(
   responses: readonly (GhRunResult | Error | ((call: RunCall) => GhRunResult | Promise<GhRunResult>))[],
 ): { calls: RunCall[]; run: GhRun } {
@@ -87,6 +91,40 @@ function projectDiscovery(projects: unknown[], hasNextPage = false, endCursor: s
         },
       },
       repository: { id: 'REPO_node' },
+    },
+  });
+}
+
+function projectItemsPage(
+  nodes: unknown[],
+  hasNextPage = false,
+  endCursor: string | null = null,
+) {
+  return success({
+    data: {
+      node: {
+        items: {
+          nodes,
+          pageInfo: { hasNextPage, endCursor },
+        },
+      },
+    },
+  });
+}
+
+function linkedRepositoriesPage(
+  nodes: unknown[],
+  hasNextPage = false,
+  endCursor: string | null = null,
+) {
+  return success({
+    data: {
+      node: {
+        repositories: {
+          nodes,
+          pageInfo: { hasNextPage, endCursor },
+        },
+      },
     },
   });
 }
@@ -149,6 +187,11 @@ describe('createGhClient', () => {
           assignees: [],
         },
       ]),
+      projectDiscovery([]),
+      ...Array.from({ length: 101 }, () => [
+        httpError(404, 'parent not found'),
+        success([]),
+      ]).flat(),
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
 
@@ -162,7 +205,7 @@ describe('createGhClient', () => {
       assignee: 'octocat',
     });
     expect(issues.at(-1)).toMatchObject({ beadId: 'pb-102', number: 102 });
-    expect(runner.calls.map((call) => call.args)).toEqual([
+    expect(runner.calls.slice(0, 2).map((call) => call.args)).toEqual([
       [
         'api',
         `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
@@ -178,6 +221,8 @@ describe('createGhClient', () => {
         ...apiHeaders,
       ],
     ]);
+    expect(parseStdin(runner.calls[2]!).query).toMatch(/query DiscoverManagedProject/u);
+    expect(runner.calls).toHaveLength(205);
   });
 
   it('rejects duplicate markers in one issue and duplicate managed bead IDs across issues', async () => {
@@ -202,6 +247,146 @@ describe('createGhClient', () => {
     await expect(
       createGhClient({ run: duplicateAcrossIssues.run, owner, repo, token }).listManagedIssues(),
     ).rejects.toThrow(/duplicate managed bead id.*pb-6/i);
+  });
+
+  it('loads paginated project items, custom fields, parents, and blockers from GitHub fixtures', async () => {
+    const firstBody = [
+      '<!-- psyche-bead-sync:v1 bead-id=pb-1 -->',
+      '## Bead',
+      '- Type: `feature`',
+      '- Status: `in_progress`',
+      '- Priority: P1',
+      '- Blocked: yes',
+    ].join('\n');
+    const secondBody = [
+      '<!-- psyche-bead-sync:v1 bead-id=pb-2 -->',
+      '## Bead',
+      '- Type: `task`',
+      '- Status: `closed`',
+      '- Priority: P2',
+      '- Blocked: no',
+    ].join('\n');
+    const firstUrl = `https://github.com/${owner}/${repo}/issues/1`;
+    const secondUrl = `https://github.com/${owner}/${repo}/issues/2`;
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-state',
+        number: 16,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      success([
+        {
+          node_id: 'ISSUE-node-1',
+          number: 1,
+          title: 'First',
+          body: firstBody,
+          state: 'open',
+          assignees: [],
+          html_url: firstUrl,
+        },
+        {
+          node_id: 'ISSUE-node-2',
+          number: 2,
+          title: 'Second',
+          body: secondBody,
+          state: 'closed',
+          assignees: [],
+          html_url: secondUrl,
+        },
+      ]),
+      projectItemsPage([{
+        id: 'ITEM-1',
+        isArchived: false,
+        content: { id: 'ISSUE-node-1', url: firstUrl },
+        fieldValues: {
+          nodes: [
+            { text: 'pb-1', field: { name: 'Bead ID' } },
+            { name: 'Blocked', field: { name: 'Status' } },
+            { name: 'P1', field: { name: 'Priority' } },
+            { name: 'Feature', field: { name: 'Bead Type' } },
+            { text: 'Launch', field: { name: 'Parent Goal' } },
+            { date: '2026-08-22', field: { name: 'Source Updated' } },
+          ],
+        },
+      }], true, 'ITEM-CURSOR'),
+      projectItemsPage([{
+        id: 'ITEM-2',
+        isArchived: true,
+        content: { id: 'different-node', url: secondUrl },
+        fieldValues: {
+          nodes: [
+            { text: 'pb-2', field: { name: 'Bead ID' } },
+            { name: 'Done', field: { name: 'Status' } },
+            { name: 'P2', field: { name: 'Priority' } },
+            { name: 'Task', field: { name: 'Bead Type' } },
+          ],
+        },
+      }]),
+      httpError(404, 'parent not found'),
+      success([{ number: 2 }]),
+      success({ number: 1 }),
+      success([]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    await client.discoverProject();
+
+    await expect(client.listManagedIssues()).resolves.toEqual([
+      expect.objectContaining({
+        beadId: 'pb-1',
+        projectItem: {
+          id: 'ITEM-1',
+          archived: false,
+          fields: {
+            beadId: 'pb-1',
+            status: 'in_progress',
+            blocked: true,
+            done: false,
+            priority: 1,
+            type: 'feature',
+            parentGoal: 'Launch',
+            sourceUpdated: '2026-08-22',
+          },
+        },
+        parentIssueNumber: null,
+        blockerIssueNumbers: [2],
+      }),
+      expect.objectContaining({
+        beadId: 'pb-2',
+        projectItem: {
+          id: 'ITEM-2',
+          archived: true,
+          fields: {
+            beadId: 'pb-2',
+            status: 'closed',
+            blocked: false,
+            done: true,
+            priority: 2,
+            type: 'task',
+          },
+        },
+        parentIssueNumber: 1,
+        blockerIssueNumbers: [],
+      }),
+    ]);
+
+    const itemQueries = runner.calls.slice(2, 4).map(parseStdin);
+    expect(itemQueries.map((payload) => payload.variables)).toEqual([
+      { projectId: 'P-state', cursor: null },
+      { projectId: 'P-state', cursor: 'ITEM-CURSOR' },
+    ]);
+    expect(itemQueries[0]?.query).toMatch(
+      /items\(first:\s*100,\s*after:\s*\$cursor,\s*archivedStates:\s*\[ARCHIVED,\s*NOT_ARCHIVED\]\)/u,
+    );
+    expect(itemQueries[0]?.query).toMatch(/\bisArchived\b/u);
+    expect(itemQueries[0]?.query).toMatch(/\bfieldValues\(first:\s*100\)/u);
+    expect(runner.calls.slice(4).map((call) => call.args[1])).toEqual([
+      `repos/${owner}/${repo}/issues/1/parent`,
+      `repos/${owner}/${repo}/issues/1/dependencies/blocked_by?per_page=100&page=1`,
+      `repos/${owner}/${repo}/issues/2/parent`,
+      `repos/${owner}/${repo}/issues/2/dependencies/blocked_by?per_page=100&page=1`,
+    ]);
   });
 
   it('ensures every managed label and sends label definitions through stdin', async () => {
@@ -297,6 +482,7 @@ describe('createGhClient', () => {
         url: 'https://github.com/orgs/OpenCoven/projects/12',
       } } } }),
       success({ data: { updateProjectV2: { projectV2: { id: 'P-new', public: true, readme } } } }),
+      linkedRepositoriesPage([]),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
@@ -304,7 +490,7 @@ describe('createGhClient', () => {
     const project = await client.ensureProject({ title: 'Public Beads', readme });
 
     expect(project).toMatchObject({ id: 'P-new', number: 12, public: true, readme });
-    expect(runner.calls).toHaveLength(4);
+    expect(runner.calls).toHaveLength(5);
     expect(parseStdin(runner.calls[1]!)).toMatchObject({
       variables: { ownerId: 'ORG_node', title: 'Public Beads' },
     });
@@ -313,13 +499,69 @@ describe('createGhClient', () => {
       variables: { projectId: 'P-new', public: true, readme },
     });
     expect(parseStdin(runner.calls[2]!).query).toMatch(/mutation UpdateManagedProject/u);
-    expect(parseStdin(runner.calls[3]!)).toMatchObject({
+    expect(parseStdin(runner.calls[4]!)).toMatchObject({
       variables: { projectId: 'P-new', repositoryId: 'REPO_node' },
     });
     for (const call of runner.calls.slice(1)) {
       expect(call.args).toEqual(['api', 'graphql', '--input', '-']);
       expect(call.args.join(' ')).not.toContain(readme);
     }
+  });
+
+  it('verifies and repairs repository linking for an existing marked Project', async () => {
+    const readme = `${PROJECT_README_MARKER}\n# Public Beads`;
+    const existing = {
+      id: 'P-existing',
+      number: 13,
+      title: 'Public Beads',
+      readme,
+      public: true,
+    };
+    const runner = createRunner([
+      projectDiscovery([existing]),
+      linkedRepositoriesPage([]),
+      success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject(existing);
+    expect(parseStdin(runner.calls[1]!)).toMatchObject({
+      variables: { projectId: 'P-existing', cursor: null },
+    });
+    expect(parseStdin(runner.calls[1]!).query).toMatch(/\brepositories\(first:\s*100/u);
+    expect(parseStdin(runner.calls[2]!)).toMatchObject({
+      variables: { projectId: 'P-existing', repositoryId: 'REPO_node' },
+    });
+  });
+
+  it('re-reads a newly created Project by name after an applied-then-5xx response', async () => {
+    const readme = `${PROJECT_README_MARKER}\n# Public Beads`;
+    const transient = Object.assign(new Error('HTTP 503 project response lost'), { status: 503 });
+    const created = {
+      id: 'P-applied',
+      number: 18,
+      title: 'Public Beads',
+      readme: '',
+      public: false,
+    };
+    const runner = createRunner([
+      projectDiscovery([]),
+      transient,
+      projectDiscovery([created]),
+      success({ data: { updateProjectV2: { projectV2: { ...created, readme, public: true } } } }),
+      linkedRepositoriesPage([]),
+      success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
+      id: 'P-applied',
+      readme,
+      public: true,
+    });
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject'),
+    )).toHaveLength(1);
   });
 
   it('discovers fields/options and provisions the required Status and custom field definitions', async () => {
@@ -414,6 +656,63 @@ describe('createGhClient', () => {
     })).toEqual(['Priority', 'Bead Type', 'Bead ID', 'Parent Goal', 'Source Updated']);
   });
 
+  it('re-reads a custom field by name after an applied-then-5xx create', async () => {
+    const transient = Object.assign(new Error('HTTP 503 field response lost'), { status: 503 });
+    const fields = [
+      {
+        __typename: 'ProjectV2SingleSelectField',
+        id: 'F-status',
+        name: 'Status',
+        dataType: 'SINGLE_SELECT',
+        options: ['Backlog', 'Ready', 'In Progress', 'Blocked', 'Done']
+          .map((name, index) => ({ id: `S-${index}`, name })),
+      },
+      {
+        __typename: 'ProjectV2SingleSelectField',
+        id: 'F-priority',
+        name: 'Priority',
+        dataType: 'SINGLE_SELECT',
+        options: ['P0', 'P1', 'P2', 'P3', 'P4']
+          .map((name, index) => ({ id: `P-${index}`, name })),
+      },
+      {
+        __typename: 'ProjectV2SingleSelectField',
+        id: 'F-type',
+        name: 'Bead Type',
+        dataType: 'SINGLE_SELECT',
+        options: ['Epic', 'Feature', 'Task', 'Bug', 'Chore', 'Decision']
+          .map((name, index) => ({ id: `T-${index}`, name })),
+      },
+      { __typename: 'ProjectV2Field', id: 'F-id', name: 'Bead ID', dataType: 'TEXT' },
+      { __typename: 'ProjectV2Field', id: 'F-parent', name: 'Parent Goal', dataType: 'TEXT' },
+      { __typename: 'ProjectV2Field', id: 'F-updated', name: 'Source Updated', dataType: 'DATE' },
+    ];
+    const fieldsPage = (nodes: unknown[]) => success({ data: { node: { fields: {
+      nodes,
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } } } });
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-field-applied',
+        number: 19,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      fieldsPage(fields.filter((field) => field.name !== 'Bead ID')),
+      transient,
+      fieldsPage(fields),
+      fieldsPage(fields),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    await client.discoverProject();
+
+    await expect(client.ensureFields()).resolves.toEqual(expect.any(Map));
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProjectField'),
+    )).toHaveLength(1);
+  });
+
   it('creates or updates the six managed views through GraphQL with exact layouts and filters', async () => {
     const runner = createRunner([
       projectDiscovery([{
@@ -429,7 +728,22 @@ describe('createGhClient', () => {
         ],
         pageInfo: { hasNextPage: false, endCursor: null },
       } } } }),
-      ...Array.from({ length: 6 }, () => success({ data: {} })),
+      success({ data: { updateProjectV2View: { projectV2View: {
+        id: 'V-overview',
+        ...PROJECT_VIEWS[0],
+      } } } }),
+      ...PROJECT_VIEWS.slice(1).flatMap((view, index) => [
+        success({ data: { createProjectV2View: { projectV2View: {
+          id: `V-${index + 1}`,
+          name: view.name,
+          layout: view.layout,
+          filter: '',
+        } } } }),
+        success({ data: { updateProjectV2View: { projectV2View: {
+          id: `V-${index + 1}`,
+          ...view,
+        } } } }),
+      ]),
       success({ data: { node: { views: {
         nodes: PROJECT_VIEWS.map((view, index) => ({ id: `V-${index}`, ...view })),
         pageInfo: { hasNextPage: false, endCursor: null },
@@ -439,14 +753,12 @@ describe('createGhClient', () => {
     await client.discoverProject();
 
     const views = await client.ensureViews();
-
     expect(views.map(({ name, layout, filter }) => ({ name, layout, filter }))).toEqual(PROJECT_VIEWS);
-    const mutationCalls = runner.calls.slice(2, 8);
-    expect(mutationCalls).toHaveLength(6);
+    const mutationCalls = runner.calls.slice(2, -1);
+    expect(mutationCalls).toHaveLength(11);
     expect(parseStdin(mutationCalls[0]!)).toMatchObject({
       variables: {
         input: {
-          projectId: 'P-views',
           viewId: 'V-overview',
           name: 'Overview',
           layout: 'TABLE_LAYOUT',
@@ -455,13 +767,70 @@ describe('createGhClient', () => {
       },
     });
     expect(parseStdin(mutationCalls[0]!).query).toMatch(/mutation UpdateManagedProjectView/u);
-    expect(mutationCalls.slice(1).map((call) => {
-      const payload = parseStdin(call);
-      expect(payload.query).toMatch(/mutation CreateManagedProjectView/u);
-      return payload.variables;
-    })).toEqual(PROJECT_VIEWS.slice(1).map((view) => ({
-      input: { projectId: 'P-views', ...view },
-    })));
+    for (const [index, view] of PROJECT_VIEWS.slice(1).entries()) {
+      const createPayload = parseStdin(mutationCalls[(index * 2) + 1]!);
+      expect(createPayload.query).toMatch(/mutation CreateManagedProjectView/u);
+      expect(createPayload.variables).toEqual({
+        input: {
+          projectId: 'P-views',
+          name: view.name,
+          layout: view.layout,
+        },
+      });
+
+      const filterPayload = parseStdin(mutationCalls[(index * 2) + 2]!);
+      expect(filterPayload.query).toMatch(/mutation UpdateManagedProjectView/u);
+      expect(filterPayload.variables).toEqual({
+        input: {
+          viewId: `V-${index + 1}`,
+          filter: view.filter,
+        },
+      });
+    }
+  });
+
+  it('re-reads a Project view by name after an applied-then-5xx create', async () => {
+    const transient = Object.assign(new Error('HTTP 503 view response lost'), { status: 503 });
+    const existingViews = PROJECT_VIEWS
+      .filter((view) => view.name !== 'Backlog')
+      .map((view, index) => ({ id: `V-existing-${index}`, ...view }));
+    const createdBacklog = {
+      id: 'V-backlog',
+      name: 'Backlog',
+      layout: 'BOARD_LAYOUT',
+      filter: '',
+    };
+    const viewsPage = (nodes: unknown[]) => success({ data: { node: { views: {
+      nodes,
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } } } });
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-view-applied',
+        number: 20,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      viewsPage(existingViews),
+      transient,
+      viewsPage([...existingViews, createdBacklog]),
+      success({ data: { updateProjectV2View: { projectV2View: {
+        ...createdBacklog,
+        filter: 'status:Backlog',
+      } } } }),
+      viewsPage(PROJECT_VIEWS.map((view, index) => ({ id: `V-${index}`, ...view }))),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    await client.discoverProject();
+
+    await expect(client.ensureViews()).resolves.toHaveLength(6);
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProjectView'),
+    )).toHaveLength(1);
+    expect(parseStdin(runner.calls[4]!).variables).toEqual({
+      input: { viewId: 'V-backlog', filter: 'status:Backlog' },
+    });
   });
 
   it('creates, updates, closes, reopens, labels, and assigns issues with JSON stdin', async () => {
@@ -535,6 +904,7 @@ describe('createGhClient', () => {
     };
     const runner = createRunner([
       projectDiscovery([project]),
+      projectItemsPage([]),
       success({ id: 'ITEM-42' }),
       success({}),
       success({}),
@@ -568,7 +938,7 @@ describe('createGhClient', () => {
       },
     });
 
-    expect(runner.calls[1]).toEqual({
+    expect(runner.calls[2]).toEqual({
       command: 'gh',
       args: [
         'project',
@@ -583,7 +953,7 @@ describe('createGhClient', () => {
       ],
       options: { env: { GH_TOKEN: token } },
     });
-    expect(runner.calls.slice(2).map((call) => call.args)).toEqual([
+    expect(runner.calls.slice(3).map((call) => call.args)).toEqual([
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-id', '--text', 'pb-42'],
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-status', '--single-select-option-id', 'O-blocked'],
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-priority', '--single-select-option-id', 'O-p1'],
@@ -591,6 +961,105 @@ describe('createGhClient', () => {
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-parent', '--text', 'Public launch'],
       ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-updated', '--date', '2026-08-22'],
     ]);
+  });
+
+  it('re-reads a Project item by issue identity after an applied-then-5xx add', async () => {
+    const transient = Object.assign(new Error('HTTP 503 item response lost'), { status: 503 });
+    const issueUrl = `https://github.com/${owner}/${repo}/issues/42`;
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-item-applied',
+        number: 21,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      projectItemsPage([]),
+      transient,
+      projectItemsPage([{
+        id: 'ITEM-applied',
+        isArchived: false,
+        content: { id: 'ISSUE-42', url: issueUrl },
+        fieldValues: { nodes: [] },
+      }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    await client.discoverProject();
+
+    await expect(client.ensureProjectItem({ issueNumber: 42 })).resolves.toEqual({
+      id: 'ITEM-applied',
+    });
+    expect(runner.calls.filter((call) => call.args[0] === 'project'
+      && call.args[1] === 'item-add')).toHaveLength(1);
+  });
+
+  it('awaits project field edits sequentially and stops after the first failure', async () => {
+    let releaseFirst: (() => void) | undefined;
+    let firstStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let activeEdits = 0;
+    let maxActiveEdits = 0;
+    const failed = Object.assign(new Error('HTTP 422 invalid field value'), { status: 422 });
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-sequential',
+        number: 17,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      async () => {
+        activeEdits += 1;
+        maxActiveEdits = Math.max(maxActiveEdits, activeEdits);
+        firstStarted?.();
+        await firstGate;
+        activeEdits -= 1;
+        throw failed;
+      },
+      async () => {
+        activeEdits += 1;
+        maxActiveEdits = Math.max(maxActiveEdits, activeEdits);
+        await Promise.resolve();
+        activeEdits -= 1;
+        return success({});
+      },
+      async () => {
+        activeEdits += 1;
+        maxActiveEdits = Math.max(maxActiveEdits, activeEdits);
+        await Promise.resolve();
+        activeEdits -= 1;
+        return success({});
+      },
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    await client.discoverProject();
+    client.setFieldContext(new Map([
+      ['Status', { id: 'F-status', name: 'Status', dataType: 'SINGLE_SELECT', options: new Map([['Backlog', 'O-backlog']]) }],
+      ['Priority', { id: 'F-priority', name: 'Priority', dataType: 'SINGLE_SELECT', options: new Map([['P1', 'O-p1']]) }],
+      ['Bead ID', { id: 'F-id', name: 'Bead ID', dataType: 'TEXT', options: new Map() }],
+    ]));
+
+    const settingFields = client.setFields({
+      itemId: 'ITEM-sequential',
+      fields: {
+        beadId: 'pb-sequential',
+        status: 'open',
+        priority: 1,
+      },
+    });
+    await started;
+    const callsBeforeFailure = runner.calls.length;
+    releaseFirst?.();
+
+    await expect(settingFields).rejects.toThrow(/invalid field value/i);
+    expect(callsBeforeFailure).toBe(2);
+    expect(runner.calls).toHaveLength(2);
+    expect(maxActiveEdits).toBe(1);
   });
 
   it('adds/removes sub-issue and blocked-by relationships with database IDs', async () => {
@@ -616,6 +1085,35 @@ describe('createGhClient', () => {
     expect(parseStdin(runner.calls[0]!)).toEqual({ sub_issue_id: 2001 });
     expect(parseStdin(runner.calls[1]!)).toEqual({ sub_issue_id: 2001 });
     expect(parseStdin(runner.calls[2]!)).toEqual({ issue_id: 3001 });
+  });
+
+  it('re-reads relationships after applied-then-5xx adds without repeating POST requests', async () => {
+    const transientSubIssue = Object.assign(new Error('HTTP 503 sub-issue response lost'), { status: 503 });
+    const transientBlocker = Object.assign(new Error('HTTP 503 blocker response lost'), { status: 503 });
+    const runner = createRunner([
+      transientSubIssue,
+      success([{ id: 2001, number: 2 }]),
+      transientBlocker,
+      success([{ id: 3001, number: 3 }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.addSubIssue({
+      parentIssueNumber: 10,
+      subIssueId: 2001,
+    })).resolves.toMatchObject({ id: 2001 });
+    await expect(client.addBlockedBy({
+      issueNumber: 20,
+      blockerIssueId: 3001,
+    })).resolves.toMatchObject({ id: 3001 });
+
+    expect(runner.calls.filter((call) => call.args.includes('POST'))).toHaveLength(2);
+    expect(runner.calls.map((call) => call.args[1])).toEqual([
+      `repos/${owner}/${repo}/issues/10/sub_issues`,
+      `repos/${owner}/${repo}/issues/10/sub_issues?per_page=100&page=1`,
+      `repos/${owner}/${repo}/issues/20/dependencies/blocked_by`,
+      `repos/${owner}/${repo}/issues/20/dependencies/blocked_by?per_page=100&page=1`,
+    ]);
   });
 
   it('maps reconciliation parent/blocker operations and archive/restore names directly', async () => {
@@ -714,6 +1212,50 @@ describe('createGhClient', () => {
     expect(permissionRunner.calls).toHaveLength(1);
   });
 
+  it('re-reads issue identity after an applied-then-5xx create without repeating the POST', async () => {
+    const transient = Object.assign(new Error('HTTP 503 response lost'), { status: 503 });
+    const body = managedBody('pb-applied');
+    const runner = createRunner([
+      transient,
+      success([{
+        number: 77,
+        node_id: 'ISSUE-77',
+        title: '[pb-applied] Applied',
+        body,
+        state: 'open',
+        html_url: `https://github.com/${owner}/${repo}/issues/77`,
+      }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.createIssue({
+      beadId: 'pb-applied',
+      title: '[pb-applied] Applied',
+      body,
+    })).resolves.toMatchObject({ number: 77 });
+    expect(runner.calls.filter((call) => call.args.includes('--method')
+      && call.args.includes('POST'))).toHaveLength(1);
+    expect(runner.calls[1]?.args).toContain(
+      `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
+    );
+  });
+
+  it('surfaces structured ambiguity when a retryable issue create cannot be verified', async () => {
+    const transient = Object.assign(new Error('HTTP 503 response lost'), { status: 503 });
+    const runner = createRunner([transient, success([])]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.createIssue({
+      beadId: 'pb-unknown',
+      title: '[pb-unknown] Unknown',
+      body: managedBody('pb-unknown'),
+    })).rejects.toMatchObject({
+      kind: 'ambiguous',
+      status: 503,
+    });
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it('surfaces GraphQL errors without exposing tokens or logging full records', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const runner = createRunner([
@@ -739,5 +1281,23 @@ describe('createGhClient', () => {
     expect(String(thrown)).not.toContain('full private record');
     expect(consoleSpy).not.toHaveBeenCalled();
     consoleSpy.mockRestore();
+  });
+
+  it('redacts tokens from one-shot mutation failures', async () => {
+    const failure = Object.assign(
+      new Error(`HTTP 422 invalid dependency for ${token}`),
+      { status: 422 },
+    );
+    const runner = createRunner([failure]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    let thrown: unknown;
+    try {
+      await client.removeBlockedBy({ issueNumber: 20, blockerIssueId: 3001 });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(String(thrown)).toMatch(/invalid dependency/i);
+    expect(String(thrown)).not.toContain(token);
   });
 });
