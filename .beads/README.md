@@ -32,8 +32,10 @@ migrator, then let every other checkout pull the resulting Dolt state. Never
 run competing migrations from separate clones or worktrees.
 
 The Project sync workflow is serialized with the `beads-project-sync`
-concurrency group. Coordinate any local apply with it because apply mode runs
-`bd bootstrap --yes` before exporting.
+concurrency group. Source loading always tries a read-only export first. Apply
+mode runs `bd bootstrap --yes` only when that export reports a missing or
+uninitialized database, so coordinate any recovery or migration-capable run
+with the workflow.
 
 ## Local Project export, check, and apply
 

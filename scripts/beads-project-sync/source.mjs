@@ -87,6 +87,20 @@ function errorMessage(error) {
 }
 
 /**
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isMissingOrUninitializedDatabaseError(error) {
+  const message = errorMessage(error);
+  return [
+    /\bno beads database found\b/iu,
+    /\bdatabase(?:\s+"[^"]+"|\s+\S+)?\s+not found on Dolt server\b/iu,
+    /\bdatabase not initialized\b/iu,
+    /\bissue_prefix config is missing\b/iu,
+  ].some((pattern) => pattern.test(message));
+}
+
+/**
  * @param {string} parent
  * @param {string} candidate
  * @returns {boolean}
@@ -332,12 +346,12 @@ export async function loadBeadsSource(options) {
   );
 
   try {
-    if (mode !== 'dry-run') {
-      await bootstrapBeads({ cwd: options.cwd, run });
-    }
     try {
       await exportBeads({ cwd: options.cwd, run, outputPath });
     } catch (error) {
+      if (!isMissingOrUninitializedDatabaseError(error)) {
+        throw error;
+      }
       if (mode === 'dry-run') {
         throw new Error(
           `${errorMessage(error)}. Dry-run source loading is read-only and will not initialize Beads. `
@@ -345,7 +359,8 @@ export async function loadBeadsSource(options) {
           { cause: error },
         );
       }
-      throw error;
+      await bootstrapBeads({ cwd: options.cwd, run });
+      await exportBeads({ cwd: options.cwd, run, outputPath });
     }
     return await readFile(outputPath, 'utf8');
   } finally {

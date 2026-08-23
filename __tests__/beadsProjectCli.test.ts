@@ -282,7 +282,7 @@ describe('Beads project sync configuration', () => {
 
 describe('Beads source adapter', () => {
   it.each(['apply', 'provision'] as const)(
-    'bootstraps for %s then performs only a readonly export outside the worktree',
+    'reuses an existing shared database for %s without bootstrapping',
     async (mode) => {
     const fixture = await readFile(fixturePath, 'utf8');
     const calls: Array<{
@@ -315,11 +315,6 @@ describe('Beads source adapter', () => {
     expect(calls).toEqual([
       {
         command: 'bd',
-        args: ['bootstrap', '--yes'],
-        options: { cwd: repositoryRoot },
-      },
-      {
-        command: 'bd',
         args: [
           '--readonly',
           'export',
@@ -336,6 +331,7 @@ describe('Beads source adapter', () => {
     expect(removed).toEqual([temporaryDirectory]);
     expect(calls.flatMap((call) => call.args)).not.toContain('update');
     expect(calls.flatMap((call) => call.args)).not.toContain('close');
+    expect(calls.flatMap((call) => call.args)).not.toContain('bootstrap');
     },
   );
 
@@ -367,6 +363,110 @@ describe('Beads source adapter', () => {
     }]);
     expect(removed).toEqual([temporaryDirectory]);
   });
+
+  it.each([
+    ['apply', 'no beads database found'],
+    [
+      'provision',
+      'database "psyche" not found on Dolt server at 127.0.0.1:3307',
+    ],
+    [
+      'apply',
+      'database not initialized: issue_prefix config is missing',
+    ],
+  ] as const)(
+    'bootstraps for %s only after a setup-class export failure',
+    async (mode, setupError) => {
+      const fixture = await readFile(fixturePath, 'utf8');
+      const calls: Array<{
+        command: string;
+        args: readonly string[];
+        options: ExecFileRunOptions;
+      }> = [];
+      const temporaryDirectory = join(
+        tmpdir(),
+        `psyche-beads-project-sync-${mode}-missing-test`,
+      );
+      let exportAttempts = 0;
+
+      await expect(loadBeadsSource({
+        cwd: repositoryRoot,
+        mode,
+        run: async (command, args, options) => {
+          calls.push({ command, args: [...args], options: { ...options } });
+          if (args[0] === '--readonly') {
+            exportAttempts += 1;
+            if (exportAttempts === 1) {
+              return { stdout: '', stderr: setupError, exitCode: 1 };
+            }
+          }
+          return { stdout: '', stderr: '', exitCode: 0 };
+        },
+        makeTemporaryDirectory: async () => temporaryDirectory,
+        readFile: async () => fixture,
+        remove: async () => undefined,
+      })).resolves.toBe(fixture);
+
+      expect(calls).toEqual([
+        {
+          command: 'bd',
+          args: [
+            '--readonly',
+            'export',
+            '-o',
+            join(temporaryDirectory, 'issues.jsonl'),
+          ],
+          options: { cwd: repositoryRoot },
+        },
+        {
+          command: 'bd',
+          args: ['bootstrap', '--yes'],
+          options: { cwd: repositoryRoot },
+        },
+        {
+          command: 'bd',
+          args: [
+            '--readonly',
+            'export',
+            '-o',
+            join(temporaryDirectory, 'issues.jsonl'),
+          ],
+          options: { cwd: repositoryRoot },
+        },
+      ]);
+    },
+  );
+
+  it.each(['dry-run', 'apply', 'provision'] as const)(
+    'does not bootstrap for a non-setup %s export failure',
+    async (mode) => {
+      const calls: Array<{command: string; args: readonly string[]}> = [];
+      const temporaryDirectory = join(
+        tmpdir(),
+        `psyche-beads-project-sync-${mode}-failure-test`,
+      );
+
+      await expect(loadBeadsSource({
+        cwd: repositoryRoot,
+        mode,
+        run: async (command, args) => {
+          calls.push({ command, args: [...args] });
+          return {
+            stdout: '',
+            stderr: 'permission denied while reading Dolt storage',
+            exitCode: 1,
+          };
+        },
+        makeTemporaryDirectory: async () => temporaryDirectory,
+        remove: async () => undefined,
+      })).rejects.toThrow(/permission denied while reading Dolt storage/i);
+
+      expect(calls).toEqual([{
+        command: 'bd',
+        args: ['--readonly', 'export', '-o', join(temporaryDirectory, 'issues.jsonl')],
+      }]);
+    },
+  );
 
   it('cleans the OS-temp raw export when reading the completed export fails', async () => {
     const temporaryDirectory = join(tmpdir(), 'psyche-beads-project-sync-read-failure');
