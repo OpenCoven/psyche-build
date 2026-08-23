@@ -15,10 +15,10 @@ contract, executable validation, and an owned recovery path.
 |---|---|
 | **Supported** | Intended for real use in the named distribution, covered by acceptance evidence, and owned for recovery |
 | **Source-supported** | Supported from a repository checkout for contributors or operators; not separately distributed |
-| **Internal beta** | Available only to authorized internal testers; behavior and distribution may change |
+| **Internal beta** | Available only to authorized internal testers, with distributed-build evidence; behavior and distribution may change |
 | **Compile-only** | CI checks compilation compatibility; no application artifact, install path, or support commitment is published |
 | **Optional integration** | Extends a complete standalone product through a typed, bounded interface and fails in isolation when unavailable |
-| **Planned** | Roadmapped but not a current product claim |
+| **Planned** | Roadmapped but not a current product or availability claim |
 | **Unavailable** | Deliberately not distributed or supported in this release |
 
 ## Distribution surfaces
@@ -28,11 +28,11 @@ contract, executable validation, and an owned recovery path.
 | macOS native application | **Planned public supported surface** after #194 closes | Signed and notarized Apple Silicon and Intel DMGs, checksums, stable GitHub Release, and native Homebrew Cask |
 | TUI / Node CLI from source checkout | **Source-supported** | Contributor/operator interface invoked from the repository checkout; its package archive is validated |
 | npm package | **Unavailable** | `psyche-build` is not published as an npm release for `v0.0.1` |
-| iOS application | **Internal beta** | Authorized internal TestFlight companion; tracked independently in #200 |
+| iOS application | **Planned internal beta pending #200** | No live TestFlight availability is claimed until an immutable distributed build and physical-device acceptance are linked from #200 |
 | External TestFlight | **Unavailable** | Not part of the first delivery contract |
 | Public App Store | **Unavailable** | Not part of the first delivery contract |
-| Windows application | **Compile-only** | Cross-platform compilation may be validated; no public installer or supported application is shipped |
-| Linux application | **Compile-only** | Cross-platform compilation may be validated; no public package or supported application is shipped |
+| Windows application | **Compile-only** | Cross-platform compilation compatibility is retained as evidence; no public installer or supported application is shipped |
+| Linux application | **Compile-only** | Cross-platform compilation compatibility is retained as evidence; no public package or supported application is shipped |
 | Android application | **Unavailable** | No release artifact or supported runtime |
 | Browser-hosted application | **Unavailable** | Psyche Build is not currently a hosted web product |
 | Cloud execution / hosted terminals | **Planned** | Future work only; not required for local use or the first release |
@@ -41,24 +41,32 @@ Until [#194](https://github.com/OpenCoven/psyche-build/issues/194)
 closes with retained distribution evidence, public copy must describe the
 macOS installation path as pending rather than already available.
 
+The intended product contract keeps iOS-only failures off the macOS release
+critical path. The current release workflow does not yet enforce that contract
+because its verify job runs iOS checks unconditionally. Closing
+[#203](https://github.com/OpenCoven/psyche-build/issues/203) is therefore a P0
+macOS release blocker. Until #203 closes, the workflow coupling is a known
+implementation fact rather than evidence that iOS is a supported or required
+macOS surface.
+
 ## Core capability contract
 
 | Capability | macOS / source status | iOS status | Notes |
 |---|---|---|---|
-| Open and manage explicit projects | Supported after release acceptance / source-supported | Internal beta observation | Project identity and canonical scope must be proven |
-| Plain terminal panes | Supported after release acceptance / source-supported | Internal beta control where wired | Does not require an agent CLI |
-| Agent-backed panes | Supported after release acceptance / source-supported | Internal beta observation/control where wired | Requires an installed supported launcher; absence must not disable plain terminals |
-| Git worktree isolation | Supported after release acceptance / source-supported | Internal beta observation | Cleanup remains explicit; a pane close must not silently delete the only copy of work |
-| Multi-project cockpit | Supported after release acceptance / source-supported | Internal beta workspace view | Project ownership and active scope remain explicit |
-| File browsing and bounded diff inspection | Supported after release acceptance / source-supported | Not a first-release mobile claim unless separately accepted | Large content must remain bounded |
+| Open and manage explicit projects | Supported after release acceptance / source-supported | Planned observation pending #200 | Project identity and canonical scope must be proven |
+| Plain terminal panes | Supported after release acceptance / source-supported | Planned control where wired | Does not require an agent CLI |
+| Agent-backed panes | Supported after release acceptance / source-supported | Planned observation/control where wired | Requires an installed supported launcher; absence must not disable plain terminals |
+| Git worktree isolation | Supported after release acceptance / source-supported | Planned observation | Cleanup remains explicit; a pane close must not silently delete the only copy of work |
+| Multi-project cockpit | Supported after release acceptance / source-supported | Planned workspace view | Project ownership and active scope remain explicit |
+| File browsing and bounded diff inspection | Supported after release acceptance / source-supported | Not a first mobile-beta claim unless separately accepted | Large content must remain bounded |
 | Ritual discovery and launch | Supported from source where current paths are accepted | Blocked pending #192 live-path repair | Fixtures or simulator menus do not establish production support |
-| Merge, pull request, and cleanup workflows | Supported after release acceptance / source-supported | Not a first internal-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
+| Merge, pull request, and cleanup workflows | Supported after release acceptance / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
 | Pane/browser control over MCP | Source-supported bounded interface | Not a direct mobile claim | Requires project scope, exact generations, leases, approvals where necessary, receipts, and revocation |
-| Local daemon / bridge | Source-supported and used by companion paths | Internal beta | Unavailable optional providers fail closed without disabling core local workflows |
-| Bonjour host discovery | Not a desktop product claim | Internal beta pending #193 | Local discovery only; not the remote-connectivity architecture |
+| Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
+| Bonjour host discovery | Not a desktop product claim | Planned pending #193 | Local discovery only; not the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
-| Diagnostics/support bundle | Partial; release minimum under #196, hardened under #199 | Partial/internal | Must be bounded, recent, versioned, and automatically redacted |
-| Automatic update | Supported only when release acceptance proves the configured path | Internal distribution-specific | Update claims must identify source, version, integrity, rollback, and failure behavior |
+| Diagnostics/support bundle | Current visible diagnostics only; versioned support bundle planned under #199 | Planned | The first release does not claim the bounded support bundle before #199 delivers it |
+| Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
 | Team collaboration | Planned | Planned | Not a first-release claim |
 | Marketplace/plugin ecosystem | Planned | Planned | Must wait for stable capability, identity, and compatibility contracts |
 
@@ -81,12 +89,15 @@ An optional provider must:
 
 ## iOS companion contract
 
-The first internal iOS delivery is a companion, not an independent authority.
-It may discover or select a host, authenticate, restore an authoritative
-workspace, observe bounded state, and invoke explicitly supported mobile
-commands.
+The planned first internal iOS delivery is a companion, not an independent
+authority. After #200's distribution and physical-device gates pass, it may
+discover or select a host, authenticate, restore an authoritative workspace,
+observe bounded state, and invoke explicitly supported mobile commands.
 
-It must not:
+Until then, source, simulator, and UI-test behavior are development evidence,
+not a live TestFlight availability claim.
+
+The companion must not:
 
 - present a newly loaded workspace as live when readiness failed;
 - infer success from a local UI transition without an authoritative host
@@ -134,10 +145,10 @@ or a generated artifact alone is insufficient.
 
 ## Current known deferrals
 
-The following do not block `v0.0.1` unless they expose a shared defect in the
-supported macOS path:
+The following are not product prerequisites for `v0.0.1` unless they expose a
+shared defect in the supported macOS path:
 
-- public or external iOS distribution;
+- internal, public, or external iOS distribution and mobile feature completion;
 - remote/off-LAN companion transport;
 - graphics diagnostics in #190 unless release acceptance proves them required;
 - desktop architecture decomposition;
@@ -147,6 +158,10 @@ supported macOS path:
 - team collaboration;
 - marketplace/plugin behavior;
 - complete Threads and AgentFS convergence.
+
+[#203](https://github.com/OpenCoven/psyche-build/issues/203) is separately P0
+because it removes an accidental workflow dependency; it does not make iOS a
+product prerequisite.
 
 ## Changing this contract
 
