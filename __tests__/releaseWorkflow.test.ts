@@ -309,7 +309,15 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
     expect(workflow).toContain('codesign --verify --deep --strict');
     expect(workflow).toContain('spctl --assess --type execute');
+    expect(workflow).toContain('xcrun notarytool submit "$DMG_PATH"');
+    expect(workflow).toContain('xcrun stapler staple "$DMG_PATH"');
     expect(workflow).toContain('xcrun stapler validate');
+    expect(workflow.indexOf('xcrun notarytool submit "$DMG_PATH"')).toBeLessThan(
+      workflow.indexOf('xcrun stapler staple "$DMG_PATH"'),
+    );
+    expect(workflow.indexOf('xcrun stapler staple "$DMG_PATH"')).toBeLessThan(
+      workflow.indexOf('xcrun stapler validate "$DMG_PATH"'),
+    );
     expect(workflow).not.toMatch(/continue-on-error:\s*true/);
     expect(workflowJobSource(workflow, 'build-macos')).toContain('if: always()');
     expect(workflowJobSource(workflow, 'build-macos')).toContain(
