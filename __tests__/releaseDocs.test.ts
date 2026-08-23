@@ -92,6 +92,23 @@ function releaseEnvironmentSecretNames(runbook: string): string[] {
 }
 
 describe('v0.0.1 release documentation contract', () => {
+  it('finalizes the first-release changelog without claiming TestFlight availability', async () => {
+    const changelog = await readFile('CHANGELOG.md', 'utf8');
+    const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/);
+    const release = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
+
+    expect(unreleased).not.toBeNull();
+    expect(unreleased?.[1].trim()).toBe('');
+    expect(release).not.toBeNull();
+    expect(release?.[1]).toContain('### Performance');
+    expect(release?.[1]).toContain('### Security');
+    expect(release?.[1]).toContain('### Reliability');
+    expect(release?.[1]).toContain('### Documentation');
+    expect(release?.[1]).toMatch(/internal distribution remains pending #200\./i);
+    expect(changelog).not.toMatch(/release-candidate record/i);
+    expect(changelog).not.toMatch(/Public macOS\/Homebrew availability remains pending/i);
+  });
+
   it('parses an aligned Markdown secret table without weakening exact-name checks', () => {
     expect(
       releaseEnvironmentSecretNames(`  | Secret | Purpose |\n | :--- | ---: |\n  |   \`ONE_SECRET\`   | first |\n | \`TWO_SECRET\` | second |`),
@@ -241,6 +258,61 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain(
       'Tag pushes always run the coordinated macOS and internal TestFlight release',
     );
+    expect(runbook).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
+    );
+    expect(runbook).toMatch(/shared protocol\/schema validation[\s\S]{0,180}(?:mandatory|required)/i);
+    expect(runbook).toMatch(/retain[\s\S]{0,240}workflow run URL[\s\S]{0,160}release SHA/i);
+  });
+
+  it('records the implemented desktop-only workflow contract and dry-run evidence', async () => {
+    const acceptance = await readFile('docs/RELEASE-ACCEPTANCE.md', 'utf8');
+
+    expect(acceptance).not.toContain('The current release workflow does not yet enforce that contract');
+    expect(acceptance).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true',
+    );
+    expect(acceptance).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
+    );
+    expect(acceptance).toMatch(/iOS\/TestFlight[\s\S]{0,160}(?:separate|non-blocking)/i);
+    for (const evidence of [
+      'workflow run URL',
+      'release SHA',
+      'desktop_only',
+      'build-macos',
+      'upload-ios',
+      'publish',
+    ]) {
+      expect(acceptance).toContain(evidence);
+    }
+  });
+
+  it('keeps canonical support and roadmap docs aligned with the implemented offline contract', async () => {
+    const canonicalDocs = await Promise.all(
+      ['docs/SUPPORT-MATRIX.md', 'docs/ROADMAP.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of canonicalDocs) {
+      expect(source, filePath).not.toMatch(/verify job runs iOS checks unconditionally/i);
+      expect(source, filePath).not.toMatch(/workflow coupling is a known implementation (?:fact|defect)/i);
+      expect(source, filePath).toMatch(/offline workflow contract is implemented/i);
+      expect(source, filePath).toMatch(
+        /(?:\[#203\]\([^)]*\)|#203)\s+remains\s+open\s+pending\s+live desktop-only dry-run evidence/i,
+      );
+      for (const [label, evidence] of [
+        ['both build-macos matrix jobs', /both\s+`build-macos` matrix jobs/i],
+        ['upload-ios skipped', /`upload-ios` is `skipped`/i],
+        ['publish', /`publish`/i],
+        ['release environment approval', /`release`\s+environment\s+approval/i],
+        ['Homebrew notification', /Homebrew notification/i],
+      ] as const) {
+        expect(source, `${filePath}: ${label}`).toMatch(evidence);
+      }
+    }
   });
 
   it('validates and tags the exact clean fetched origin/main commit', async () => {

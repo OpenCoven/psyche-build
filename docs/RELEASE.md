@@ -272,7 +272,7 @@ the failure is transient and manually dispatch the existing immutable tag from
 `main`:
 
 ```sh
-gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1
+gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false
 ```
 
 Tag pushes always run the coordinated macOS and internal TestFlight release.
@@ -293,6 +293,17 @@ Desktop-only publication still requires `APPLE_CERTIFICATE`,
 requires the signed annotated tag, both signed and notarized DMGs, checksums,
 curated notes, protected-environment approval, and Homebrew notification.
 Desktop-only publication does not upload or claim TestFlight availability.
+The shared protocol/schema validation in the root test, typecheck, and build
+gate remains mandatory in both modes. Only iOS-specific XcodeGen setup,
+simulator availability, generated-project checking, Core/app/UI verification,
+distribution credentials, archive, and upload work is skipped.
+
+For either manual mode, retain the workflow run URL, exact release SHA, the
+resolved `desktop_only` output, and the `verify`, both `build-macos`,
+`upload-ios`, `publish`, and `notify-homebrew` job results. For desktop-only
+publication, the expected `upload-ios` result is `skipped`; for a coordinated
+release it must be `success`. A failed/cancelled shared verification or macOS
+build is not acceptable evidence and must not reach publication.
 
 The retry rebuilds the exact tag. Its App Store Connect preflight is
 fail-closed:

@@ -892,6 +892,7 @@ describe('native CodeMirror workspace editor surface', () => {
       renderPaneWorkspace: () => undefined,
       setActiveProject: async () => true,
       setStatus: () => undefined,
+      refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
