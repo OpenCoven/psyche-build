@@ -9,15 +9,21 @@ not yet represented in the site.
 
 Use these sources in this order when determining current delivery status:
 
-1. [Roadmap](ROADMAP.md) — active outcomes, priorities, dependencies, delivery
-   trains, and phase gates.
-2. [Support matrix](SUPPORT-MATRIX.md) — what may currently be claimed as
-   supported, internal, compile-only, planned, or unavailable.
-3. [Owning GitHub issue](https://github.com/OpenCoven/psyche-build/issues) —
-   live ownership, checklists, blockers, and evidence links.
+1. The [owning GitHub issue](https://github.com/OpenCoven/psyche-build/issues)
+   or [pull request](https://github.com/OpenCoven/psyche-build/pulls) — live
+   ownership, implementation state, blockers, review findings, and evidence.
+2. [Roadmap](ROADMAP.md) — active outcomes, priorities, dependencies, delivery
+   trains, and phase-gate policy.
+3. [Support matrix](SUPPORT-MATRIX.md) — the contract for what may be claimed
+   as supported, source-supported, pending, compile-only, or unavailable.
 4. [Release acceptance](RELEASE-ACCEPTANCE.md) and
-   [release runbook](RELEASE.md) — proof and publication procedures.
+   [release runbook](RELEASE.md) — proof requirements and publication
+   procedures.
 5. Dated specs and plans — design intent and historical reasoning.
+
+The roadmap and support matrix are policy and reconciliation snapshots. When a
+snapshot conflicts with the owning issue or pull request, treat the live GitHub
+state as authoritative and repair the snapshot in the same change.
 
 `docs/superpowers/` contains dated design and implementation records. Those
 records remain useful history, but they are not the executable backlog and do
@@ -58,11 +64,15 @@ open -a "Psyche Build"
 Until that outcome closes, documentation must describe the public Cask as
 pending rather than already available.
 
-The iOS build is an internal TestFlight companion for authorized OpenCoven
-testers and follows an independent gate in
-[#200](https://github.com/OpenCoven/psyche-build/issues/200). The Cask installs
-only `Psyche Build.app`. Source CLI development uses the repository checkout
-and contributing guide:
+An internal TestFlight companion is planned under
+[#200](https://github.com/OpenCoven/psyche-build/issues/200). This repository
+does not claim a live TestFlight build until #200 links distributed-build and
+physical-device acceptance evidence. The planned companion remains restricted
+to authorized OpenCoven testers; it is not an external TestFlight or public App
+Store release.
+
+The Cask installs only `Psyche Build.app`. Source CLI development uses the
+repository checkout and contributing guide:
 
 ```sh
 node /path/to/psyche-build/psyche
