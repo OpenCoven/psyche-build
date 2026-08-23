@@ -5457,10 +5457,31 @@
 
   function projectAppearanceContextActions(project, anchor) {
     if (!project) return [];
+    var restoreKey = anchor && anchor.dataset
+      ? anchor.dataset.treeKey || ""
+      : "";
+    function restoreProjectFocus() {
+      if (!restoreKey) return;
+      sessionTreeFocusKey = restoreKey;
+      restoreSessionTreeFocus(restoreKey);
+    }
     return [{
       label: "Customize appearance",
       run: function () {
         openProjectAppearancePopover(project, anchor);
+      },
+    }, {
+      label: "Close project",
+      danger: true,
+      run: function () {
+        var wasActive = state.activeProjectId === project.id;
+        return Promise.resolve(removeProject(project.id)).then(function (closed) {
+          if (!closed || !wasActive) restoreProjectFocus();
+          return closed;
+        }, function (error) {
+          restoreProjectFocus();
+          throw error;
+        });
       },
     }];
   }
@@ -7537,21 +7558,25 @@
 
     var projectModels = [];
     state.projects.forEach(function (project) {
-      var localRows = state.threads.filter(function (t) {
-        return t.projectId === project.id && !t.hidden && !isDormantThread(t);
+      var projectThreads = state.threads.filter(function (thread) {
+        return thread.projectId === project.id && !isDormantThread(thread);
       });
+      var visibleLocalRows = projectThreads.filter(function (thread) {
+        return !thread.hidden;
+      });
+      var remoteRows = covenSessionsForProject(project, covenAssignments);
+      if (projectThreads.length === 0 && remoteRows.length === 0) return;
       // This branch calls buildSidebarProjectModel instead of reaching for
       // buildProjectRailModel directly; the rail model still exists and
-      // sidebar-model.mjs builds on it. The sidebar model also carries the
-      // query/filter/selection that used to be applied afterwards here, which
-      // is why the surrounding code reads projectModel.visibleCount rather than
-      // filtering worktrees itself. main's covenAssignments argument survives the
-      // swap: it hoists the assignment map out of the per-project loop, which
-      // covenSessionsForProject would otherwise rebuild once per project.
-      var remoteRows = covenSessionsForProject(project, covenAssignments);
+      // sidebar-model.mjs builds on it. Eligibility is decided before the
+      // sidebar model sees any rows so query/filter presentation cannot turn a
+      // populated project into an "empty" one. main's covenAssignments
+      // argument survives the swap: it hoists the assignment map out of the
+      // per-project loop, which covenSessionsForProject would otherwise rebuild
+      // once per project.
       var projectModel = PsycheSessions.buildSidebarProjectModel({
         project: project,
-        localSessions: localRows,
+        localSessions: visibleLocalRows,
         covenSessions: remoteRows,
         query: currentSearchQuery,
         filter: sessionTypeFilter,
@@ -8328,8 +8353,8 @@
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    var preserveTerminalFocus = state.activeProjectId !== id;
     var closeResults = await Promise.all(threadIds.map(function (tid) {
+      var preserveTerminalFocus = state.activeProjectId !== id;
       return closeThread(tid, {
         focus: false,
         preserveTerminalFocus: preserveTerminalFocus,
@@ -8352,6 +8377,8 @@
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
     startCovenPolling();
+    var shouldRefreshSidebar = threadIds.length === 0;
+    var sidebarRefreshedByActiveProjectHandoff = false;
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
@@ -8359,14 +8386,16 @@
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(null);
       else Object.assign(state, { activeProjectId: null });
       if (next) {
-        await setActiveProject(next.id);
+        shouldRefreshSidebar = false;
+        sidebarRefreshedByActiveProjectHandoff = await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
         renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
     }
-    refreshTabs();
+    if (shouldRefreshSidebar && !sidebarRefreshedByActiveProjectHandoff) refreshSidebar();
+    else refreshTabs();
     if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
