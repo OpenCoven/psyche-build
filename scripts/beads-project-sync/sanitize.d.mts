@@ -27,6 +27,8 @@ export interface PublicBead {
 
 export function assertNoPublishableSecrets(value: string): void;
 
+export function containsLocalOperationalPath(value: string): boolean;
+
 export function sanitizePublicText(
   value: string | null | undefined,
   config?: SanitizePublicTextConfig,

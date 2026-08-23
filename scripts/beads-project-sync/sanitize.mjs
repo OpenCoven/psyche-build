@@ -42,10 +42,9 @@ const CREDENTIAL_ASSIGNMENT_PATTERN =
   /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
-const LOCAL_OPERATIONAL_PATH_PATTERN =
-  /(?:~[\\/][^\s"'`()\[\]{}<>;,:]*?(?:\.copilot|\.worktrees)|(?:^|[^A-Za-z0-9._~-])(?:\.copilot(?:[\\/]session-state)?|\.worktrees))(?:[\\/][^\s"'`()\[\]{}<>;,:]*)?/giu;
 const PROTECTED_URL_PATTERN = /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`()\[\]{}<>]+/gu;
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
+const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%+@-]/u;
 const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
 const PROTECTED_URL_PLACEHOLDER_SUFFIX = '\u0000';
 const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
@@ -556,18 +555,188 @@ function redactHomeDirectories(value, config) {
 }
 
 /**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isLocalPathComponentCharacter(value) {
+  return value != null && LOCAL_PATH_COMPONENT_CHARACTER_PATTERN.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isPathSeparator(value) {
+  return value === '/' || value === '\\';
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasLocalPathComponentStart(value, index) {
+  return (
+    index === 0
+    || isPathSeparator(value[index - 1])
+    || !isLocalPathComponentCharacter(value[index - 1])
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasLocalPathComponentEnd(value, index) {
+  return (
+    index >= value.length
+    || isPathSeparator(value[index])
+    || !isLocalPathComponentCharacter(value[index])
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {string} component
+ * @param {number} [fromIndex=0]
+ * @returns {number}
+ */
+function findLocalPathComponent(value, component, fromIndex = 0) {
+  const lower = value.toLowerCase();
+  let index = lower.indexOf(component, fromIndex);
+
+  while (index >= 0) {
+    const end = index + component.length;
+    if (
+      hasLocalPathComponentStart(value, index)
+      && hasLocalPathComponentEnd(value, end)
+    ) {
+      return index;
+    }
+    index = lower.indexOf(component, index + 1);
+  }
+
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {number} [fromIndex=0]
+ * @returns {number}
+ */
+function findLocalOperationalPathMarker(value, fromIndex = 0) {
+  const candidates = [
+    findLocalPathComponent(value, '.copilot', fromIndex),
+    findLocalPathComponent(value, '.worktrees', fromIndex),
+  ];
+  let psycheIndex = findLocalPathComponent(value, '.psyche', fromIndex);
+
+  while (psycheIndex >= 0) {
+    const separatorIndex = psycheIndex + '.psyche'.length;
+    if (isPathSeparator(value[separatorIndex])) {
+      const worktreesIndex = separatorIndex + 1;
+      const worktreesEnd = worktreesIndex + 'worktrees'.length;
+      if (
+        value.slice(worktreesIndex, worktreesEnd).toLowerCase() === 'worktrees'
+        && hasLocalPathComponentEnd(value, worktreesEnd)
+      ) {
+        candidates.push(psycheIndex);
+        break;
+      }
+    }
+    psycheIndex = findLocalPathComponent(value, '.psyche', psycheIndex + 1);
+  }
+
+  return candidates
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0] ?? -1;
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function containsLocalOperationalPath(value) {
+  return findLocalOperationalPathMarker(value) >= 0;
+}
+
+/**
+ * @param {string} token
+ * @param {number} markerIndex
+ * @returns {number}
+ */
+function findLocalOperationalPathStart(token, markerIndex) {
+  let start = markerIndex;
+
+  while (start > 0) {
+    const previous = token[start - 1];
+    if (isPathSeparator(previous) || isLocalPathComponentCharacter(previous)) {
+      start -= 1;
+      continue;
+    }
+    if (
+      previous === ':'
+      && start === 2
+      && /^[A-Za-z]$/u.test(token[0] ?? '')
+    ) {
+      start -= 1;
+      continue;
+    }
+    break;
+  }
+
+  return start;
+}
+
+/**
+ * @param {string} token
+ * @param {number} markerIndex
+ * @returns {number}
+ */
+function findLocalOperationalPathEnd(token, markerIndex) {
+  let end = markerIndex;
+  while (
+    end < token.length
+    && (
+      isPathSeparator(token[end])
+      || isLocalPathComponentCharacter(token[end])
+    )
+  ) {
+    end += 1;
+  }
+  return end;
+}
+
+/**
+ * @param {string} token
+ * @returns {string}
+ */
+function redactLocalOperationalPathToken(token) {
+  let sanitized = '';
+  let cursor = 0;
+
+  while (cursor < token.length) {
+    const markerIndex = findLocalOperationalPathMarker(token, cursor);
+    if (markerIndex < 0) {
+      break;
+    }
+
+    const pathStart = Math.max(cursor, findLocalOperationalPathStart(token, markerIndex));
+    const pathEnd = findLocalOperationalPathEnd(token, markerIndex);
+    sanitized += `${token.slice(cursor, pathStart)}<redacted-local-path>`;
+    cursor = pathEnd;
+  }
+
+  return cursor > 0 ? sanitized + token.slice(cursor) : token;
+}
+
+/**
  * @param {string} value
  * @returns {string}
  */
 function redactLocalOperationalPaths(value) {
-  return value.replace(LOCAL_OPERATIONAL_PATH_PATTERN, (match) => {
-    const lower = match.toLowerCase();
-    const pathStart = ['~/', '~\\', '.copilot', '.worktrees']
-      .map((prefix) => lower.indexOf(prefix))
-      .filter((index) => index >= 0)
-      .sort((left, right) => left - right)[0] ?? 0;
-    return `${match.slice(0, pathStart)}<redacted-local-path>`;
-  });
+  return value.replace(TOKEN_PATTERN, redactLocalOperationalPathToken);
 }
 
 /**

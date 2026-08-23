@@ -125,6 +125,23 @@ describe('Beads project renderers', () => {
     expect(
       sanitizePublicText('/Users/buns/.copilot/session-state/run-1/plan.md'),
     ).toBe('<redacted-local-path>');
+    for (const localPath of [
+      '.psyche/worktrees/public-beads-project/plan.md',
+      './.psyche/worktrees/public-beads-project/plan.md',
+      'psyche-build/.psyche/worktrees/public-beads-project/plan.md',
+      '~/.psyche/worktrees/public-beads-project/plan.md',
+      '/opt/repos/psyche-build/.psyche/worktrees/public-beads-project/plan.md',
+      'C:\\repos\\psyche-build\\.psyche\\worktrees\\public-beads-project\\plan.md',
+    ]) {
+      expect(sanitizePublicText(`Plan: ${localPath}`)).toBe('Plan: <redacted-local-path>');
+    }
+    expect(
+      sanitizePublicText(
+        'Keep .psyche/worktrees-inspired prose and docs/.psyche/worktrees-notes.md public.',
+      ),
+    ).toBe(
+      'Keep .psyche/worktrees-inspired prose and docs/.psyche/worktrees-notes.md public.',
+    );
 
     expect(() => assertNoPublishableSecrets('token = ghp_abcdefghijklmnopqrstuvwxyz123456')).toThrow(
       /GitHub token/i,
@@ -328,6 +345,11 @@ describe('Beads project renderers', () => {
       '~/.copilot/session-state/run-1/plan.md',
       '.copilot/session-state/run-1/plan.md',
       '.worktrees/mobile-multiproject-cockpit/docs/spec.md',
+      '.psyche/worktrees/public-beads-project/docs/spec.md',
+      './.psyche/worktrees/public-beads-project/docs/spec.md',
+      'psyche-build/.psyche/worktrees/public-beads-project/docs/spec.md',
+      '~/.psyche/worktrees/public-beads-project/docs/spec.md',
+      '/opt/repos/psyche-build/.psyche/worktrees/public-beads-project/docs/spec.md',
       '../outside/plan.md',
       './docs/plan.md',
       'docs/~scratch/plan.md',
@@ -365,6 +387,25 @@ describe('Beads project renderers', () => {
     expect(renderedSanitizedSource).not.toContain('## Design');
     expect(renderedSanitizedSource).not.toContain('<redacted-local-path>');
     expect(renderedSanitizedSource).not.toContain('/blob/f2f1da60/');
+
+    for (const safePath of [
+      'docs/.psyche/worktrees-inspired.md',
+      'docs/.psyche-worktrees/guide.md',
+      'docs/not.psyche/worktrees/guide.md',
+    ]) {
+      const renderedSafeSource = renderIssueBody(
+        {
+          ...feature!,
+          design: safePath,
+          specId: null,
+        },
+        buildContext(inventory),
+      );
+
+      expect(renderedSafeSource).toContain(
+        `[${safePath}](https://github.com/OpenCoven/psyche-build/blob/f2f1da60/${safePath})`,
+      );
+    }
   });
 
   it('rejects secret-bearing repository and source URLs from public output', () => {

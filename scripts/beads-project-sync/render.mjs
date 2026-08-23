@@ -8,7 +8,11 @@ import {
   normalizeMarker,
   projectReadmeMarker,
 } from './markers.mjs';
-import { assertNoPublishableSecrets, sanitizePublicText } from './sanitize.mjs';
+import {
+  assertNoPublishableSecrets,
+  containsLocalOperationalPath,
+  sanitizePublicText,
+} from './sanitize.mjs';
 
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
 
@@ -31,7 +35,7 @@ const GENERATED_MARKER_PATTERN =
   /<!--\s*[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,199})\s+(?:bead-id=|project-readme|render-hash=)/giu;
 const TYPE_SORT_ORDER = ['epic', 'feature', 'task'];
 const ABSOLUTE_URL_PATTERN = /^(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//iu;
-const UNSAFE_REPOSITORY_PATH_SEGMENTS = new Set(['..', '.copilot', '.worktrees']);
+const UNSAFE_REPOSITORY_PATH_SEGMENTS = new Set(['..']);
 
 /**
  * @param {string} message
@@ -347,6 +351,7 @@ function normalizeRepositoryRelativePath(value) {
     || normalized.includes('?')
     || normalized.includes('#')
     || normalized.includes('<redacted-local-path>')
+    || containsLocalOperationalPath(normalized)
   ) {
     return null;
   }
