@@ -94,6 +94,12 @@ describe('Beads project renderers', () => {
     expect(
       sanitizePublicText('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.'),
     ).toBe('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.');
+    expect(sanitizePublicText('Keep https://example.com/.worktrees/releases public.')).toBe(
+      'Keep https://example.com/.worktrees/releases public.',
+    );
+    expect(
+      sanitizePublicText('Keep http://example.com/.psyche/worktrees/releases public.'),
+    ).toBe('Keep http://example.com/.psyche/worktrees/releases public.');
     expect(sanitizePublicText('Keep https://example.com/?path=/Users/buns/docs public.')).toBe(
       'Keep https://example.com/?path=~/docs public.',
     );

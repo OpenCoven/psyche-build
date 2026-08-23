@@ -553,17 +553,13 @@ function redactHomeDirectoryToken(token, matchers, options = {}) {
 
 /**
  * @param {string} value
- * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
-function redactHomeDirectories(value, config) {
-  const matchers = buildHomeDirectoryMatchers(config);
-  const { protectedValue, protectedUrls } = protectNonFileUrls(value, matchers);
-  const sanitized = protectedValue.replace(TOKEN_PATTERN, (token) =>
+function redactHomeDirectories(value, matchers) {
+  return value.replace(TOKEN_PATTERN, (token) =>
     redactHomeDirectoryToken(token, matchers)
   );
-
-  return restoreProtectedUrls(sanitized, protectedUrls);
 }
 
 /**
@@ -1019,6 +1015,21 @@ function redactLocalOperationalPaths(value) {
 
 /**
  * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string}
+ */
+function redactLocalPaths(value, config) {
+  const matchers = buildHomeDirectoryMatchers(config);
+  const { protectedValue, protectedUrls } = protectNonFileUrls(value, matchers);
+  const sanitized = redactLocalOperationalPaths(
+    redactHomeDirectories(protectedValue, matchers),
+  );
+
+  return restoreProtectedUrls(sanitized, protectedUrls);
+}
+
+/**
+ * @param {string} value
  * @returns {string}
  */
 function escapeGeneratedMarkers(value) {
@@ -1147,8 +1158,7 @@ export function sanitizePublicText(value, config = {}) {
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
   sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
-  sanitized = redactHomeDirectories(sanitized, config);
-  sanitized = redactLocalOperationalPaths(sanitized);
+  sanitized = redactLocalPaths(sanitized, config);
   assertNoPublishableSecrets(sanitized);
   sanitized = escapeGeneratedMarkers(sanitized);
   return normalizeMultilineText(sanitized);
