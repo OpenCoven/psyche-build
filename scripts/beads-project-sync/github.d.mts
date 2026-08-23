@@ -59,6 +59,7 @@ export interface ManagedIssueSnapshot {
   body: string | null;
   state: string;
   assignee: string | null;
+  labels: string[];
   renderHash: string | null;
   projectItem: {
     id: string;

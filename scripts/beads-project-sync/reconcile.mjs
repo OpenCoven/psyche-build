@@ -41,6 +41,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   body?: unknown,
  *   state?: unknown,
  *   assignee?: unknown,
+ *   labels?: unknown,
  *   renderHash?: unknown,
  *   projectItem?: unknown,
  *   parentIssueNumber?: unknown,
@@ -80,6 +81,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   body: string | null,
  *   state: string,
  *   assignee: string | null,
+ *   labels: string[] | null,
  *   renderHash: string | null,
  *   projectItem: ProjectItemSnapshot | null,
  *   parentIssueNumber: number | null,
@@ -538,6 +540,32 @@ function normalizeIssueNumberList(value, context) {
 /**
  * @param {unknown} value
  * @param {string} context
+ * @returns {string[] | null}
+ */
+function normalizeIssueLabels(value, context) {
+  if (value == null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    fail(`${context} must be an array when present`);
+  }
+
+  const seen = new Set();
+  const labels = [];
+  for (const entry of value) {
+    const label = normalizeRequiredTrimmedString(entry, 'label', context);
+    if (seen.has(label)) {
+      continue;
+    }
+    seen.add(label);
+    labels.push(label);
+  }
+  return labels.sort(compareStrings);
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
  * @returns {ProjectItemSnapshot | null}
  */
 function normalizeProjectItem(value, context) {
@@ -575,6 +603,7 @@ function normalizeIssueSnapshot(value, context) {
     body: normalizeOptionalMultilineString(issue.body, 'body', context),
     state: normalizeOptionalTrimmedString(issue.state, 'state', context)?.toLowerCase() ?? 'open',
     assignee: normalizeOptionalTrimmedString(issue.assignee, 'assignee', context),
+    labels: normalizeIssueLabels(issue.labels, `${context} labels`),
     renderHash: normalizeRenderHash(issue.renderHash, 'renderHash', context),
     projectItem: normalizeProjectItem(issue.projectItem, context),
     parentIssueNumber: normalizeNullablePositiveInteger(issue.parentIssueNumber, 'parentIssueNumber', context),
@@ -954,6 +983,31 @@ function buildIssueRenderContext(inventory, renderContext) {
 }
 
 /**
+ * @param {PublicBead} bead
+ * @returns {string[]}
+ */
+function desiredIssueLabels(bead) {
+  const labels = ['bead', `priority:P${bead.priority}`];
+  if (bead.type === 'epic' || bead.type === 'feature' || bead.type === 'task') {
+    labels.push(`bead:${bead.type}`);
+  }
+  if (bead.blocked) {
+    labels.push('status:blocked');
+  }
+  return labels.sort(compareStrings);
+}
+
+/**
+ * @param {readonly string[]} left
+ * @param {readonly string[]} right
+ * @returns {boolean}
+ */
+function stringListsEqual(left, right) {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+/**
  * @param {readonly PublicBead[]} inventory
  * @param {ReadonlyMap<string, ManagedIssueSnapshot>} managedIssuesByBeadId
  * @param {CreateIssueOperation[]} createIssues
@@ -1092,6 +1146,10 @@ export function planReconciliation(input) {
         existingIssue.title !== title
         || existingIssue.assignee !== assignee
         || existingIssue.state === 'closed'
+        || (
+          existingIssue.labels != null
+          && !stringListsEqual(existingIssue.labels, desiredIssueLabels(bead))
+        )
         || !hasCurrentRenderedBody(
           existingIssue,
           renderedBody,

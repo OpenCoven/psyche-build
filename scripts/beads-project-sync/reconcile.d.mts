@@ -23,6 +23,7 @@ export interface IssueSnapshotInput {
   body?: string | null;
   state?: string | null;
   assignee?: string | null;
+  labels?: readonly string[] | null;
   renderHash?: string | null;
   projectItem?: ProjectItemSnapshotInput | null;
   parentIssueNumber?: number | null;
@@ -35,6 +36,7 @@ export interface IssueSnapshot {
   body: string | null;
   state: string;
   assignee: string | null;
+  labels: string[] | null;
   renderHash: string | null;
   projectItem: ProjectItemSnapshot | null;
   parentIssueNumber: number | null;

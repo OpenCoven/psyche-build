@@ -12,7 +12,13 @@ import type {
   GhRunResult,
   ManagedIssueSnapshot,
 } from '../scripts/beads-project-sync/github.mjs';
-import type { ReconciliationAdapters } from '../scripts/beads-project-sync/reconcile.mjs';
+import {
+  planReconciliation,
+} from '../scripts/beads-project-sync/reconcile.mjs';
+import type {
+  ReconciliationAdapters,
+} from '../scripts/beads-project-sync/reconcile.mjs';
+import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
 
 const owner = 'OpenCoven';
 const repo = 'psyche-build';
@@ -140,6 +146,7 @@ describe('createGhClient', () => {
       body: managedBody('pb-child'),
       state: 'open',
       assignee: null,
+      labels: ['bead', 'bead:task', 'priority:P1'],
       renderHash: null,
       projectItem: null,
       parentIssueNumber: 1,
@@ -180,7 +187,7 @@ describe('createGhClient', () => {
     expect(JSON.stringify(runner.calls.map((call) => call.args))).not.toContain(token);
   });
 
-  it('paginates all bead-labeled repository issues including closed issues and parses managed markers', async () => {
+  it('paginates all repository issues including closed issues and parses managed markers', async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
       number: index + 1,
       title: `Issue ${index + 1}`,
@@ -205,6 +212,13 @@ describe('createGhClient', () => {
           state: 'open',
           assignees: [],
         },
+        {
+          number: 103,
+          title: 'Pull request with a copied marker',
+          body: managedBody('pb-pr'),
+          state: 'closed',
+          pull_request: { url: `https://api.github.com/repos/${owner}/${repo}/pulls/103` },
+        },
       ]),
       projectDiscovery([]),
       ...Array.from({ length: 101 }, () => [
@@ -227,14 +241,14 @@ describe('createGhClient', () => {
     expect(runner.calls.slice(0, 2).map((call) => call.args)).toEqual([
       [
         'api',
-        `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
+        `repos/${owner}/${repo}/issues?state=all&per_page=100&page=1`,
         '--method',
         'GET',
         ...apiHeaders,
       ],
       [
         'api',
-        `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=2`,
+        `repos/${owner}/${repo}/issues?state=all&per_page=100&page=2`,
         '--method',
         'GET',
         ...apiHeaders,
@@ -242,6 +256,75 @@ describe('createGhClient', () => {
     ]);
     expect(parseStdin(runner.calls[2]!).query).toMatch(/query DiscoverManagedProject/u);
     expect(runner.calls).toHaveLength(205);
+  });
+
+  it('discovers a marked issue without the bead label and plans repair instead of a duplicate', async () => {
+    const bead: PublicBead = {
+      id: 'pb-label-drift',
+      title: 'Repair label drift',
+      description: 'Keep the existing managed issue.',
+      design: null,
+      specId: null,
+      acceptanceCriteria: '- The issue is reused.',
+      notes: null,
+      status: 'open',
+      priority: 0,
+      type: 'task',
+      blocked: false,
+      labels: [],
+      parentId: null,
+      blockedByIds: [],
+      githubAssignee: null,
+      createdAt: '2026-08-20T00:00:00Z',
+      updatedAt: '2026-08-20T00:00:00Z',
+      closedAt: null,
+    };
+    const firstRun = planReconciliation({
+      inventory: [bead],
+      existingIssues: [],
+      readme: null,
+    });
+    const createOperation = firstRun.operations.find(
+      (operation) => operation.type === 'createIssue',
+    );
+    expect(createOperation?.type).toBe('createIssue');
+
+    const runner = createRunner([
+      success([{
+        number: 77,
+        title: createOperation?.type === 'createIssue' ? createOperation.title : null,
+        body: createOperation?.type === 'createIssue' ? createOperation.body : null,
+        state: 'open',
+        assignees: [],
+        labels: [{ name: 'bead:task' }, { name: 'priority:P0' }],
+      }]),
+      projectDiscovery([]),
+      httpError(404, 'parent not found'),
+      success([]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    const existingIssues = await client.listManagedIssues();
+    const plan = planReconciliation({
+      inventory: [bead],
+      existingIssues,
+      readme: null,
+    });
+
+    expect(existingIssues).toEqual([
+      expect.objectContaining({
+        beadId: 'pb-label-drift',
+        number: 77,
+        labels: ['bead:task', 'priority:P0'],
+      }),
+    ]);
+    expect(plan.summary.createIssueCount).toBe(0);
+    expect(plan.summary.updateIssueCount).toBe(1);
+    expect(plan.operations).toContainEqual(expect.objectContaining({
+      type: 'updateIssue',
+      beadId: 'pb-label-drift',
+      issueNumber: 77,
+    }));
   });
 
   it('rejects duplicate markers in one issue and duplicate managed bead IDs across issues', async () => {
@@ -1437,7 +1520,7 @@ describe('createGhClient', () => {
     expect(runner.calls.filter((call) => call.args.includes('--method')
       && call.args.includes('POST'))).toHaveLength(1);
     expect(runner.calls[1]?.args).toContain(
-      `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
+      `repos/${owner}/${repo}/issues?state=all&per_page=100&page=1`,
     );
   });
 
@@ -1465,7 +1548,7 @@ describe('createGhClient', () => {
     expect(runner.calls.filter((call) => call.args.includes('--method')
       && call.args.includes('POST'))).toHaveLength(1);
     expect(runner.calls[1]?.args).toContain(
-      `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=1`,
+      `repos/${owner}/${repo}/issues?state=all&per_page=100&page=1`,
     );
   });
 

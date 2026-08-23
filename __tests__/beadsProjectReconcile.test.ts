@@ -85,6 +85,17 @@ function canonicalReadmeBody(inventory: readonly PublicBead[]): string {
   return renderProjectReadme(inventory, baseContext);
 }
 
+function desiredLabels(bead: PublicBead): string[] {
+  const labels = ['bead', `priority:P${bead.priority}`];
+  if (bead.type === 'epic' || bead.type === 'feature' || bead.type === 'task') {
+    labels.splice(1, 0, `bead:${bead.type}`);
+  }
+  if (bead.blocked) {
+    labels.push('status:blocked');
+  }
+  return labels;
+}
+
 function desiredFields(
   bead: Pick<
     PublicBead,
@@ -174,6 +185,7 @@ function managedIssue(
     body: canonicalIssueBody(bead, inventory),
     state: bead.status === 'closed' ? 'closed' : 'open',
     assignee: bead.githubAssignee,
+    labels: desiredLabels(bead),
     renderHash: null,
     projectItem: {
       id: `item-${issueNumber}`,

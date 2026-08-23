@@ -856,6 +856,26 @@ function labelsFromBody(body) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+function issueLabelNames(value) {
+  const labels = [];
+  const seen = new Set();
+  for (const rawLabel of array(value)) {
+    const name = typeof rawLabel === 'string'
+      ? rawLabel
+      : stringOrEmpty(record(rawLabel).name);
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    labels.push(name);
+  }
+  return labels;
+}
+
+/**
  * @param {unknown} input
  * @returns {number}
  */
@@ -1162,7 +1182,7 @@ export function createGhClient(options) {
     for (let page = 1; ; page += 1) {
       const pageItems = array(await rest(
         'GET',
-        `repos/${owner}/${repo}/issues?state=all&labels=bead&per_page=100&page=${page}`,
+        `repos/${owner}/${repo}/issues?state=all&per_page=100&page=${page}`,
       ));
       issues.push(...pageItems);
       if (pageItems.length < 100) {
@@ -1295,6 +1315,7 @@ export function createGhClient(options) {
      *   body: string | null,
      *   state: string,
      *   assignee: string | null,
+     *   labels: string[],
      *   renderHash: string | null,
      *   projectItem: {
      *     id: string,
@@ -1339,6 +1360,7 @@ export function createGhClient(options) {
         body: typeof issue.body === 'string' ? issue.body : null,
         state: typeof issue.state === 'string' ? issue.state : 'open',
         assignee: typeof firstAssignee.login === 'string' ? firstAssignee.login : null,
+        labels: issueLabelNames(issue.labels),
         renderHash,
         projectItem: null,
         parentIssueNumber: null,
