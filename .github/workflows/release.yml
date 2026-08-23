@@ -152,12 +152,14 @@ jobs:
           grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
           grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
 
-      - uses: ./.github/actions/setup-xcodegen
+      - name: Set up XcodeGen for iOS verification
+        if: steps.release.outputs.desktop_only != 'true'
+        uses: ./.github/actions/setup-xcodegen
 
       - name: Require matching release versions
         run: pnpm release:check -- "$RELEASE_TAG"
 
-      - name: Verify TypeScript and package surfaces
+      - name: Verify shared TypeScript, protocol, and package surfaces
         run: |
           set -euo pipefail
           pnpm docs:focus:check
@@ -177,6 +179,7 @@ jobs:
           pnpm --dir native/desktop/psyche-build-tauri build:web
 
       - name: Require iOS 26.2 iPhone 16 Pro simulator
+        if: steps.release.outputs.desktop_only != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -191,6 +194,7 @@ jobs:
           fi
 
       - name: Verify generated iOS project, Core, app, and UI tests
+        if: steps.release.outputs.desktop_only != 'true'
         shell: bash
         run: |
           set -euo pipefail
