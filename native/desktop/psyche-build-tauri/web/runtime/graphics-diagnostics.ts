@@ -265,9 +265,9 @@ export async function collectRuntimeGraphicsReport(
     }
     return mergeRuntimeGraphicsReport(nativeFacts, classifyGraphicsEvidence(probe));
   } catch (error) {
-    (deps.reportError ?? defaultReportError)(error, 'collect runtime graphics report');
-    return null;
-  }
+  safelyReportRuntimeGraphicsError(deps, error);
+  return null;
+}
 }
 
 export function ensureRuntimeGraphicsStartupSummary(
@@ -275,13 +275,18 @@ export function ensureRuntimeGraphicsStartupSummary(
   startupState: RuntimeGraphicsStartupState = sharedStartupState,
 ): Promise<RuntimeGraphicsReport | null> {
   if (!startupState.inFlight) {
-    startupState.inFlight = collectRuntimeGraphicsReport(deps).then((report) => {
-      if (report) (deps.log ?? defaultLog)('[psyche:graphics]', report);
-      return report;
-    });
-  }
+  const invoke = deps.invoke ?? defaultInvoke();
+  // Tauri installs its global bridge after the module can begin loading.
+  // A missing default invoke is retryable and must not be cached.
+  if (!invoke) return Promise.resolve(null);
 
-  return startupState.inFlight;
+  startupState.inFlight = collectRuntimeGraphicsReport({ ...deps, invoke }).then((report) => {
+    if (report) safelyLogRuntimeGraphicsReport(deps, report);
+    return report;
+  });
+}
+
+return startupState.inFlight;
 }
 
 function compactProbeResult(result: GraphicsProbeResult): GraphicsProbeResult {
@@ -814,6 +819,28 @@ function defaultInvoke():
       };
     };
   }).__TAURI__?.core?.invoke;
+}
+
+function safelyReportRuntimeGraphicsError(
+  deps: RuntimeGraphicsStartupDependencies,
+  error: unknown,
+): void {
+  try {
+    (deps.reportError ?? defaultReportError)(error, 'collect runtime graphics report');
+  } catch {
+    // Diagnostics reporting is best-effort and must never block startup.
+  }
+}
+
+function safelyLogRuntimeGraphicsReport(
+  deps: RuntimeGraphicsStartupDependencies,
+  report: RuntimeGraphicsReport,
+): void {
+  try {
+    (deps.log ?? defaultLog)('[psyche:graphics]', report);
+  } catch {
+    // Consumer logging is best-effort and must never block startup.
+  }
 }
 
 function defaultLog(label: '[psyche:graphics]', report: RuntimeGraphicsReport): void {
