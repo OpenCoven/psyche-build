@@ -356,6 +356,7 @@ import {
 
 /**
  * @typedef {{
+ *   assertApplyLockOwned?: () => Awaitable<void>,
  *   createIssue: (operation: CreateIssueOperation) => Awaitable<CreateIssueResult>,
  *   updateIssue: (operation: UpdateIssueOperation & { issueNumber: number }) => Awaitable<unknown>,
  *   labelIssue: (operation: LabelIssueOperation) => Awaitable<unknown>,
@@ -1937,6 +1938,9 @@ export async function applyReconciliation(plan, adapters) {
     let failingOperation = operation;
 
     try {
+      if (adapters.assertApplyLockOwned) {
+        await adapters.assertApplyLockOwned();
+      }
       switch (operation.type) {
         case 'createIssue': {
           const createIssue = adapters.createIssue ?? fail('applyReconciliation requires adapters.createIssue');

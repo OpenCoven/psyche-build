@@ -53,6 +53,7 @@ interface CapturedCli {
 interface FakeGhOptions {
   existingIssues?: readonly Record<string, unknown>[];
   failAcquireLock?: Error;
+  failLeaseValidationAfterWrite?: string;
   failReleaseLock?: Error;
   failSetFields?: Error;
   project?: ProjectContext | null;
@@ -119,6 +120,27 @@ function createFakeGh(options: FakeGhOptions = {}) {
       url: 'https://github.com/orgs/OpenCoven/projects/11',
     }
     : options.project;
+  let activeLease: {
+    assertOwned(): Promise<void>;
+    failure(): Error | null;
+    release(): Promise<void>;
+    renewNow(): Promise<Record<string, unknown>>;
+    stop(): Promise<void>;
+  } | null = null;
+
+  async function assertLeaseOwned() {
+    const failedWrite = options.failLeaseValidationAfterWrite;
+    if (failedWrite && writes.includes(failedWrite)) {
+      throw new Error('GitHub apply lease lost after renewal transport failure');
+    }
+  }
+
+  async function releaseLock() {
+    lockCalls.push('release');
+    if (options.failReleaseLock) {
+      throw options.failReleaseLock;
+    }
+  }
 
   const client = {
     async verifyAccess() {
@@ -156,11 +178,23 @@ function createFakeGh(options: FakeGhOptions = {}) {
         expiresAt: Date.now() + 60_000,
       };
     },
-    async releaseApplyLock() {
-      lockCalls.push('release');
-      if (options.failReleaseLock) {
-        throw options.failReleaseLock;
-      }
+    async assertApplyLockOwned() {
+      await activeLease?.assertOwned();
+    },
+    releaseApplyLock: releaseLock,
+    startApplyLockLease(handle: Record<string, unknown>) {
+      activeLease = {
+        assertOwned: assertLeaseOwned,
+        failure() {
+          return null;
+        },
+        release: releaseLock,
+        async renewNow() {
+          return handle;
+        },
+        async stop() {},
+      };
+      return activeLease;
     },
     async listManagedIssues() {
       calls.push('listManagedIssues');
@@ -970,6 +1004,25 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes.at(-1)).toBe('updateReadme');
     expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
     expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/11');
+  });
+
+  it('surfaces terminal lease loss after the final mutation before reporting success', async () => {
+    const fakeGh = createFakeGh({
+      failLeaseValidationAfterWrite: 'updateReadme',
+    });
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/lease lost.*renewal transport failure/i);
+    expect(fakeGh.writes.at(-1)).toBe('updateReadme');
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
   });
 
   it('reports structured sanitized partial progress when reconciliation apply fails', async () => {

@@ -421,6 +421,19 @@ describe('Beads Project sync workflow contract', () => {
     expect(beadsReadme).not.toMatch(/repository Actions secret\s+named `BEADS_PROJECT_TOKEN`/i);
   });
 
+  it('documents the complete fine-grained token permission contract', () => {
+    const workflow = beadsWorkflowSource();
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    for (const document of [beadsReadme, contributing, workflow]) {
+      expect(document).toMatch(/Contents:\s*read and write/i);
+      expect(document).toMatch(/Issues:\s*read and write/i);
+      expect(document).toMatch(/Metadata:\s*read/i);
+      expect(document).toMatch(/Projects:\s*read and write/i);
+    }
+  });
+
   it('documents ephemeral Actions dry-run bootstrap without weakening local dry-run safety', () => {
     const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
     const contributing = readFileSync(contributingPath, 'utf8');

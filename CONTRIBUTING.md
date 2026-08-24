@@ -113,8 +113,10 @@ reviewers so scheduled runs remain unattended, while the `beads-project-sync`
 environment must have required reviewers so manual runs remain reviewer-gated.
 Install the fine-grained token as the environment secret `BEADS_PROJECT_TOKEN`
 in both environments, or use a secure equivalent that preserves those
-properties. The token needs repository Issues read/write and organization
-Projects read/write permissions.
+properties. Its complete fine-grained permission contract is repository
+**Contents: read and write** (for the atomic commit/tag-ref apply lock),
+**Issues: read and write**, and **Metadata: read**, plus organization
+**Projects: read and write**.
 
 Local dry-run is read-only and never bootstraps or mutates Beads; a missing
 database produces explicit `bd bootstrap --yes` guidance. Actions dry-run
@@ -154,7 +156,9 @@ The lock is an atomic, expiring repository tag-ref lease, so a local
 `pnpm beads:project:sync` fails closed while an Actions apply owns the lease (and
 vice versa); dry-runs never acquire it. Do not delete or rewrite the
 `psyche-beads-project-sync-lock` tag manually. A stale lease is taken over with
-a non-forced fast-forward, and only the current lease owner may release it.
+a non-forced fast-forward. The 30-minute lease is renewed by a bounded
+heartbeat and revalidated before reconciliation mutations; renewal or ownership
+proof failure stops further writes. Only the current lease owner may release it.
 
 During a Beads version or schema migration, designate one sole migrator and
 stop other bootstrap/migration-capable processes until the migrated Dolt state

@@ -86,10 +86,10 @@ or an artifact.
 
 `BEADS_PROJECT_TOKEN` remains a manual fine-grained token setup; the workflow
 does not create or rotate it. Scope it to the `OpenCoven/psyche-build`
-repository with repository **Issues: read and write** and organization
-**Projects: read and write** permissions (plus the implicit metadata read
-permission). Create two protected environments restricted to the main branch
-(`main`):
+repository with repository **Contents: read and write** (for the atomic
+commit/tag-ref apply lock), **Issues: read and write**, and **Metadata: read**,
+plus organization **Projects: read and write**. Create two protected
+environments restricted to the main branch (`main`):
 
 - The `beads-project-sync-automation` environment has no required reviewers, so
   the daily schedule remains unattended.

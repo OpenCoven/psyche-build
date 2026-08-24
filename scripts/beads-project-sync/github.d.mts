@@ -183,6 +183,14 @@ export interface ApplyLockHandle {
   treeSha: string;
 }
 
+export interface ApplyLockLeaseController {
+  assertOwned(): Promise<void>;
+  failure(): GhClientError | null;
+  release(): Promise<void>;
+  renewNow(): Promise<ApplyLockHandle>;
+  stop(): Promise<void>;
+}
+
 export class GhClientError extends Error {
   readonly kind: string;
   readonly status?: number;
@@ -205,7 +213,9 @@ export interface GhClient {
     leaseId: string;
     ttlMs?: number;
   }): Promise<ApplyLockHandle>;
+  assertApplyLockOwned(): Promise<void>;
   releaseApplyLock(handle: ApplyLockHandle): Promise<void>;
+  startApplyLockLease(handle: ApplyLockHandle): ApplyLockLeaseController;
   listRepositoryIssues(): Promise<unknown[]>;
   listManagedIssues(): Promise<ManagedIssueSnapshot[]>;
   ensureLabels(): Promise<readonly ManagedLabel[]>;
@@ -293,5 +303,7 @@ export function createGhClient(options: {
   legacyIssueMarkers?: readonly string[];
   sleep?: (milliseconds: number) => void | Promise<void>;
   now?: () => number;
+  setTimer?: (callback: () => void, milliseconds: number) => unknown;
+  clearTimer?: (timer: unknown) => void;
   maxRetryWaitMs?: number;
 }): GhClient;

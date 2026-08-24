@@ -46,6 +46,10 @@ const APPLY_LOCK_REF_ENDPOINT = 'tags/psyche-beads-project-sync-lock';
 const APPLY_LOCK_MESSAGE_PREFIX = 'psyche-beads-project-lock:v1 ';
 const DEFAULT_APPLY_LOCK_TTL_MS = 30 * 60 * 1_000;
 const MAX_APPLY_LOCK_TTL_MS = 24 * 60 * 60 * 1_000;
+const APPLY_LOCK_PERMISSION_MESSAGE =
+  'BEADS_PROJECT_TOKEN received HTTP 403 from the repository apply-lock API. '
+  + 'Configure the fine-grained token with repository Contents: read and write, '
+  + 'Issues: read and write, Metadata: read, and organization Projects: read and write.';
 const SAFE_LOCK_IDENTITY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
@@ -498,6 +502,16 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   sha: string,
  *   treeSha: string,
  * }} ApplyLockHandle
+ */
+
+/**
+ * @typedef {{
+ *   assertOwned: () => Promise<void>,
+ *   failure: () => GhClientError | null,
+ *   release: () => Promise<void>,
+ *   renewNow: () => Promise<ApplyLockHandle>,
+ *   stop: () => Promise<void>,
+ * }} ApplyLockLeaseController
  */
 
 export class GhClientError extends Error {
@@ -1305,6 +1319,8 @@ function normalizeFieldMap(rawFields) {
  *   legacyIssueMarkers?: readonly string[],
  *   sleep?: (milliseconds: number) => void | Promise<void>,
  *   now?: () => number,
+ *   setTimer?: (callback: () => void, milliseconds: number) => unknown,
+ *   clearTimer?: (timer: unknown) => void,
  *   maxRetryWaitMs?: number,
  * }} options
  */
@@ -1341,6 +1357,16 @@ export function createGhClient(options) {
     ? options.sleep
     : (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
   const now = typeof options.now === 'function' ? options.now : Date.now;
+  /** @type {(callback: () => void, milliseconds: number) => unknown} */
+  const setTimer = typeof options.setTimer === 'function'
+    ? options.setTimer
+    : (callback, milliseconds) => setTimeout(callback, milliseconds);
+  /** @type {(timer: unknown) => void} */
+  const clearTimer = typeof options.clearTimer === 'function'
+    ? options.clearTimer
+    : (timer) => clearTimeout(
+      /** @type {ReturnType<typeof globalThis.setTimeout>} */ (timer),
+    );
   const maxRetryWaitMs = options.maxRetryWaitMs == null
     ? MAX_RETRY_DELAY_MS
     : (
@@ -1389,6 +1415,8 @@ export function createGhClient(options) {
   let projectDiscoveryComplete = false;
   /** @type {Record<string, unknown>[] | null} */
   let projectItemsCache = null;
+  /** @type {ApplyLockLeaseController | null} */
+  let activeApplyLockLease = null;
 
   /**
    * @param {ProjectContext | null} project
@@ -1710,6 +1738,36 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {unknown} error
+   * @returns {GhClientError}
+   */
+  function applyLeaseLostError(error) {
+    if (error instanceof GhClientError && error.kind === 'lease-lost') {
+      return error;
+    }
+    return new GhClientError(
+      'lease-lost',
+      `GitHub apply lease lost: ${errorDetail(error)}`,
+      errorStatus(error),
+    );
+  }
+
+  /**
+   * @param {ApplyLockHandle} expected
+   * @param {ApplyLockHandle | null} current
+   * @returns {boolean}
+   */
+  function isOwnedApplyLock(expected, current) {
+    return (
+      current?.state === 'acquired'
+      && current.sha === expected.sha
+      && current.owner === expected.owner
+      && current.runId === expected.runId
+      && current.leaseId === expected.leaseId
+    );
+  }
+
+  /**
    * @param {ApplyLockState} state
    * @returns {string}
    */
@@ -1887,56 +1945,301 @@ export function createGhClient(options) {
    * @returns {Promise<ApplyLockHandle>}
    */
   async function acquireApplyLock(input) {
-    const lockOwner = lockIdentity(input?.owner, 'apply lock owner');
-    const runId = lockIdentity(input?.runId, 'apply lock runId');
-    const leaseId = lockIdentity(input?.leaseId, 'apply lock leaseId');
-    const ttlMs = lockTtl(input?.ttlMs);
-    const acquiredAt = now();
-    const state = /** @type {ApplyLockState} */ ({
-      version: 1,
-      state: 'acquired',
-      owner: lockOwner,
-      runId,
-      leaseId,
-      acquiredAt,
-      expiresAt: acquiredAt + ttlMs,
-    });
+    try {
+      const lockOwner = lockIdentity(input?.owner, 'apply lock owner');
+      const runId = lockIdentity(input?.runId, 'apply lock runId');
+      const leaseId = lockIdentity(input?.leaseId, 'apply lock leaseId');
+      const ttlMs = lockTtl(input?.ttlMs);
+      const acquiredAt = now();
+      const state = /** @type {ApplyLockState} */ ({
+        version: 1,
+        state: 'acquired',
+        owner: lockOwner,
+        runId,
+        leaseId,
+        acquiredAt,
+        expiresAt: acquiredAt + ttlMs,
+      });
+      const current = await readApplyLock();
+      if (current?.state === 'acquired' && current.expiresAt > acquiredAt) {
+        throw new GhClientError(
+          'lock',
+          `GitHub apply lock is held by ${current.owner} (${current.runId}) until `
+            + new Date(current.expiresAt).toISOString(),
+          409,
+        );
+      }
+
+      let parentSha;
+      let treeSha;
+      if (current) {
+        parentSha = current.sha;
+        treeSha = current.treeSha;
+      } else {
+        const base = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/commits/${encodeURIComponent(repositoryDefaultBranch)}`,
+        ));
+        parentSha = requiredString(base.sha, 'apply lock base commit sha');
+        treeSha = requiredString(record(base.tree).sha, 'apply lock base tree sha');
+      }
+
+      const sha = await createApplyLockCommit(state, parentSha, treeSha);
+      if (current) {
+        await updateApplyLockRef(sha, leaseId);
+      } else {
+        await createApplyLockRef(sha, leaseId);
+      }
+      return {
+        ...state,
+        ref: APPLY_LOCK_REF,
+        sha,
+        treeSha,
+      };
+    } catch (error) {
+      if (errorStatus(error) === 403 && !isDefiniteRateLimit(error)) {
+        throw new GhClientError('permission', APPLY_LOCK_PERMISSION_MESSAGE, 403);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * @param {ApplyLockHandle} handle
+   * @param {number} ttlMs
+   * @returns {Promise<ApplyLockHandle>}
+   */
+  async function renewApplyLock(handle, ttlMs) {
     const current = await readApplyLock();
-    if (current?.state === 'acquired' && current.expiresAt > acquiredAt) {
+    if (current == null || !isOwnedApplyLock(handle, current)) {
       throw new GhClientError(
-        'lock',
-        `GitHub apply lock is held by ${current.owner} (${current.runId}) until `
-          + new Date(current.expiresAt).toISOString(),
+        'lease-lost',
+        'GitHub apply lease lost because the current tag ref is no longer owned by this run',
+        409,
+      );
+    }
+    const renewedAt = now();
+    if (current.expiresAt <= renewedAt) {
+      throw new GhClientError(
+        'lease-lost',
+        'GitHub apply lease expired before ownership could be renewed',
         409,
       );
     }
 
-    let parentSha;
-    let treeSha;
-    if (current) {
-      parentSha = current.sha;
-      treeSha = current.treeSha;
-    } else {
-      const base = record(await rest(
-        'GET',
-        `repos/${owner}/${repo}/git/commits/${encodeURIComponent(repositoryDefaultBranch)}`,
-      ));
-      parentSha = requiredString(base.sha, 'apply lock base commit sha');
-      treeSha = requiredString(record(base.tree).sha, 'apply lock base tree sha');
-    }
-
-    const sha = await createApplyLockCommit(state, parentSha, treeSha);
-    if (current) {
-      await updateApplyLockRef(sha, leaseId);
-    } else {
-      await createApplyLockRef(sha, leaseId);
-    }
-    return {
-      ...state,
+    const renewed = /** @type {ApplyLockState} */ ({
+      ...current,
+      expiresAt: renewedAt + ttlMs,
+    });
+    const sha = await createApplyLockCommit(renewed, current.sha, current.treeSha);
+    await updateApplyLockRef(sha, current.leaseId);
+    const renewedHandle = {
+      ...renewed,
       ref: APPLY_LOCK_REF,
       sha,
-      treeSha,
+      treeSha: current.treeSha,
     };
+    if (renewedHandle.expiresAt <= now()) {
+      throw new GhClientError(
+        'lease-lost',
+        'GitHub apply lease renewal completed after the renewed lease had already expired',
+        409,
+      );
+    }
+    return renewedHandle;
+  }
+
+  /**
+   * @param {ApplyLockHandle} handle
+   * @returns {ApplyLockLeaseController}
+   */
+  function startApplyLockLease(handle) {
+    if (activeApplyLockLease != null) {
+      fail('An apply lock lease is already active for this GitHub client');
+    }
+    if (handle?.state !== 'acquired') {
+      fail('startApplyLockLease requires an acquired apply lock handle');
+    }
+    const ttlMs = lockTtl(handle.expiresAt - handle.acquiredAt);
+    const heartbeatMs = Math.max(1, Math.floor(ttlMs / 3));
+    /** @type {ApplyLockHandle} */
+    let currentHandle = { ...handle };
+    /** @type {unknown | null} */
+    let timer = null;
+    /** @type {Promise<ApplyLockHandle> | null} */
+    let renewal = null;
+    /** @type {Promise<void> | null} */
+    let verification = null;
+    /** @type {GhClientError | null} */
+    let terminalFailure = null;
+    let stopped = false;
+    let released = false;
+    let nextHeartbeatAt = handle.acquiredAt + heartbeatMs;
+
+    function clearHeartbeat() {
+      if (timer == null) {
+        return;
+      }
+      clearTimer(timer);
+      timer = null;
+    }
+
+    /**
+     * @param {unknown} error
+     * @returns {GhClientError}
+     */
+    function lose(error) {
+      terminalFailure ??= applyLeaseLostError(error);
+      clearHeartbeat();
+      return terminalFailure;
+    }
+
+    function scheduleHeartbeat() {
+      if (stopped || released || terminalFailure || timer != null) {
+        return;
+      }
+      const delay = Math.max(0, nextHeartbeatAt - now());
+      timer = setTimer(() => {
+        timer = null;
+        if (stopped || released || terminalFailure) {
+          return;
+        }
+        void renewNow().catch(() => undefined);
+      }, delay);
+      const unref = /** @type {{unref?: unknown}} */ (timer ?? {}).unref;
+      if (typeof unref === 'function') {
+        unref.call(timer);
+      }
+    }
+
+    /**
+     * @returns {Promise<ApplyLockHandle>}
+     */
+    async function renewNow() {
+      if (verification) {
+        await verification;
+      }
+      if (terminalFailure) {
+        throw terminalFailure;
+      }
+      if (stopped || released) {
+        throw new GhClientError('lease-lost', 'GitHub apply lease is no longer active', 409);
+      }
+      if (renewal) {
+        return renewal;
+      }
+      clearHeartbeat();
+      renewal = renewApplyLock(currentHandle, ttlMs)
+        .then((renewedHandle) => {
+          currentHandle = renewedHandle;
+          nextHeartbeatAt = renewedHandle.expiresAt - (ttlMs - heartbeatMs);
+          return renewedHandle;
+        })
+        .catch((error) => {
+          throw lose(error);
+        })
+        .finally(() => {
+          renewal = null;
+          scheduleHeartbeat();
+        });
+      return renewal;
+    }
+
+    async function assertOwned() {
+      if (verification) {
+        return verification;
+      }
+      if (renewal) {
+        try {
+          await renewal;
+        } catch {
+          throw terminalFailure;
+        }
+      }
+      if (terminalFailure) {
+        throw terminalFailure;
+      }
+      if (stopped || released) {
+        throw new GhClientError('lease-lost', 'GitHub apply lease is no longer active', 409);
+      }
+
+      clearHeartbeat();
+      verification = Promise.resolve().then(async () => {
+        try {
+          const current = await readApplyLock();
+          if (current == null || !isOwnedApplyLock(currentHandle, current)) {
+            throw new GhClientError(
+              'lease-lost',
+              'GitHub apply lease lost because ownership of the current tag ref could not be proven',
+              409,
+            );
+          }
+          if (current.expiresAt <= now()) {
+            throw new GhClientError(
+              'lease-lost',
+              'GitHub apply lease expired before the next mutation',
+              409,
+            );
+          }
+        } catch (error) {
+          throw lose(error);
+        }
+      });
+      try {
+        await verification;
+      } finally {
+        verification = null;
+      }
+      if (now() >= nextHeartbeatAt) {
+        await renewNow();
+      } else {
+        scheduleHeartbeat();
+      }
+    }
+
+    async function stop() {
+      stopped = true;
+      clearHeartbeat();
+      if (renewal) {
+        await renewal.catch(() => undefined);
+      }
+      if (verification) {
+        await verification.catch(() => undefined);
+      }
+    }
+
+    async function release() {
+      if (released) {
+        return;
+      }
+      await stop();
+      try {
+        await releaseApplyLock(currentHandle);
+        released = true;
+      } finally {
+        if (activeApplyLockLease === controller) {
+          activeApplyLockLease = null;
+        }
+      }
+    }
+
+    const controller = /** @type {ApplyLockLeaseController} */ (Object.freeze({
+      assertOwned,
+      failure: () => terminalFailure,
+      release,
+      renewNow,
+      stop,
+    }));
+    activeApplyLockLease = controller;
+    scheduleHeartbeat();
+    return controller;
+  }
+
+  async function assertApplyLockOwned() {
+    if (activeApplyLockLease == null) {
+      return;
+    }
+    await activeApplyLockLease.assertOwned();
   }
 
   /**
@@ -3464,7 +3767,9 @@ ${selections.join('\n')}
   return Object.freeze({
     verifyAccess,
     acquireApplyLock,
+    assertApplyLockOwned,
     releaseApplyLock,
+    startApplyLockLease,
     listRepositoryIssues,
     listManagedIssues,
     ensureLabels,

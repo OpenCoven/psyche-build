@@ -282,6 +282,7 @@ export interface EnsureProjectItemResult {
 export type Awaitable<T> = T | PromiseLike<T>;
 
 export interface ReconciliationAdapters {
+  assertApplyLockOwned?(): Awaitable<void>;
   createIssue(operation: CreateIssueOperation): Awaitable<CreateIssueResult>;
   updateIssue(
     operation: UpdateIssueOperation & { issueNumber: number },

@@ -42,6 +42,13 @@ interface RunCall {
   options: GhRunOptions;
 }
 
+interface ScheduledTimer {
+  callback: () => void;
+  milliseconds: number;
+  cleared: boolean;
+  unref: ReturnType<typeof vi.fn>;
+}
+
 function success(value: unknown = {}): GhRunResult {
   return {
     stdout: typeof value === 'string' ? value : JSON.stringify(value),
@@ -80,6 +87,147 @@ function createRunner(
 function parseStdin(call: RunCall): Record<string, unknown> {
   expect(call.options.stdin).toBeTypeOf('string');
   return JSON.parse(call.options.stdin ?? '') as Record<string, unknown>;
+}
+
+function createApplyLockBackend() {
+  const calls: RunCall[] = [];
+  const commits = new Map<string, Record<string, unknown>>([
+    ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
+  ]);
+  let lockSha: string | null = null;
+  let nextCommit = 0;
+  let nextCommitFailure: Error | null = null;
+  let nextRefReadHook: (() => void) | null = null;
+  let activeRefReads = 0;
+  let maxConcurrentRefReads = 0;
+
+  const run: GhRun = async (command, args, options) => {
+    const call = { command, args: [...args], options: { ...options } };
+    calls.push(call);
+    const endpoint = args[1];
+    const methodIndex = args.indexOf('--method');
+    const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+
+    if (endpoint === `repos/${owner}/${repo}/git/ref/tags/psyche-beads-project-sync-lock`) {
+      if (lockSha == null) {
+        throw httpError(404, 'not found');
+      }
+      activeRefReads += 1;
+      maxConcurrentRefReads = Math.max(maxConcurrentRefReads, activeRefReads);
+      try {
+        const hook = nextRefReadHook;
+        nextRefReadHook = null;
+        hook?.();
+        await Promise.resolve();
+        return success({ object: { sha: lockSha } });
+      } finally {
+        activeRefReads -= 1;
+      }
+    }
+    if (endpoint?.startsWith(`repos/${owner}/${repo}/git/commits/`) && method === 'GET') {
+      const sha = endpoint.split('/').at(-1) ?? '';
+      return success(commits.get(sha));
+    }
+    if (endpoint === `repos/${owner}/${repo}/git/commits` && method === 'POST') {
+      if (nextCommitFailure) {
+        const failure = nextCommitFailure;
+        nextCommitFailure = null;
+        throw failure;
+      }
+      const body = parseStdin(call);
+      const sha = `LOCK-${++nextCommit}`;
+      commits.set(sha, { sha, ...body, tree: { sha: body.tree } });
+      return success({ sha, tree: { sha: body.tree } });
+    }
+    if (endpoint === `repos/${owner}/${repo}/git/refs` && method === 'POST') {
+      if (lockSha != null) {
+        throw httpError(422, 'Reference already exists');
+      }
+      lockSha = String(parseStdin(call).sha);
+      return success({ object: { sha: lockSha } });
+    }
+    if (
+      endpoint === `repos/${owner}/${repo}/git/refs/tags/psyche-beads-project-sync-lock`
+      && method === 'PATCH'
+    ) {
+      const nextSha = String(parseStdin(call).sha);
+      const next = commits.get(nextSha);
+      if (next?.parents == null || !Array.isArray(next.parents) || next.parents[0] !== lockSha) {
+        throw httpError(422, 'Update is not a fast forward');
+      }
+      lockSha = nextSha;
+      return success({ object: { sha: lockSha } });
+    }
+    throw new Error(`Unexpected runner call ${command} ${args.join(' ')}`);
+  };
+
+  return {
+    calls,
+    commits,
+    run,
+    currentSha() {
+      return lockSha;
+    },
+    maxConcurrentRefReads() {
+      return maxConcurrentRefReads;
+    },
+    currentState() {
+      const message = String(commits.get(lockSha ?? '')?.message ?? '');
+      return JSON.parse(message.replace(/^psyche-beads-project-lock:v1 /u, '')) as {
+        state: string;
+        owner: string;
+        runId: string;
+        leaseId: string;
+        expiresAt: number;
+      };
+    },
+    failNextCommit(error: Error) {
+      nextCommitFailure = error;
+    },
+    onNextRefRead(callback: () => void) {
+      nextRefReadHook = callback;
+    },
+    stealLock(state: {
+      owner: string;
+      runId: string;
+      leaseId: string;
+      acquiredAt: number;
+      expiresAt: number;
+    }) {
+      const sha = `STOLEN-${++nextCommit}`;
+      commits.set(sha, {
+        sha,
+        tree: { sha: 'TREE' },
+        parents: lockSha == null ? [] : [lockSha],
+        message: `psyche-beads-project-lock:v1 ${JSON.stringify({
+          version: 1,
+          state: 'acquired',
+          ...state,
+        })}`,
+      });
+      lockSha = sha;
+    },
+  };
+}
+
+function createTimerHarness() {
+  const timers: ScheduledTimer[] = [];
+  return {
+    timers,
+    setTimer(callback: () => void, milliseconds: number) {
+      const timer: ScheduledTimer = {
+        callback,
+        milliseconds,
+        cleared: false,
+        unref: vi.fn(),
+      };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer(timer: unknown) {
+      (timer as ScheduledTimer).cleared = true;
+    },
+  };
 }
 
 function managedBody(id: string, extra = ''): string {
@@ -2775,6 +2923,265 @@ describe('createGhClient', () => {
     for (const update of updates) {
       expect(parseStdin(update)).toMatchObject({ force: false });
     }
+  });
+
+  it('renews a long apply, blocks a contender, releases the renewed lease, and stops heartbeats', async () => {
+    const backend = createApplyLockBackend();
+    const timers = createTimerHarness();
+    let currentTime = 1_000;
+    const first = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    const handle = await first.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'long-run',
+      leaseId: 'long-lease',
+      ttlMs: 90,
+    });
+    const lease = first.startApplyLockLease(handle);
+
+    expect(timers.timers).toHaveLength(1);
+    expect(timers.timers[0]?.milliseconds).toBe(30);
+    expect(timers.timers[0]?.unref).toHaveBeenCalledOnce();
+
+    currentTime = 1_031;
+    timers.timers[0]?.callback();
+    await expect(lease.assertOwned()).resolves.toBeUndefined();
+    expect(backend.currentState().expiresAt).toBe(1_121);
+
+    currentTime = 1_100;
+    const contender = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+    });
+    await expect(contender.acquireApplyLock({
+      owner: 'github-actions',
+      runId: 'contender-run',
+      leaseId: 'contender-lease',
+      ttlMs: 90,
+    })).rejects.toThrow(/lock is held/i);
+
+    await expect(lease.release()).resolves.toBeUndefined();
+    expect(backend.currentState()).toMatchObject({
+      state: 'released',
+      owner: 'local-cli',
+      runId: 'long-run',
+      leaseId: 'long-lease',
+    });
+    expect(timers.timers.at(-1)?.cleared).toBe(true);
+
+    const callCountAfterRelease = backend.calls.length;
+    for (const timer of timers.timers) {
+      timer.callback();
+    }
+    await Promise.resolve();
+    expect(backend.calls).toHaveLength(callCountAfterRelease);
+  });
+
+  it('makes renewal transport failure terminal before the next reconciliation mutation', async () => {
+    const backend = createApplyLockBackend();
+    let currentTime = 2_000;
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'transport-run',
+      leaseId: 'transport-lease',
+      ttlMs: 90,
+    });
+    const lease = client.startApplyLockLease(handle);
+    backend.failNextCommit(
+      Object.assign(new Error(`socket reset while using ${token}`), { code: 'ECONNRESET' }),
+    );
+    currentTime = 2_031;
+
+    await expect(lease.renewNow()).rejects.toThrow(/lease.*lost/i);
+
+    const bead: PublicBead = {
+      id: 'pb-lease-guard',
+      title: 'Guard the next mutation',
+      description: null,
+      design: null,
+      specId: null,
+      acceptanceCriteria: null,
+      notes: null,
+      status: 'open',
+      priority: 1,
+      type: 'task',
+      blocked: false,
+      labels: [],
+      parentId: null,
+      blockedByIds: [],
+      githubAssignee: null,
+      createdAt: '2026-08-24T00:00:00Z',
+      updatedAt: '2026-08-24T00:00:00Z',
+      closedAt: null,
+    };
+    const plan = planReconciliation({
+      inventory: [bead],
+      existingIssues: [],
+      readme: null,
+      renderContext: {
+        repositoryIdentity,
+        sourceRepositoryUrl: `https://github.com/${repositoryIdentity}`,
+      },
+    });
+    const callsBeforeApply = backend.calls.length;
+
+    let applyFailure: unknown;
+    try {
+      await applyReconciliation(plan, client);
+    } catch (error) {
+      applyFailure = error;
+    }
+    expect(applyFailure).toBeInstanceOf(Error);
+    expect(String((applyFailure as { cause?: unknown }).cause)).toMatch(/lease.*lost/i);
+    expect(backend.calls.slice(callsBeforeApply).some((call) =>
+      call.args.includes(`repos/${owner}/${repo}/issues`)
+    )).toBe(false);
+    expect(String(await lease.failure())).not.toContain(token);
+
+    await expect(lease.release()).resolves.toBeUndefined();
+  });
+
+  it('serializes ownership revalidation with a heartbeat that becomes due mid-read', async () => {
+    const backend = createApplyLockBackend();
+    const timers = createTimerHarness();
+    let currentTime = 2_500;
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'serialized-run',
+      leaseId: 'serialized-lease',
+      ttlMs: 90,
+    });
+    const lease = client.startApplyLockLease(handle);
+    currentTime = 2_531;
+    backend.onNextRefRead(() => {
+      timers.timers[0]?.callback();
+    });
+
+    await expect(lease.assertOwned()).resolves.toBeUndefined();
+    await expect(lease.renewNow()).resolves.toMatchObject({
+      leaseId: 'serialized-lease',
+    });
+    expect(lease.failure()).toBeNull();
+    expect(backend.maxConcurrentRefReads()).toBe(1);
+    expect(backend.currentState()).toMatchObject({
+      state: 'acquired',
+      leaseId: 'serialized-lease',
+      expiresAt: 2_621,
+    });
+    await expect(lease.release()).resolves.toBeUndefined();
+  });
+
+  it('keeps the renewal deadline fixed across ownership revalidations', async () => {
+    const backend = createApplyLockBackend();
+    const timers = createTimerHarness();
+    let currentTime = 4_000;
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'deadline-run',
+      leaseId: 'deadline-lease',
+      ttlMs: 90,
+    });
+    const lease = client.startApplyLockLease(handle);
+    expect(timers.timers.at(-1)?.milliseconds).toBe(30);
+
+    currentTime = 4_010;
+    await lease.assertOwned();
+
+    expect(timers.timers.at(-1)?.milliseconds).toBe(20);
+    await lease.release();
+  });
+
+  it('detects a stolen ref before mutation and refuses to release the contender lease', async () => {
+    const backend = createApplyLockBackend();
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 3_000,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'stolen-run',
+      leaseId: 'stolen-lease',
+      ttlMs: 90,
+    });
+    const lease = client.startApplyLockLease(handle);
+    backend.stealLock({
+      owner: 'github-actions',
+      runId: 'other-run',
+      leaseId: 'other-lease',
+      acquiredAt: 3_001,
+      expiresAt: 4_000,
+    });
+
+    await expect(lease.assertOwned()).rejects.toThrow(/lease.*lost|ownership/i);
+    await expect(lease.release()).rejects.toThrow(/ownership/i);
+    expect(backend.currentState()).toMatchObject({
+      state: 'acquired',
+      leaseId: 'other-lease',
+    });
+  });
+
+  it('reports the fine-grained Contents permission contract on lock preflight 403s', async () => {
+    const runner = createRunner([
+      Object.assign(new Error(`HTTP 403 resource not accessible by ${token}`), { status: 403 }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
+
+    let thrown: unknown;
+    try {
+      await client.acquireApplyLock({
+        owner: 'local-cli',
+        runId: 'permission-run',
+        leaseId: 'permission-lease',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(String(thrown)).toMatch(/BEADS_PROJECT_TOKEN/i);
+    expect(String(thrown)).toMatch(/Contents:\s*read and write/i);
+    expect(String(thrown)).toMatch(/Issues:\s*read and write/i);
+    expect(String(thrown)).toMatch(/Metadata:\s*read/i);
+    expect(String(thrown)).toMatch(/Projects:\s*read and write/i);
+    expect(String(thrown)).not.toContain(token);
+    expect(runner.calls).toHaveLength(1);
   });
 
   it('redacts tokens from lock API failures', async () => {

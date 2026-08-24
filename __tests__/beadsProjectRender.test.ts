@@ -29,6 +29,9 @@ const issuesJsonl = readFileSync(fixturePath, 'utf8');
 const designDocPath = 'docs/superpowers/specs/2026-08-21-public-beads-project-design.md';
 const planDocPath = 'docs/superpowers/plans/2026-08-21-public-beads-project.md';
 const runtimeHomeDirectory = os.homedir().replace(/[\\/]+$/gu, '').replace(/\\/gu, '/');
+const runtimeHomeUrlPath = runtimeHomeDirectory.startsWith('/')
+  ? runtimeHomeDirectory
+  : `/${runtimeHomeDirectory}`;
 
 function buildPublicInventory(): PublicBead[] {
   return parseBeadExport(issuesJsonl, {
@@ -231,14 +234,20 @@ describe('Beads project renderers', () => {
       ';~/Documents/GitHub/OpenCoven/psyche-build;',
     );
     expect(
-      sanitizePublicText('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.'),
-    ).toBe('Keep https://example.com/Users/buns/docs and https://example.com/home/alice/docs public.');
+      sanitizePublicText(
+        `Keep https://example.com${runtimeHomeUrlPath}/docs `
+          + 'and https://example.com/home/alice/docs public.',
+      ),
+    ).toBe(
+      'Keep https://example.com/<redacted-local-path> '
+        + 'and https://example.com/home/alice/docs public.',
+    );
     expect(sanitizePublicText('Keep https://example.com/.worktrees/releases public.')).toBe(
-      'Keep https://example.com/.worktrees/releases public.',
+      'Keep https://example.com/<redacted-local-path> public.',
     );
     expect(
       sanitizePublicText('Keep http://example.com/.psyche/worktrees/releases public.'),
-    ).toBe('Keep http://example.com/.psyche/worktrees/releases public.');
+    ).toBe('Keep http://example.com/<redacted-local-path> public.');
     expect(sanitizePublicText('Keep https://example.com/?path=/Users/buns/docs public.')).toBe(
       'Keep https://example.com/?path=~/docs public.',
     );
@@ -354,14 +363,14 @@ describe('Beads project renderers', () => {
     );
   });
 
-  it('sanitizes operational paths in HTTP query and fragment components only', () => {
+  it('sanitizes operational paths in every sensitive HTTP URL component', () => {
     expect(
       sanitizePublicText(
         'Keep https://example.com/.worktrees/releases?cwd=.psyche/worktrees/run-1'
           + '#/.copilot/session-state/run-2/plan.md public.',
       ),
     ).toBe(
-      'Keep https://example.com/.worktrees/releases?cwd=<redacted-local-path>'
+      'Keep https://example.com/<redacted-local-path>?cwd=<redacted-local-path>'
         + '#<redacted-local-path> public.',
     );
     expect(
@@ -380,6 +389,55 @@ describe('Beads project renderers', () => {
       ),
     ).toBe(
       'Keep https://example.com/home/alice/docs?source=~/private#preview=~/private public.',
+    );
+  });
+
+  it('redacts recursively decoded sensitive HTTP pathnames without rebuilding leaked paths', () => {
+    const config = {
+      homeDirectories: [
+        '/Users/build-user',
+        '/home/build-user',
+        'C:\\Users\\build-user',
+      ],
+    };
+    const unsafeUrls = [
+      'https://example.com/Users/build-user/private/client-plan.md',
+      'https://example.com/home/build-user/private/client-plan.md',
+      'https://example.com/C:/Users/build-user/private/client-plan.md',
+      'https://example.com/%252Eworktrees%252Fpublic-beads-project%252Fplan.md',
+      'https://example.com/%26percnt%3B2Ecopilot%26sol%3Bsession-state'
+        + '%26sol%3Brun-1%26sol%3Bplan.md',
+      'https://example.com/&percnt;2Epsyche&sol;worktrees&sol;run-2&sol;plan.md',
+      'https://example.com/%26sol%3BUsers%26sol%3Bbuild-user'
+        + '%26sol%3Bprivate%26sol%3Bplan.md',
+      'https://example.com&sol;&percnt;2Eworktrees&sol;run-3&sol;plan.md',
+    ];
+
+    for (const unsafeUrl of unsafeUrls) {
+      const sanitized = sanitizePublicText(`Open ${unsafeUrl}?view=public#summary`, config);
+      expect(sanitized).toBe(
+        'Open https://example.com/<redacted-local-path>?view=public#summary',
+      );
+      expect(sanitized).not.toContain('client-plan');
+      expect(sanitized).not.toContain('public-beads-project');
+      expect(sanitized).not.toContain('session-state');
+      expect(sanitized).not.toContain('run-2');
+      expect(sanitized).not.toContain('run-3');
+    }
+
+    expect(
+      sanitizePublicText(
+        'Keep https://example.com/home/alice/docs, '
+          + 'https://example.com/.well-known/openid-configuration, '
+          + 'https://example.com/.worktrees-inspired/releases, and '
+          + 'https://example.com/docs/.psyche/worktrees-notes.md public.',
+        config,
+      ),
+    ).toBe(
+      'Keep https://example.com/home/alice/docs, '
+        + 'https://example.com/.well-known/openid-configuration, '
+        + 'https://example.com/.worktrees-inspired/releases, and '
+        + 'https://example.com/docs/.psyche/worktrees-notes.md public.',
     );
   });
 

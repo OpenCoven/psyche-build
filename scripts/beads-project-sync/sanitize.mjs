@@ -1188,6 +1188,56 @@ function redactEmailsInUrlComponent(value) {
 /**
  * @param {string} value
  * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {boolean}
+ */
+function containsExactHomeDirectory(value, matchers) {
+  const slashNormalized = value.replace(/\\/gu, '/');
+  for (const matcher of matchers) {
+    if (matcher.replacement !== '~') {
+      continue;
+    }
+    const prefix = matcher.prefix.replace(/\\/gu, '/');
+    const caseInsensitive = /^[A-Za-z]:\//u.test(prefix);
+    const inspectedValue = caseInsensitive ? slashNormalized.toLowerCase() : slashNormalized;
+    const inspectedPrefix = caseInsensitive ? prefix.toLowerCase() : prefix;
+    let cursor = 0;
+    while (cursor < inspectedValue.length) {
+      const start = inspectedValue.indexOf(inspectedPrefix, cursor);
+      if (start === -1) {
+        break;
+      }
+      const end = start + inspectedPrefix.length;
+      if (
+        hasHomePathBoundary(slashNormalized, start)
+        && hasHomePathFollower(slashNormalized, end)
+      ) {
+        return true;
+      }
+      cursor = start + 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeHttpPathname(value, matchers) {
+  const inspected = decodeUrlInspectionMapped(createMappedInspectionText(value)).value;
+  if (
+    containsExactHomeDirectory(inspected, matchers)
+    || containsLocalOperationalPath(inspected)
+  ) {
+    return value.startsWith('/') ? '/<redacted-local-path>' : '<redacted-local-path>';
+  }
+  return redactEmailsInUrlComponent(value);
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
 function sanitizeUrlComponent(value, matchers) {
@@ -1409,7 +1459,7 @@ function sanitizeParsedUri(value, uri, matchers) {
     uri.path,
     (component) => {
       const sanitized = uri.scheme === 'http' || uri.scheme === 'https'
-        ? redactEmailsInUrlComponent(component)
+        ? sanitizeHttpPathname(component, matchers)
         : sanitizeUrlComponent(component, matchers);
       const structurallyNormalized = uri.authority == null
         ? sanitized.replace(/%3A/giu, ':').replace(/%2C/giu, ',')
@@ -1447,6 +1497,58 @@ function sanitizeParsedUri(value, uri, matchers) {
 /**
  * @param {string} value
  * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string | null}
+ */
+function redactStructurallyDecodedHttpPath(value, matchers) {
+  const inspected = decodeUrlInspectionMapped(createMappedInspectionText(value)).value;
+  const parsed = parseAbsoluteUri(inspected);
+  if (parsed == null || (parsed.scheme !== 'http' && parsed.scheme !== 'https')) {
+    return null;
+  }
+  const withoutUserinfo = stripUriUserinfo(inspected, parsed);
+  const uri = parseAbsoluteUri(withoutUserinfo);
+  if (uri == null) {
+    return null;
+  }
+  const pathname = withoutUserinfo.slice(uri.path.start, uri.path.end);
+  if (
+    !containsExactHomeDirectory(pathname, matchers)
+    && !containsLocalOperationalPath(pathname)
+  ) {
+    return null;
+  }
+
+  let safePrefix = withoutUserinfo.slice(0, uri.path.start);
+  if (uri.authority != null) {
+    const authority = withoutUserinfo.slice(uri.authority.start, uri.authority.end);
+    const sanitizedAuthority = sanitizeUrlComponent(authority, matchers);
+    if (sanitizedAuthority.includes('<redacted-local-path>')) {
+      return '<redacted-local-path>';
+    }
+    safePrefix = `${withoutUserinfo.slice(0, uri.authority.start)}${sanitizedAuthority}`;
+  }
+
+  const safePath = pathname.startsWith('/')
+    ? '/<redacted-local-path>'
+    : '<redacted-local-path>';
+  const query = uri.query == null
+    ? ''
+    : `?${sanitizeUrlQuery(
+      withoutUserinfo.slice(uri.query.start, uri.query.end),
+      matchers,
+    )}`;
+  const fragment = uri.fragment == null
+    ? ''
+    : `#${sanitizeUrlHash(
+      withoutUserinfo.slice(uri.fragment.start, uri.fragment.end),
+      matchers,
+    )}`;
+  return `${safePrefix}${safePath}${query}${fragment}`;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
 function sanitizeProtectedUrl(value, matchers) {
@@ -1463,7 +1565,7 @@ function sanitizeProtectedUrl(value, matchers) {
     }
     const sanitized = sanitizeParsedUri(withoutUserinfo, reparsed, matchers);
     if (index === 0) {
-      return sanitized;
+      return redactStructurallyDecodedHttpPath(sanitized, matchers) ?? sanitized;
     }
     if (sanitized !== variant) {
       return '<redacted-local-path>';

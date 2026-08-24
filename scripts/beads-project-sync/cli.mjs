@@ -491,9 +491,13 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     const applyLock = options.mode === 'dry-run'
       ? null
       : await gh.acquireApplyLock(createApplyLockIdentity(env));
+    const applyLease = applyLock == null
+      ? null
+      : gh.startApplyLockLease(applyLock);
 
     try {
       if (options.mode !== 'dry-run' && project) {
+        await applyLease?.assertOwned();
         const repairedProject = await gh.ensureProject({
           title: config.projectTitle,
           readme: desiredProjectReadme,
@@ -505,6 +509,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
 
       if (options.provision) {
         if (!project) {
+          await applyLease?.assertOwned();
           const provisioned = await gh.provisionProject({
             title: config.projectTitle,
             readme: desiredProjectReadme,
@@ -514,6 +519,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         }
 
         if (options.mode === 'provision') {
+          await applyLease?.assertOwned();
           const url = project.url
             ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
           if (provisionedThisRun) {
@@ -595,8 +601,11 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       }
 
       if (!provisionedThisRun) {
+        await applyLease?.assertOwned();
         await gh.ensureLabels();
+        await applyLease?.assertOwned();
         await gh.ensureFields();
+        await applyLease?.assertOwned();
         await gh.ensureViews();
       }
       let applied;
@@ -619,6 +628,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         }, stdout);
         return 1;
       }
+      await applyLease?.assertOwned();
       stderr.write(`Applied ${applied.applied.length} Beads Project reconciliation operations.\n`);
       writeSummary({
         mode: options.mode,
@@ -630,8 +640,8 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       }, stdout);
       return 0;
     } finally {
-      if (applyLock) {
-        await gh.releaseApplyLock(applyLock);
+      if (applyLease) {
+        await applyLease.release();
       }
     }
   } catch (error) {
