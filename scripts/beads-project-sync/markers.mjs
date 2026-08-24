@@ -6,6 +6,11 @@ export const LEGACY_PROJECT_MARKERS = Object.freeze(['psyche-bead-sync:v1']);
 export const LEGACY_ISSUE_MARKERS = Object.freeze(['psyche-bead-sync:v1']);
 
 const MARKER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,199})$/u;
+const REPOSITORY_SEGMENT_PATTERN = '[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})';
+const REPOSITORY_IDENTITY_PATTERN = new RegExp(
+  `^${REPOSITORY_SEGMENT_PATTERN}\\/${REPOSITORY_SEGMENT_PATTERN}$`,
+  'u',
+);
 
 /**
  * @param {unknown} value
@@ -21,6 +26,22 @@ export function normalizeMarker(value, context) {
     throw new Error(`${context} must be a safe machine marker`);
   }
   return marker;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
+ * @returns {string}
+ */
+export function normalizeRepositoryIdentity(value, context) {
+  if (typeof value !== 'string') {
+    throw new Error(`${context} must be a string`);
+  }
+  const identity = value.trim();
+  if (!REPOSITORY_IDENTITY_PATTERN.test(identity)) {
+    throw new Error(`${context} must be an owner/repository identity`);
+  }
+  return identity;
 }
 
 /**
@@ -69,10 +90,42 @@ export function recognizedProjectMarkers(current, legacy, context) {
 
 /**
  * @param {string} marker
+ * @param {string | null | undefined} [repositoryIdentity]
  * @returns {string}
  */
-export function projectReadmeMarker(marker) {
-  return `<!-- ${normalizeMarker(marker, 'project marker')} project-readme -->`;
+export function projectReadmeMarker(marker, repositoryIdentity) {
+  const normalizedMarker = normalizeMarker(marker, 'project marker');
+  if (repositoryIdentity == null) {
+    return `<!-- ${normalizedMarker} project-readme -->`;
+  }
+  return `<!-- ${normalizedMarker} project-readme repository=${
+    normalizeRepositoryIdentity(repositoryIdentity, 'project repository identity')
+  } -->`;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly string[]} markers
+ * @returns {{marker: string, repository: string | null}[]}
+ */
+export function extractProjectReadmeMarkers(value, markers) {
+  if (typeof value !== 'string') {
+    throw new Error('Project README must be a string');
+  }
+  if (markers.length === 0) {
+    throw new Error('extractProjectReadmeMarkers requires at least one marker');
+  }
+  const alternatives = markers.map(escapeRegExp).join('|');
+  const pattern = new RegExp(
+    `<!--\\s*(${alternatives})\\s+project-readme(?:\\s+repository=(${REPOSITORY_SEGMENT_PATTERN}\\/${REPOSITORY_SEGMENT_PATTERN}))?\\s*-->`,
+    'gu',
+  );
+  return [...value.matchAll(pattern)].map((match) => ({
+    marker: match[1] ?? '',
+    repository: match[2] == null
+      ? null
+      : normalizeRepositoryIdentity(match[2], 'project repository identity'),
+  }));
 }
 
 /**

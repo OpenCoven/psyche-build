@@ -19,6 +19,7 @@ type FieldMap = Record<string, string | number | boolean | null>;
 const baseContext = Object.freeze({
   inventoryTimestamp: '2026-08-22T20:00:00Z',
   projectName: 'Public Beads inventory',
+  repositoryIdentity: 'OpenCoven/psyche-build',
   sourceRef: 'main',
   sourceRepositoryUrl: 'https://github.com/OpenCoven/psyche-build',
 });
@@ -161,8 +162,21 @@ function managedIssue(
   issueNumbers: ReadonlyMap<string, number>,
   overrides: Partial<{
     assignee: string | null,
+    blockerIssues: readonly {
+      id: number,
+      nodeId: string,
+      number: number,
+      repository: string,
+    }[] | null,
     blockerIssueNumbers: readonly number[] | null,
     body: string | null,
+    labels: readonly string[] | null,
+    parentIssue: {
+      id: number,
+      nodeId: string,
+      number: number,
+      repository: string,
+    } | null,
     parentIssueNumber: number | null,
     projectItem: {
       id: string,
@@ -194,7 +208,15 @@ function managedIssue(
     },
     parentIssueNumber: desiredParentIssueNumber(bead, inventory, issueNumbers),
     blockerIssueNumbers: desiredBlockerIssueNumbers(bead, inventory, issueNumbers),
+    blockerIssues: desiredBlockerIssueNumbers(bead, inventory, issueNumbers).map((number) => ({
+      id: 10_000 + number,
+      nodeId: `ISSUE-${number}`,
+      number,
+      repository: baseContext.repositoryIdentity,
+    })),
     ...overrides,
+    repository: baseContext.repositoryIdentity,
+    issueNodeId: `ISSUE-${issueNumber}`,
   };
 }
 
@@ -326,7 +348,9 @@ describe('Beads project reconciliation', () => {
     )?.body).toContain('<!-- custom-issue-sync:v2 bead-id=pb-legacy -->');
     expect(migrated.operations.find(
       (operation) => operation.type === 'updateReadme',
-    )?.body).toContain('<!-- custom-project-sync:v2 project-readme -->');
+    )?.body).toContain(
+      '<!-- custom-project-sync:v2 project-readme repository=OpenCoven/psyche-build -->',
+    );
   });
 
   it('plans no mutations on a matching second run by using current bodies or render hashes', () => {
@@ -504,6 +528,117 @@ describe('Beads project reconciliation', () => {
     expect(updateOps[0]?.body).toContain('Refresh the canonical mirror output.');
   });
 
+  it('repairs required labels with a separate idempotent label operation', () => {
+    const inventory = finalizeInventory([makeBead('pb-labels')]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 430);
+    const bead = inventory[0]!;
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(bead, inventory, issueNumbers, {
+          labels: ['priority:P0'],
+        }),
+      ],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations).toEqual([
+      {
+        type: 'labelIssue',
+        phase: 'labelIssues',
+        beadId: 'pb-labels',
+        issueNumber: 430,
+        labels: ['bead', 'bead:task', 'priority:P0'],
+      },
+    ]);
+  });
+
+  it('does not conflate foreign parent and blocker issue numbers with local managed issues', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-parent', { type: 'feature' }),
+      makeBead('pb-blocker'),
+      makeBead('pb-child', {
+        parentId: 'pb-parent',
+        blockedByIds: ['pb-blocker'],
+      }),
+    ]);
+    const issueNumbers = new Map([
+      ['pb-parent', 501],
+      ['pb-blocker', 502],
+      ['pb-child', 503],
+    ]);
+    const child = inventory.find((bead) => bead.id === 'pb-child')!;
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: inventory.map((bead) =>
+        managedIssue(bead, inventory, issueNumbers, bead.id === 'pb-child'
+          ? {
+              parentIssueNumber: 501,
+              blockerIssueNumbers: [502],
+              parentIssue: {
+                id: 91_501,
+                nodeId: 'FOREIGN-PARENT',
+                number: 501,
+                repository: 'OtherOrg/other-repo',
+              },
+              blockerIssues: [{
+                id: 91_502,
+                nodeId: 'FOREIGN-BLOCKER',
+                number: 502,
+                repository: 'OtherOrg/other-repo',
+              }],
+            }
+          : {})
+      ),
+      readme: { body: canonicalReadmeBody(inventory), public: true },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations).toContainEqual(expect.objectContaining({
+      type: 'syncParent',
+      beadId: child.id,
+      parentBeadId: 'pb-parent',
+      currentParentIssue: expect.objectContaining({
+        nodeId: 'FOREIGN-PARENT',
+        repository: 'OtherOrg/other-repo',
+      }),
+    }));
+    expect(plan.operations).toContainEqual(expect.objectContaining({
+      type: 'syncBlocker',
+      beadId: child.id,
+      blockerBeadIds: ['pb-blocker'],
+      currentBlockerIssues: [
+        expect.objectContaining({
+          nodeId: 'FOREIGN-BLOCKER',
+          repository: 'OtherOrg/other-repo',
+        }),
+      ],
+    }));
+  });
+
+  it('reconciles private Project visibility when its README is already current', () => {
+    const inventory = finalizeInventory([makeBead('pb-private-project')]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 440);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: inventory.map((bead) => managedIssue(bead, inventory, issueNumbers)),
+      readme: {
+        body: canonicalReadmeBody(inventory),
+        public: false,
+      },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations).toEqual([
+      {
+        type: 'setProjectVisibility',
+        phase: 'setProjectVisibility',
+        public: true,
+      },
+    ]);
+  });
+
   it('reopens active beads by restoring archived project items before field updates', async () => {
     const currentInventory = finalizeInventory([makeBead('pb-01')]);
     const previousInventory = finalizeInventory([
@@ -561,6 +696,9 @@ describe('Beads project reconciliation', () => {
       closeIssue() {
         throw new Error('closeIssue should not be called');
       },
+      labelIssue() {
+        throw new Error('labelIssue should not be called');
+      },
       ensureProjectItem() {
         throw new Error('ensureProjectItem should not be called');
       },
@@ -581,6 +719,9 @@ describe('Beads project reconciliation', () => {
       },
       updateReadme() {
         throw new Error('updateReadme should not be called');
+      },
+      setProjectVisibility() {
+        throw new Error('setProjectVisibility should not be called');
       },
     });
 
@@ -713,6 +854,7 @@ describe('Beads project reconciliation', () => {
     expect(plan.summary.operationCounts).toEqual({
       createIssue: 0,
       updateIssue: 0,
+      labelIssue: 0,
       closeIssue: 8,
       ensureProjectItem: 0,
       restoreItem: 0,
@@ -721,6 +863,7 @@ describe('Beads project reconciliation', () => {
       syncBlocker: 0,
       archiveItem: 8,
       updateReadme: 0,
+      setProjectVisibility: 0,
     });
     expect(plan.summary.closureCandidates).toEqual(
       Array.from({ length: 8 }, (_, index) => {
@@ -784,6 +927,9 @@ describe('Beads project reconciliation', () => {
       closeIssue() {
         throw new Error('closeIssue should not be called');
       },
+      labelIssue() {
+        throw new Error('labelIssue should not be called');
+      },
       ensureProjectItem(operation) {
         calls.push({ issueNumber: operation.issueNumber, type: `${operation.type}:${operation.beadId}` });
         return { id: `item-${operation.issueNumber}` };
@@ -813,6 +959,9 @@ describe('Beads project reconciliation', () => {
       },
       updateReadme(operation) {
         calls.push({ path: operation.path, type: operation.type });
+      },
+      setProjectVisibility() {
+        throw new Error('setProjectVisibility should not be called');
       },
     });
 
@@ -863,6 +1012,9 @@ describe('Beads project reconciliation', () => {
         closeIssue() {
           throw new Error('closeIssue should not be called');
         },
+        labelIssue() {
+          throw new Error('labelIssue should not be called');
+        },
         ensureProjectItem(operation) {
           return { id: `item-${operation.issueNumber}` };
         },
@@ -883,6 +1035,9 @@ describe('Beads project reconciliation', () => {
         },
         updateReadme() {
           throw new Error('updateReadme should not be called');
+        },
+        setProjectVisibility() {
+          throw new Error('setProjectVisibility should not be called');
         },
       });
     } catch (error) {

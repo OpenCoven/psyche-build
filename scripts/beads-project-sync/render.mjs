@@ -6,6 +6,7 @@ import {
   DEFAULT_PROJECT_MARKER,
   issueBeadMarker,
   normalizeMarker,
+  normalizeRepositoryIdentity,
   projectReadmeMarker,
 } from './markers.mjs';
 import {
@@ -24,6 +25,7 @@ import {
  *   sourceRef?: string | null,
  *   inventoryTimestamp?: string | null,
  *   projectName?: string | null,
+ *   repositoryIdentity?: string | null,
  *   projectMarker?: string | null,
  *   issueMarker?: string | null,
  *   legacyProjectMarkers?: readonly string[],
@@ -272,6 +274,9 @@ function normalizeHttpUrl(value, fieldName, options = {}) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return null;
   }
+  if (url.username || url.password) {
+    return null;
+  }
   if (urlContainsPublishableSecrets(normalized, url)) {
     return null;
   }
@@ -316,6 +321,31 @@ function normalizeRepositoryUrl(value) {
     clearSearch: true,
     clearHash: true,
   });
+}
+
+/**
+ * @param {RenderContext} context
+ * @returns {string}
+ */
+function resolveRepositoryIdentity(context) {
+  if (context.repositoryIdentity != null) {
+    return normalizeRepositoryIdentity(
+      context.repositoryIdentity,
+      'renderProjectReadme repositoryIdentity',
+    );
+  }
+  const repositoryUrl = normalizeRepositoryUrl(context.sourceRepositoryUrl);
+  if (!repositoryUrl) {
+    fail('renderProjectReadme requires repositoryIdentity or a canonical sourceRepositoryUrl');
+  }
+  const pathSegments = new URL(repositoryUrl).pathname.split('/').filter(Boolean);
+  if (pathSegments.length !== 2) {
+    fail('renderProjectReadme sourceRepositoryUrl must identify one repository');
+  }
+  return normalizeRepositoryIdentity(
+    `${decodeURIComponent(pathSegments[0] ?? '')}/${decodeURIComponent(pathSegments[1] ?? '')}`,
+    'renderProjectReadme repository identity',
+  );
 }
 
 /**
@@ -689,7 +719,7 @@ export function renderProjectReadme(inventory, context = {}) {
     'renderProjectReadme projectMarker',
   );
   const sections = [
-    projectReadmeMarker(projectMarker),
+    projectReadmeMarker(projectMarker, resolveRepositoryIdentity(context)),
     `# ${title}`,
     'This README is a generated public tracking snapshot for mirrored Beads work. The Beads project remains authoritative, so update the source Bead instead of editing this README.',
     renderSection('Inventory snapshot', [

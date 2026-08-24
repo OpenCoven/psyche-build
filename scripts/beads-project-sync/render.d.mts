@@ -7,6 +7,7 @@ export interface RenderContext {
   sourceRef?: string | null;
   inventoryTimestamp?: string | null;
   projectName?: string | null;
+  repositoryIdentity?: string | null;
   projectMarker?: string | null;
   issueMarker?: string | null;
   legacyProjectMarkers?: readonly string[];

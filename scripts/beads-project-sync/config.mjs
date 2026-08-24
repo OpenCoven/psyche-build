@@ -128,13 +128,19 @@ function massClose(value) {
   const input = record(value, '"massClose"');
   assertExactKeys(input, ['minimum', 'fraction'], '"massClose"');
 
-  const minimum = Number(input.minimum);
+  const minimum = input.minimum;
+  if (typeof minimum !== 'number') {
+    fail('"massClose.minimum" must be a non-negative integer');
+  }
   if (!Number.isInteger(minimum) || minimum < 0) {
     fail('"massClose.minimum" must be a non-negative integer');
   }
-  const fraction = Number(input.fraction);
-  if (!Number.isFinite(fraction) || fraction <= 0 || fraction > 1) {
-    fail('"massClose.fraction" must be greater than 0 and at most 1');
+  const fraction = input.fraction;
+  if (typeof fraction !== 'number') {
+    fail('"massClose.fraction" must be between 0 and 1');
+  }
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    fail('"massClose.fraction" must be between 0 and 1');
   }
   return { minimum, fraction };
 }

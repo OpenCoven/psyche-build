@@ -46,6 +46,11 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   projectItem?: unknown,
  *   parentIssueNumber?: unknown,
  *   blockerIssueNumbers?: unknown,
+ *   blockerIssues?: unknown,
+ *   issueDatabaseId?: unknown,
+ *   issueNodeId?: unknown,
+ *   parentIssue?: unknown,
+ *   repository?: unknown,
  * }} RawIssueSnapshot
  */
 
@@ -54,7 +59,17 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   body?: unknown,
  *   renderHash?: unknown,
  *   path?: unknown,
+ *   public?: unknown,
  * }} RawReadmeSnapshot
+ */
+
+/**
+ * @typedef {{
+ *   id: number | null,
+ *   nodeId: string | null,
+ *   number: number,
+ *   repository: string | null,
+ * }} IssueIdentity
  */
 
 /**
@@ -86,6 +101,11 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   projectItem: ProjectItemSnapshot | null,
  *   parentIssueNumber: number | null,
  *   blockerIssueNumbers: number[],
+ *   parentIssue: IssueIdentity | null,
+ *   blockerIssues: IssueIdentity[],
+ *   issueDatabaseId: number | null,
+ *   issueNodeId: string | null,
+ *   repository: string | null,
  * }} IssueSnapshot
  */
 
@@ -98,6 +118,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   body: string | null,
  *   renderHash: string | null,
  *   path: string,
+ *   public: boolean | null,
  * }} ReadmeSnapshot
  */
 
@@ -111,7 +132,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  */
 
 /**
- * @typedef {'createIssues' | 'updateIssues' | 'closeIssues' | 'ensureProjectItems' | 'restoreItems' | 'setFields' | 'syncParents' | 'syncBlockers' | 'archiveItems' | 'updateReadme'} ReconciliationPhase
+ * @typedef {'createIssues' | 'updateIssues' | 'labelIssues' | 'closeIssues' | 'ensureProjectItems' | 'restoreItems' | 'setFields' | 'syncParents' | 'syncBlockers' | 'archiveItems' | 'updateReadme' | 'setProjectVisibility'} ReconciliationPhase
  */
 
 /**
@@ -139,6 +160,16 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   assignee: string | null,
  *   state: string,
  * }} UpdateIssueOperation
+ */
+
+/**
+ * @typedef {{
+ *   type: 'labelIssue',
+ *   phase: 'labelIssues',
+ *   beadId: string,
+ *   issueNumber: number,
+ *   labels: string[],
+ * }} LabelIssueOperation
  */
 
 /**
@@ -186,6 +217,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   parentBeadId: string | null,
  *   parentIssueNumber?: number | null,
  *   currentParentIssueNumber: number | null,
+ *   currentParentIssue: IssueIdentity | null,
  * }} SyncParentOperation
  */
 
@@ -197,6 +229,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   blockerBeadIds: string[],
  *   blockerIssueNumbers?: number[],
  *   currentBlockerIssueNumbers: number[],
+ *   currentBlockerIssues: IssueIdentity[],
  * }} SyncBlockerOperation
  */
 
@@ -220,13 +253,22 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  */
 
 /**
- * @typedef {CreateIssueOperation | UpdateIssueOperation | CloseIssueOperation | EnsureProjectItemOperation | RestoreItemOperation | SetFieldsOperation | SyncParentOperation | SyncBlockerOperation | ArchiveItemOperation | UpdateReadmeOperation} ReconciliationOperation
+ * @typedef {{
+ *   type: 'setProjectVisibility',
+ *   phase: 'setProjectVisibility',
+ *   public: true,
+ * }} SetProjectVisibilityOperation
+ */
+
+/**
+ * @typedef {CreateIssueOperation | UpdateIssueOperation | LabelIssueOperation | CloseIssueOperation | EnsureProjectItemOperation | RestoreItemOperation | SetFieldsOperation | SyncParentOperation | SyncBlockerOperation | ArchiveItemOperation | UpdateReadmeOperation | SetProjectVisibilityOperation} ReconciliationOperation
  */
 
 /**
  * @typedef {{
  *   createIssue: number,
  *   updateIssue: number,
+ *   labelIssue: number,
  *   closeIssue: number,
  *   ensureProjectItem: number,
  *   restoreItem: number,
@@ -235,6 +277,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   syncBlocker: number,
  *   archiveItem: number,
  *   updateReadme: number,
+ *   setProjectVisibility: number,
  * }} ReconciliationOperationCounts
  */
 
@@ -256,6 +299,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   defaultMaxCloseCount: number,
  *   createIssueCount: number,
  *   updateIssueCount: number,
+ *   labelIssueCount: number,
  *   closeIssueCount: number,
  *   ensureProjectItemCount: number,
  *   restoreItemCount: number,
@@ -264,6 +308,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   syncBlockerCount: number,
  *   archiveItemCount: number,
  *   updateReadmeCount: number,
+ *   setProjectVisibilityCount: number,
  *   operationCounts: ReconciliationOperationCounts,
  *   closureCandidates: ReconciliationClosureCandidate[],
  * }} ReconciliationSummary
@@ -305,6 +350,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  * @typedef {{
  *   createIssue: (operation: CreateIssueOperation) => Awaitable<CreateIssueResult>,
  *   updateIssue: (operation: UpdateIssueOperation) => Awaitable<unknown>,
+ *   labelIssue: (operation: LabelIssueOperation) => Awaitable<unknown>,
  *   closeIssue: (operation: CloseIssueOperation) => Awaitable<unknown>,
  *   ensureProjectItem: (operation: EnsureProjectItemOperation & { issueNumber: number }) => Awaitable<EnsureProjectItemResult>,
  *   restoreItem: (operation: RestoreItemOperation & { itemId: string }) => Awaitable<unknown>,
@@ -313,6 +359,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   syncBlocker: (operation: SyncBlockerOperation & { issueNumber: number, blockerIssueNumbers: number[] }) => Awaitable<unknown>,
  *   archiveItem: (operation: ArchiveItemOperation & { itemId: string }) => Awaitable<unknown>,
  *   updateReadme: (operation: UpdateReadmeOperation) => Awaitable<unknown>,
+ *   setProjectVisibility: (operation: SetProjectVisibilityOperation) => Awaitable<unknown>,
  * }} ReconciliationAdapters
  */
 
@@ -566,6 +613,50 @@ function normalizeIssueLabels(value, context) {
 /**
  * @param {unknown} value
  * @param {string} context
+ * @returns {IssueIdentity | null}
+ */
+function normalizeIssueIdentity(value, context) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    fail(`${context} must be an object when present`);
+  }
+  const identity = /** @type {Record<string, unknown>} */ (value);
+  return {
+    id: identity.id == null
+      ? null
+      : normalizePositiveInteger(identity.id, 'id', context),
+    nodeId: normalizeOptionalTrimmedString(identity.nodeId, 'nodeId', context),
+    number: normalizePositiveInteger(identity.number, 'number', context),
+    repository: normalizeOptionalTrimmedString(identity.repository, 'repository', context),
+  };
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
+ * @returns {IssueIdentity[] | null}
+ */
+function normalizeIssueIdentities(value, context) {
+  if (value == null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    fail(`${context} must be an array when present`);
+  }
+  return value.map((identity, index) => {
+    const normalized = normalizeIssueIdentity(identity, `${context}[${index}]`);
+    if (!normalized) {
+      fail(`${context}[${index}] must be an object`);
+    }
+    return normalized;
+  });
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
  * @returns {ProjectItemSnapshot | null}
  */
 function normalizeProjectItem(value, context) {
@@ -597,6 +688,30 @@ function normalizeIssueSnapshot(value, context) {
   }
 
   const issue = /** @type {RawIssueSnapshot & Record<string, unknown>} */ (value);
+  const parentIssueNumber = normalizeNullablePositiveInteger(
+    issue.parentIssueNumber,
+    'parentIssueNumber',
+    context,
+  );
+  const blockerIssueNumbers = normalizeIssueNumberList(
+    issue.blockerIssueNumbers,
+    `${context} blockerIssueNumbers`,
+  );
+  const parentIssue = normalizeIssueIdentity(issue.parentIssue, `${context} parentIssue`)
+    ?? (
+      parentIssueNumber == null
+        ? null
+        : { id: null, nodeId: null, number: parentIssueNumber, repository: null }
+    );
+  const blockerIssues = normalizeIssueIdentities(
+    issue.blockerIssues,
+    `${context} blockerIssues`,
+  ) ?? blockerIssueNumbers.map((number) => ({
+    id: null,
+    nodeId: null,
+    number,
+    repository: null,
+  }));
   return {
     number: normalizePositiveInteger(issue.number, 'number', context),
     title: normalizeOptionalTrimmedString(issue.title, 'title', context),
@@ -606,8 +721,15 @@ function normalizeIssueSnapshot(value, context) {
     labels: normalizeIssueLabels(issue.labels, `${context} labels`),
     renderHash: normalizeRenderHash(issue.renderHash, 'renderHash', context),
     projectItem: normalizeProjectItem(issue.projectItem, context),
-    parentIssueNumber: normalizeNullablePositiveInteger(issue.parentIssueNumber, 'parentIssueNumber', context),
-    blockerIssueNumbers: normalizeIssueNumberList(issue.blockerIssueNumbers, `${context} blockerIssueNumbers`),
+    parentIssueNumber,
+    blockerIssueNumbers,
+    parentIssue,
+    blockerIssues,
+    issueDatabaseId: issue.issueDatabaseId == null
+      ? null
+      : normalizePositiveInteger(issue.issueDatabaseId, 'issueDatabaseId', context),
+    issueNodeId: normalizeOptionalTrimmedString(issue.issueNodeId, 'issueNodeId', context),
+    repository: normalizeOptionalTrimmedString(issue.repository, 'repository', context),
   };
 }
 
@@ -622,6 +744,7 @@ function normalizeReadmeSnapshot(value, context) {
       body: null,
       renderHash: null,
       path: README_PATH,
+      public: null,
     };
   }
   if (typeof value !== 'object' || Array.isArray(value)) {
@@ -634,6 +757,9 @@ function normalizeReadmeSnapshot(value, context) {
     body: normalizeOptionalMultilineString(readme.body, 'body', context),
     renderHash: normalizeRenderHash(readme.renderHash, 'renderHash', context),
     path,
+    public: readme.public == null
+      ? null
+      : normalizeBoolean(readme.public, 'public', context),
   };
 }
 
@@ -836,8 +962,7 @@ function hasCurrentRenderedBody(issue, desiredBody, desiredRenderHash, issueMark
  */
 function hasCurrentReadme(readme, desiredBody, desiredRenderHash, projectMarkers) {
   if (readme.body != null) {
-    return markerPattern(projectMarkers, 'project-readme').test(readme.body)
-      && normalizeCanonicalBody(readme.body, projectMarkers) === desiredBody;
+    return normalizeCanonicalBody(readme.body, projectMarkers) === desiredBody;
   }
 
   return (readme.renderHash ?? extractRenderHash(readme.body, projectMarkers)) === desiredRenderHash;
@@ -899,6 +1024,37 @@ function numberListsEqual(left, right) {
     return false;
   }
   return left.every((value, index) => value === right[index]);
+}
+
+/**
+ * @param {IssueIdentity | null | undefined} relationship
+ * @param {ManagedIssueSnapshot | null | undefined} managedIssue
+ * @returns {boolean}
+ */
+function relationshipMatchesManagedIssue(relationship, managedIssue) {
+  if (!relationship || !managedIssue) {
+    return false;
+  }
+  if (relationship.nodeId && managedIssue.issueNodeId) {
+    return relationship.nodeId === managedIssue.issueNodeId;
+  }
+  if (relationship.repository && managedIssue.repository) {
+    return relationship.repository.toLowerCase() === managedIssue.repository.toLowerCase()
+      && relationship.number === managedIssue.number;
+  }
+  return relationship.repository == null && relationship.number === managedIssue.number;
+}
+
+/**
+ * @param {readonly IssueIdentity[]} current
+ * @param {readonly ManagedIssueSnapshot[]} desired
+ * @returns {boolean}
+ */
+function relationshipListsEqual(current, desired) {
+  return current.length === desired.length
+    && desired.every((desiredIssue) =>
+      current.some((currentIssue) => relationshipMatchesManagedIssue(currentIssue, desiredIssue))
+    );
 }
 
 /**
@@ -1012,6 +1168,7 @@ function stringListsEqual(left, right) {
  * @param {ReadonlyMap<string, ManagedIssueSnapshot>} managedIssuesByBeadId
  * @param {CreateIssueOperation[]} createIssues
  * @param {UpdateIssueOperation[]} updateIssues
+ * @param {LabelIssueOperation[]} labelIssues
  * @param {CloseIssueOperation[]} closeIssues
  * @param {EnsureProjectItemOperation[]} ensureProjectItems
  * @param {RestoreItemOperation[]} restoreItems
@@ -1020,6 +1177,7 @@ function stringListsEqual(left, right) {
  * @param {SyncBlockerOperation[]} syncBlockers
  * @param {ArchiveItemOperation[]} archiveItems
  * @param {UpdateReadmeOperation[]} updateReadmeOperations
+ * @param {SetProjectVisibilityOperation[]} setProjectVisibilityOperations
  * @returns {ReconciliationSummary}
  */
 function buildSummary(
@@ -1027,6 +1185,7 @@ function buildSummary(
   managedIssuesByBeadId,
   createIssues,
   updateIssues,
+  labelIssues,
   closeIssues,
   ensureProjectItems,
   restoreItems,
@@ -1035,6 +1194,7 @@ function buildSummary(
   syncBlockers,
   archiveItems,
   updateReadmeOperations,
+  setProjectVisibilityOperations,
 ) {
   const sourceActive = activeBeads(inventory);
   const managedOpenCount = [...managedIssuesByBeadId.values()]
@@ -1043,6 +1203,7 @@ function buildSummary(
   const operationCounts = {
     createIssue: createIssues.length,
     updateIssue: updateIssues.length,
+    labelIssue: labelIssues.length,
     closeIssue: closeIssues.length,
     ensureProjectItem: ensureProjectItems.length,
     restoreItem: restoreItems.length,
@@ -1051,6 +1212,7 @@ function buildSummary(
     syncBlocker: syncBlockers.length,
     archiveItem: archiveItems.length,
     updateReadme: updateReadmeOperations.length,
+    setProjectVisibility: setProjectVisibilityOperations.length,
   };
   const closureCandidates = closeIssues.map((operation) => ({
     beadId: operation.beadId,
@@ -1067,6 +1229,7 @@ function buildSummary(
     defaultMaxCloseCount: Math.max(5, Math.ceil(managedOpenCount * 0.25)),
     createIssueCount: createIssues.length,
     updateIssueCount: updateIssues.length,
+    labelIssueCount: labelIssues.length,
     closeIssueCount: closeIssues.length,
     ensureProjectItemCount: ensureProjectItems.length,
     restoreItemCount: restoreItems.length,
@@ -1075,6 +1238,7 @@ function buildSummary(
     syncBlockerCount: syncBlockers.length,
     archiveItemCount: archiveItems.length,
     updateReadmeCount: updateReadmeOperations.length,
+    setProjectVisibilityCount: setProjectVisibilityOperations.length,
     operationCounts,
     closureCandidates,
   };
@@ -1105,6 +1269,8 @@ export function planReconciliation(input) {
   const createIssues = [];
   /** @type {UpdateIssueOperation[]} */
   const updateIssues = [];
+  /** @type {LabelIssueOperation[]} */
+  const labelIssues = [];
   /** @type {CloseIssueOperation[]} */
   const closeIssues = [];
   /** @type {EnsureProjectItemOperation[]} */
@@ -1121,6 +1287,8 @@ export function planReconciliation(input) {
   const archiveItems = [];
   /** @type {UpdateReadmeOperation[]} */
   const updateReadmeOperations = [];
+  /** @type {SetProjectVisibilityOperation[]} */
+  const setProjectVisibilityOperations = [];
 
   for (const bead of sortedActiveBeads) {
     const existingIssue = managedIssuesByBeadId.get(bead.id);
@@ -1146,10 +1314,6 @@ export function planReconciliation(input) {
         existingIssue.title !== title
         || existingIssue.assignee !== assignee
         || existingIssue.state === 'closed'
-        || (
-          existingIssue.labels != null
-          && !stringListsEqual(existingIssue.labels, desiredIssueLabels(bead))
-        )
         || !hasCurrentRenderedBody(
           existingIssue,
           renderedBody,
@@ -1169,6 +1333,20 @@ export function planReconciliation(input) {
           renderHash,
           assignee,
           state: 'open',
+        });
+      }
+
+      const labels = desiredIssueLabels(bead);
+      if (
+        existingIssue.labels != null
+        && !stringListsEqual(existingIssue.labels, labels)
+      ) {
+        labelIssues.push({
+          type: 'labelIssue',
+          phase: 'labelIssues',
+          beadId: bead.id,
+          issueNumber: existingIssue.number,
+          labels,
         });
       }
     }
@@ -1208,10 +1386,14 @@ export function planReconciliation(input) {
       ? bead.parentId
       : null;
     const knownParentIssueNumber = resolveKnownIssueNumber(managedIssuesByBeadId, desiredParentBeadId);
+    const knownParentIssue = desiredParentBeadId == null
+      ? null
+      : managedIssuesByBeadId.get(desiredParentBeadId) ?? null;
     if (
       desiredParentBeadId == null
-        ? existingIssue?.parentIssueNumber != null
-        : knownParentIssueNumber == null || existingIssue?.parentIssueNumber !== knownParentIssueNumber
+        ? existingIssue?.parentIssue != null
+        : knownParentIssue == null
+          || !relationshipMatchesManagedIssue(existingIssue?.parentIssue, knownParentIssue)
     ) {
       syncParents.push({
         type: 'syncParent',
@@ -1220,6 +1402,7 @@ export function planReconciliation(input) {
         parentBeadId: desiredParentBeadId,
         parentIssueNumber: knownParentIssueNumber,
         currentParentIssueNumber: existingIssue?.parentIssueNumber ?? null,
+        currentParentIssue: existingIssue?.parentIssue ?? null,
       });
     }
 
@@ -1230,10 +1413,13 @@ export function planReconciliation(input) {
       .map((blockedById) => resolveKnownIssueNumber(managedIssuesByBeadId, blockedById))
       .filter((issueNumber) => issueNumber != null)
       .sort((left, right) => left - right);
+    const desiredKnownBlockerIssues = desiredBlockerBeadIds
+      .map((blockedById) => managedIssuesByBeadId.get(blockedById))
+      .filter((issue) => issue != null);
 
     if (
       desiredBlockerBeadIds.some((blockedById) => !managedIssuesByBeadId.has(blockedById))
-      || !numberListsEqual(existingIssue?.blockerIssueNumbers ?? [], desiredKnownBlockerIssueNumbers)
+      || !relationshipListsEqual(existingIssue?.blockerIssues ?? [], desiredKnownBlockerIssues)
     ) {
       syncBlockers.push({
         type: 'syncBlocker',
@@ -1242,6 +1428,7 @@ export function planReconciliation(input) {
         blockerBeadIds: desiredBlockerBeadIds,
         blockerIssueNumbers: desiredKnownBlockerIssueNumbers,
         currentBlockerIssueNumbers: [...(existingIssue?.blockerIssueNumbers ?? [])],
+        currentBlockerIssues: [...(existingIssue?.blockerIssues ?? [])],
       });
     }
   }
@@ -1317,10 +1504,18 @@ export function planReconciliation(input) {
       renderHash: readmeRenderHash,
     });
   }
+  if (normalizedInput.readme?.public === false) {
+    setProjectVisibilityOperations.push({
+      type: 'setProjectVisibility',
+      phase: 'setProjectVisibility',
+      public: true,
+    });
+  }
 
   const operations = /** @type {ReconciliationOperation[]} */ ([
     ...createIssues,
     ...updateIssues,
+    ...labelIssues,
     ...closeIssues,
     ...ensureProjectItems,
     ...restoreItems,
@@ -1329,6 +1524,7 @@ export function planReconciliation(input) {
     ...syncBlockers,
     ...archiveItems,
     ...updateReadmeOperations,
+    ...setProjectVisibilityOperations,
   ]);
 
   return {
@@ -1340,6 +1536,7 @@ export function planReconciliation(input) {
       managedIssuesByBeadId,
       createIssues,
       updateIssues,
+      labelIssues,
       closeIssues,
       ensureProjectItems,
       restoreItems,
@@ -1348,6 +1545,7 @@ export function planReconciliation(input) {
       syncBlockers,
       archiveItems,
       updateReadmeOperations,
+      setProjectVisibilityOperations,
     ),
   };
 }
@@ -1410,7 +1608,10 @@ function describeReconciliationOperationTarget(operation) {
   if ('beadId' in operation) {
     return `bead "${operation.beadId}"`;
   }
-  return `README "${operation.path}"`;
+  if (operation.type === 'updateReadme') {
+    return `README "${operation.path}"`;
+  }
+  return 'Project visibility';
 }
 
 /**
@@ -1487,6 +1688,13 @@ export async function applyReconciliation(plan, adapters) {
         case 'updateIssue': {
           const updateIssue = adapters.updateIssue ?? fail('applyReconciliation requires adapters.updateIssue');
           const result = await updateIssue(operation);
+          issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
+          applied.push({ operation, result });
+          break;
+        }
+        case 'labelIssue': {
+          const labelIssue = adapters.labelIssue ?? fail('applyReconciliation requires adapters.labelIssue');
+          const result = await labelIssue(operation);
           issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
           applied.push({ operation, result });
           break;
@@ -1601,6 +1809,13 @@ export async function applyReconciliation(plan, adapters) {
         case 'updateReadme': {
           const updateReadme = adapters.updateReadme ?? fail('applyReconciliation requires adapters.updateReadme');
           const result = await updateReadme(operation);
+          applied.push({ operation, result });
+          break;
+        }
+        case 'setProjectVisibility': {
+          const setProjectVisibility = adapters.setProjectVisibility
+            ?? fail('applyReconciliation requires adapters.setProjectVisibility');
+          const result = await setProjectVisibility(operation);
           applied.push({ operation, result });
           break;
         }

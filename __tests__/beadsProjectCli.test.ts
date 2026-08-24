@@ -102,7 +102,8 @@ function createFakeGh(options: FakeGhOptions = {}) {
       id: 'PVT_project',
       number: 12,
       title: 'Psyche Build: Goals & Implementation',
-      readme: '<!-- psyche-bead-sync:v1 project-readme -->',
+      readme:
+        '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
       public: true,
       url: 'https://github.com/orgs/OpenCoven/projects/12',
     }
@@ -158,6 +159,10 @@ function createFakeGh(options: FakeGhOptions = {}) {
       writes.push('updateIssue');
       return {};
     },
+    async labelIssue() {
+      writes.push('labelIssue');
+      return {};
+    },
     async closeIssue() {
       writes.push('closeIssue');
       return {};
@@ -186,6 +191,9 @@ function createFakeGh(options: FakeGhOptions = {}) {
     },
     async updateReadme() {
       writes.push('updateReadme');
+    },
+    async setProjectVisibility() {
+      writes.push('setProjectVisibility');
     },
   } as unknown as GhClient;
 
@@ -241,15 +249,39 @@ describe('Beads project sync configuration', () => {
   });
 
   it('rejects malformed or unsupported safety configuration', () => {
-    expect(() => parseSyncConfig({
+    const base = {
       owner: 'OpenCoven',
       repository: 'psyche-build',
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
       assigneeMap: {},
-      massClose: { minimum: 5, fraction: 2 },
-    })).toThrow(/fraction/i);
+    };
+
+    for (const minimum of [true, false, '5', 1.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => parseSyncConfig({
+        ...base,
+        massClose: { minimum, fraction: 0.25 },
+      })).toThrow(/minimum/i);
+    }
+    for (const fraction of [
+      true,
+      false,
+      '0.25',
+      -0.1,
+      1.1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expect(() => parseSyncConfig({
+        ...base,
+        massClose: { minimum: 5, fraction },
+      })).toThrow(/fraction/i);
+    }
+    expect(parseSyncConfig({
+      ...base,
+      massClose: { minimum: 0, fraction: 0 },
+    }).massClose).toEqual({ minimum: 0, fraction: 0 });
   });
 
   it('accepts safe configured markers and rejects comment-breaking markers', () => {
@@ -703,7 +735,7 @@ describe('Beads project sync CLI', () => {
     expect(absentProject.calls).toEqual(['verifyAccess', 'discoverProject']);
     expect(absentProject.writes).toEqual(['provisionProject']);
     expect(absentProject.provisionReadmes[0]).toContain(
-      '<!-- psyche-beads-project-sync:v1 project-readme -->',
+      '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
     );
     expect(absentProject.provisionReadmes[0]).not.toContain(
       '<!-- psyche-bead-sync:v1 project-readme -->',

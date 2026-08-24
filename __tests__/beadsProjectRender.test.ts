@@ -44,6 +44,7 @@ function buildContext(
       'pb-closed': 'https://github.com/OpenCoven/psyche-build-public/issues/4',
     },
     sourceRepositoryUrl: 'https://github.com/OpenCoven/psyche-build',
+    repositoryIdentity: 'OpenCoven/psyche-build',
     sourceRef: 'f2f1da60',
     inventoryTimestamp: '2026-08-22T20:00:00Z',
     ...overrides,
@@ -165,6 +166,54 @@ describe('Beads project renderers', () => {
         '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----',
       ),
     ).toThrow(/private key/i);
+  });
+
+  it('redacts URL userinfo across schemes before public rendering', () => {
+    const rendered = sanitizePublicText(
+      [
+        'https://alice:secret@example.com/repo',
+        'ssh://deploy:secret@example.com/home/deploy/repo',
+        'git://token@example.com/OpenCoven/psyche-build.git',
+        'custom+tool://name:password@example.com/route',
+      ].join('\n'),
+    );
+
+    expect(rendered).toBe([
+      'https://example.com/repo',
+      'ssh://example.com/~/repo',
+      'git://example.com/OpenCoven/psyche-build.git',
+      'custom+tool://example.com/route',
+    ].join('\n'));
+    expect(rendered).not.toContain('alice');
+    expect(rendered).not.toContain('secret');
+    expect(rendered).not.toContain('token@');
+    expect(() =>
+      assertNoPublishableSecrets('ssh://deploy:secret@example.com/repo')
+    ).toThrow(/URL credentials/i);
+  });
+
+  it('sanitizes local paths in non-HTTP URLs while preserving safe external routes', () => {
+    expect(
+      sanitizePublicText(
+        'Open vscode://file/Users/buns/project/src/main.ts and ssh://host/home/alice/private/repo.',
+      ),
+    ).toBe(
+      'Open vscode://file/~/project/src/main.ts and ssh://host/~/private/repo.',
+    );
+    expect(
+      sanitizePublicText(
+        'Keep vscode://extension/publisher.safe and ssh://host/srv/public/releases intact.',
+      ),
+    ).toBe(
+      'Keep vscode://extension/publisher.safe and ssh://host/srv/public/releases intact.',
+    );
+    expect(
+      sanitizePublicText(
+        'Open ssh://host/srv/public?workspace=.psyche/worktrees/run#/home/alice/private.',
+      ),
+    ).toBe(
+      'Open ssh://host/srv/public?workspace=<redacted-local-path>#~/private.',
+    );
   });
 
   it('redacts complete delimiter-aware operational paths', () => {
@@ -341,7 +390,9 @@ describe('Beads project renderers', () => {
 
     expect(issue).toContain('<!-- custom-issue-sync:v2 bead-id=pb-feature -->');
     expect(issue).not.toContain('<!-- psyche-bead-sync:v1 bead-id=pb-feature -->');
-    expect(readme).toContain('<!-- custom-project-sync:v2 project-readme -->');
+    expect(readme).toContain(
+      '<!-- custom-project-sync:v2 project-readme repository=OpenCoven/psyche-build -->',
+    );
     expect(readme).not.toContain('<!-- psyche-bead-sync:v1 project-readme -->');
   });
 
@@ -363,7 +414,7 @@ describe('Beads project renderers', () => {
     );
 
     expect(rendered).toContain(
-      '- Parent: [#2](https://ghe.example.com/OpenCoven/psyche-build-public/issues/2?path=~/private#mirror) `pb-feature` — Model Beads project inventory',
+      '- Parent: `pb-feature` — Model Beads project inventory',
     );
     expect(rendered).toContain(
       '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3#/home/alice/file) `pb-in-progress` — Track in-progress beads',
@@ -404,6 +455,28 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain('access_token=');
   });
 
+  it('rejects credential-bearing HTTP URLs instead of rendering stripped links', () => {
+    const inventory = buildPublicInventory();
+    const blocked = inventory.find((bead) => bead.id === 'pb-blocked');
+
+    expect(blocked).toBeTruthy();
+
+    const rendered = renderIssueBody(
+      blocked!,
+      buildContext(inventory, {
+        mirroredIssueUrlsByBeadId: {
+          'pb-feature': 'https://alice:secret@example.com/issues/2',
+          'pb-in-progress': 'https://github.com/OpenCoven/psyche-build-public/issues/3',
+        },
+      }),
+    );
+
+    expect(rendered).toContain('- Parent: `pb-feature` — Model Beads project inventory');
+    expect(rendered).not.toContain('example.com/issues/2');
+    expect(rendered).not.toContain('alice');
+    expect(rendered).not.toContain('secret');
+  });
+
   it('links only normalized repository-relative design and plan paths', () => {
     const inventory = buildPublicInventory();
     const [feature] = inventory.filter((bead) => bead.id === 'pb-feature');
@@ -417,9 +490,8 @@ describe('Beads project renderers', () => {
       }),
     );
 
-    expect(renderedRepositoryLink).toContain(
-      `[${designDocPath}](https://ghe.example.com/OpenCoven/psyche-build/blob/f2f1da60/${designDocPath})`,
-    );
+    expect(renderedRepositoryLink).toContain(`- Design doc: ${designDocPath}`);
+    expect(renderedRepositoryLink).toContain(`- Plan: ${planDocPath}`);
     expect(renderedRepositoryLink).not.toContain('mirror-user');
     expect(renderedRepositoryLink).not.toContain('mirror-pass');
     expect(renderedRepositoryLink).not.toMatch(/https:\/\/[^)\s]*@/u);
@@ -674,7 +746,12 @@ describe('Beads project renderers', () => {
     const rendered = renderProjectReadme(inventory, context);
 
     expect(rendered).toBe(renderProjectReadme(inventory, context));
-    expect(countMatches(rendered, '<!-- psyche-beads-project-sync:v1 project-readme -->')).toBe(1);
+    expect(
+      countMatches(
+        rendered,
+        '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
+      ),
+    ).toBe(1);
     expect(rendered).toContain('# Public Beads inventory');
     expect(rendered).toContain('generated public tracking snapshot');
     expect(rendered).toContain('The Beads project remains authoritative');

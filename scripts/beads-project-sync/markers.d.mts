@@ -4,6 +4,7 @@ export const LEGACY_PROJECT_MARKERS: readonly ['psyche-bead-sync:v1'];
 export const LEGACY_ISSUE_MARKERS: readonly ['psyche-bead-sync:v1'];
 
 export function normalizeMarker(value: unknown, context: string): string;
+export function normalizeRepositoryIdentity(value: unknown, context: string): string;
 
 export function recognizedMarkers(
   current: unknown,
@@ -17,7 +18,15 @@ export function recognizedProjectMarkers(
   context: string,
 ): string[];
 
-export function projectReadmeMarker(marker: string): string;
+export function projectReadmeMarker(
+  marker: string,
+  repositoryIdentity?: string | null,
+): string;
+
+export function extractProjectReadmeMarkers(
+  value: string,
+  markers: readonly string[],
+): Array<{ marker: string; repository: string | null }>;
 
 export function issueBeadMarker(marker: string, beadId: string): string;
 

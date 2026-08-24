@@ -3,10 +3,12 @@
 import {
   DEFAULT_ISSUE_MARKER,
   DEFAULT_PROJECT_MARKER,
+  extractProjectReadmeMarkers,
   LEGACY_ISSUE_MARKERS,
   LEGACY_PROJECT_MARKERS,
   markerPattern,
   normalizeMarker,
+  normalizeRepositoryIdentity,
   projectReadmeMarker,
   recognizedMarkers,
   recognizedProjectMarkers,
@@ -29,6 +31,7 @@ const API_HEADERS = Object.freeze([
   'Accept: application/vnd.github+json',
   '-H',
   'X-GitHub-Api-Version: 2026-03-10',
+  '--include',
 ]);
 const SAFE_OWNER_REPO_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$/u;
 const SAFE_BEAD_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,199})$/u;
@@ -36,7 +39,8 @@ const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9
 const MAX_ERROR_DETAIL = 512;
 const MAX_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 25;
-const MAX_RETRY_DELAY_MS = 200;
+const MAX_RETRY_DELAY_MS = 60_000;
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 const STATUS_OPTIONS = Object.freeze([
   Object.freeze({ name: 'Backlog', color: 'GRAY', description: '' }),
@@ -96,6 +100,18 @@ query DiscoverManagedProject($owner: String!, $repo: String!, $cursor: String) {
         public
         closed
         url
+        repositories(first: 100) {
+          nodes {
+            id
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+        items(first: 1, archivedStates: [ARCHIVED, NOT_ARCHIVED]) {
+          totalCount
+        }
       }
       pageInfo {
         hasNextPage
@@ -134,6 +150,28 @@ mutation UpdateManagedProject($projectId: ID!, $public: Boolean!, $readme: Strin
       readme
       public
       url
+    }
+  }
+}
+`.trim();
+
+const UPDATE_PROJECT_README_MUTATION = `
+mutation UpdateManagedProjectReadme($projectId: ID!, $readme: String!) {
+  updateProjectV2(input: {projectId: $projectId, readme: $readme}) {
+    projectV2 {
+      id
+      readme
+    }
+  }
+}
+`.trim();
+
+const UPDATE_PROJECT_VISIBILITY_MUTATION = `
+mutation UpdateManagedProjectVisibility($projectId: ID!, $public: Boolean!) {
+  updateProjectV2(input: {projectId: $projectId, public: $public}) {
+    projectV2 {
+      id
+      public
     }
   }
 }
@@ -356,6 +394,10 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   stdout: string,
  *   stderr?: string,
  *   exitCode?: number,
+ *   headers?: Readonly<Record<string, string | readonly string[] | undefined>>,
+ *   retryAfter?: string | number,
+ *   rateLimitReset?: string | number,
+ *   status?: number,
  * }} GhRunResult
  */
 
@@ -372,7 +414,21 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   public: boolean,
  *   closed?: boolean,
  *   url?: string,
+ *   linkedRepositoryIds?: readonly string[],
+ *   linkedRepositoriesKnown?: boolean,
+ *   linkedRepositoriesHasNextPage?: boolean,
+ *   linkedRepositoriesEndCursor?: string | null,
+ *   itemCount?: number | null,
  * }} ProjectContext
+ */
+
+/**
+ * @typedef {{
+ *   id: number,
+ *   nodeId: string,
+ *   number: number,
+ *   repository: string,
+ * }} IssueIdentity
  */
 
 /**
@@ -406,6 +462,9 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   stderrSummary?: unknown,
  *   message?: unknown,
  *   response?: { status?: unknown },
+ *   headers?: unknown,
+ *   retryAfter?: unknown,
+ *   rateLimitReset?: unknown,
  *   graphqlErrors?: unknown,
  * }} ErrorLike
  */
@@ -582,17 +641,63 @@ function isTransportFailure(error) {
     return true;
   }
 
-  return /(?:\b(?:ECONNRESET|ETIMEDOUT|aborted)\b|socket hang up|connection (?:was )?(?:closed|reset)|timed? out|timeout|unexpected eof|network error|fetch failed|broken pipe)/iu
+  return /(?:\b(?:ECONNRESET|ETIMEDOUT|aborted|EOF)\b|socket hang up|connection (?:was )?(?:closed|refused|reset)|error connecting|dial tcp|i\/o timeout|no such host|TLS handshake timeout|timed? out|timeout|network error|fetch failed|broken pipe)/iu
     .test(errorDetail(error));
 }
 
 /**
- * @param {number} attempt
- * @returns {Promise<void>}
+ * @param {unknown} rawHeaders
+ * @param {string} name
+ * @returns {string | null}
  */
-function retryDelay(attempt) {
-  const delay = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * (2 ** attempt));
-  return new Promise((resolve) => setTimeout(resolve, delay));
+function headerValue(rawHeaders, name) {
+  if (rawHeaders == null) {
+    return null;
+  }
+  if (typeof /** @type {{get?: unknown}} */ (rawHeaders).get === 'function') {
+    const value = /** @type {{get(name: string): unknown}} */ (rawHeaders).get(name);
+    return value == null ? null : String(value);
+  }
+  const headers = record(rawHeaders);
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  const value = entry?.[1];
+  if (Array.isArray(value)) {
+    return value[0] == null ? null : String(value[0]);
+  }
+  return value == null ? null : String(value);
+}
+
+/**
+ * @param {unknown} error
+ * @param {number} attempt
+ * @param {number} now
+ * @param {number} maxWaitMs
+ * @returns {number}
+ */
+function retryWaitMilliseconds(error, attempt, now, maxWaitMs) {
+  const candidate = /** @type {ErrorLike} */ (error ?? {});
+  const retryAfter = candidate.retryAfter
+    ?? headerValue(candidate.headers, 'Retry-After');
+  if (retryAfter != null) {
+    const seconds = Number(retryAfter);
+    const milliseconds = Number.isFinite(seconds)
+      ? seconds * 1_000
+      : Date.parse(String(retryAfter)) - now;
+    if (Number.isFinite(milliseconds)) {
+      return Math.max(0, Math.min(maxWaitMs, milliseconds));
+    }
+  }
+
+  const reset = candidate.rateLimitReset
+    ?? headerValue(candidate.headers, 'X-RateLimit-Reset');
+  if (reset != null) {
+    const resetSeconds = Number(reset);
+    if (Number.isFinite(resetSeconds)) {
+      return Math.max(0, Math.min(maxWaitMs, (resetSeconds * 1_000) - now));
+    }
+  }
+
+  return Math.min(maxWaitMs, BASE_RETRY_DELAY_MS * (2 ** attempt));
 }
 
 /**
@@ -661,14 +766,73 @@ function normalizeRunResult(result) {
     stdout: stringOrEmpty(value.stdout),
     stderr: stringOrEmpty(value.stderr),
     exitCode,
+    ...(value.headers == null
+      ? {}
+      : {
+          headers: /** @type {Readonly<Record<string, string | readonly string[] | undefined>>} */ (
+            value.headers
+          ),
+        }),
+    ...(typeof value.retryAfter === 'string' || typeof value.retryAfter === 'number'
+      ? { retryAfter: value.retryAfter }
+      : {}),
+    ...(typeof value.rateLimitReset === 'string' || typeof value.rateLimitReset === 'number'
+      ? { rateLimitReset: value.rateLimitReset }
+      : {}),
+    ...(typeof value.status === 'number' ? { status: value.status } : {}),
+  };
+}
+
+/**
+ * @param {GhRunResult} result
+ * @returns {GhRunResult}
+ */
+function parseIncludedApiResult(result) {
+  let stdout = result.stdout;
+  /** @type {Record<string, string>} */
+  const parsedHeaders = {};
+  let status = typeof result.status === 'number' ? result.status : undefined;
+
+  while (/^HTTP\/\S+\s+\d{3}(?:\s|$)/u.test(stdout)) {
+    const separator = stdout.search(/\r?\n\r?\n/u);
+    if (separator === -1) {
+      break;
+    }
+    const headerBlock = stdout.slice(0, separator);
+    const separatorMatch = stdout.slice(separator).match(/^\r?\n\r?\n/u)?.[0] ?? '';
+    stdout = stdout.slice(separator + separatorMatch.length);
+    const lines = headerBlock.split(/\r?\n/u);
+    const statusMatch = lines[0]?.match(/^HTTP\/\S+\s+(\d{3})(?:\s|$)/u);
+    if (statusMatch) {
+      status = Number(statusMatch[1]);
+    }
+    for (const line of lines.slice(1)) {
+      const colon = line.indexOf(':');
+      if (colon <= 0) {
+        continue;
+      }
+      parsedHeaders[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+    }
+  }
+
+  const headers = /** @type {Record<string, string | readonly string[] | undefined>} */ ({
+    ...parsedHeaders,
+    ...record(result.headers),
+  });
+  return {
+    ...result,
+    stdout,
+    ...(Object.keys(headers).length === 0 ? {} : { headers }),
+    ...(status == null ? {} : { status }),
   };
 }
 
 /**
  * @param {Record<string, unknown>} payload
+ * @param {GhRunResult} [result]
  * @returns {void}
  */
-function assertNoGraphqlErrors(payload) {
+function assertNoGraphqlErrors(payload, result) {
   const errors = array(payload.errors);
   if (errors.length === 0) {
     return;
@@ -682,6 +846,22 @@ function assertNoGraphqlErrors(payload) {
     value: errors,
     writable: false,
   });
+  if (result?.headers != null) {
+    Object.defineProperty(graphqlError, 'headers', {
+      configurable: false,
+      enumerable: false,
+      value: result.headers,
+      writable: false,
+    });
+  }
+  if (result?.status != null) {
+    Object.defineProperty(graphqlError, 'status', {
+      configurable: false,
+      enumerable: false,
+      value: result.status,
+      writable: false,
+    });
+  }
   throw graphqlError;
 }
 
@@ -691,6 +871,15 @@ function assertNoGraphqlErrors(payload) {
  */
 function normalizeProject(raw) {
   const project = record(raw);
+  const repositories = record(project.repositories);
+  const repositoryPageInfo = record(repositories.pageInfo);
+  const items = record(project.items);
+  const rawItemCount = project.itemCount ?? items.totalCount;
+  const itemCount = typeof rawItemCount === 'number'
+    && Number.isSafeInteger(rawItemCount)
+    && rawItemCount >= 0
+    ? rawItemCount
+    : null;
   return {
     id: requiredString(project.id, 'project id'),
     number: positiveInteger(project.number, 'project number'),
@@ -699,6 +888,21 @@ function normalizeProject(raw) {
     public: project.public === true,
     ...(typeof project.closed === 'boolean' ? { closed: project.closed } : {}),
     ...(typeof project.url === 'string' ? { url: project.url } : {}),
+    linkedRepositoriesKnown:
+      project.linkedRepositoriesKnown === true || project.repositories != null,
+    linkedRepositoryIds: Array.isArray(project.linkedRepositoryIds)
+      ? project.linkedRepositoryIds.filter((id) => typeof id === 'string')
+      : array(repositories.nodes)
+        .map((rawRepository) => stringOrEmpty(record(rawRepository).id))
+        .filter(Boolean),
+    linkedRepositoriesHasNextPage: project.linkedRepositoriesHasNextPage === true
+      || repositoryPageInfo.hasNextPage === true,
+    linkedRepositoriesEndCursor: typeof project.linkedRepositoriesEndCursor === 'string'
+      ? project.linkedRepositoriesEndCursor
+      : typeof repositoryPageInfo.endCursor === 'string'
+        ? repositoryPageInfo.endCursor
+        : null,
+    itemCount,
   };
 }
 
@@ -799,6 +1003,51 @@ function normalizeProjectItemFields(rawValues, issueBody) {
  */
 function normalizeUrl(value) {
   return typeof value === 'string' ? value.replace(/\/+$/u, '') : '';
+}
+
+/**
+ * @param {Record<string, unknown>} issue
+ * @param {string} context
+ * @returns {string}
+ */
+function issueRepositoryIdentity(issue, context) {
+  const fullName = stringOrEmpty(record(issue.repository).full_name);
+  if (fullName) {
+    return normalizeRepositoryIdentity(fullName, `${context} repository`);
+  }
+  const repositoryUrl = stringOrEmpty(issue.repository_url);
+  if (repositoryUrl) {
+    try {
+      const segments = new URL(repositoryUrl).pathname.split('/').filter(Boolean);
+      const reposIndex = segments.findIndex((segment) => segment.toLowerCase() === 'repos');
+      if (reposIndex >= 0 && segments.length === reposIndex + 3) {
+        return normalizeRepositoryIdentity(
+          `${decodeURIComponent(segments[reposIndex + 1] ?? '')}/${
+            decodeURIComponent(segments[reposIndex + 2] ?? '')
+          }`,
+          `${context} repository`,
+        );
+      }
+    } catch {
+      // Fall through to the fail-closed error below.
+    }
+  }
+  fail(`${context} is missing repository identity`);
+}
+
+/**
+ * @param {unknown} rawIssue
+ * @param {string} context
+ * @returns {IssueIdentity}
+ */
+function normalizeIssueIdentity(rawIssue, context) {
+  const issue = record(rawIssue);
+  return {
+    id: positiveInteger(issue.id, `${context} database id`),
+    nodeId: requiredString(issue.node_id, `${context} node id`),
+    number: positiveInteger(issue.number, `${context} number`),
+    repository: issueRepositoryIdentity(issue, context),
+  };
 }
 
 /**
@@ -945,6 +1194,9 @@ function normalizeFieldMap(rawFields) {
  *   issueMarker?: string,
  *   legacyProjectMarkers?: readonly string[],
  *   legacyIssueMarkers?: readonly string[],
+ *   sleep?: (milliseconds: number) => void | Promise<void>,
+ *   now?: () => number,
+ *   maxRetryWaitMs?: number,
  * }} options
  */
 export function createGhClient(options) {
@@ -957,7 +1209,25 @@ export function createGhClient(options) {
   const run = options.run;
   const owner = requiredString(options.owner, 'owner');
   const repo = requiredString(options.repo, 'repo');
+  const repositoryIdentity = normalizeRepositoryIdentity(
+    `${owner}/${repo}`,
+    'repository identity',
+  );
   const token = requiredString(options.token, 'token');
+  /** @type {(milliseconds: number) => void | Promise<void>} */
+  const sleep = typeof options.sleep === 'function'
+    ? options.sleep
+    : (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  const maxRetryWaitMs = options.maxRetryWaitMs == null
+    ? MAX_RETRY_DELAY_MS
+    : (
+      typeof options.maxRetryWaitMs === 'number'
+      && Number.isFinite(options.maxRetryWaitMs)
+      && options.maxRetryWaitMs >= 0
+        ? options.maxRetryWaitMs
+        : fail('maxRetryWaitMs must be a non-negative finite number')
+    );
   const projectMarker = normalizeMarker(
     options.projectMarker ?? DEFAULT_PROJECT_MARKER,
     'projectMarker',
@@ -976,8 +1246,7 @@ export function createGhClient(options) {
     options.legacyIssueMarkers ?? LEGACY_ISSUE_MARKERS,
     'issueMarker',
   );
-  const currentProjectReadmeMarker = projectReadmeMarker(projectMarker);
-  const recognizedProjectReadmeMarkers = recognizedProjectMarkerValues.map(projectReadmeMarker);
+  const currentProjectReadmeMarker = projectReadmeMarker(projectMarker, repositoryIdentity);
   if (!SAFE_OWNER_REPO_PATTERN.test(owner) || !SAFE_OWNER_REPO_PATTERN.test(repo)) {
     fail('owner and repo must be safe GitHub path segments');
   }
@@ -994,6 +1263,17 @@ export function createGhClient(options) {
   const issueDatabaseIds = new Map();
   /** @type {ProjectContext[]} */
   let lastDiscoveredProjects = [];
+  /** @type {ProjectContext[]} */
+  let lastUnlinkedBoundProjects = [];
+
+  /**
+   * @param {Record<string, unknown>} issue
+   * @returns {boolean}
+   */
+  function isTrustedManagedIssue(issue) {
+    const association = stringOrEmpty(issue.author_association).toUpperCase();
+    return TRUSTED_AUTHOR_ASSOCIATIONS.has(association);
+  }
 
   /**
    * @template TValue
@@ -1005,10 +1285,13 @@ export function createGhClient(options) {
       try {
         return await action();
       } catch (error) {
-        if (!isRetryable(error) || attempt === MAX_ATTEMPTS - 1) {
+        if (
+          (!isRetryable(error) && !isTransportFailure(error))
+          || attempt === MAX_ATTEMPTS - 1
+        ) {
           throw toClientError(error);
         }
-        await retryDelay(attempt);
+        await sleep(retryWaitMilliseconds(error, attempt, now(), maxRetryWaitMs));
       }
     }
     throw new GhClientError('github', 'GitHub request exhausted retries');
@@ -1024,11 +1307,20 @@ export function createGhClient(options) {
       env: { GH_TOKEN: token },
       ...(stdin === undefined ? {} : { stdin }),
     };
-    const result = normalizeRunResult(await run('gh', args, runOptions));
+    const result = args[0] === 'api'
+      ? parseIncludedApiResult(normalizeRunResult(await run('gh', args, runOptions)))
+      : normalizeRunResult(await run('gh', args, runOptions));
     if ((result.exitCode ?? 0) !== 0) {
       throw Object.assign(
         new Error(result.stderr || `GitHub command exited with code ${result.exitCode}`),
-        { exitCode: result.exitCode, stderr: result.stderr },
+        {
+          exitCode: result.exitCode,
+          status: result.status,
+          stderr: result.stderr,
+          ...('headers' in result ? { headers: result.headers } : {}),
+          ...('retryAfter' in result ? { retryAfter: result.retryAfter } : {}),
+          ...('rateLimitReset' in result ? { rateLimitReset: result.rateLimitReset } : {}),
+        },
       );
     }
     return result;
@@ -1061,7 +1353,7 @@ export function createGhClient(options) {
       ...API_HEADERS,
       ...(body === undefined ? [] : ['--input', '-']),
     ];
-    const execute = method === 'GET' || method === 'PATCH' ? runGh : runGhOnce;
+    const execute = method === 'POST' ? runGhOnce : runGh;
     try {
       const result = await execute(
         args,
@@ -1130,18 +1422,27 @@ export function createGhClient(options) {
    * @returns {Promise<Record<string, unknown>>}
    */
   async function graphqlOnce(query, variables) {
-    const result = normalizeRunResult(await run('gh', ['api', 'graphql', '--input', '-'], {
-      env: { GH_TOKEN: token },
-      stdin: `${JSON.stringify({ query, variables })}\n`,
-    }));
+    const result = parseIncludedApiResult(normalizeRunResult(
+      await run('gh', ['api', 'graphql', '--include', '--input', '-'], {
+        env: { GH_TOKEN: token },
+        stdin: `${JSON.stringify({ query, variables })}\n`,
+      }),
+    ));
     if ((result.exitCode ?? 0) !== 0) {
       throw Object.assign(
         new Error(result.stderr || `GitHub GraphQL command exited with code ${result.exitCode}`),
-        { exitCode: result.exitCode, stderr: result.stderr },
+        {
+          exitCode: result.exitCode,
+          status: result.status,
+          stderr: result.stderr,
+          ...('headers' in result ? { headers: result.headers } : {}),
+          ...('retryAfter' in result ? { retryAfter: result.retryAfter } : {}),
+          ...('rateLimitReset' in result ? { rateLimitReset: result.rateLimitReset } : {}),
+        },
       );
     }
     const payload = parseJsonObject(result.stdout, 'GitHub GraphQL');
-    assertNoGraphqlErrors(payload);
+    assertNoGraphqlErrors(payload, result);
     return payload;
   }
 
@@ -1202,6 +1503,9 @@ export function createGhClient(options) {
       if (issue.pull_request != null) {
         continue;
       }
+      if (!isTrustedManagedIssue(issue)) {
+        continue;
+      }
       const number = positiveInteger(issue.number, 'issue number');
       if (extractBeadId(stringOrEmpty(issue.body), number, recognizedIssueMarkerValues) === beadId) {
         matches.push(issue);
@@ -1256,9 +1560,9 @@ export function createGhClient(options) {
 
   /**
    * @param {number} issueNumber
-   * @returns {Promise<number[]>}
+   * @returns {Promise<IssueIdentity[]>}
    */
-  async function listBlockerIssueNumbers(issueNumber) {
+  async function listBlockerIssues(issueNumber) {
     const blockers = [];
     for (let page = 1; ; page += 1) {
       const pageItems = array(await rest(
@@ -1266,10 +1570,13 @@ export function createGhClient(options) {
         `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by?per_page=100&page=${page}`,
       ));
       for (const rawBlocker of pageItems) {
-        blockers.push(positiveInteger(record(rawBlocker).number, 'blocker issue number'));
+        blockers.push(normalizeIssueIdentity(rawBlocker, 'blocker issue'));
       }
       if (pageItems.length < 100) {
-        return [...new Set(blockers)].sort((left, right) => left - right);
+        const byNodeId = new Map(blockers.map((blocker) => [blocker.nodeId, blocker]));
+        return [...byNodeId.values()].sort((left, right) =>
+          left.repository.localeCompare(right.repository) || left.number - right.number
+        );
       }
     }
   }
@@ -1324,6 +1631,9 @@ export function createGhClient(options) {
      *   } | null,
      *   parentIssueNumber: number | null,
      *   blockerIssueNumbers: number[],
+     *   parentIssue: IssueIdentity | null,
+     *   blockerIssues: IssueIdentity[],
+     *   repository: string,
      *   url?: string,
      * }>} */
     const managed = [];
@@ -1332,6 +1642,9 @@ export function createGhClient(options) {
     for (const rawIssue of rawIssues) {
       const issue = record(rawIssue);
       if (issue.pull_request != null) {
+        continue;
+      }
+      if (!isTrustedManagedIssue(issue)) {
         continue;
       }
       const number = positiveInteger(issue.number, 'issue number');
@@ -1355,6 +1668,7 @@ export function createGhClient(options) {
       managed.push({
         beadId,
         number,
+        ...(typeof issue.id === 'number' ? { issueDatabaseId: positiveInteger(issue.id, 'issue database id') } : {}),
         ...(typeof issue.node_id === 'string' ? { issueNodeId: issue.node_id } : {}),
         title: typeof issue.title === 'string' ? issue.title : null,
         body: typeof issue.body === 'string' ? issue.body : null,
@@ -1365,6 +1679,9 @@ export function createGhClient(options) {
         projectItem: null,
         parentIssueNumber: null,
         blockerIssueNumbers: [],
+        parentIssue: null,
+        blockerIssues: [],
+        repository: repositoryIdentity,
         ...(typeof issue.html_url === 'string' ? { url: issue.html_url } : {}),
       });
     }
@@ -1409,14 +1726,15 @@ export function createGhClient(options) {
     }
 
     for (const issue of managed) {
-      const parent = record(await getOrNull(
+      const rawParent = await getOrNull(
         `repos/${owner}/${repo}/issues/${issue.number}/parent`,
-      ));
-      issue.parentIssueNumber = parent.number == null
+      );
+      issue.parentIssue = rawParent == null
         ? null
-        : positiveInteger(parent.number, 'parent issue number');
-      issue.blockerIssueNumbers = await listBlockerIssueNumbers(issue.number);
-      delete issue.issueNodeId;
+        : normalizeIssueIdentity(rawParent, 'parent issue');
+      issue.parentIssueNumber = issue.parentIssue?.number ?? null;
+      issue.blockerIssues = await listBlockerIssues(issue.number);
+      issue.blockerIssueNumbers = issue.blockerIssues.map((blocker) => blocker.number);
     }
 
     return managed;
@@ -1445,7 +1763,12 @@ export function createGhClient(options) {
 
     for (const label of REQUIRED_LABELS) {
       if (!existing.has(label.name)) {
-        await rest('POST', `repos/${owner}/${repo}/labels`, { ...label });
+        const labelEndpoint = `repos/${owner}/${repo}/labels/${encodeURIComponent(label.name)}`;
+        await ambiguousMutation(
+          `Label create for "${label.name}"`,
+          () => rest('POST', `repos/${owner}/${repo}/labels`, { ...label }),
+          () => getOrNull(labelEndpoint),
+        );
       }
     }
     return REQUIRED_LABELS;
@@ -1491,10 +1814,36 @@ export function createGhClient(options) {
    * @returns {Promise<ProjectContext | null>}
    */
   async function discoverProject() {
-    const matches = (await discoverProjects())
-      .filter((project) => recognizedProjectReadmeMarkers.some(
-        (marker) => project.readme.includes(marker),
-      ));
+    const candidates = [];
+    lastUnlinkedBoundProjects = [];
+    for (const project of await discoverProjects()) {
+      const markers = extractProjectReadmeMarkers(
+        project.readme,
+        recognizedProjectMarkerValues,
+      );
+      if (markers.length > 1) {
+        throw new GhClientError(
+          'marker',
+          `GitHub Project #${project.number} contains duplicate managed README markers`,
+        );
+      }
+      const discoveredMarker = markers[0];
+      if (!discoveredMarker) {
+        continue;
+      }
+      if (
+        discoveredMarker.repository != null
+        && discoveredMarker.repository.toLowerCase() !== repositoryIdentity.toLowerCase()
+      ) {
+        continue;
+      }
+      if (await isProjectLinkedToRepository(project)) {
+        candidates.push(project);
+      } else if (discoveredMarker.repository != null) {
+        lastUnlinkedBoundProjects.push(project);
+      }
+    }
+    const matches = candidates;
     if (matches.length > 1) {
       throw new GhClientError('marker', 'Multiple GitHub Projects contain the managed README marker');
     }
@@ -1503,14 +1852,24 @@ export function createGhClient(options) {
   }
 
   /**
-   * @param {string} projectId
+   * @param {string | ProjectContext} projectInput
    * @returns {Promise<boolean>}
    */
-  async function isProjectLinkedToRepository(projectId) {
+  async function isProjectLinkedToRepository(projectInput) {
     if (!repositoryId) {
       throw new GhClientError('permission', 'Unable to resolve repository access');
     }
-    let cursor = null;
+    const project = typeof projectInput === 'string' ? null : projectInput;
+    const projectId = typeof projectInput === 'string' ? projectInput : projectInput.id;
+    if (project?.linkedRepositoryIds?.includes(repositoryId)) {
+      return true;
+    }
+    if (project?.linkedRepositoriesKnown && !project.linkedRepositoriesHasNextPage) {
+      return false;
+    }
+    let cursor = project?.linkedRepositoriesKnown
+      ? project.linkedRepositoriesEndCursor ?? null
+      : null;
     for (;;) {
       const payload = await graphql(DISCOVER_LINKED_REPOSITORIES_QUERY, {
         projectId,
@@ -1536,7 +1895,7 @@ export function createGhClient(options) {
     if (!repositoryId) {
       throw new GhClientError('permission', 'Unable to resolve repository access');
     }
-    if (await isProjectLinkedToRepository(project.id)) {
+    if (await isProjectLinkedToRepository(project)) {
       return;
     }
     await ambiguousMutation(
@@ -1569,7 +1928,15 @@ export function createGhClient(options) {
           readme,
         });
         const updatedData = record(record(updatedPayload.data).updateProjectV2);
-        projectContext = normalizeProject(updatedData.projectV2);
+        projectContext = {
+          ...existing,
+          ...normalizeProject(updatedData.projectV2),
+          linkedRepositoriesKnown: existing.linkedRepositoriesKnown,
+          linkedRepositoryIds: existing.linkedRepositoryIds,
+          linkedRepositoriesHasNextPage: existing.linkedRepositoriesHasNextPage,
+          linkedRepositoriesEndCursor: existing.linkedRepositoriesEndCursor,
+          itemCount: existing.itemCount,
+        };
       }
       await ensureProjectLinked(requireProject());
       return requireProject();
@@ -1579,42 +1946,87 @@ export function createGhClient(options) {
       throw new GhClientError('permission', 'Unable to resolve organization or repository access');
     }
     const priorProjectIds = new Set(lastDiscoveredProjects.map((project) => project.id));
-    const createdPayload = await ambiguousMutation(
-      `Project create for "${title}"`,
-      () => graphqlOnce(CREATE_PROJECT_MUTATION, {
-        ownerId: organizationId,
-        title,
-      }),
-      async () => {
-        const candidates = (await discoverProjects()).filter((project) =>
-          project.title === title && !priorProjectIds.has(project.id));
-        if (candidates.length > 1) {
-          throw new GhClientError('ambiguous', `Multiple newly created Projects are named "${title}"`);
-        }
-        return candidates[0] == null
-          ? null
-          : { data: { createProjectV2: { projectV2: candidates[0] } } };
-      },
+    const pristineCandidates = lastDiscoveredProjects.filter((project) =>
+      project.title === title
+      && !project.readme.trim()
+      && project.public === false
+      && project.closed === false
+      && project.linkedRepositoriesKnown === true
+      && (project.linkedRepositoryIds?.length ?? 0) === 0
+      && project.linkedRepositoriesHasNextPage !== true
+      && project.itemCount === 0
     );
-    const createdData = record(record(createdPayload.data).createProjectV2);
-    const created = normalizeProject(createdData.projectV2);
+    const recoveryCandidates = [
+      ...lastUnlinkedBoundProjects.filter((project) => project.title === title),
+      ...pristineCandidates,
+    ];
+    const uniqueRecoveryCandidates = [
+      ...new Map(recoveryCandidates.map((project) => [project.id, project])).values(),
+    ];
+    if (uniqueRecoveryCandidates.length > 1) {
+      throw new GhClientError(
+        'ambiguous',
+        `Multiple Projects are eligible for recovery as "${title}"`,
+      );
+    }
 
-    const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
-      projectId: created.id,
-      public: true,
-      readme,
-    });
-    const updatedData = record(record(updatedPayload.data).updateProjectV2);
-    const updatedRaw = record(updatedData.projectV2);
-    projectContext = {
-      ...created,
-      ...updatedRaw,
-      id: created.id,
-      number: created.number,
-      title: typeof updatedRaw.title === 'string' ? updatedRaw.title : created.title,
-      readme,
-      public: true,
-    };
+    let created = uniqueRecoveryCandidates[0] ?? null;
+    if (!created) {
+      const createdPayload = await ambiguousMutation(
+        `Project create for "${title}"`,
+        () => graphqlOnce(CREATE_PROJECT_MUTATION, {
+          ownerId: organizationId,
+          title,
+        }),
+        async () => {
+          const candidates = (await discoverProjects()).filter((project) =>
+            project.title === title
+            && !priorProjectIds.has(project.id)
+            && !project.readme.trim()
+            && project.public === false
+            && project.closed === false
+            && project.linkedRepositoriesKnown === true
+            && (project.linkedRepositoryIds?.length ?? 0) === 0
+            && project.linkedRepositoriesHasNextPage !== true
+            && project.itemCount === 0
+          );
+          if (candidates.length > 1) {
+            throw new GhClientError('ambiguous', `Multiple newly created Projects are named "${title}"`);
+          }
+          return candidates[0] == null
+            ? null
+            : { data: { createProjectV2: { projectV2: candidates[0] } } };
+        },
+      );
+      const createdData = record(record(createdPayload.data).createProjectV2);
+      created = normalizeProject(createdData.projectV2);
+    }
+
+    if (!created.public || created.readme !== readme) {
+      const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
+        projectId: created.id,
+        public: true,
+        readme,
+      });
+      const updatedData = record(record(updatedPayload.data).updateProjectV2);
+      const updatedRaw = record(updatedData.projectV2);
+      projectContext = {
+        ...created,
+        ...updatedRaw,
+        id: created.id,
+        number: created.number,
+        title: typeof updatedRaw.title === 'string' ? updatedRaw.title : created.title,
+        readme,
+        public: true,
+        linkedRepositoriesKnown: created.linkedRepositoriesKnown,
+        linkedRepositoryIds: created.linkedRepositoryIds,
+        linkedRepositoriesHasNextPage: created.linkedRepositoriesHasNextPage,
+        linkedRepositoriesEndCursor: created.linkedRepositoriesEndCursor,
+        itemCount: created.itemCount,
+      };
+    } else {
+      projectContext = created;
+    }
 
     await ensureProjectLinked(requireProject());
     return requireProject();
@@ -2168,15 +2580,19 @@ export function createGhClient(options) {
   }
 
   /**
-   * @param {{parentIssueNumber: number, subIssueId: number}} operation
+   * @param {{parentIssueNumber: number, subIssueId: number, parentRepository?: string}} operation
    * @returns {Promise<unknown>}
    */
   async function removeSubIssue(operation) {
     const parentIssueNumber = positiveInteger(operation?.parentIssueNumber, 'parent issue number');
     const subIssueId = positiveInteger(operation?.subIssueId, 'sub-issue database id');
+    const parentRepository = normalizeRepositoryIdentity(
+      operation?.parentRepository ?? repositoryIdentity,
+      'parent repository identity',
+    );
     return rest(
       'DELETE',
-      `repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issue`,
+      `repos/${parentRepository}/issues/${parentIssueNumber}/sub_issue`,
       { sub_issue_id: subIssueId },
     );
   }
@@ -2217,23 +2633,49 @@ export function createGhClient(options) {
    *   issueNumber: number,
    *   parentIssueNumber: number | null,
    *   currentParentIssueNumber: number | null,
+   *   currentParentIssue?: IssueIdentity | null,
    * }} operation
    * @returns {Promise<void>}
    */
   async function syncParent(operation) {
     const childIssueNumber = positiveInteger(operation?.issueNumber, 'child issue number');
     const childIssueId = await resolveIssueDatabaseId(childIssueNumber);
-    const currentParent = operation?.currentParentIssueNumber == null
+    const currentParentIssue = operation?.currentParentIssue == null
       ? null
-      : positiveInteger(operation.currentParentIssueNumber, 'current parent issue number');
+      : {
+          id: positiveInteger(operation.currentParentIssue.id, 'current parent database id'),
+          nodeId: requiredString(operation.currentParentIssue.nodeId, 'current parent node id'),
+          number: positiveInteger(operation.currentParentIssue.number, 'current parent issue number'),
+          repository: normalizeRepositoryIdentity(
+            operation.currentParentIssue.repository,
+            'current parent repository identity',
+          ),
+        };
+    const currentParent = currentParentIssue?.number ?? (
+      operation?.currentParentIssueNumber == null
+        ? null
+        : positiveInteger(operation.currentParentIssueNumber, 'current parent issue number')
+    );
     const desiredParent = operation?.parentIssueNumber == null
       ? null
       : positiveInteger(operation.parentIssueNumber, 'parent issue number');
+    const currentMatchesDesired = desiredParent != null && (
+      currentParentIssue == null
+        ? currentParent === desiredParent
+        : (
+            currentParentIssue.repository.toLowerCase() === repositoryIdentity.toLowerCase()
+            && currentParentIssue.number === desiredParent
+          )
+    );
 
-    if (currentParent != null && currentParent !== desiredParent) {
-      await removeSubIssue({ parentIssueNumber: currentParent, subIssueId: childIssueId });
+    if (currentParent != null && !currentMatchesDesired) {
+      await removeSubIssue({
+        parentIssueNumber: currentParentIssue?.number ?? currentParent,
+        subIssueId: childIssueId,
+        parentRepository: currentParentIssue?.repository ?? repositoryIdentity,
+      });
     }
-    if (desiredParent != null && currentParent !== desiredParent) {
+    if (desiredParent != null && !currentMatchesDesired) {
       await addSubIssue({ parentIssueNumber: desiredParent, subIssueId: childIssueId });
     }
   }
@@ -2246,6 +2688,7 @@ export function createGhClient(options) {
    *   issueNumber: number,
    *   blockerIssueNumbers: readonly number[],
    *   currentBlockerIssueNumbers: readonly number[],
+   *   currentBlockerIssues?: readonly IssueIdentity[],
    * }} operation
    * @returns {Promise<void>}
    */
@@ -2257,17 +2700,50 @@ export function createGhClient(options) {
     const current = new Set(
       array(operation?.currentBlockerIssueNumbers).map((value) => positiveInteger(value, 'blocker issue number')),
     );
+    const currentBlockerIssues = array(operation?.currentBlockerIssues).map((value) => {
+      const blocker = record(value);
+      return {
+        id: positiveInteger(blocker.id, 'current blocker database id'),
+        nodeId: requiredString(blocker.nodeId, 'current blocker node id'),
+        number: positiveInteger(blocker.number, 'current blocker issue number'),
+        repository: normalizeRepositoryIdentity(
+          blocker.repository,
+          'current blocker repository identity',
+        ),
+      };
+    });
+    const currentLocalNumbers = new Set(
+      currentBlockerIssues
+        .filter((blocker) => blocker.repository.toLowerCase() === repositoryIdentity.toLowerCase())
+        .map((blocker) => blocker.number),
+    );
 
-    for (const blockerNumber of current) {
-      if (!desired.has(blockerNumber)) {
-        await removeBlockedBy({
-          issueNumber,
-          blockerIssueId: await resolveIssueDatabaseId(blockerNumber),
-        });
+    if (currentBlockerIssues.length > 0) {
+      for (const blocker of currentBlockerIssues) {
+        const matchesDesired = blocker.repository.toLowerCase() === repositoryIdentity.toLowerCase()
+          && desired.has(blocker.number);
+        if (!matchesDesired) {
+          await removeBlockedBy({
+            issueNumber,
+            blockerIssueId: blocker.id,
+          });
+        }
+      }
+    } else {
+      for (const blockerNumber of current) {
+        if (!desired.has(blockerNumber)) {
+          await removeBlockedBy({
+            issueNumber,
+            blockerIssueId: await resolveIssueDatabaseId(blockerNumber),
+          });
+        }
       }
     }
     for (const blockerNumber of desired) {
-      if (!current.has(blockerNumber)) {
+      const alreadyPresent = currentBlockerIssues.length > 0
+        ? currentLocalNumbers.has(blockerNumber)
+        : current.has(blockerNumber);
+      if (!alreadyPresent) {
         await addBlockedBy({
           issueNumber,
           blockerIssueId: await resolveIssueDatabaseId(blockerNumber),
@@ -2323,12 +2799,27 @@ export function createGhClient(options) {
     if (!readme.includes(currentProjectReadmeMarker)) {
       fail('project README must contain the managed marker');
     }
-    await graphql(UPDATE_PROJECT_MUTATION, {
+    await graphql(UPDATE_PROJECT_README_MUTATION, {
       projectId: project.id,
-      public: true,
       readme,
     });
-    projectContext = { ...project, public: true, readme };
+    projectContext = { ...project, readme };
+  }
+
+  /**
+   * @param {{public: true}} operation
+   * @returns {Promise<void>}
+   */
+  async function setProjectVisibility(operation) {
+    const project = requireProject();
+    if (operation?.public !== true) {
+      fail('Project visibility can only be reconciled to public');
+    }
+    await graphql(UPDATE_PROJECT_VISIBILITY_MUTATION, {
+      projectId: project.id,
+      public: true,
+    });
+    projectContext = { ...project, public: true };
   }
 
   /**
@@ -2374,5 +2865,6 @@ export function createGhClient(options) {
     restoreItem,
     unarchiveItem: restoreItem,
     updateReadme,
+    setProjectVisibility,
   });
 }

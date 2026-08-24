@@ -40,6 +40,8 @@ const API_KEY_ASSIGNMENT_PATTERN =
   /\b(?:api[_-]?key|apikey|client[_-]?secret|access[_-]?token|auth[_-]?token)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const CREDENTIAL_ASSIGNMENT_PATTERN =
   /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
+const URL_USERINFO_PATTERN =
+  /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s"'`()\[\]{}<>@]+@/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
 const PROTECTED_URL_PATTERN = /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`()\[\]{}<>]+/gu;
@@ -210,25 +212,6 @@ function stripGitPlusPrefix(value) {
  * @param {string} value
  * @returns {string}
  */
-function extractAbsoluteUrlBase(value) {
-  const queryIndex = value.indexOf('?');
-  const hashIndex = value.indexOf('#');
-  let end = value.length;
-
-  if (queryIndex !== -1) {
-    end = queryIndex;
-  }
-  if (hashIndex !== -1 && hashIndex < end) {
-    end = hashIndex;
-  }
-
-  return value.slice(0, end);
-}
-
-/**
- * @param {string} value
- * @returns {string}
- */
 function decodeUrlComponent(value) {
   if (!value) {
     return value;
@@ -274,6 +257,25 @@ function redactHomeDirectoriesInUrlComponent(value, matchers, options = {}) {
   }
 
   const decodedSanitized = redactHomeDirectoryToken(decoded, matchers, options);
+  return decodedSanitized !== decoded ? decodedSanitized : value;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function redactLocalOperationalPathsInUrlComponent(value) {
+  const directlySanitized = redactLocalOperationalPaths(value);
+  if (directlySanitized !== value) {
+    return directlySanitized;
+  }
+
+  const decoded = decodeUrlComponent(value);
+  if (decoded === value) {
+    return value;
+  }
+
+  const decodedSanitized = redactLocalOperationalPaths(decoded);
   return decodedSanitized !== decoded ? decodedSanitized : value;
 }
 
@@ -368,7 +370,7 @@ function sanitizeUrlHash(value, matchers) {
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
-function redactHttpUrlHomeDirectoryComponents(value, matchers) {
+function sanitizeProtectedUrl(value, matchers) {
   /** @type {URL} */
   let url;
   try {
@@ -377,31 +379,86 @@ function redactHttpUrlHomeDirectoryComponents(value, matchers) {
     return value;
   }
 
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return value;
+  let changed = false;
+  const protocol = url.protocol.toLowerCase();
+
+  if (url.username || url.password) {
+    const authorityStart = value.indexOf('://') + 3;
+    const authorityEnd = value.slice(authorityStart).search(/[/?#]/u);
+    const absoluteAuthorityEnd = authorityEnd === -1
+      ? value.length
+      : authorityStart + authorityEnd;
+    const atIndex = value.lastIndexOf('@', absoluteAuthorityEnd);
+    if (atIndex >= authorityStart) {
+      value = `${value.slice(0, authorityStart)}${value.slice(atIndex + 1)}`;
+      changed = true;
+      try {
+        url = new URL(stripGitPlusPrefix(value));
+      } catch {
+        return value;
+      }
+    }
   }
 
-  let changed = false;
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    const authorityStart = value.indexOf('://') + 3;
+    const pathOffset = value.slice(authorityStart).search(/[/?#]/u);
+    if (pathOffset !== -1) {
+      const pathStart = authorityStart + pathOffset;
+      const suffixOffset = value.slice(pathStart).search(/[?#]/u);
+      const pathEnd = suffixOffset === -1 ? value.length : pathStart + suffixOffset;
+      const rawPath = value.slice(pathStart, pathEnd);
+      const sanitizedPath = redactLocalOperationalPaths(
+        redactHomeDirectoriesInUrlComponent(rawPath, matchers, {
+          allowGenericFileUriPatterns: true,
+          allowGenericPathPatterns: true,
+        }),
+      );
+      if (sanitizedPath !== rawPath) {
+        const normalizedPath = rawPath.startsWith('/') && !sanitizedPath.startsWith('/')
+          ? `/${sanitizedPath}`
+          : sanitizedPath;
+        value = `${value.slice(0, pathStart)}${normalizedPath}${value.slice(pathEnd)}`;
+        changed = true;
+      }
+    }
+  }
 
   if (url.search) {
     const rawSearch = url.search.startsWith('?') ? url.search.slice(1) : url.search;
-    const sanitizedSearch = sanitizeUrlQuery(rawSearch, matchers);
+    let sanitizedSearch = sanitizeUrlQuery(rawSearch, matchers);
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      sanitizedSearch = redactLocalOperationalPathsInUrlComponent(
+        redactHomeDirectoriesInUrlComponent(sanitizedSearch, matchers, {
+          allowGenericFileUriPatterns: true,
+          allowGenericPathPatterns: true,
+        }),
+      );
+    }
     if (sanitizedSearch !== rawSearch) {
-      url.search = sanitizedSearch;
+      value = value.replace(url.search, `?${sanitizedSearch}`);
       changed = true;
     }
   }
 
   if (url.hash) {
     const rawHash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
-    const sanitizedHash = sanitizeUrlHash(rawHash, matchers);
+    let sanitizedHash = sanitizeUrlHash(rawHash, matchers);
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      sanitizedHash = redactLocalOperationalPathsInUrlComponent(
+        redactHomeDirectoriesInUrlComponent(sanitizedHash, matchers, {
+          allowGenericFileUriPatterns: true,
+          allowGenericPathPatterns: true,
+        }),
+      );
+    }
     if (sanitizedHash !== rawHash) {
-      url.hash = sanitizedHash;
+      value = value.replace(url.hash, `#${sanitizedHash}`);
       changed = true;
     }
   }
 
-  return changed ? `${extractAbsoluteUrlBase(value)}${url.search}${url.hash}` : value;
+  return value;
 }
 
 /**
@@ -425,7 +482,7 @@ function protectNonFileUrls(value, matchers) {
     }
 
     const placeholder = `${PROTECTED_URL_PLACEHOLDER_PREFIX}${protectedUrls.length}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`;
-    protectedUrls.push(redactHttpUrlHomeDirectoryComponents(match, matchers));
+    protectedUrls.push(sanitizeProtectedUrl(match, matchers));
     return placeholder;
   });
 
@@ -1141,6 +1198,9 @@ export function assertNoPublishableSecrets(value) {
   if (CREDENTIAL_ASSIGNMENT_PATTERN.test(value)) {
     fail('Publishable credential assignment detected');
   }
+  if (URL_USERINFO_PATTERN.test(value)) {
+    fail('Publishable URL credentials detected');
+  }
 }
 
 /**
@@ -1157,6 +1217,17 @@ export function sanitizePublicText(value, config = {}) {
   }
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
+  sanitized = sanitized.replace(PROTECTED_URL_PATTERN, (url) => {
+    const authorityStart = url.indexOf('://') + 3;
+    const authorityEndOffset = url.slice(authorityStart).search(/[/?#]/u);
+    const authorityEnd = authorityEndOffset === -1
+      ? url.length
+      : authorityStart + authorityEndOffset;
+    const atIndex = url.lastIndexOf('@', authorityEnd);
+    return atIndex >= authorityStart
+      ? `${url.slice(0, authorityStart)}${url.slice(atIndex + 1)}`
+      : url;
+  });
   sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
   sanitized = redactLocalPaths(sanitized, config);
   assertNoPublishableSecrets(sanitized);

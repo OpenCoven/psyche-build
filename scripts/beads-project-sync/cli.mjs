@@ -376,6 +376,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     const inventorySummary = summarizeInventory(inventory);
     const renderContext = {
       projectName: config.projectTitle,
+      repositoryIdentity: `${config.owner}/${config.repository}`,
       sourceRepositoryUrl: `https://github.com/${config.owner}/${config.repository}`,
       sourceRef: env.GITHUB_SHA?.trim() || 'main',
       projectMarker: config.projectMarker,
@@ -479,7 +480,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     const plan = planReconciliation({
       inventory,
       existingIssues,
-      readme: project == null ? null : { body: project.readme },
+      readme: project == null ? null : { body: project.readme, public: project.public },
       renderContext,
     });
     const url = project == null

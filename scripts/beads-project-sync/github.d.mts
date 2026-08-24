@@ -11,6 +11,10 @@ export interface GhRunResult {
   stdout: string;
   stderr?: string;
   exitCode?: number;
+  headers?: Readonly<Record<string, string | readonly string[] | undefined>>;
+  retryAfter?: string | number;
+  rateLimitReset?: string | number;
+  status?: number;
 }
 
 export type GhRun = (
@@ -68,7 +72,19 @@ export interface ManagedIssueSnapshot {
   } | null;
   parentIssueNumber: number | null;
   blockerIssueNumbers: number[];
+  parentIssue: IssueIdentity | null;
+  blockerIssues: IssueIdentity[];
+  issueDatabaseId?: number;
+  issueNodeId?: string;
+  repository: string;
   url?: string;
+}
+
+export interface IssueIdentity {
+  id: number | null;
+  nodeId: string | null;
+  number: number;
+  repository: string | null;
 }
 
 export interface IssueMutationResult {
@@ -97,6 +113,7 @@ export interface AssignIssueInput {
 export interface SubIssueInput {
   parentIssueNumber: number;
   subIssueId: number;
+  parentRepository?: string;
 }
 
 export interface BlockedByInput {
@@ -122,6 +139,7 @@ export interface SyncParentInput {
   issueNumber: number;
   parentIssueNumber: number | null;
   currentParentIssueNumber: number | null;
+  currentParentIssue?: IssueIdentity | null;
   beadId?: string;
   parentBeadId?: string | null;
   type?: 'syncParent';
@@ -132,6 +150,7 @@ export interface SyncBlockerInput {
   issueNumber: number;
   blockerIssueNumbers: number[];
   currentBlockerIssueNumbers: readonly number[];
+  currentBlockerIssues?: readonly IssueIdentity[];
   beadId?: string;
   blockerBeadIds?: string[];
   type?: 'syncBlocker';
@@ -238,6 +257,11 @@ export interface GhClient {
     type?: 'updateReadme';
     phase?: 'updateReadme';
   }): Promise<void>;
+  setProjectVisibility(operation: {
+    public: true;
+    type?: 'setProjectVisibility';
+    phase?: 'setProjectVisibility';
+  }): Promise<void>;
 }
 
 export function createGhClient(options: {
@@ -249,4 +273,7 @@ export function createGhClient(options: {
   issueMarker?: string;
   legacyProjectMarkers?: readonly string[];
   legacyIssueMarkers?: readonly string[];
+  sleep?: (milliseconds: number) => void | Promise<void>;
+  now?: () => number;
+  maxRetryWaitMs?: number;
 }): GhClient;

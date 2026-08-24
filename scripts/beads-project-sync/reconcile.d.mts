@@ -17,6 +17,20 @@ export interface ProjectItemSnapshot {
   fields: ProjectFieldValues;
 }
 
+export interface IssueIdentityInput {
+  id?: number | null;
+  nodeId?: string | null;
+  number: number;
+  repository?: string | null;
+}
+
+export interface IssueIdentity {
+  id: number | null;
+  nodeId: string | null;
+  number: number;
+  repository: string | null;
+}
+
 export interface IssueSnapshotInput {
   number: number;
   title?: string | null;
@@ -28,6 +42,11 @@ export interface IssueSnapshotInput {
   projectItem?: ProjectItemSnapshotInput | null;
   parentIssueNumber?: number | null;
   blockerIssueNumbers?: readonly number[] | null;
+  parentIssue?: IssueIdentityInput | null;
+  blockerIssues?: readonly IssueIdentityInput[] | null;
+  issueDatabaseId?: number | null;
+  issueNodeId?: string | null;
+  repository?: string | null;
 }
 
 export interface IssueSnapshot {
@@ -41,6 +60,11 @@ export interface IssueSnapshot {
   projectItem: ProjectItemSnapshot | null;
   parentIssueNumber: number | null;
   blockerIssueNumbers: number[];
+  parentIssue: IssueIdentity | null;
+  blockerIssues: IssueIdentity[];
+  issueDatabaseId: number | null;
+  issueNodeId: string | null;
+  repository: string | null;
 }
 
 export interface ManagedIssueSnapshot extends IssueSnapshot {
@@ -51,12 +75,14 @@ export interface ReadmeSnapshotInput {
   body?: string | null;
   renderHash?: string | null;
   path?: string | null;
+  public?: boolean | null;
 }
 
 export interface ReadmeSnapshot {
   body: string | null;
   renderHash: string | null;
   path: string;
+  public: boolean | null;
 }
 
 export interface PlanReconciliationInput {
@@ -69,6 +95,7 @@ export interface PlanReconciliationInput {
 export type ReconciliationPhase =
   | 'createIssues'
   | 'updateIssues'
+  | 'labelIssues'
   | 'closeIssues'
   | 'ensureProjectItems'
   | 'restoreItems'
@@ -76,7 +103,8 @@ export type ReconciliationPhase =
   | 'syncParents'
   | 'syncBlockers'
   | 'archiveItems'
-  | 'updateReadme';
+  | 'updateReadme'
+  | 'setProjectVisibility';
 
 export interface CreateIssueOperation {
   type: 'createIssue';
@@ -99,6 +127,14 @@ export interface UpdateIssueOperation {
   renderHash: string;
   assignee: string | null;
   state: string;
+}
+
+export interface LabelIssueOperation {
+  type: 'labelIssue';
+  phase: 'labelIssues';
+  beadId: string;
+  issueNumber: number;
+  labels: string[];
 }
 
 export interface CloseIssueOperation {
@@ -137,6 +173,7 @@ export interface SyncParentOperation {
   parentBeadId: string | null;
   parentIssueNumber?: number | null;
   currentParentIssueNumber: number | null;
+  currentParentIssue: IssueIdentity | null;
 }
 
 export interface SyncBlockerOperation {
@@ -146,6 +183,7 @@ export interface SyncBlockerOperation {
   blockerBeadIds: string[];
   blockerIssueNumbers?: number[];
   currentBlockerIssueNumbers: number[];
+  currentBlockerIssues: IssueIdentity[];
 }
 
 export interface ArchiveItemOperation {
@@ -163,9 +201,16 @@ export interface UpdateReadmeOperation {
   renderHash: string;
 }
 
+export interface SetProjectVisibilityOperation {
+  type: 'setProjectVisibility';
+  phase: 'setProjectVisibility';
+  public: true;
+}
+
 export type ReconciliationOperation =
   | CreateIssueOperation
   | UpdateIssueOperation
+  | LabelIssueOperation
   | CloseIssueOperation
   | EnsureProjectItemOperation
   | RestoreItemOperation
@@ -173,11 +218,13 @@ export type ReconciliationOperation =
   | SyncParentOperation
   | SyncBlockerOperation
   | ArchiveItemOperation
-  | UpdateReadmeOperation;
+  | UpdateReadmeOperation
+  | SetProjectVisibilityOperation;
 
 export interface ReconciliationOperationCounts {
   createIssue: number;
   updateIssue: number;
+  labelIssue: number;
   closeIssue: number;
   ensureProjectItem: number;
   restoreItem: number;
@@ -186,6 +233,7 @@ export interface ReconciliationOperationCounts {
   syncBlocker: number;
   archiveItem: number;
   updateReadme: number;
+  setProjectVisibility: number;
 }
 
 export interface ReconciliationClosureCandidate {
@@ -203,6 +251,7 @@ export interface ReconciliationSummary {
   defaultMaxCloseCount: number;
   createIssueCount: number;
   updateIssueCount: number;
+  labelIssueCount: number;
   closeIssueCount: number;
   ensureProjectItemCount: number;
   restoreItemCount: number;
@@ -211,6 +260,7 @@ export interface ReconciliationSummary {
   syncBlockerCount: number;
   archiveItemCount: number;
   updateReadmeCount: number;
+  setProjectVisibilityCount: number;
   operationCounts: ReconciliationOperationCounts;
   closureCandidates: ReconciliationClosureCandidate[];
 }
@@ -239,6 +289,7 @@ export type Awaitable<T> = T | PromiseLike<T>;
 export interface ReconciliationAdapters {
   createIssue(operation: CreateIssueOperation): Awaitable<CreateIssueResult>;
   updateIssue(operation: UpdateIssueOperation): Awaitable<unknown>;
+  labelIssue(operation: LabelIssueOperation): Awaitable<unknown>;
   closeIssue(operation: CloseIssueOperation): Awaitable<unknown>;
   ensureProjectItem(
     operation: EnsureProjectItemOperation & { issueNumber: number },
@@ -259,6 +310,7 @@ export interface ReconciliationAdapters {
   ): Awaitable<unknown>;
   archiveItem(operation: ArchiveItemOperation & { itemId: string }): Awaitable<unknown>;
   updateReadme(operation: UpdateReadmeOperation): Awaitable<unknown>;
+  setProjectVisibility(operation: SetProjectVisibilityOperation): Awaitable<unknown>;
 }
 
 export interface AppliedReconciliationOperation {

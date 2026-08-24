@@ -243,6 +243,10 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain('group: beads-project-sync');
     expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).toContain('runs-on: ubuntu-24.04');
+    expect(workflow).toContain(
+      "if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')",
+    );
+    expect(workflow).toContain('environment: beads-project-sync');
     expect(workflow).toContain('args=(--apply)');
     expect(workflow).toContain('args=(--dry-run)');
     expect(workflow).toContain('args+=(--allow-mass-close)');
@@ -334,5 +338,18 @@ describe('Beads Project sync workflow contract', () => {
     );
     expect(workflow).toContain('if-no-files-found: warn');
     expect(workflow).not.toContain('if-no-files-found: error');
+  });
+
+  it('documents the protected environment secret and its deployment rules', () => {
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    for (const document of [beadsReadme, contributing]) {
+      expect(document).toMatch(/beads-project-sync environment/i);
+      expect(document).toMatch(/environment secret.*BEADS_PROJECT_TOKEN/is);
+      expect(document).toMatch(/required reviewers?/i);
+      expect(document).toMatch(/main branch/i);
+    }
+    expect(beadsReadme).not.toMatch(/repository Actions secret\s+named `BEADS_PROJECT_TOKEN`/i);
   });
 });
