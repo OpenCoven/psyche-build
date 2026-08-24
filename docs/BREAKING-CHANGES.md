@@ -17,8 +17,8 @@ run. Read the hooks section below even if you skip the rest.
 npm uninstall -g comux
 ```
 
-After the `v0.0.1` release and Cask are available, install and open the public
-GUI:
+Install and open the supported public `v0.0.1` macOS GUI through the OpenCoven
+Homebrew Cask:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
