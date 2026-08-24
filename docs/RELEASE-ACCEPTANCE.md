@@ -1,106 +1,124 @@
 # Psyche Build release acceptance
 
-**Status:** Reusable release gate; macOS `v0.0.1` published 2026-08-23
+**Status:** Reusable release gate; macOS `v0.0.1` published 2026-08-23  
+**Active stabilization owner:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)  
+**Executable evidence slice:** [#239](https://github.com/OpenCoven/psyche-build/issues/239)  
+**Active governance owner:** [#31](https://github.com/OpenCoven/psyche-build/issues/31)  
+**Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
+**Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
+**Execution order:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
 
-**Active owning outcomes:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)
-and [#31](https://github.com/OpenCoven/psyche-build/issues/31)
+This document defines the evidence required to call a Psyche Build release
+supported. It complements the mechanical [release runbook](./RELEASE.md): the
+runbook explains how to publish; this file distinguishes what has already been
+proven for `v0.0.1`, what remains open operator-observed stabilization work, and
+what must be repeated for a future release.
 
-**Completed publication outcomes:**
-[#203](https://github.com/OpenCoven/psyche-build/issues/203) and
-[#194](https://github.com/OpenCoven/psyche-build/issues/194)
+A green CI run, a passing unit-test count, source presence, or a successful
+build job does not by itself prove that a clean user can install, launch,
+operate, recover, and remove the application.
 
-**Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)
+## Evidence status for `v0.0.1`
 
-This document defines the minimum evidence required to call a Psyche Build
-macOS release supported. It complements the mechanical
-[release runbook](./RELEASE.md): the runbook explains how to publish; this
-checklist defines what must be proven before and after publication.
+| Evidence class | Status | Owner and proof |
+|---|---|---|
+| Immutable source, signed tag, dual-architecture artifacts, checksums, signing, notarization, stapling, Gatekeeper, and public download verification | **Complete** | #194; accepted source `57c6c71bd5264fde960b062e95de278c8438c94f` |
+| Desktop-only release independence while retaining shared validation | **Complete** | #203 and protected run `32629730508` |
+| Stable GitHub Release and native Homebrew Cask | **Complete** | #194, `OpenCoven/homebrew-tap#2`, and native Apple Silicon/Intel lifecycle runs |
+| Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #196 executed through #239 |
+| Administrator-enforced required checks/review and removal of standing bypasses | **Open governance debt** | #31 |
+| iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
+| Versioned bounded support bundle and reusable recovery harness | **Planned post-release capability** | #199 and #243 |
 
-A green CI run, a passing unit-test count, or a successful build job does not
-by itself prove that a clean user can install, launch, recover, and remove the
-application.
+The open #196/#239 and #31 rows do not make the already-delivered macOS artifact
+unreleased. They are explicit post-release correctness and governance
+obligations. Conversely, completed publication evidence does not invent the
+operator observations that remain open.
 
 ## `v0.0.1` publication record
 
 The first public macOS release is available at
 [GitHub Releases](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1)
-and through
-[`opencoven/tap/psyche-build`](https://github.com/OpenCoven/homebrew-tap/blob/main/Casks/psyche-build.rb).
-The immutable tag resolves to
-`57c6c71bd5264fde960b062e95de278c8438c94f`. The successful
+and through the native
+[`opencoven/tap/psyche-build`](https://github.com/OpenCoven/homebrew-tap/blob/main/Casks/psyche-build.rb)
+Cask. The immutable signed tag resolves to
+`57c6c71bd5264fde960b062e95de278c8438c94f`.
+
+The successful
 [desktop-only release workflow](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508)
-published signed and notarized Apple Silicon and Intel DMGs plus
-`SHA256SUMS` while skipping iOS distribution. PR
-[#235](https://github.com/OpenCoven/psyche-build/pull/235) then corrected the
-desktop-only Homebrew notification path, and the public Cask is present. #203
-and #194 are closed.
+published signed, notarized, and stapled Apple Silicon and Intel DMGs plus
+`SHA256SUMS`. It skipped iOS-only verification and distribution while preserving
+shared protocol/schema, TypeScript, package, Rust, Tauri, and publication
+validation required by macOS. PR #235 repaired the future desktop-only Homebrew
+notification path, and the public Cask passed native Apple Silicon and Intel
+audit, install, trust validation, launch, no-op upgrade, uninstall, reinstall,
+zap, and cleanup coverage.
 
-This checklist remains the acceptance contract for subsequent releases and for
-closing the post-release stabilization work in #196. Unchecked manual items
-remain requirements for the next applicable release unless linked evidence
-marks them complete; publication alone must not retroactively invent missing
-operator evidence.
+This is completed publication evidence. The sections marked for #239 below are
+operator-observed acceptance work and must not be checked off based solely on
+the publication workflow.
 
-## Release-candidate invariants
+## Evidence classification rules
 
-The candidate must have:
+Use these classifications in every retained manifest:
 
-- one exact commit SHA on `origin/main`;
-- one version coherent across package, native application, update, and release
-  metadata;
-- no unresolved current review finding on an included change;
-- all required status checks passing on the exact candidate;
-- no unowned P0 blocker;
-- no undocumented support claim;
-- a signed annotated immutable release tag created only after acceptance;
-- no repository-level fallback copy of protected release credentials.
+- **automated:** deterministic repository or workflow evidence;
+- **operator-observed:** a named operator exercised the actual source, artifact,
+  application, or policy path;
+- **independently verified:** a second actor or clean environment reproduced the
+  result;
+- **failed:** the expected terminal state was not reached;
+- **retried:** a failure was repeated, with the original result retained;
+- **deferred:** intentionally outside the current support claim with an owner;
+- **inapplicable:** the condition cannot apply to the named release and the
+  reason is recorded;
+- **unknown:** the effect or terminal state cannot be proven and requires
+  reconciliation.
 
-After candidate freeze, a new change may enter only when it names the failed
-acceptance case it repairs. The full candidate gate must then run again.
+Never convert `unknown` into success because a local UI advanced, a timeout
+expired, or a retry appeared to work.
 
-## Evidence directory contract
+## Evidence directory and manifest contract
 
-Retain release evidence in a durable operator-controlled location and link it
-from the owning issue. Do not commit secrets, unrestricted terminal output,
-private repository contents, or personal filesystem data merely to satisfy the
-shape below.
+Retain evidence in a durable operator-controlled location and link it from the
+owning issue. Do not commit secrets, unrestricted terminal output, private
+repository contents, or personal filesystem data merely to satisfy this shape.
 
 ```text
 release-evidence/
   v0.0.1/
-    <candidate-sha>/
+    57c6c71bd5264fde960b062e95de278c8438c94f/
       manifest.json
       automated-gates.txt
       operator-smoke.txt
-      compatibility-evidence.md
       clean-machine-macos.md
       lifecycle-and-recovery.md
-      signatures.txt
-      gatekeeper.txt
-      checksums.txt
-      provenance.txt
+      git-and-cleanup.md
+      optional-provider-isolation.md
+      artifact-integrity.md
       homebrew.md
       known-deferrals.md
 ```
 
-`manifest.json` should record:
+`manifest.json` records:
 
-- version and exact candidate SHA;
-- release tag after publication;
+- release version, exact release SHA, and signed tag identity;
 - macOS version, architecture, and machine class;
-- application and artifact identifiers;
-- artifact SHA-256 digests;
-- automated, manual, deferred, failed, and rerun checks;
-- operator and independent verifier GitHub identities where appropriate;
+- application and artifact identifiers plus SHA-256 digests;
+- automated, operator-observed, independently verified, failed, retried,
+  deferred, inapplicable, and unknown checks separately;
+- operator and verifier GitHub identities where appropriate;
 - CI and workflow URLs;
 - evidence file digests;
-- explicit confirmation that captured evidence was reviewed for secrets and
-  unnecessary user data.
+- terminal state and safe recovery action for each failure-oriented case;
+- explicit confirmation that retained material was reviewed for credentials,
+  prompts, unrestricted terminal output, repository contents, environment
+  variables, infrastructure details, and unnecessary full paths.
 
-## Exact-candidate automated gate
+## Exact-source automated gate
 
-The protected release workflow currently runs these repository commands on the
-exact tagged candidate:
+The protected release workflow runs the following repository commands against
+the exact candidate:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -112,109 +130,93 @@ pnpm build
 pnpm smoke:pack
 ```
 
-It also retains:
+It also retains Rust formatting, locked tests, and checks for the Tauri
+manifest; canonical desktop-web generation and parity; release-version
+coherence; diff/generated-file cleanliness; and iOS validation in coordinated
+full-release mode.
 
-- Rust formatting, locked tests, and checks for the Tauri manifest;
-- canonical desktop-web bundle generation and parity validation;
-- release-version coherence checks;
-- diff and generated-file cleanliness;
-- iOS validation in full coordinated-release mode.
+The command list must remain aligned with the actual workflow. A required check
+not executed there must name its environment and exact invocation separately.
 
-The command list in this section must stay aligned with the actual release
-workflow. A required check that is not executed there must be classified in a
-separate evidence section with its concrete environment and invocation.
+## Tmux-equipped exact-source smoke — #239
 
-## Tmux-equipped operator smoke
-
-`pnpm smoke` requires a working `tmux` environment and is not currently run by
-the release workflow. Run it separately on a tmux-equipped supported macOS
-machine against the exact candidate checkout and retain its output:
+`pnpm smoke` requires a working tmux environment and is not established by the
+publication workflow. Run it on a supported tmux-equipped Mac against the exact
+accepted source:
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm smoke
 ```
 
-- [ ] Record the candidate SHA, Node/pnpm/tmux versions, machine architecture,
-  command, exit status, and sanitized output.
-- [ ] Confirm the smoke run uses the exact candidate rather than an arbitrary
+- [ ] Record the release SHA, Node, pnpm, tmux, Git, macOS, architecture,
+  command, exit status, and reviewed output.
+- [ ] Confirm the checkout is the accepted source rather than an arbitrary
   development tree.
-- [ ] Treat a failure as a release blocker until the test is fixed or the
-  support claim it protects is explicitly removed.
+- [ ] Confirm missing optional providers or agent CLIs do not block ordinary
+  local operation.
+- [ ] Treat a failure as a supported-surface defect or remove the unsupported
+  claim explicitly; do not waive it silently.
 
 ## Platform compatibility evidence
 
 The public artifact gate is macOS-specific. Windows and Linux remain
-compile-only targets, so their evidence may come from either:
+compile-only targets. Their evidence may use either the exact candidate matrix
+or a source-equivalent successful ancestor only when a path-scoped diff proves
+that no relevant source, manifest, lockfile, build script, workflow input, or
+generated artifact changed.
 
-1. a successful matrix run on the exact candidate; or
-2. the nearest successful ancestor whose relevant desktop/Rust/package source
-   tree is byte-identical to the candidate.
-
-When using a source-equivalent ancestor:
-
-- [ ] record its SHA and workflow URL;
-- [ ] retain a path-scoped diff proving that no Windows/Linux-relevant source,
-  manifest, lockfile, build script, workflow input, or generated artifact
-  changed between that SHA and the candidate;
-- [ ] rerun the matrix on the exact candidate whenever any relevant path
-  changed or the equivalence proof is uncertain.
-
-Documentation-only change classification is not itself proof that a future
-source candidate remains compatible.
+Documentation-only classification is not proof that a later source candidate
+remains compatible. Rerun the matrix whenever the equivalence proof is
+uncertain.
 
 ## macOS and iOS release-train separation
 
-The implemented workflow contract makes iOS/TestFlight a separate,
-non-blocking train only when an operator explicitly selects desktop-only mode.
-Tag pushes and manual full releases remain coordinated: an iOS-only failure
-blocks them. Shared protocol/schema, TypeScript, package, Rust, and Tauri
-validation remains mandatory for both modes, so a shared failure still blocks
-macOS publication.
+The implemented workflow makes iOS/TestFlight a separate, non-blocking train
+only when an operator explicitly selects desktop-only mode. Tag pushes and
+manual full releases remain coordinated and retain every iOS gate. Shared
+protocol/schema, TypeScript, package, Rust, and Tauri validation remains
+mandatory in both modes.
 
-Use one of these exact auditable manual invocations against the existing
-immutable tag:
+Auditable manual invocations against the immutable tag are:
 
 ```sh
 gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false
 gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true
 ```
 
-Tag pushes have no desktop-only input and always resolve `desktop_only` to
-`false`; they must not silently select the macOS-only path.
+Tag pushes have no desktop-only input and resolve `desktop_only` to `false`.
+They must not silently choose the macOS-only path.
 
-Required #203 evidence:
+Completed #203 evidence proves:
 
-- [x] offline workflow-contract tests prove desktop-only mode skips only
-  iOS-specific setup, simulator, project, app,
+- desktop-only mode skips only iOS-specific setup, simulator, project, app,
   UI-test, credential, archive, and upload work;
-- [x] offline workflow-contract tests prove shared protocol/schema validation
-  required by macOS still runs;
-- [x] offline workflow-contract tests prove full release mode continues to
-  require iOS validation and upload/reuse;
-- [x] a desktop-only dry run reaches both macOS build jobs and the publication
-  condition when iOS-only validation is unavailable;
-- [x] offline result-gating tests prove a failed shared or macOS check prevents
-  publication.
+- shared validation required by macOS still runs;
+- full mode continues to require iOS verification and upload/reuse;
+- shared or macOS failure prevents publication;
+- a protected desktop-only run reached both `build-macos` jobs, left
+  `upload-ios` skipped, and reached `publish` without requesting iOS
+  distribution credentials.
 
-The retained live run is
-[32629730508](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508)
-against the released SHA. Future desktop-only releases must retain the workflow
-run URL, exact release SHA, resolved `desktop_only=true` output, `verify`
-result, both `build-macos` results, `upload-ios=skipped`, `publish` result,
-Homebrew notification result, protected-environment approval receipt, and
-signed/notarized artifact evidence.
+The retained live workflow run URL is
+`https://github.com/OpenCoven/psyche-build/actions/runs/32629730508`. Its exact
+release SHA is `57c6c71bd5264fde960b062e95de278c8438c94f`; the resolved mode was
+`desktop_only=true`. Future desktop-only releases must retain the workflow run
+URL, release SHA, resolved mode, `verify` result, both `build-macos` results,
+`upload-ios` result, `publish` result, protected-environment approval, Homebrew
+notification result, and signed/notarized artifact evidence.
 
-## Clean-machine macOS matrix
+## Clean-machine and ordinary lifecycle — #239
 
-Execute against the installable release candidate, not a development checkout.
-Record commands and observed outcomes.
+Execute these checks against the public application in a clean or disposable
+user context, not merely a development checkout.
 
 ### Installation and first launch
 
-- [ ] Install the application from the candidate artifact without relying on a
-  source checkout.
-- [ ] Verify the application identity, version, and candidate SHA/provenance.
+- [ ] Install through the public Homebrew Cask or named immutable release
+  artifact.
+- [ ] Verify application identity, version, architecture, and provenance.
 - [ ] Launch through Finder or `open -a "Psyche Build"`.
 - [ ] Complete first-run onboarding without unexplained errors.
 - [ ] Confirm missing optional providers do not prevent ordinary local use.
@@ -223,171 +225,175 @@ Record commands and observed outcomes.
 
 - [ ] Open a disposable Git repository through the supported UI.
 - [ ] Create and use a plain terminal pane without an agent CLI.
-- [ ] When a supported agent CLI is installed, launch one agent-backed lane.
-- [ ] Verify explicit project scope, selected project, active lane, and
-  worktree/branch identity.
-- [ ] Exercise focus, split, resize, hide, restore, and close behavior.
-- [ ] Confirm closing a pane does not silently delete uncommitted work, its
-  worktree, or its branch.
-- [ ] Close a project through the supported lifecycle and verify focus and
-  active-project handoff remain coherent.
+- [ ] When a supported launcher is installed, create one agent-backed lane.
+- [ ] Verify explicit selected project, lane, branch, worktree, and focus state.
+- [ ] Exercise split, focus, resize, hide, restore, pane close, project close,
+  and active-project handoff.
+- [ ] Confirm close operations never silently delete the only copy of
+  uncommitted work, a worktree, or a branch.
 
 ### Persistence and restart
 
-- [ ] Quit normally and relaunch.
-- [ ] Confirm the intended durable workspace restores without duplicate panes,
-  sessions, projects, or worktrees.
-- [ ] Confirm long-running tmux/process state survives or terminates exactly as
-  documented.
-- [ ] Force-quit during a disposable state transition and verify recovery is
-  deterministic and evidence is retained.
-- [ ] Verify stale or unavailable identities are reported rather than silently
-  replaced.
+- [ ] Quit normally and confirm the intended workspace restores without
+  duplicate projects, panes, sessions, or worktrees.
+- [ ] Confirm tmux/process survival or termination matches documentation.
+- [ ] Force-quit during a disposable transition and verify deterministic
+  recovery or explicit `recovery_required` state.
+- [ ] Corrupt disposable persisted state and confirm the input is preserved or
+  quarantined rather than silently overwritten.
+- [ ] Verify stale or replaced tmux/resource identities are reported and never
+  rebound to unrelated state.
+- [ ] Exercise unwritable/full state storage and confirm persistence is not
+  falsely reported as successful.
 
-### Git integration
+### Git integration and cleanup
 
-- [ ] Inspect the worktree and bounded diff.
-- [ ] Exercise the supported review/integration menu.
-- [ ] Verify merge, pull-request, archive, and cleanup actions remain explicit
-  and fail safely when preconditions are not satisfied.
-- [ ] Verify a failed or unknown cleanup result preserves the work and exposes
-  a reconciliation path.
+- [ ] Inspect files and a bounded diff.
+- [ ] Exercise supported merge and pull-request success paths.
+- [ ] Exercise merge conflict, failed PR prerequisite, interrupted cleanup, and
+  unknown cleanup result.
+- [ ] Confirm failed or unknown paths preserve work and expose reconciliation or
+  a safe retry.
+- [ ] Confirm duplicate retries return or reconcile the existing canonical
+  outcome rather than duplicating the effect.
 
 ### Optional integrations and authority
 
-- [ ] Run core project, terminal, worktree, file, ritual, merge/PR, settings,
-  and cleanup flows without Coven or another optional session provider.
-- [ ] When an optional provider is present, verify canonical project scope and
-  resource ownership.
-- [ ] Verify provider disappearance does not grant broader fallback authority
-  or disable unrelated local workflows.
-- [ ] Verify consequential control actions use exact resource generations,
-  scoped leases, approvals where required, canonical receipts, idempotency,
-  and revocation behavior.
+- [ ] Use projects, terminals, worktrees, files, rituals, merge/PR, settings,
+  and cleanup with optional Coven/session providers absent.
+- [ ] Connect an optional provider, then remove or interrupt it during a
+  disposable session.
+- [ ] Confirm provider-specific operations fail closed without broad fallback
+  authority or loss of unrelated local workflows.
+- [ ] Verify revoked or stale authority is rejected on reconnect and before the
+  next protected action.
 
-### Current error and diagnostic surfaces
+## Current error and diagnostic surfaces
 
-The first macOS release does **not** claim the versioned, bounded support bundle
-owned by #199. Do not invent a nonexistent command or schema to satisfy this
-gate.
+The first release does not claim the versioned support bundle owned by #199 and
+#243. Do not invent a nonexistent command or schema to satisfy acceptance.
 
-For the current release surface:
-
-- [ ] Verify visible app errors identify the failed operation and a safe next
-  action without dumping credentials, raw prompts, unrestricted terminal
+- [ ] Verify visible application errors identify the failed operation and a
+  safe next action without dumping credentials, prompts, unrestricted terminal
   output, repository contents, environment variables, or infrastructure
   secrets.
 - [ ] Verify release version and source provenance are available through the
   accepted application/release evidence path.
-- [ ] For the source-supported CLI, run `node ./psyche doctor --json` only as a
-  local operator diagnostic. It may contain local configuration paths, so do
-  not attach raw output; retain a reviewed/redacted summary instead.
-- [ ] Record the full support-bundle capability as explicitly deferred to #199
-  in public limitations and evidence.
+- [ ] For the source-supported CLI, use `node ./psyche doctor --json` only as a
+  local operator diagnostic and retain a reviewed/redacted summary rather than
+  raw output.
+- [ ] Record the bounded support-bundle capability as explicitly deferred to
+  #199/#243.
 
-### Update, uninstall, and reinstall
+## Update, uninstall, and reinstall
 
-- [ ] Verify update behavior from the previous public version when one exists;
-  for the first release, document the not-applicable case explicitly.
+- [ ] For the first release, record previous-version upgrade as inapplicable;
+  exercise it for later releases.
 - [ ] Uninstall through the public distribution path.
 - [ ] Confirm uninstall does not unexpectedly delete repositories, worktrees,
   branches, or other user work.
-- [ ] Reinstall and verify safe prior state is restored or deliberately
+- [ ] Reinstall and verify prior state is safely restored or deliberately
   quarantined with a recovery path.
 
-## Failure-oriented acceptance
+## Failure-oriented acceptance — #239
 
-Use disposable data and fail closed. At minimum, exercise:
+Use disposable data and fail closed.
 
 | Scenario | Required invariant |
 |---|---|
-| Corrupt persisted workspace | Preserve the corrupt input for diagnosis, avoid silent overwrite, and start or recover through an explicit path |
-| Dead or replaced tmux session | Do not attach to an unrelated session or reuse stale resource authority |
-| Process termination during save | Restore the last atomic durable state or explicitly enter recovery-required state |
-| Interrupted pane/worktree cleanup | Preserve user work and expose what is known, unknown, and safe to retry |
-| Optional provider unavailable | Core local workflows remain available; provider-specific operations fail closed |
-| Duplicate action retry | Return or reconcile the existing canonical outcome without duplicating the effect |
-| Old owner epoch or revoked subject | Reject the stale authority on reconnect and before the next protected action |
-| Unwritable or full state directory | Report the failure; do not claim persistence succeeded or silently discard prior state |
-| Incompatible schema/version | Negotiate, migrate through an approved path, or fail with an actionable compatibility error |
-| Upgrade and rollback | Preserve supported state or quarantine incompatibility without silently mutating user work |
+| Corrupt persisted workspace | Preserve or quarantine the corrupt input; never silently overwrite it |
+| Dead or replaced tmux session | Never attach to an unrelated session or reuse stale resource authority |
+| Process termination during save | Restore the last atomic durable state or enter `recovery_required` |
+| Interrupted pane/worktree cleanup | Preserve user work and expose known, unknown, and safe-to-retry state |
+| Optional provider unavailable | Keep core local workflows available; fail provider operations closed |
+| Duplicate action retry | Return or reconcile the canonical outcome without duplicating the effect |
+| Old owner epoch or revoked subject | Reject stale authority on reconnect and before the next protected action |
+| Unwritable/full state directory | Report failure; never claim persistence succeeded or discard prior state |
+| Incompatible schema/version | Negotiate, migrate through an approved path, or fail actionably |
+| Upgrade and rollback | Preserve supported state or quarantine incompatibility without silent mutation |
 
-A failure case is complete only when the observed terminal state, retained
-evidence, safe retry/recovery behavior, and affected identities are recorded.
+A case is complete only when the observed terminal state, retained evidence,
+safe retry/recovery behavior, and affected identities are recorded.
 
-## Artifact integrity gate
+## Completed artifact integrity record
 
-For each Apple Silicon and Intel DMG:
+For both public DMGs, the `v0.0.1` publication evidence records:
 
-- [ ] the filename and embedded application version match the release contract;
-- [ ] `codesign` verifies the application and nested code;
-- [ ] Gatekeeper accepts the mounted application;
-- [ ] notarization evidence is valid and the ticket is stapled where required;
-- [ ] the artifact SHA-256 equals its `SHA256SUMS` entry;
-- [ ] provenance identifies the exact candidate SHA and workflow;
-- [ ] the public asset downloads successfully without privileged repository
-  credentials;
-- [ ] release notes describe the real supported surface and known deferrals.
+- [x] filename and embedded application version match the release contract;
+- [x] application and nested code pass strict `codesign` verification;
+- [x] Gatekeeper accepts the mounted application as Notarized Developer ID;
+- [x] notarization is valid and tickets are stapled where required;
+- [x] artifact SHA-256 values match `SHA256SUMS`;
+- [x] provenance identifies the exact source and workflow;
+- [x] assets download without privileged repository credentials;
+- [x] release notes describe the supported surface and known deferrals.
 
-The signed annotated tag must point to the exact accepted commit on
-`origin/main`, and the remote tag object must have a verified signature.
+The signed annotated tag points to the exact accepted commit on `origin/main`,
+and the remote tag object has a verified signature.
 
-## Homebrew gate
+## Completed Homebrew publication record
 
-The native Cask must use the exact immutable public release assets and their
-verified checksums.
+The native Cask uses the immutable public release assets and their verified
+checksums. Native Apple Silicon and Intel jobs exercised audit, installation,
+trust validation, launch, no-op upgrade, uninstall, reinstall, zap, and cleanup.
+The Cask installs only `Psyche Build.app`; it does not claim to install the Node
+CLI.
 
-On a clean supported Mac:
+The public command is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"
 ```
 
-Verify:
+Future releases repeat the Homebrew gate against their own immutable assets.
+#239 still owns application-level first-run, ordinary lifecycle, persistence,
+and representative failure observations that package lifecycle automation does
+not prove.
 
-- [ ] install completes from the public tap;
-- [ ] the expected signed application launches;
-- [ ] version and architecture are correct;
-- [ ] upgrade behavior works when applicable;
-- [ ] uninstall succeeds;
-- [ ] zap behavior removes only documented application state;
-- [ ] reinstall succeeds;
-- [ ] the Cask does not claim to install the Node CLI.
+## Release-candidate invariants for future releases
+
+A future candidate must have:
+
+- one exact commit SHA on `origin/main`;
+- one coherent version across package, native application, update, and release
+  metadata;
+- no unresolved current review finding on included work;
+- all required checks passing on the exact candidate;
+- no unowned P0 blocker or undocumented support claim;
+- a signed annotated immutable release tag created only after acceptance;
+- no repository-level fallback copy of protected release credentials.
+
+After freeze, a new change enters only when it names the failed acceptance case
+it repairs. The full candidate gate then runs again.
 
 ## Secrets and operator safety
 
 - Never paste certificate material, app-specific passwords, tokens, private
-  keys, or encoded secrets into an issue, pull request, comment, log, artifact,
-  or document.
-- Provision protected values only through an operator-controlled terminal or
+  keys, encoded secrets, raw prompts, unrestricted terminal output, private
+  repository contents, or complete environment dumps into issues, PRs, logs,
+  artifacts, or documentation.
+- Provision protected values only through an operator-controlled terminal or an
   approved secret-management path.
-- Verify names and presence separately from values.
-- Require the configured release-environment approval before jobs receive
-  protected credentials.
+- Verify secret names and presence separately from values.
+- Require configured release-environment approval before jobs receive protected
+  credentials.
 - Confirm repository-level fallback secret copies are absent.
 - Treat missing, invalid, or uncertain signing/notarization evidence as a hard
   publication failure.
 
-## Release decision
+## Closure decisions
 
-The candidate may be published only when:
+Close [#239](https://github.com/OpenCoven/psyche-build/issues/239) when its
+sanitized manifest contains exact-source smoke and all required operator
+observations. Close #196 when that manifest proves the supported ordinary and
+representative failure paths and every reusable gap is transferred to #199 or
+#243.
 
-1. every required exact-candidate automated gate passes;
-2. tmux-equipped smoke and compatibility evidence are retained under the
-   procedures above;
-3. #203 proves desktop-only workflow independence without skipping shared
-   validation;
-4. every supported capability in the support matrix has executable evidence;
-5. every clean-machine and integrity item is complete or explicitly
-   inapplicable;
-6. every known limitation is reflected in public copy;
-7. no current review finding, ambiguous consequential effect, or unowned P0
-   blocker remains;
-8. protected credentials and release rules are verified;
-9. an independent verifier reproduces the public Homebrew install and launch.
+Close #31 only after administrators are subject to required checks/review, no
+standing actor can silently bypass the protected path, and a successful proof
+PR plus sanitized before/after policy evidence is linked.
 
-Close #196 when the post-release acceptance and stabilization baseline is
-complete. Close #31 when the post-release governance, credential, and
-protection gate is complete. #203 and #194 closed after the desktop-only
-workflow and public GitHub Release/Homebrew path were verified.
+#194 and #203 remain complete. Neither #196/#239 nor #31 requires republishing
+`v0.0.1` unless new evidence proves a defect in the immutable public artifacts
+or their supported installation path.
