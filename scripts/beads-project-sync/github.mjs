@@ -1314,7 +1314,29 @@ export function createGhClient(options) {
   const issueDatabaseIds = new Map();
   /** @type {ProjectContext[]} */
   let lastDiscoveredProjects = [];
-  /** @type {ProjectContext[]} */
+  let projectDiscoveryComplete = false;
+  /** @type {Record<string, unknown>[] | null} */
+  let projectItemsCache = null;
+
+  /**
+   * @param {ProjectContext | null} project
+   * @returns {void}
+   */
+  function rememberProject(project) {
+    if (projectContext?.id !== project?.id) {
+      projectItemsCache = null;
+    }
+    projectContext = project;
+    if (!project) {
+      return;
+    }
+    const index = lastDiscoveredProjects.findIndex((candidate) => candidate.id === project.id);
+    if (index === -1) {
+      lastDiscoveredProjects.push(project);
+    } else {
+      lastDiscoveredProjects[index] = project;
+    }
+  }
 
   /**
    * @param {Record<string, unknown>} issue
@@ -1611,7 +1633,10 @@ export function createGhClient(options) {
   /**
    * @returns {Promise<Record<string, unknown>[]>}
    */
-  async function listProjectItems() {
+  async function listProjectItems(forceRefresh = false) {
+    if (!forceRefresh && projectItemsCache) {
+      return [...projectItemsCache];
+    }
     const project = requireProject();
     const items = [];
     let cursor = null;
@@ -1629,7 +1654,8 @@ export function createGhClient(options) {
       }
       const pageInfo = record(connection.pageInfo);
       if (pageInfo.hasNextPage !== true) {
-        return items;
+        projectItemsCache = items;
+        return [...items];
       }
       cursor = requiredString(pageInfo.endCursor, 'project item page cursor');
     }
@@ -1637,11 +1663,12 @@ export function createGhClient(options) {
 
   /**
    * @param {string} issueUrl
+   * @param {boolean} [forceRefresh]
    * @returns {Promise<Record<string, unknown> | null>}
    */
-  async function findProjectItemByIssueUrl(issueUrl) {
+  async function findProjectItemByIssueUrl(issueUrl, forceRefresh = false) {
     const normalizedIssueUrl = normalizeUrl(issueUrl);
-    const matches = (await listProjectItems()).filter((rawItem) =>
+    const matches = (await listProjectItems(forceRefresh)).filter((rawItem) =>
       normalizeUrl(record(record(rawItem).content).url) === normalizedIssueUrl);
     if (matches.length > 1) {
       throw new GhClientError('project', `Issue "${normalizedIssueUrl}" has multiple Project items`);
@@ -1867,7 +1894,10 @@ export function createGhClient(options) {
   /**
    * @returns {Promise<ProjectContext[]>}
    */
-  async function discoverProjects() {
+  async function discoverProjects(forceRefresh = false) {
+    if (!forceRefresh && projectDiscoveryComplete) {
+      return [...lastDiscoveredProjects];
+    }
     const projectsFound = [];
     let cursor = null;
 
@@ -1897,7 +1927,8 @@ export function createGhClient(options) {
     }
 
     lastDiscoveredProjects = projectsFound;
-    return projectsFound;
+    projectDiscoveryComplete = true;
+    return [...projectsFound];
   }
 
   /**
@@ -1936,7 +1967,7 @@ export function createGhClient(options) {
     if (matches.length > 1) {
       throw new GhClientError('marker', 'Multiple GitHub Projects contain the managed README marker');
     }
-    projectContext = matches[0] ?? null;
+    rememberProject(matches[0] ?? null);
     return projectContext;
   }
 
@@ -2018,7 +2049,7 @@ export function createGhClient(options) {
           readme,
         });
         const updatedData = record(record(updatedPayload.data).updateProjectV2);
-        projectContext = {
+        rememberProject({
           ...existing,
           ...normalizeProject(updatedData.projectV2),
           linkedRepositoriesKnown: existing.linkedRepositoriesKnown,
@@ -2026,7 +2057,7 @@ export function createGhClient(options) {
           linkedRepositoriesHasNextPage: existing.linkedRepositoriesHasNextPage,
           linkedRepositoriesEndCursor: existing.linkedRepositoriesEndCursor,
           itemCount: existing.itemCount,
-        };
+        });
       }
       await ensureProjectLinked(requireProject());
       return requireProject();
@@ -2059,7 +2090,7 @@ export function createGhClient(options) {
         title,
       }),
       async () => {
-        const candidates = (await discoverProjects()).filter((project) =>
+        const candidates = (await discoverProjects(true)).filter((project) =>
           !preCreateProjectIds.has(project.id)
           && isStrictProjectCreateCandidate(project, title)
         );
@@ -2083,7 +2114,7 @@ export function createGhClient(options) {
       });
       const updatedData = record(record(updatedPayload.data).updateProjectV2);
       const updatedRaw = record(updatedData.projectV2);
-      projectContext = {
+      rememberProject({
         ...created,
         ...updatedRaw,
         id: created.id,
@@ -2096,9 +2127,9 @@ export function createGhClient(options) {
         linkedRepositoriesHasNextPage: created.linkedRepositoriesHasNextPage,
         linkedRepositoriesEndCursor: created.linkedRepositoriesEndCursor,
         itemCount: created.itemCount,
-      };
+      });
     } else {
-      projectContext = created;
+      rememberProject(created);
     }
 
     await ensureProjectLinked(requireProject());
@@ -2429,31 +2460,89 @@ export function createGhClient(options) {
         ], undefined);
         return parseJsonObject(result.stdout, 'gh project item-add');
       },
-      () => findProjectItemByIssueUrl(issueUrl),
+      () => findProjectItemByIssueUrl(issueUrl, true),
     );
     const id = requiredString(item.id ?? record(item.item).id, 'project item id');
+    if (projectItemsCache) {
+      const returnedItem = record(item.item);
+      projectItemsCache.push({
+        ...returnedItem,
+        id,
+        isArchived: false,
+        content: {
+          ...record(returnedItem.content),
+          url: issueUrl,
+        },
+        fieldValues: returnedItem.fieldValues ?? { nodes: [] },
+      });
+    }
     return { id };
   }
 
   /**
    * @param {string} itemId
-   * @param {ProjectFieldContext} field
-   * @param {readonly string[]} valueArgs
+   * @param {readonly {field: ProjectFieldContext, valueArgs: string[]}[]} updates
    * @returns {Promise<void>}
    */
-  async function editProjectField(itemId, field, valueArgs) {
+  async function editProjectFields(itemId, updates) {
     const project = requireProject();
-    await runGh([
-      'project',
-      'item-edit',
-      '--id',
+    const declarations = ['$projectId: ID!', '$itemId: ID!'];
+    /** @type {Record<string, string>} */
+    const variables = {
+      projectId: project.id,
       itemId,
-      '--project-id',
-      project.id,
-      '--field-id',
-      field.id,
-      ...valueArgs,
-    ]);
+    };
+    const selections = [];
+
+    for (const [index, update] of updates.entries()) {
+      const fieldId = `fieldId${index}`;
+      declarations.push(`$${fieldId}: ID!`);
+      variables[fieldId] = update.field.id;
+
+      if (update.valueArgs.length === 1 && update.valueArgs[0] === '--clear') {
+        selections.push(`
+  clear${index}: clearProjectV2ItemFieldValue(input: {
+    projectId: $projectId
+    itemId: $itemId
+    fieldId: $${fieldId}
+  }) {
+    projectV2Item { id }
+  }`);
+        continue;
+      }
+
+      const [flag, rawValue] = update.valueArgs;
+      const value = requiredString(rawValue, `${update.field.name} value`);
+      const valueId = `value${index}`;
+      const definition = {
+        '--text': { type: 'String!', field: 'text' },
+        '--single-select-option-id': { type: 'String!', field: 'singleSelectOptionId' },
+        '--date': { type: 'Date!', field: 'date' },
+      }[flag];
+      if (!definition || update.valueArgs.length !== 2) {
+        fail(`Unsupported Project field update for "${update.field.name}"`);
+      }
+      declarations.push(`$${valueId}: ${definition.type}`);
+      variables[valueId] = value;
+      selections.push(`
+  update${index}: updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId
+    itemId: $itemId
+    fieldId: $${fieldId}
+    value: {${definition.field}: $${valueId}}
+  }) {
+    projectV2Item { id }
+  }`);
+    }
+
+    await graphql(`
+mutation UpdateManagedProjectItemFields(
+  ${declarations.join('\n  ')}
+) {
+${selections.join('\n')}
+}
+`.trim(), variables);
+    projectItemsCache = null;
   }
 
   /**
@@ -2613,8 +2702,8 @@ export function createGhClient(options) {
       }
     }
 
-    for (const update of updates) {
-      await editProjectField(itemId, update.field, update.valueArgs);
+    if (updates.length > 0) {
+      await editProjectFields(itemId, updates);
     }
   }
 
@@ -2852,6 +2941,7 @@ export function createGhClient(options) {
       '--id',
       requiredString(operation?.itemId, 'project item id'),
     ]);
+    projectItemsCache = null;
   }
 
   /**
@@ -2872,6 +2962,7 @@ export function createGhClient(options) {
       requiredString(operation?.itemId, 'project item id'),
       '--undo',
     ]);
+    projectItemsCache = null;
   }
 
   /**
@@ -2888,7 +2979,7 @@ export function createGhClient(options) {
       projectId: project.id,
       readme,
     });
-    projectContext = { ...project, readme };
+    rememberProject({ ...project, readme });
   }
 
   /**
@@ -2904,7 +2995,7 @@ export function createGhClient(options) {
       projectId: project.id,
       public: true,
     });
-    projectContext = { ...project, public: true };
+    rememberProject({ ...project, public: true });
   }
 
   /**

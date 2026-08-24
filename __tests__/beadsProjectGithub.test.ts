@@ -13,10 +13,12 @@ import type {
   ManagedIssueSnapshot,
 } from '../scripts/beads-project-sync/github.mjs';
 import {
+  applyReconciliation,
   planReconciliation,
 } from '../scripts/beads-project-sync/reconcile.mjs';
 import type {
   ReconciliationAdapters,
+  ReconciliationPlan,
 } from '../scripts/beads-project-sync/reconcile.mjs';
 import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
 
@@ -848,6 +850,30 @@ describe('createGhClient', () => {
     expect(payload.query).toMatch(/\breadme\b/u);
     expect(payload.query).toMatch(/\brepositories\(first:\s*100/u);
     expect(payload.query).toMatch(/\bitems\(first:\s*1/u);
+  });
+
+  it('reuses one Project discovery snapshot throughout a sync run', async () => {
+    const project = {
+      id: 'P-cached',
+      number: 7,
+      title: 'Public Beads',
+      readme: `${boundProjectReadmeMarker}\n# Public Beads`,
+      public: true,
+      url: 'https://github.com/orgs/OpenCoven/projects/7',
+    };
+    const runner = createRunner([
+      projectDiscovery([project]),
+      projectDiscovery([project]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.discoverProject()).resolves.toMatchObject({ id: 'P-cached' });
+    await expect(client.ensureProject({
+      title: project.title,
+      readme: project.readme,
+    })).resolves.toMatchObject({ id: 'P-cached' });
+
+    expect(runner.calls).toHaveLength(1);
   });
 
   it('uses repository binding when an unbound marked Project is linked elsewhere', async () => {
@@ -1682,7 +1708,7 @@ describe('createGhClient', () => {
     expect(parseStdin(runner.calls[6]!)).toEqual({ assignees: ['hubot'] });
   });
 
-  it('adds one project item per invocation and updates each requested field in its own invocation', async () => {
+  it('adds one project item and batches each requested field set into one GraphQL invocation', async () => {
     const project = {
       id: 'P-items',
       number: 14,
@@ -1751,16 +1777,177 @@ describe('createGhClient', () => {
       ],
       options: { env: { GH_TOKEN: token } },
     });
-    expect(runner.calls.slice(3).map((call) => call.args)).toEqual([
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-id', '--text', 'pb-42'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-status', '--single-select-option-id', 'O-blocked'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-priority', '--single-select-option-id', 'O-p1'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-type', '--single-select-option-id', 'O-feature'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-parent', '--text', 'Public launch'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-updated', '--date', '2026-08-22'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-parent', '--clear'],
-      ['project', 'item-edit', '--id', 'ITEM-42', '--project-id', 'P-items', '--field-id', 'F-updated', '--date', '2026-08-23'],
-    ]);
+    const fieldUpdates = runner.calls.slice(3);
+    expect(fieldUpdates).toHaveLength(2);
+    for (const call of fieldUpdates) {
+      expect(call.args).toEqual(['api', 'graphql', '--include', '--input', '-']);
+      expect(parseStdin(call).query).toMatch(/mutation UpdateManagedProjectItemFields/u);
+    }
+    expect(parseStdin(fieldUpdates[0]!)).toMatchObject({
+      variables: {
+        projectId: 'P-items',
+        itemId: 'ITEM-42',
+        fieldId0: 'F-id',
+        value0: 'pb-42',
+        fieldId1: 'F-status',
+        value1: 'O-blocked',
+        fieldId2: 'F-priority',
+        value2: 'O-p1',
+        fieldId3: 'F-type',
+        value3: 'O-feature',
+        fieldId4: 'F-parent',
+        value4: 'Public launch',
+        fieldId5: 'F-updated',
+        value5: '2026-08-22',
+      },
+    });
+    expect(parseStdin(fieldUpdates[1]!)).toMatchObject({
+      variables: {
+        projectId: 'P-items',
+        itemId: 'ITEM-42',
+        fieldId0: 'F-parent',
+        fieldId1: 'F-updated',
+        value1: '2026-08-23',
+      },
+    });
+  });
+
+  it('bounds GraphQL-backed invocations across end-to-end item reconciliation', async () => {
+    const calls: RunCall[] = [];
+    let addedItemCount = 0;
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args: [...args], options: { ...options } };
+      calls.push(call);
+      if (args[0] === 'project' && args[1] === 'item-add') {
+        addedItemCount += 1;
+        return success({ id: `ITEM-${addedItemCount}` });
+      }
+      if (args[0] === 'project' && args[1] === 'item-edit') {
+        return success({});
+      }
+      if (args[0] === 'api' && args[1] === 'graphql') {
+        const query = String(parseStdin(call).query ?? '');
+        if (query.includes('query DiscoverManagedProject')) {
+          return projectDiscovery([{
+            id: 'P-e2e',
+            number: 25,
+            title: 'Public Beads',
+            readme: PROJECT_README_MARKER,
+            public: true,
+          }]);
+        }
+        if (query.includes('query DiscoverManagedProjectItems')) {
+          return projectItemsPage([]);
+        }
+        if (query.includes('mutation UpdateManagedProjectItemFields')) {
+          return success({ data: {} });
+        }
+      }
+      throw new Error(`Unexpected runner call ${command} ${args.join(' ')}`);
+    };
+    const client = createGhClient({ run, owner, repo, token });
+    await client.discoverProject();
+    client.setFieldContext(new Map([
+      ['Status', { id: 'F-status', name: 'Status', dataType: 'SINGLE_SELECT', options: new Map([['Backlog', 'O-backlog']]) }],
+      ['Priority', { id: 'F-priority', name: 'Priority', dataType: 'SINGLE_SELECT', options: new Map([['P1', 'O-p1']]) }],
+      ['Bead Type', { id: 'F-type', name: 'Bead Type', dataType: 'SINGLE_SELECT', options: new Map([['Task', 'O-task']]) }],
+      ['Bead ID', { id: 'F-id', name: 'Bead ID', dataType: 'TEXT', options: new Map() }],
+      ['Parent Goal', { id: 'F-parent', name: 'Parent Goal', dataType: 'TEXT', options: new Map() }],
+      ['Source Updated', { id: 'F-updated', name: 'Source Updated', dataType: 'DATE', options: new Map() }],
+    ]));
+    const fields = {
+      beadId: 'pb-placeholder',
+      status: 'open',
+      priority: 1,
+      type: 'task',
+      parentGoal: null,
+      sourceUpdated: '2026-08-24T00:00:00Z',
+    };
+
+    const operationCounts = {
+      createIssue: 0,
+      updateIssue: 0,
+      labelIssue: 0,
+      closeIssue: 0,
+      ensureProjectItem: 2,
+      restoreItem: 0,
+      setFields: 2,
+      syncParent: 0,
+      syncBlocker: 0,
+      archiveItem: 0,
+      updateReadme: 0,
+      setProjectVisibility: 0,
+    };
+    const plan: ReconciliationPlan = {
+      inventory: [],
+      renderContext: {
+        repositoryIdentity,
+        sourceRepositoryUrl: `https://github.com/${repositoryIdentity}`,
+      },
+      managedIssuesByBeadId: new Map(),
+      summary: {
+        sourceTotal: 0,
+        sourceActive: 0,
+        sourceClosed: 0,
+        managedTotal: 0,
+        managedOpenCount: 0,
+        defaultMaxCloseCount: 5,
+        createIssueCount: 0,
+        updateIssueCount: 0,
+        labelIssueCount: 0,
+        closeIssueCount: 0,
+        ensureProjectItemCount: 2,
+        restoreItemCount: 0,
+        setFieldsCount: 2,
+        syncParentCount: 0,
+        syncBlockerCount: 0,
+        archiveItemCount: 0,
+        updateReadmeCount: 0,
+        setProjectVisibilityCount: 0,
+        operationCounts,
+        closureCandidates: [],
+      },
+      operations: [
+        {
+          type: 'ensureProjectItem',
+          phase: 'ensureProjectItems',
+          beadId: 'pb-one',
+          issueNumber: 101,
+        },
+        {
+          type: 'ensureProjectItem',
+          phase: 'ensureProjectItems',
+          beadId: 'pb-two',
+          issueNumber: 102,
+        },
+        {
+          type: 'setFields',
+          phase: 'setFields',
+          beadId: 'pb-one',
+          fields: { ...fields, beadId: 'pb-one' },
+        },
+        {
+          type: 'setFields',
+          phase: 'setFields',
+          beadId: 'pb-two',
+          fields: { ...fields, beadId: 'pb-two' },
+        },
+      ],
+    };
+
+    await applyReconciliation(plan, client);
+
+    const graphqlBackedCalls = calls.filter((call) =>
+      call.args[0] === 'project'
+      || (call.args[0] === 'api' && call.args[1] === 'graphql')
+    );
+    expect(graphqlBackedCalls).toHaveLength(6);
+    expect(graphqlBackedCalls.filter((call) =>
+      String(call.options.stdin ?? '').includes('query DiscoverManagedProjectItems')
+    )).toHaveLength(1);
+    expect(graphqlBackedCalls.filter((call) =>
+      String(call.options.stdin ?? '').includes('mutation UpdateManagedProjectItemFields')
+    )).toHaveLength(2);
   });
 
   it('re-reads a Project item by issue identity after an applied-then-5xx add', async () => {
@@ -1793,7 +1980,7 @@ describe('createGhClient', () => {
       && call.args[1] === 'item-add')).toHaveLength(1);
   });
 
-  it('awaits project field edits sequentially and stops after the first failure', async () => {
+  it('sends one batched field mutation and stops after its first failure', async () => {
     let releaseFirst: (() => void) | undefined;
     let firstStarted: (() => void) | undefined;
     const started = new Promise<void>((resolve) => {
@@ -1820,20 +2007,6 @@ describe('createGhClient', () => {
         await firstGate;
         activeEdits -= 1;
         throw failed;
-      },
-      async () => {
-        activeEdits += 1;
-        maxActiveEdits = Math.max(maxActiveEdits, activeEdits);
-        await Promise.resolve();
-        activeEdits -= 1;
-        return success({});
-      },
-      async () => {
-        activeEdits += 1;
-        maxActiveEdits = Math.max(maxActiveEdits, activeEdits);
-        await Promise.resolve();
-        activeEdits -= 1;
-        return success({});
       },
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });

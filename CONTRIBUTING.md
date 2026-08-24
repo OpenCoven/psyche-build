@@ -130,6 +130,12 @@ workflow dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an
 exception guard override and should be enabled only after reviewing a dry-run
 artifact, including its operation-kind counts and body-free closure candidates.
 
+The synchronizer minimizes GitHub GraphQL pressure within each run. Project
+discovery and Project item inventory are read once and reused, while all field
+changes for one Project item are sent as one aliased mutation instead of one
+request per field. Ambiguous writes deliberately bypass the snapshot and
+re-read GitHub before deciding whether a retry is safe.
+
 During a Beads version or schema migration, designate one sole migrator and
 stop other bootstrap/migration-capable processes until the migrated Dolt state
 has been pushed. See [`.beads/README.md`](.beads/README.md) for export commands,
