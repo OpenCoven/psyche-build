@@ -52,7 +52,8 @@ describe('post-release execution documentation', () => {
     expect(roadmap).toContain(issueUrl(237));
     expect(roadmap).toContain(issueUrl(240));
     expect(acceptance).toContain(issueUrl(239));
-    expect(acceptance).toMatch(/Complete[\s\S]{0,180}Open post-release stabilization debt/i);
+    expect(acceptance).toContain('**Complete**');
+    expect(acceptance).toContain('**Open post-release stabilization debt**');
     expect(acceptance).toMatch(/completed publication evidence[\s\S]{0,180}operator-observed acceptance work/i);
   });
 
