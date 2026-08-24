@@ -1,10 +1,14 @@
 # Psyche Build release acceptance
 
-**Status:** Required gate for the planned public macOS `v0.0.1` release  
-**Owning outcomes:** [#196](https://github.com/OpenCoven/psyche-build/issues/196),
-[#31](https://github.com/OpenCoven/psyche-build/issues/31),
-[#203](https://github.com/OpenCoven/psyche-build/issues/203), and
-[#194](https://github.com/OpenCoven/psyche-build/issues/194)  
+**Status:** Reusable release gate; macOS `v0.0.1` published 2026-08-23
+
+**Active owning outcomes:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)
+and [#31](https://github.com/OpenCoven/psyche-build/issues/31)
+
+**Completed publication outcomes:**
+[#203](https://github.com/OpenCoven/psyche-build/issues/203) and
+[#194](https://github.com/OpenCoven/psyche-build/issues/194)
+
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)
 
 This document defines the minimum evidence required to call a Psyche Build
@@ -15,6 +19,27 @@ checklist defines what must be proven before and after publication.
 A green CI run, a passing unit-test count, or a successful build job does not
 by itself prove that a clean user can install, launch, recover, and remove the
 application.
+
+## `v0.0.1` publication record
+
+The first public macOS release is available at
+[GitHub Releases](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1)
+and through
+[`opencoven/tap/psyche-build`](https://github.com/OpenCoven/homebrew-tap/blob/main/Casks/psyche-build.rb).
+The immutable tag resolves to
+`57c6c71bd5264fde960b062e95de278c8438c94f`. The successful
+[desktop-only release workflow](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508)
+published signed and notarized Apple Silicon and Intel DMGs plus
+`SHA256SUMS` while skipping iOS distribution. PR
+[#235](https://github.com/OpenCoven/psyche-build/pull/235) then corrected the
+desktop-only Homebrew notification path, and the public Cask is present. #203
+and #194 are closed.
+
+This checklist remains the acceptance contract for subsequent releases and for
+closing the post-release stabilization work in #196. Unchecked manual items
+remain requirements for the next applicable release unless linked evidence
+marks them complete; publication alone must not retroactively invent missing
+operator evidence.
 
 ## Release-candidate invariants
 
@@ -167,17 +192,18 @@ Required #203 evidence:
   required by macOS still runs;
 - [x] offline workflow-contract tests prove full release mode continues to
   require iOS validation and upload/reuse;
-- [ ] a desktop-only dry run reaches both macOS build jobs and the publication
+- [x] a desktop-only dry run reaches both macOS build jobs and the publication
   condition when iOS-only validation is unavailable;
 - [x] offline result-gating tests prove a failed shared or macOS check prevents
   publication.
 
-For the live dry run, retain the workflow run URL, exact release SHA, resolved
-`desktop_only=true` output, `verify` result, both `build-macos` results,
-`upload-ios=skipped`, `publish` result, and Homebrew notification result. Also
-retain the protected-environment approval receipt and the signed/notarized DMG
-and checksum evidence. Do not close #203 or claim live release readiness until
-that dry-run evidence exists.
+The retained live run is
+[32629730508](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508)
+against the released SHA. Future desktop-only releases must retain the workflow
+run URL, exact release SHA, resolved `desktop_only=true` output, `verify`
+result, both `build-macos` results, `upload-ios=skipped`, `publish` result,
+Homebrew notification result, protected-environment approval receipt, and
+signed/notarized artifact evidence.
 
 ## Clean-machine macOS matrix
 
@@ -361,7 +387,7 @@ The candidate may be published only when:
 8. protected credentials and release rules are verified;
 9. an independent verifier reproduces the public Homebrew install and launch.
 
-Close #196 when the acceptance baseline is complete. Close #31 when the
-credential and protection gate is complete. Close #203 when the workflow
-contract and dry-run evidence pass. Close #194 only after the public GitHub
-Release and Homebrew path are independently verified.
+Close #196 when the post-release acceptance and stabilization baseline is
+complete. Close #31 when the post-release governance, credential, and
+protection gate is complete. #203 and #194 closed after the desktop-only
+workflow and public GitHub Release/Homebrew path were verified.

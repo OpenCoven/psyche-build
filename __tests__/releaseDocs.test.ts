@@ -92,13 +92,15 @@ function releaseEnvironmentSecretNames(runbook: string): string[] {
 }
 
 describe('v0.0.1 release documentation contract', () => {
-  it('finalizes the first-release changelog without claiming TestFlight availability', async () => {
+  it('tracks post-release changes without claiming TestFlight availability', async () => {
     const changelog = await readFile('CHANGELOG.md', 'utf8');
     const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/);
     const release = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
 
     expect(unreleased).not.toBeNull();
-    expect(unreleased?.[1].trim()).toBe('');
+    expect(unreleased?.[1]).toContain('bare Coven CLI (`coven`)');
+    expect(unreleased?.[1]).toContain('graphite surfaces');
+    expect(unreleased?.[1]).toContain('Files-pane toolbar controls');
     expect(release).not.toBeNull();
     expect(release?.[1]).toContain('### Performance');
     expect(release?.[1]).toContain('### Security');
@@ -276,15 +278,15 @@ describe('v0.0.1 release documentation contract', () => {
       'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
     );
     expect(acceptance).toMatch(/iOS\/TestFlight[\s\S]{0,160}(?:separate|non-blocking)/i);
-    for (const evidence of [
-      'workflow run URL',
-      'release SHA',
-      'desktop_only',
-      'build-macos',
-      'upload-ios',
-      'publish',
-    ]) {
-      expect(acceptance).toContain(evidence);
+    for (const [label, evidence] of [
+      ['workflow run URL', /workflow\s+run URL/i],
+      ['release SHA', /release SHA/i],
+      ['desktop_only', /desktop_only/],
+      ['build-macos', /build-macos/],
+      ['upload-ios', /upload-ios/],
+      ['publish', /publish/],
+    ] as const) {
+      expect(acceptance, label).toMatch(evidence);
     }
   });
 
@@ -299,19 +301,23 @@ describe('v0.0.1 release documentation contract', () => {
     for (const { filePath, source } of canonicalDocs) {
       expect(source, filePath).not.toMatch(/verify job runs iOS checks unconditionally/i);
       expect(source, filePath).not.toMatch(/workflow coupling is a known implementation (?:fact|defect)/i);
-      expect(source, filePath).toMatch(/offline workflow contract is implemented/i);
-      expect(source, filePath).toMatch(
-        /(?:\[#203\]\([^)]*\)|#203)\s+remains\s+open\s+pending\s+live desktop-only dry-run evidence/i,
+      expect(source, filePath).toContain(
+        '57c6c71bd5264fde960b062e95de278c8438c94f',
       );
-      for (const [label, evidence] of [
-        ['both build-macos matrix jobs', /both\s+`build-macos` matrix jobs/i],
-        ['upload-ios skipped', /`upload-ios` is `skipped`/i],
-        ['publish', /`publish`/i],
-        ['release environment approval', /`release`\s+environment\s+approval/i],
-        ['Homebrew notification', /Homebrew notification/i],
-      ] as const) {
-        expect(source, `${filePath}: ${label}`).toMatch(evidence);
-      }
+      expect(source, filePath).toContain(
+        'https://github.com/OpenCoven/psyche-build/actions/runs/32629730508',
+      );
+      expect(source, filePath).toContain(
+        'https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1',
+      );
+      expect(source, filePath).toMatch(/Homebrew Cask/i);
+      expect(source, filePath).toMatch(
+        /(?:#194[\s\S]{0,220}#203|#203[\s\S]{0,220}#194)[\s\S]{0,80}(?:are\s+)?closed/i,
+      );
+      expect(source, filePath).toMatch(/iOS[\s\S]{0,180}skip/i);
+      expect(source, filePath).toMatch(
+        /(?:preserv(?:ing|ed)|mandatory)[\s\S]{0,80}shared\s+validation|shared\s+validation[\s\S]{0,80}(?:preserv(?:ing|ed)|mandatory)/i,
+      );
     }
   });
 
@@ -360,7 +366,12 @@ describe('v0.0.1 release documentation contract', () => {
       expect(contents, filePath).toContain('brew install --cask opencoven/tap/psyche-build');
       expect(contents, filePath).toContain('open -a "Psyche Build"');
       expect(contents, filePath).toContain('node /path/to/psyche-build/psyche');
-      expect(contents, filePath).toMatch(/(?:after|when)[^\n]{0,100}v0\.0\.1[^\n]{0,100}(?:release|Cask)|v0\.0\.1[^\n]{0,100}(?:release|Cask)[^\n]{0,100}(?:available|published)/i);
+      expect(contents, filePath).toMatch(
+        /(?:supported public|published)[\s\S]{0,120}(?:macOS|v0\.0\.1|Cask)|(?:macOS|v0\.0\.1|Cask)[\s\S]{0,120}(?:supported public|published)/i,
+      );
+      expect(contents, filePath).not.toMatch(
+        /(?:after|when)[^\n]{0,100}v0\.0\.1[^\n]{0,100}(?:release|Cask)[^\n]{0,100}(?:available|published)/i,
+      );
     }
   });
 
@@ -372,7 +383,8 @@ describe('v0.0.1 release documentation contract', () => {
 
     expect(hero).toContain(caskCommand);
     expect(main).toContain(caskCommand);
-    expect(hero).toMatch(/available after[^\n]{0,80}v0\.0\.1 release/i);
+    expect(hero).toMatch(/Public macOS v0\.0\.1 via the OpenCoven Homebrew tap/i);
+    expect(hero).not.toMatch(/available after[^\n]{0,80}v0\.0\.1 release/i);
     expect(hero).toContain('source CLI:');
     expect(hero).toContain('node /path/to/psyche-build/psyche');
     expect(hero).not.toMatch(/<span>\$<\/span>\s*<code>psyche<\/code>/);

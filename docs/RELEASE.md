@@ -1,13 +1,20 @@
 # Psyche Build v0.0.1 Release Runbook
 
-This runbook publishes one coordinated release from
-`.github/workflows/release.yml`:
+**Status:** macOS `v0.0.1` published 2026-08-23; retained as the reproducible
+release procedure and basis for subsequent release trains.
+
+`.github/workflows/release.yml` supports an explicitly selected desktop-only
+publication or a coordinated macOS/iOS release:
 
 - macOS app `Psyche Build`, as signed and notarized Apple Silicon and Intel
   DMGs;
 - iOS app `Psyche Build`, bundle ID `ai.opencoven.psyche-ios`, marketing
   version/build `0.0.1 (1)`, for internal TestFlight only;
 - a curated GitHub Release and a native Homebrew Cask update.
+
+The public `v0.0.1` macOS release used the verified desktop-only path, so iOS
+distribution was skipped. This repository still does not claim a live
+TestFlight build.
 
 The Node CLI ships in the source tree and npm package archive, but `0.0.1` is
 not an npm release. Windows, Linux, Android, external TestFlight, and public App
