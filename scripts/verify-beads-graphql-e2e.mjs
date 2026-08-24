@@ -17,6 +17,10 @@ const REQUIRED_OPERATIONS = Object.freeze([
   'DiscoverManagedProjectItems',
 ]);
 const REQUIRED_OPERATION_NAMES = new Set(REQUIRED_OPERATIONS);
+const ALLOWED_OPERATION_NAMES = new Set([
+  ...REQUIRED_OPERATIONS,
+  'DiscoverLinkedProjectRepositories',
+]);
 const MAX_GRAPHQL_REQUESTS = 200;
 const MAX_PAGES_PER_OPERATION = 100;
 
@@ -137,8 +141,9 @@ export async function runBeadsGraphqlE2e(options = {}) {
    * }[]} */ ([]);
   const signatures = new Set();
   const cursorsByOperation = new Map(
-    REQUIRED_OPERATIONS.map((name) => [name, new Set()]),
+    [...ALLOWED_OPERATION_NAMES].map((name) => [name, new Set()]),
   );
+  let graphqlAttemptCount = 0;
 
   /** @type {ExecFileRun} */
   const tracedRun = async (command, args, runOptions) => {
@@ -149,9 +154,16 @@ export async function runBeadsGraphqlE2e(options = {}) {
           `GraphQL mutation "${operation.name}" is forbidden during the read-only E2E`,
         );
       }
-      if (!REQUIRED_OPERATION_NAMES.has(operation.name)) {
+      if (!ALLOWED_OPERATION_NAMES.has(operation.name)) {
         throw new Error(`Unexpected GraphQL operation "${operation.name}" during read-only E2E`);
       }
+      if (graphqlAttemptCount >= MAX_GRAPHQL_REQUESTS) {
+        throw new Error(
+          `GraphQL request ceiling exceeded: ${graphqlAttemptCount + 1} > `
+            + `${MAX_GRAPHQL_REQUESTS}`,
+        );
+      }
+      graphqlAttemptCount += 1;
       if (signatures.has(operation.signature)) {
         throw new Error(`Duplicate GraphQL request detected for "${operation.name}"`);
       }
@@ -170,20 +182,18 @@ export async function runBeadsGraphqlE2e(options = {}) {
             + `${cursors.size + 1} > ${MAX_PAGES_PER_OPERATION}`,
         );
       }
-      if (operations.length >= MAX_GRAPHQL_REQUESTS) {
-        throw new Error(
-          `GraphQL request ceiling exceeded: ${operations.length + 1} > `
-            + `${MAX_GRAPHQL_REQUESTS}`,
-        );
+      const result = await delegateRun(command, args, runOptions);
+      if ((result.exitCode ?? 0) === 0) {
+        signatures.add(operation.signature);
+        cursors.add(operation.cursorKey);
+        operations.push({
+          kind: 'query',
+          name: operation.name,
+          signature: operation.signature,
+          cursorKey: operation.cursorKey,
+        });
       }
-      signatures.add(operation.signature);
-      cursors.add(operation.cursorKey);
-      operations.push({
-        kind: 'query',
-        name: operation.name,
-        signature: operation.signature,
-        cursorKey: operation.cursorKey,
-      });
+      return result;
     }
     return delegateRun(command, args, runOptions);
   };
@@ -208,9 +218,9 @@ export async function runBeadsGraphqlE2e(options = {}) {
     throw new Error(detail || `Beads GraphQL E2E failed with exit code ${exitCode}`);
   }
 
-  if (operations.length > MAX_GRAPHQL_REQUESTS) {
+  if (graphqlAttemptCount > MAX_GRAPHQL_REQUESTS) {
     throw new Error(
-      `GraphQL request ceiling exceeded: ${operations.length} > ${MAX_GRAPHQL_REQUESTS}`,
+      `GraphQL request ceiling exceeded: ${graphqlAttemptCount} > ${MAX_GRAPHQL_REQUESTS}`,
     );
   }
   for (const required of REQUIRED_OPERATIONS) {
@@ -226,6 +236,8 @@ export async function runBeadsGraphqlE2e(options = {}) {
   const pageCounts = {
     DiscoverManagedProject:
       cursorsByOperation.get('DiscoverManagedProject')?.size ?? 0,
+    DiscoverLinkedProjectRepositories:
+      cursorsByOperation.get('DiscoverLinkedProjectRepositories')?.size ?? 0,
     DiscoverManagedProjectItems:
       cursorsByOperation.get('DiscoverManagedProjectItems')?.size ?? 0,
   };

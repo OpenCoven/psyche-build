@@ -41,6 +41,14 @@ const unsupportedTypeFixturePath = join(
   repositoryRoot,
   '__tests__/fixtures/beads-project-sync/unsupported-type.jsonl',
 );
+const invalidTimestampFixturePath = join(
+  repositoryRoot,
+  '__tests__/fixtures/beads-project-sync/invalid-timestamp.jsonl',
+);
+const mappedAssigneeConfigPath = join(
+  repositoryRoot,
+  '__tests__/fixtures/beads-project-sync/mapped-assignee-config.json',
+);
 const configPath = join(repositoryRoot, '.github/beads-project-sync.json');
 const token = 'github_pat_DO_NOT_LEAK';
 const projectNodeId = 'PVT_kwDOECXnmc4BhMIA';
@@ -54,6 +62,7 @@ interface CapturedCli {
 interface FakeGhOptions {
   existingIssues?: readonly Record<string, unknown>[];
   failAcquireLock?: Error;
+  failValidateAssignees?: Error;
   failLeaseValidationAfterWrite?: string;
   failReleaseLock?: Error;
   failSetFields?: Error;
@@ -112,6 +121,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
   const ensureProjectObservedTitles: string[] = [];
   const lockCalls: string[] = [];
   const provisionReadmes: string[] = [];
+  const validatedAssignees: string[][] = [];
   const writes: string[] = [];
   let nextIssueNumber = 100;
   let project = options.project === undefined
@@ -151,6 +161,13 @@ function createFakeGh(options: FakeGhOptions = {}) {
     async verifyAccess() {
       calls.push('verifyAccess');
       return { organization: { id: 'ORG' }, repository: { id: 'REPO' } };
+    },
+    async validateAssignees(logins: readonly string[]) {
+      calls.push('validateAssignees');
+      validatedAssignees.push([...logins]);
+      if (options.failValidateAssignees) {
+        throw options.failValidateAssignees;
+      }
     },
     async discoverProject() {
       calls.push('discoverProject');
@@ -293,6 +310,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
     ensureProjectObservedTitles,
     lockCalls,
     provisionReadmes,
+    validatedAssignees,
     writes,
   };
 }
@@ -300,6 +318,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
 async function runCli(
   args: readonly string[],
   options: {
+    configPath?: string;
     env?: Readonly<Record<string, string | undefined>>;
     fakeGh?: ReturnType<typeof createFakeGh>;
     run?: ExecFileRun;
@@ -310,7 +329,7 @@ async function runCli(
   const fakeGh = options.fakeGh ?? createFakeGh();
 
   const exitCode = await runBeadsProjectCli(args, {
-    configPath,
+    configPath: options.configPath ?? configPath,
     cwd: repositoryRoot,
     env: options.env ?? {},
     run: options.run,
@@ -508,6 +527,30 @@ describe('Beads project sync configuration', () => {
         ...base,
         ...(trustedIssueAuthors === undefined ? {} : { trustedIssueAuthors }),
       })).toThrow(/trustedIssueAuthors/i);
+    }
+  });
+
+  it('requires assignee map values to use GitHub login grammar', () => {
+    const base = {
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectNodeId,
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'psyche-beads-project-sync:v1',
+      issueMarker: 'psyche-bead-sync:v1',
+      trustedIssueAuthors: ['BunsDev'],
+      massClose: { minimum: 5, fraction: 0.25 },
+    };
+
+    expect(parseSyncConfig({
+      ...base,
+      assigneeMap: { source: 'valid-login' },
+    }).assigneeMap).toEqual({ source: 'valid-login' });
+    for (const invalid of ['-invalid', 'invalid-', 'invalid--login', 'invalid login', 'a'.repeat(40)]) {
+      expect(() => parseSyncConfig({
+        ...base,
+        assigneeMap: { source: invalid },
+      })).toThrow(/assigneeMap.*GitHub login/i);
     }
   });
 });
@@ -943,6 +986,44 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes).toEqual([]);
   });
 
+  it('rejects invalid timestamps before GitHub discovery, planning, or writes', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCli(
+      ['--apply', '--inventory-file', invalidTimestampFixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/created_at.*date|date.*created_at/i);
+    expect(fakeGh.clientOptions).toEqual([]);
+    expect(fakeGh.calls).toEqual([]);
+    expect(fakeGh.lockCalls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
+  });
+
+  it('validates every mapped assignee before acquiring the apply lock or writing', async () => {
+    const fakeGh = createFakeGh({
+      failValidateAssignees: new Error('GitHub assignee "missing-maintainer" is not assignable'),
+    });
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        configPath: mappedAssigneeConfigPath,
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/missing-maintainer.*not assignable/i);
+    expect(fakeGh.validatedAssignees).toEqual([['missing-maintainer']]);
+    expect(fakeGh.lockCalls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
+  });
+
   it('fails closed instead of provisioning when the pinned Project is absent', async () => {
     const absentProject = createFakeGh({ project: null });
     const result = await runCli(
@@ -972,7 +1053,12 @@ describe('Beads project sync CLI', () => {
 
     expect(unchanged.exitCode).toBe(0);
     expect(existingProject.lockCalls).toEqual(['acquire', 'release']);
-    expect(existingProject.writes).toEqual(['ensureProject']);
+    expect(existingProject.writes).toEqual([
+      'ensureProject',
+      'ensureLabels',
+      'ensureFields',
+      'ensureViews',
+    ]);
     expect(existingProject.ensureProjectInputs).toHaveLength(1);
     expect(existingProject.ensureProjectInputs[0]).toMatchObject({
       title: 'Psyche Build: Goals & Implementation',
@@ -981,6 +1067,11 @@ describe('Beads project sync CLI', () => {
       '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
     );
     expect(unchanged.stderr).toMatch(/verified and repaired/i);
+    expect(JSON.parse(unchanged.stdout)).toMatchObject({
+      plannedOperationCount: 0,
+      appliedOperationCount: 0,
+    });
+    expect(existingProject.calls).not.toContain('listManagedIssues');
   });
 
   it('repairs a renamed pinned public Project during apply without creating a duplicate', async () => {
@@ -1085,7 +1176,12 @@ describe('Beads project sync CLI', () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/private.*manual.*visibility/i);
-    expect(fakeGh.calls).toEqual(['verifyAccess', 'discoverProject', 'refreshProject']);
+    expect(fakeGh.calls).toEqual([
+      'verifyAccess',
+      'validateAssignees',
+      'discoverProject',
+      'refreshProject',
+    ]);
     expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
     expect(fakeGh.writes).toEqual([]);
   });
@@ -1118,9 +1214,25 @@ describe('Beads project sync CLI', () => {
     ]);
     expect(fakeGh.calls.slice(0, 3)).toEqual([
       'verifyAccess',
+      'validateAssignees',
       'discoverProject',
-      'refreshProject',
     ]);
+  });
+
+  it('plans from the repaired Project snapshot and writes its README only once', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(
+      fakeGh.writes.filter((write) => write === 'ensureProject' || write === 'updateReadme'),
+    ).toEqual(['ensureProject']);
   });
 
   it('fully applies the reconciliation plan through the GitHub adapter', async () => {
@@ -1138,6 +1250,7 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
     expect(fakeGh.calls).toEqual([
       'verifyAccess',
+      'validateAssignees',
       'discoverProject',
       'refreshProject',
       'listManagedIssues',
@@ -1150,14 +1263,14 @@ describe('Beads project sync CLI', () => {
     ]);
     expect(fakeGh.writes).toContain('createIssue');
     expect(fakeGh.writes).toContain('setFields');
-    expect(fakeGh.writes.at(-1)).toBe('updateReadme');
+    expect(fakeGh.writes.at(-1)).toBe('syncBlocker');
     expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
     expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/11');
   });
 
   it('surfaces terminal lease loss after the final mutation before reporting success', async () => {
     const fakeGh = createFakeGh({
-      failLeaseValidationAfterWrite: 'updateReadme',
+      failLeaseValidationAfterWrite: 'syncBlocker',
     });
     const result = await runCli(
       ['--apply', '--inventory-file', fixturePath],
@@ -1170,13 +1283,13 @@ describe('Beads project sync CLI', () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe('');
     expect(result.stderr).toMatch(/lease lost.*renewal transport failure/i);
-    expect(fakeGh.writes.at(-1)).toBe('updateReadme');
+    expect(fakeGh.writes.at(-1)).toBe('syncBlocker');
     expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
   });
 
   it('preserves the primary apply error when release reports ownership already lost', async () => {
     const fakeGh = createFakeGh({
-      failLeaseValidationAfterWrite: 'updateReadme',
+      failLeaseValidationAfterWrite: 'syncBlocker',
       failReleaseLock: Object.assign(
         new Error('GitHub apply lock release ownership already lost to a successor'),
         { kind: 'lease-lost', status: 409 },

@@ -82,6 +82,8 @@ export const PUBLIC_BEAD_TYPES = Object.freeze([
 ]);
 const supportedPublicBeadTypes = new Set(PUBLIC_BEAD_TYPES);
 const BEAD_ID_SOURCE = '[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?';
+const DATE_TIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/u;
 
 export const BEAD_ID_PATTERN = new RegExp(`^${BEAD_ID_SOURCE}$`, 'u');
 
@@ -165,6 +167,72 @@ function normalizeOptionalString(value, fieldName, context) {
   }
   const normalized = value.trim();
   return normalized || null;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @param {string} context
+ * @param {boolean} optional
+ * @returns {string | null}
+ */
+function normalizeDateTime(value, fieldName, context, optional) {
+  if (value == null && optional) {
+    return null;
+  }
+  const normalized = normalizeRequiredString(value, fieldName, context);
+  const match = normalized.match(DATE_TIME_PATTERN);
+  if (!match) {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
+
+  const [, rawYear, rawMonth, rawDay, rawHour, rawMinute, rawSecond, , rawOffset] = match;
+  const year = Number(rawYear);
+  const month = Number(rawMonth);
+  const day = Number(rawDay);
+  const hour = Number(rawHour);
+  const minute = Number(rawMinute);
+  const second = Number(rawSecond);
+  const offsetHour = rawOffset === 'Z' ? 0 : Number(rawOffset.slice(1, 3));
+  const offsetMinute = rawOffset === 'Z' ? 0 : Number(rawOffset.slice(4, 6));
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month - 1] ?? 0;
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInMonth
+    || hour > 23
+    || minute > 59
+    || second > 59
+    || offsetHour > 23
+    || offsetMinute > 59
+  ) {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
+
+  const milliseconds = Date.parse(normalized);
+  if (!Number.isFinite(milliseconds)) {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
+  try {
+    return new Date(milliseconds).toISOString().replace(/\.000Z$/u, 'Z');
+  } catch {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
 }
 
 /**
@@ -434,20 +502,23 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
     parentId,
     blockedByIds,
     githubAssignee: rawAssignee == null ? null : assigneeMap.get(rawAssignee) ?? null,
-    createdAt: normalizeRequiredString(
+    createdAt: /** @type {string} */ (normalizeDateTime(
       beadRecord.created_at,
       'created_at',
       `Beads record "${id}" on line ${lineNumber}`,
-    ),
-    updatedAt: normalizeRequiredString(
+      false,
+    )),
+    updatedAt: /** @type {string} */ (normalizeDateTime(
       beadRecord.updated_at,
       'updated_at',
       `Beads record "${id}" on line ${lineNumber}`,
-    ),
-    closedAt: normalizeOptionalString(
+      false,
+    )),
+    closedAt: normalizeDateTime(
       beadRecord.closed_at,
       'closed_at',
       `Beads record "${id}" on line ${lineNumber}`,
+      true,
     ),
   };
 }

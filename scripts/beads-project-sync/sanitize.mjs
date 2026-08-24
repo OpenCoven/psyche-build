@@ -88,6 +88,8 @@ const MAX_DATA_URI_ENCODED_LENGTH = 12_288;
 const MAX_DATA_URI_DECODED_BYTES = 8_192;
 const MAX_DATA_URI_METADATA_LENGTH = 1_024;
 const MAX_DATA_URI_RECURSION_DEPTH = 4;
+const MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS =
+  MAX_PERCENT_DECODE_ROUNDS + MAX_HTML_ENTITY_DECODE_ROUNDS;
 const MAX_RAW_HTML_START_TAG_COUNT = 1_024;
 const MAX_RAW_HTML_START_TAG_LENGTH = 16_384;
 const MAX_RAW_HTML_ATTRIBUTE_COUNT = 512;
@@ -105,13 +107,31 @@ const HOME_PATH_GENERIC_PATH_PATTERNS = [
   /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
   /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
 ];
-const RAW_HTML_URL_ATTRIBUTES = new Set([
-  'href',
-  'src',
-  'action',
-  'poster',
-  'cite',
-  'data',
+// URL-bearing HTML attributes are mode-classified so URL lists are sanitized
+// candidate-by-candidate instead of being treated as one destination.
+const RAW_HTML_URL_ATTRIBUTE_MODES = new Map([
+  ['href', 'single'],
+  ['xlink:href', 'single'],
+  ['src', 'single'],
+  ['action', 'single'],
+  ['formaction', 'single'],
+  ['poster', 'single'],
+  ['cite', 'single'],
+  ['data', 'single'],
+  ['background', 'single'],
+  ['longdesc', 'single'],
+  ['manifest', 'single'],
+  ['profile', 'single'],
+  ['usemap', 'single'],
+  ['codebase', 'single'],
+  ['classid', 'single'],
+  ['itemid', 'single'],
+  ['ping', 'list'],
+  ['archive', 'list'],
+  ['attributionsrc', 'list'],
+  ['itemtype', 'list'],
+  ['srcset', 'srcset'],
+  ['imagesrcset', 'srcset'],
 ]);
 const STRICT_BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
@@ -929,6 +949,75 @@ function decodeUrlInspectionMapped(mapped) {
 }
 
 /**
+ * Decodes only bounded ASCII percent escapes for scheme discovery. Invalid
+ * escapes remain literal and are validated strictly once a data URI is found.
+ *
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeAsciiPercentMappedOnce(mapped) {
+  if (!mapped.value.includes('%')) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+  while (cursor < mapped.value.length) {
+    const escape = mapped.value.slice(cursor, cursor + 3);
+    if (/^%[A-F0-9]{2}$/iu.test(escape)) {
+      const byte = Number.parseInt(escape.slice(1), 16);
+      if (byte <= 0x7f) {
+        appendMappedInspectionValue(
+          output,
+          sourceRanges,
+          String.fromCharCode(byte),
+          mappedSourceRange(mapped, cursor, cursor + 3),
+        );
+        cursor += 3;
+        continue;
+      }
+    }
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[cursor] ?? '',
+      mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+    );
+    cursor += 1;
+  }
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {string} value
+ * @returns {MappedInspectionText}
+ */
+function decodeDataUriDiscoveryMapped(value) {
+  let current = createMappedInspectionText(value);
+  for (let round = 0; round < MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS; round += 1) {
+    const decoded = decodeHtmlEntitiesMappedOnce(
+      decodeAsciiPercentMappedOnce(current),
+    );
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  const decoded = decodeHtmlEntitiesMappedOnce(
+    decodeAsciiPercentMappedOnce(current),
+  );
+  if (decoded.value !== current.value) {
+    fail('Encoded data URI discovery exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
  * @param {MappedInspectionText} mapped
  * @returns {MappedInspectionText}
  */
@@ -1042,6 +1131,48 @@ function scanDataUriCandidates(value) {
 }
 
 /**
+ * @param {string} value
+ * @returns {DataUriCandidate[]}
+ */
+function scanMappedDataUriCandidates(value) {
+  const decoded = decodeDataUriDiscoveryMapped(value);
+  const candidates = /** @type {DataUriCandidate[]} */ ([]);
+  const seen = new Set();
+
+  for (const discovered of scanDataUriCandidates(decoded.value)) {
+    const schemeEnd = findUriSchemeEnd(decoded.value, discovered.start);
+    if (schemeEnd == null) {
+      continue;
+    }
+    const sourceScheme = mappedSourceRange(
+      decoded,
+      discovered.start,
+      schemeEnd + 1,
+    );
+    const start = sourceScheme.start;
+    let end = Math.max(sourceScheme.end, start + 1);
+    while (end < value.length && !isDataUriBoundary(value[end])) {
+      end += 1;
+    }
+    end = trimUriCandidateEnd(value, start, end);
+    const key = `${start}:${end}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
+      fail('Public text exceeds the data URI candidate inspection limit');
+    }
+    seen.add(key);
+    candidates.push({
+      start,
+      end,
+      value: value.slice(start, end),
+    });
+  }
+  return candidates;
+}
+
+/**
  * @param {string} mediaType
  * @param {string} metadata
  * @returns {boolean}
@@ -1075,7 +1206,7 @@ function assertDecodedDataTextSafe(value, config, depth) {
   for (const variant of variants) {
     assertNoDirectPublishableSecrets(variant);
     assertNoEncodedUrlSecrets(variant, true);
-    assertNoMarkdownReconstructedSecrets(variant);
+    assertNoMarkdownReconstructedSecrets(variant, config, depth);
     if (
       containsEmail(variant)
       || redactLocalPaths(variant, config) !== variant
@@ -1084,6 +1215,32 @@ function assertDecodedDataTextSafe(value, config, depth) {
     }
     assertSafeDataUrisInText(variant, config, depth + 1);
   }
+}
+
+/**
+ * @param {Buffer} decoded
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertDecodedDataBytesSafe(decoded, config, depth) {
+  const latin1 = decoded.toString('latin1');
+  const printable = Array.from(decoded, (byte) => {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d) {
+      return String.fromCharCode(byte);
+    }
+    return byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ' ';
+  }).join('');
+
+  for (const variant of new Set([latin1, printable])) {
+    assertNoDirectPublishableSecrets(variant);
+    if (
+      containsEmail(variant)
+      || redactLocalPaths(variant, config) !== variant
+    ) {
+      fail('Publishable data URI contains sensitive binary data');
+    }
+  }
+  assertSafeDataUrisInText(printable, config, depth + 1);
 }
 
 /**
@@ -1158,6 +1315,7 @@ function assertSafeDataUriCandidate(candidate, config, depth) {
   if (decoded.byteLength > MAX_DATA_URI_DECODED_BYTES) {
     fail('Publishable data URI exceeds the decoded inspection limit');
   }
+  assertDecodedDataBytesSafe(decoded, config, depth);
 
   let decodedText;
   try {
@@ -1177,7 +1335,7 @@ function assertSafeDataUriCandidate(candidate, config, depth) {
  * @param {number} depth
  */
 function assertSafeDataUrisInText(value, config, depth) {
-  for (const candidate of scanDataUriCandidates(value)) {
+  for (const candidate of scanMappedDataUriCandidates(value)) {
     assertSafeDataUriCandidate(candidate.value, config, depth);
   }
 }
@@ -1287,7 +1445,7 @@ function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
   ).value;
   assertNoDirectPublishableSecrets(decoded);
   assertNoEncodedUrlSecrets(decoded, true);
-  assertNoMarkdownReconstructedSecrets(decoded);
+  assertNoMarkdownReconstructedSecrets(decoded, config, depth);
   if (decoded.toLowerCase().startsWith('data:')) {
     assertSafeDataUriCandidate(decoded, config, depth);
   }
@@ -1326,16 +1484,24 @@ function sanitizeRawHtmlSrcset(rawValue, quote, config, depth) {
     }
 
     const start = cursor;
-    const isData = rawValue.slice(cursor, cursor + 5).toLowerCase() === 'data:';
+    const isData = decodeDataUriDiscoveryMapped(
+      rawValue.slice(cursor),
+    ).value.toLowerCase().startsWith('data:');
+    let urlEnd;
+    let trailingSeparator = false;
     if (isData) {
       while (cursor < rawValue.length && !/\s/u.test(rawValue[cursor] ?? '')) {
         cursor += 1;
       }
+      urlEnd = cursor;
       const firstComma = rawValue.indexOf(',', start);
+      if (rawValue[urlEnd - 1] === ',' && firstComma < urlEnd - 1) {
+        urlEnd -= 1;
+        trailingSeparator = true;
+      }
       if (
         firstComma === -1
-        || firstComma >= cursor
-        || rawValue.indexOf(',', firstComma + 1) < cursor
+        || firstComma >= urlEnd
       ) {
         fail('Raw HTML srcset contains an ambiguous data URI candidate');
       }
@@ -1346,19 +1512,23 @@ function sanitizeRawHtmlSrcset(rawValue, quote, config, depth) {
       ) {
         cursor += 1;
       }
+      urlEnd = cursor;
     }
-    if (cursor === start) {
+    if (urlEnd === start) {
       fail('Raw HTML srcset contains an empty URL candidate');
     }
 
     const sanitized = sanitizeRawHtmlDestination(
-      rawValue.slice(start, cursor),
+      rawValue.slice(start, urlEnd),
       quote,
       config,
       depth,
     );
-    if (sanitized !== rawValue.slice(start, cursor)) {
-      replacements.push({ start, end: cursor, value: sanitized });
+    if (sanitized !== rawValue.slice(start, urlEnd)) {
+      replacements.push({ start, end: urlEnd, value: sanitized });
+    }
+    if (trailingSeparator) {
+      continue;
     }
 
     while (cursor < rawValue.length && rawValue[cursor] !== ',') {
@@ -1376,6 +1546,19 @@ function sanitizeRawHtmlSrcset(rawValue, quote, config, depth) {
     }`;
   }
   return sanitized;
+}
+
+/**
+ * @param {string} rawValue
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlUrlList(rawValue, quote, config, depth) {
+  return rawValue.replace(/[^\s]+/gu, (candidate) =>
+    sanitizeRawHtmlDestination(candidate, quote, config, depth)
+  );
 }
 
 /**
@@ -1454,14 +1637,17 @@ function sanitizeRawHtmlUrlAttributes(value, config, depth) {
       if (openingQuote) {
         cursor += 1;
       }
-      if (!RAW_HTML_URL_ATTRIBUTES.has(name) && name !== 'srcset') {
+      const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(name);
+      if (mode == null) {
         continue;
       }
 
       const rawValue = value.slice(valueStart, valueEnd);
-      const sanitized = name === 'srcset'
+      const sanitized = mode === 'srcset'
         ? sanitizeRawHtmlSrcset(rawValue, openingQuote, config, depth)
-        : sanitizeRawHtmlDestination(rawValue, openingQuote, config, depth);
+        : mode === 'list'
+          ? sanitizeRawHtmlUrlList(rawValue, openingQuote, config, depth)
+          : sanitizeRawHtmlDestination(rawValue, openingQuote, config, depth);
       if (sanitized !== rawValue) {
         replacements.push({
           start: valueStart,
@@ -3382,8 +3568,10 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
 
 /**
  * @param {MappedInspectionText} markdownDecoded
+ * @param {SanitizePublicTextConfig | null | undefined} [config]
+ * @param {number} [depth]
  */
-function assertNoMarkdownDestinationSecrets(markdownDecoded) {
+function assertNoMarkdownDestinationSecrets(markdownDecoded, config = {}, depth = 0) {
   for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
     const inspectedDestination = inspectUrlCandidateMapped(
       sliceMappedInspectionText(
@@ -3393,20 +3581,25 @@ function assertNoMarkdownDestinationSecrets(markdownDecoded) {
       ),
     );
     assertNoDirectPublishableSecrets(inspectedDestination.value);
+    if (inspectedDestination.value.toLowerCase().startsWith('data:')) {
+      assertSafeDataUriCandidate(inspectedDestination.value, config, depth);
+    }
   }
 }
 
 /**
  * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} [config]
+ * @param {number} [depth]
  */
-function assertNoMarkdownReconstructedSecrets(value) {
+function assertNoMarkdownReconstructedSecrets(value, config = {}, depth = 0) {
   const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
   if (markdownDecoded.value !== value) {
     const decoded = decodeMarkdownHtmlEntitiesMapped(markdownDecoded);
     assertNoDirectPublishableSecrets(decoded.value);
     assertNoEncodedUrlSecrets(markdownDecoded.value, true);
   }
-  assertNoMarkdownDestinationSecrets(markdownDecoded);
+  assertNoMarkdownDestinationSecrets(markdownDecoded, config, depth);
 }
 
 /**
@@ -3424,7 +3617,7 @@ export function assertNoPublishableSecrets(value) {
   assertSafeDataUrisInText(value, {}, 0);
   assertNoDirectPublishableSecrets(value);
   assertNoEncodedUrlSecrets(value, true);
-  assertNoMarkdownReconstructedSecrets(value);
+  assertNoMarkdownReconstructedSecrets(value, {}, 0);
 }
 
 /**
@@ -3444,7 +3637,7 @@ export function sanitizePublicText(value, config = {}) {
   sanitized = sanitizeRawHtmlUrlAttributes(sanitized, config, 0);
   assertSafeDataUrisInText(sanitized, config, 0);
   assertNoEncodedUrlSecrets(sanitized);
-  assertNoMarkdownReconstructedSecrets(sanitized);
+  assertNoMarkdownReconstructedSecrets(sanitized, config, 0);
   sanitized = redactDecodedHtmlEntitySensitiveText(sanitized, config);
   sanitized = replaceUrlCandidates(sanitized, (url) => {
     const uri = parseAbsoluteUri(url);

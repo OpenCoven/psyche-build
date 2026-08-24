@@ -167,7 +167,11 @@ function assigneeMap(value) {
   const normalized = {};
   for (const [sourceAssignee, githubAssignee] of Object.entries(input)) {
     const source = requiredString(sourceAssignee, 'assigneeMap key');
-    normalized[source] = requiredString(githubAssignee, `assigneeMap.${source}`);
+    const login = requiredString(githubAssignee, `assigneeMap.${source}`);
+    if (!GITHUB_LOGIN_PATTERN.test(login)) {
+      fail(`"assigneeMap.${source}" must be a valid GitHub login`);
+    }
+    normalized[source] = login;
   }
   return normalized;
 }

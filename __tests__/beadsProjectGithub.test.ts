@@ -457,7 +457,6 @@ describe('createGhClient', () => {
       repository: { id: 1 },
     });
     expect(adapters).toBe(client);
-
     expect(runner.calls).toEqual([
       {
         command: 'gh',
@@ -481,6 +480,51 @@ describe('createGhClient', () => {
       },
     ]);
     expect(JSON.stringify(runner.calls.map((call) => call.args))).not.toContain(token);
+  });
+
+  it('validates unique assignee logins through the canonical read-only endpoint', async () => {
+    const runner = createRunner([
+      success({ login: 'octocat' }),
+      success({ login: 'hubot' }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.validateAssignees([
+      'octocat',
+      'hubot',
+      'OCTOCAT',
+    ])).resolves.toBeUndefined();
+
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      [
+        'api',
+        `repos/${owner}/${repo}/assignees/octocat`,
+        '--method',
+        'GET',
+        ...apiHeaders,
+      ],
+      [
+        'api',
+        `repos/${owner}/${repo}/assignees/hubot`,
+        '--method',
+        'GET',
+        ...apiHeaders,
+      ],
+    ]);
+  });
+
+  it('fails assignee validation on a nonexistent login without mutation requests', async () => {
+    const runner = createRunner([
+      httpError(404, 'Not Found'),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.validateAssignees(['missing-maintainer'])).rejects.toThrow(
+      /missing-maintainer.*not assignable/i,
+    );
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls.every((call) => !call.args.includes('POST') && !call.args.includes('PATCH')
+      && !call.args.includes('DELETE'))).toBe(true);
   });
 
   it('preflights and caches the trusted token actor before any mutation', async () => {

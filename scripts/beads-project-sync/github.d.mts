@@ -207,6 +207,7 @@ export interface GhClient {
     organization: Record<string, unknown>;
     repository: Record<string, unknown>;
   }>;
+  validateAssignees(logins: readonly string[]): Promise<void>;
   acquireApplyLock(input: {
     owner: string;
     runId: string;

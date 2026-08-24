@@ -213,6 +213,34 @@ describe('Beads project model', () => {
     })), { assigneeMap: {} })).toThrow(/multiple parents/i);
   });
 
+  it('validates and normalizes source timestamps during model parsing', () => {
+    const [bead] = parseBeadExport(toJsonl(makeIssue({
+      created_at: '2026-08-20T01:30:00+01:30',
+      updated_at: '2026-08-20T00:00:00.125Z',
+      closed_at: '2026-08-21T00:00:00Z',
+    })), { assigneeMap: {} });
+
+    expect(bead).toMatchObject({
+      createdAt: '2026-08-20T00:00:00Z',
+      updatedAt: '2026-08-20T00:00:00.125Z',
+      closedAt: '2026-08-21T00:00:00Z',
+    });
+
+    for (const [field, value] of [
+      ['created_at', '2026-02-30T00:00:00Z'],
+      ['updated_at', 'not-a-date'],
+      ['closed_at', '2026-08-20'],
+      ['closed_at', '999999-01-01T00:00:00Z'],
+    ] as const) {
+      expect(() => parseBeadExport(toJsonl(makeIssue({ [field]: value })), {
+        assigneeMap: {},
+      })).toThrow(new RegExp(`${field}.*date|date.*${field}`, 'i'));
+    }
+    expect(parseBeadExport(toJsonl(makeIssue({ closed_at: null })), {
+      assigneeMap: {},
+    })[0]?.closedAt).toBeNull();
+  });
+
   it.each([
     ['missing', undefined],
     ['null', null],

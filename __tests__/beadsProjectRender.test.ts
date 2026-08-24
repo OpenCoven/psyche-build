@@ -652,6 +652,28 @@ describe('Beads project renderers', () => {
     ).toThrow(/encoded.*limit|data URI.*large/i);
   });
 
+  it('rejects sensitive ASCII windows in invalid UTF-8 binary data payloads', () => {
+    const sensitiveBinaryValues = [
+      Buffer.from([0xff, ...Buffer.from('github_pat_abcdefghijklmnopqrstuvwxyz1234567890')]),
+      Buffer.from([0x00, ...Buffer.from('api_key = "live-secret-value"'), 0xfe]),
+      Buffer.from([0x80, ...Buffer.from('team@example.com')]),
+      Buffer.from([0xf5, ...Buffer.from('/Users/alice/private/notes.md')]),
+      Buffer.from([0xc0, ...Buffer.from('.worktrees/run/private.log')]),
+    ];
+
+    for (const sensitive of sensitiveBinaryValues) {
+      expect(() =>
+        sanitizePublicText(
+          `data:application/octet-stream;base64,${sensitive.toString('base64')}`,
+        )
+      ).toThrow(/data URI.*sensitive|Publishable|email|local path/i);
+    }
+
+    const safeBinary = Buffer.from([0xff, 0x00, 0x41, 0x80, 0x42]);
+    const safe = `data:application/octet-stream;base64,${safeBinary.toString('base64')}`;
+    expect(sanitizePublicText(safe)).toBe(safe);
+  });
+
   it('fails closed for sensitive non-base64 data payloads while preserving small safe data', () => {
     expect(sanitizePublicText('data:text/plain,hello%20public')).toBe(
       'data:text/plain,hello%20public',
@@ -661,6 +683,28 @@ describe('Beads project renderers', () => {
       'data:text/plain,%252Eworktrees%252Frun%252Fnotes.md',
       'data:text/plain,%26%23x2F%3BUsers%26%23x2F%3Balice%26%23x2F%3Bprivate',
       'data:text/plain,github%255Fpat%255Fabcdefghijklmnopqrstuvwxyz1234567890',
+    ]) {
+      expect(() => sanitizePublicText(unsafe)).toThrow(
+        /data URI.*sensitive|Publishable|email|local path/i,
+      );
+    }
+  });
+
+  it('discovers recursively entity/percent-encoded data schemes without rewriting safe values', () => {
+    const safeValues = [
+      'd&#x61;ta:text/plain,hello%20public',
+      'd%26%23x61%3Bta%3Atext/plain,hello%20public',
+      '[safe](d&#x61;ta:text/plain,hello%20public)',
+      '[recursive](d%26%23x61%3Bta%3Atext/plain,hello%20public)',
+      '<img srcset="d&#x61;ta:text/plain,hello%20public 1x, public.png 2x">',
+    ];
+    expect(sanitizePublicText(safeValues.join('\n'))).toBe(safeValues.join('\n'));
+
+    for (const unsafe of [
+      'd&#x61;ta:text/plain,team%40example.com',
+      'd%26%23x61%3Bta%3Atext/plain,%252FUsers%252Falice%252Fprivate',
+      '[secret](d&#x61;ta:text/plain,api%255Fkey%20%3D%20live-secret)',
+      '[token](d%26%23x61%3Bta%3Atext/plain,github%255Fpat%255Fabcdefghijklmnopqrstuvwxyz1234567890)',
     ]) {
       expect(() => sanitizePublicText(unsafe)).toThrow(
         /data URI.*sensitive|Publishable|email|local path/i,
@@ -695,6 +739,33 @@ describe('Beads project renderers', () => {
     expect(sanitized).not.toMatch(/Users|home\/alice|\.worktrees|\.psyche\/worktrees/iu);
   });
 
+  it('sanitizes the documented single, list, and srcset raw HTML URL attributes', () => {
+    const unsafe = [
+      '<button formaction="%2Eworktrees%2Frun%2Fsubmit">Submit</button>',
+      '<a ping="%2FUsers%2Falice%2Fping https://example.com/public">Ping</a>',
+      '<body background="%2Fhome%2Falice%2Fbackground.png">',
+      '<img longdesc="%2Epsyche%2Fworktrees%2Frun%2Fdetails.html">',
+      '<html manifest="%2FUsers%2Falice%2Fsite.appcache">',
+      '<head profile="%2Fhome%2Falice%2Fprofile">',
+      '<img usemap="%2Ecopilot%2Fsession-state%2Frun%2Fmap">',
+      '<object codebase="%2FUsers%2Falice%2Fclasses/"></object>',
+      '<object archive="%2Fhome%2Falice%2Fa.jar public.jar"></object>',
+      '<object classid="%2Eworktrees%2Frun%2Fclassid"></object>',
+      '<svg><use xlink:href="%2FUsers%2Falice%2Ficons.svg%23private"></use></svg>',
+      '<div itemid="%2Fhome%2Falice%2Fitem"></div>',
+      '<div itemtype="%2Eworktrees%2Frun%2Ftype https://example.com/Public"></div>',
+      '<img srcset="%2FUsers%2Falice%2Fone.png 1x, public.png 2x">',
+    ].join('\n');
+
+    const sanitized = sanitizePublicText(unsafe);
+
+    expect(sanitized).not.toMatch(/%2FUsers|%2Fhome|%2E(?:worktrees|psyche|copilot)/iu);
+    expect(sanitized).toContain('formaction="&lt;redacted-local-path&gt;"');
+    expect(sanitized).toContain('ping="~/ping https://example.com/public"');
+    expect(sanitized).toContain('archive="~/a.jar public.jar"');
+    expect(sanitized).toContain('srcset="~/one.png 1x, public.png 2x"');
+  });
+
   it('rejects credential-bearing, malformed, and overlong raw HTML URL attributes', () => {
     expect(() =>
       sanitizePublicText(
@@ -715,6 +786,18 @@ describe('Beads project renderers', () => {
       '<img SRC=images/public.png alt="Public image">',
       '<form action="/public/search"><button>Search</button></form>',
       '<img srcset="small.png 1x, large.png 2x">',
+      '<button formaction="/public/submit">Submit</button>',
+      '<a ping="/public/a https://example.com/public/b">Ping</a>',
+      '<body background="/public/background.png">',
+      '<img longdesc="/public/details.html">',
+      '<html manifest="/public/site.webmanifest">',
+      '<head profile="/public/profile">',
+      '<img usemap="#public-map">',
+      '<object codebase="/public/classes/" archive="a.jar b.jar" classid="public-class"></object>',
+      '<svg><use xlink:href="/public/icons.svg#public"></use></svg>',
+      '<div itemid="https://example.com/public-item"'
+        + ' itemtype="https://schema.org/Thing https://example.com/Public"></div>',
+      '<div aria-label="Public label" data-safe="unchanged"></div>',
     ].join('\n');
 
     expect(sanitizePublicText(safe)).toBe(safe);

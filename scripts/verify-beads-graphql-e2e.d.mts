@@ -15,6 +15,7 @@ export interface GraphqlE2eReport {
   operations: GraphqlE2eOperation[];
   pageCounts: {
     DiscoverManagedProject: number;
+    DiscoverLinkedProjectRepositories: number;
     DiscoverManagedProjectItems: number;
   };
   summary: CliSummary;

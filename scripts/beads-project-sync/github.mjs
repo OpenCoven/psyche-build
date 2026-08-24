@@ -1980,6 +1980,45 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {readonly string[]} logins
+   * @returns {Promise<void>}
+   */
+  async function validateAssignees(logins) {
+    const uniqueLogins = new Map();
+    for (const rawLogin of logins) {
+      const login = requiredString(rawLogin, 'assignee login');
+      if (!GITHUB_LOGIN_PATTERN.test(login)) {
+        throw new GhClientError(
+          'validation',
+          `Configured assignee "${login}" is not a valid GitHub login`,
+        );
+      }
+      const canonicalLogin = login.toLowerCase();
+      if (!uniqueLogins.has(canonicalLogin)) {
+        uniqueLogins.set(canonicalLogin, login);
+      }
+    }
+
+    for (const login of uniqueLogins.values()) {
+      try {
+        await rest(
+          'GET',
+          `repos/${owner}/${repo}/assignees/${encodeURIComponent(login)}`,
+        );
+      } catch (error) {
+        if (errorStatus(error) === 404) {
+          throw new GhClientError(
+            'validation',
+            `GitHub assignee "${login}" is not assignable to ${repositoryIdentity}`,
+            404,
+          );
+        }
+        throw error;
+      }
+    }
+  }
+
+  /**
    * @param {unknown} value
    * @param {string} fieldName
    * @returns {string}
@@ -4180,6 +4219,7 @@ ${selections.join('\n')}
 
   return Object.freeze({
     verifyAccess,
+    validateAssignees,
     acquireApplyLock,
     assertApplyLockOwned,
     releaseApplyLock,

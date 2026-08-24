@@ -334,6 +334,27 @@ function summarizePlan(plan, secrets) {
   };
 }
 
+function summarizeNoReconciliation() {
+  return {
+    plannedOperationCount: 0,
+    operationCounts: {
+      createIssue: 0,
+      updateIssue: 0,
+      labelIssue: 0,
+      closeIssue: 0,
+      ensureProjectItem: 0,
+      restoreItem: 0,
+      setFields: 0,
+      syncParent: 0,
+      syncBlocker: 0,
+      archiveItem: 0,
+      updateReadme: 0,
+    },
+    visibilityDrift: false,
+    closureCandidates: [],
+  };
+}
+
 /**
  * @param {import('./reconcile.mjs').ReconciliationPlan} plan
  * @returns {string}
@@ -494,6 +515,20 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       legacyIssueMarkers: LEGACY_ISSUE_MARKERS,
     });
     await gh.verifyAccess();
+    if (options.mode === 'apply') {
+      const assigneesByLogin = new Map();
+      for (const login of Object.values(config.assigneeMap)) {
+        const canonicalLogin = login.toLowerCase();
+        if (!assigneesByLogin.has(canonicalLogin)) {
+          assigneesByLogin.set(canonicalLogin, login);
+        }
+      }
+      await gh.validateAssignees(
+        [...assigneesByLogin.values()].sort((left, right) =>
+          left.toLowerCase().localeCompare(right.toLowerCase())
+        ),
+      );
+    }
     let project = await gh.discoverProject();
     assertPinnedPublicProject(project, config.projectNodeId);
     let provisionedThisRun = false;
@@ -524,9 +559,8 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
           title: config.projectTitle,
           readme: desiredProjectReadme,
         });
-        if (options.mode === 'provision') {
-          project = repairedProject;
-        }
+        assertPinnedPublicProject(repairedProject, config.projectNodeId);
+        project = repairedProject;
       }
 
       if (options.provision) {
@@ -541,6 +575,12 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         }
 
         if (options.mode === 'provision') {
+          await applyLease?.assertOwned();
+          await gh.ensureLabels();
+          await applyLease?.assertOwned();
+          await gh.ensureFields();
+          await applyLease?.assertOwned();
+          await gh.ensureViews();
           await applyLease?.assertOwned();
           const url = project.url
             ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
@@ -558,7 +598,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
           writeSummary({
             mode: options.mode,
             inventory: inventorySummary,
-            ...summarizePlan(firstRunPlan, diagnosticSecrets),
+            ...summarizeNoReconciliation(),
             appliedOperationCount: 0,
             warnings,
             projectUrl: url,

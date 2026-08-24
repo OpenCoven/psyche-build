@@ -108,6 +108,7 @@ describe('Beads GraphQL live E2E verifier', () => {
     expect(report.graphqlRequestCount).toBe(7);
     expect(report.pageCounts).toEqual({
       DiscoverManagedProject: 3,
+      DiscoverLinkedProjectRepositories: 0,
       DiscoverManagedProjectItems: 4,
     });
   });
@@ -122,6 +123,75 @@ describe('Beads GraphQL live E2E verifier', () => {
         { kind: 'query', name: 'DiscoverManagedProject', variables: { cursor: null } },
       ]),
     })).rejects.toThrow(/duplicate GraphQL request/i);
+  });
+
+  it.each([
+    ['HTTP 503', {
+      stdout: '',
+      stderr: 'HTTP 503 transient',
+      exitCode: 1,
+      status: 503,
+    }],
+    ['transport failure', new Error('socket hang up')],
+  ])('counts a retried identical request after %s as one successful logical query', async (
+    _name,
+    transient,
+  ) => {
+    let failed = false;
+    const retryingDelegate: ExecFileRun = async (_command, _args, options) => {
+      const request = JSON.parse(options.stdin ?? '{}') as { query?: string };
+      if (!failed && request.query?.includes('DiscoverManagedProject')) {
+        failed = true;
+        if (transient instanceof Error) {
+          throw transient;
+        }
+        return transient;
+      }
+      return delegateRun(_command, _args, options);
+    };
+    const retryingRunCli = async (
+      _argv: readonly string[],
+      dependencies: {
+        run: ExecFileRun;
+        stdout: { write(chunk: string): unknown };
+        stderr: { write(chunk: string): unknown };
+      },
+    ) => {
+      const projectRequest = {
+        env: { GH_TOKEN: token },
+        stdin: graphqlPayload('query', 'DiscoverManagedProject', { cursor: null }),
+      };
+      try {
+        const result = await dependencies.run('gh', ['api', 'graphql'], projectRequest);
+        if ((result.exitCode ?? 0) !== 0) {
+          await dependencies.run('gh', ['api', 'graphql'], projectRequest);
+        }
+      } catch {
+        await dependencies.run('gh', ['api', 'graphql'], projectRequest);
+      }
+      await dependencies.run('gh', ['api', 'graphql'], {
+        env: { GH_TOKEN: token },
+        stdin: graphqlPayload('query', 'DiscoverManagedProjectItems', { cursor: null }),
+      });
+      dependencies.stdout.write(`${JSON.stringify({
+        mode: 'dry-run',
+        appliedOperationCount: 0,
+      })}\n`);
+      return 0;
+    };
+
+    const report = await runBeadsGraphqlE2e({
+      cwd: process.cwd(),
+      env: { BEADS_PROJECT_TOKEN: token },
+      run: retryingDelegate,
+      runCli: retryingRunCli,
+    });
+
+    expect(report.graphqlRequestCount).toBe(2);
+    expect(report.pageCounts).toMatchObject({
+      DiscoverManagedProject: 1,
+      DiscoverManagedProjectItems: 1,
+    });
   });
 
   it('rejects a duplicate cursor for the same paginated operation', async () => {
@@ -153,6 +223,40 @@ describe('Beads GraphQL live E2E verifier', () => {
     })).rejects.toThrow(/unexpected GraphQL operation/i);
   });
 
+  it('allows bounded linked-repository fallback pagination and reports its pages', async () => {
+    const report = await runBeadsGraphqlE2e({
+      cwd: process.cwd(),
+      env: { BEADS_PROJECT_TOKEN: token },
+      run: delegateRun,
+      runCli: fakeRunCli([
+        { kind: 'query', name: 'DiscoverManagedProject', variables: { cursor: null } },
+        {
+          kind: 'query',
+          name: 'DiscoverLinkedProjectRepositories',
+          variables: { cursor: null, projectId: 'PVT_project' },
+        },
+        {
+          kind: 'query',
+          name: 'DiscoverLinkedProjectRepositories',
+          variables: { cursor: 'repo-1', projectId: 'PVT_project' },
+        },
+        {
+          kind: 'query',
+          name: 'DiscoverLinkedProjectRepositories',
+          variables: { cursor: 'repo-2', projectId: 'PVT_project' },
+        },
+        { kind: 'query', name: 'DiscoverManagedProjectItems', variables: { cursor: null } },
+      ]),
+    });
+
+    expect(report.graphqlRequestCount).toBe(5);
+    expect(report.pageCounts).toEqual({
+      DiscoverManagedProject: 1,
+      DiscoverLinkedProjectRepositories: 3,
+      DiscoverManagedProjectItems: 1,
+    });
+  });
+
   it('fails closed when pagination exceeds the bounded per-operation ceiling', async () => {
     const runawayPages = Array.from({ length: 101 }, (_, index) => ({
       kind: 'query' as const,
@@ -166,6 +270,53 @@ describe('Beads GraphQL live E2E verifier', () => {
       run: delegateRun,
       runCli: fakeRunCli(runawayPages),
     })).rejects.toThrow(/page.*ceiling|pagination.*limit|runaway/i);
+  });
+
+  it('applies the global request ceiling to failed retry attempts', async () => {
+    let attempts = 0;
+    const repeatedlyFailingDelegate: ExecFileRun = async () => {
+      attempts += 1;
+      if (attempts <= 201) {
+        return {
+          stdout: '',
+          stderr: 'HTTP 503 transient',
+          exitCode: 1,
+        };
+      }
+      return delegateRun('', [], {});
+    };
+    const runawayRetryRunCli = async (
+      _argv: readonly string[],
+      dependencies: {
+        run: ExecFileRun;
+        stdout: { write(chunk: string): unknown };
+      },
+    ) => {
+      const projectRequest = {
+        env: { GH_TOKEN: token },
+        stdin: graphqlPayload('query', 'DiscoverManagedProject', { cursor: null }),
+      };
+      for (let index = 0; index < 201; index += 1) {
+        await dependencies.run('gh', ['api', 'graphql'], projectRequest);
+      }
+      await dependencies.run('gh', ['api', 'graphql'], projectRequest);
+      await dependencies.run('gh', ['api', 'graphql'], {
+        env: { GH_TOKEN: token },
+        stdin: graphqlPayload('query', 'DiscoverManagedProjectItems', { cursor: null }),
+      });
+      dependencies.stdout.write(`${JSON.stringify({
+        mode: 'dry-run',
+        appliedOperationCount: 0,
+      })}\n`);
+      return 0;
+    };
+
+    await expect(runBeadsGraphqlE2e({
+      cwd: process.cwd(),
+      env: { BEADS_PROJECT_TOKEN: token },
+      run: repeatedlyFailingDelegate,
+      runCli: runawayRetryRunCli,
+    })).rejects.toThrow(/request.*ceiling|runaway/i);
   });
 
   it('rejects GraphQL mutations during the read-only E2E', async () => {
