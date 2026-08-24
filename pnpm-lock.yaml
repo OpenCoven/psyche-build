@@ -20,6 +20,9 @@ importers:
       cli-highlight:
         specifier: ^2.1.11
         version: 2.1.11
+      entities:
+        specifier: 7.0.1
+        version: 7.0.1
       ink:
         specifier: ^7.1.1
         version: 7.1.1(@types/react@19.2.18)(react@19.2.8)

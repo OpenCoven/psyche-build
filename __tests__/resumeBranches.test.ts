@@ -170,7 +170,7 @@ describe('resumeBranches', () => {
       }
 
       if (cwd === rootRepo && command.includes("'for-each-ref' '--format=%(refname:short)' 'refs/heads'")) {
-        return output('main\nfeature/local-parent');
+        return output('main\nfeature/local-parent\npsyche-beads-project-sync-lock');
       }
       if (cwd === childRepo && command.includes("'for-each-ref' '--format=%(refname:short)' 'refs/heads'")) {
         return output('child/local-only');
@@ -187,7 +187,9 @@ describe('resumeBranches', () => {
       }
 
       if (cwd === rootRepo && command.includes("'for-each-ref' '--format=%(refname:short)' 'refs/remotes/origin'")) {
-        return output(rootRemoteFetched ? 'origin/feature/reopen-me\norigin/feature/remote-only' : '');
+        return output(rootRemoteFetched
+          ? 'origin/feature/reopen-me\norigin/feature/remote-only\norigin/psyche-beads-project-sync-lock'
+          : '');
       }
       if (cwd === childRepo && command.includes("'for-each-ref' '--format=%(refname:short)' 'refs/remotes/origin'")) {
         return output(childRemoteFetched ? 'origin/feature/remote-only\norigin/child/remote-child-only' : '');
@@ -235,6 +237,9 @@ describe('resumeBranches', () => {
         }),
       ])
     );
+    expect(candidates.some((candidate) =>
+      candidate.branchName === 'psyche-beads-project-sync-lock'
+    )).toBe(false);
     expect(execSyncMock).toHaveBeenCalledWith(
       expect.stringContaining("'fetch' '--prune' 'origin'"),
       expect.objectContaining({ cwd: rootRepo, stdio: 'pipe' })
