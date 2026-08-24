@@ -21,6 +21,7 @@ import {
 } from './markers.mjs';
 import {
   assertIssueBodyWithinLimit,
+  assertProjectReadmeWithinLimit,
   renderIssueBody,
   renderIssueTitle,
   renderProjectReadme,
@@ -1706,6 +1707,12 @@ export function planReconciliation(input) {
 
   const renderedReadmeBody = renderProjectReadme(inventory, normalizedInput.renderContext ?? {});
   const readmeRenderHash = hashRenderedBody(renderedReadmeBody);
+  const managedReadmeBody = attachRenderHash(
+    renderedReadmeBody,
+    readmeRenderHash,
+    markerContext.projectMarker,
+  );
+  assertProjectReadmeWithinLimit(managedReadmeBody);
   if (!hasCurrentReadme(
     normalizedInput.readme ?? normalizeReadmeSnapshot(null, 'plan'),
     renderedReadmeBody,
@@ -1716,7 +1723,7 @@ export function planReconciliation(input) {
       type: 'updateReadme',
       phase: 'updateReadme',
       path: (normalizedInput.readme ?? normalizeReadmeSnapshot(null, 'plan')).path,
-      body: attachRenderHash(renderedReadmeBody, readmeRenderHash, markerContext.projectMarker),
+      body: managedReadmeBody,
       renderHash: readmeRenderHash,
     });
   }
@@ -1875,6 +1882,8 @@ export async function applyReconciliation(plan, adapters) {
   for (const operation of plan.operations) {
     if (operation.type === 'createIssue' || operation.type === 'updateIssue') {
       assertIssueBodyWithinLimit(operation.beadId, operation.body);
+    } else if (operation.type === 'updateReadme') {
+      assertProjectReadmeWithinLimit(operation.body);
     }
   }
 

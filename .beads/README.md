@@ -134,6 +134,11 @@ Every run uploads a sanitized `summary.json` and `diagnostics.log`, including
 failed runs. The summary reports counts by operation kind and body-free closure
 candidates with Bead ID, issue number, and public issue title when available.
 
+The generated Project README stays within GitHub's 10,000-Unicode-code-point
+limit. Required snapshot, field-guide, sync, and authority sections take
+priority; the remaining budget includes as many sorted closed-history entries
+as fit, with long titles bounded and an exact omission count when truncated.
+
 The guard normally refuses to close more than the greater of five managed
 issues or 25% of currently open managed issues. Run a dry-run first and inspect
 its artifact before manually enabling `allow_mass_close`; a refused run still

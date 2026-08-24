@@ -9,10 +9,16 @@ import {
   toPublicBead,
 } from '../scripts/beads-project-sync/sanitize.mjs';
 import {
+  assertProjectReadmeWithinLimit,
+  GITHUB_PROJECT_README_MAX_CODE_POINTS,
   renderIssueBody,
   renderIssueTitle,
   renderProjectReadme,
 } from '../scripts/beads-project-sync/render.mjs';
+import {
+  DEFAULT_PROJECT_MARKER,
+  renderHashMarker,
+} from '../scripts/beads-project-sync/markers.mjs';
 import type { RenderContext } from '../scripts/beads-project-sync/render.mjs';
 import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
 
@@ -60,6 +66,44 @@ function countMatches(value: string, search: string): number {
 
 function codePointLength(value: string): number {
   return [...value].length;
+}
+
+function makeClosedHistoryInventory(
+  count: number,
+  titleForIndex: (index: number) => string,
+): PublicBead[] {
+  const template = buildPublicInventory()[0]!;
+  return Array.from({ length: count }, (_, index) => ({
+    ...template,
+    id: `pb-closed-${String(index + 1).padStart(4, '0')}`,
+    title: titleForIndex(index),
+    status: 'closed',
+    priority: index % 5,
+    type: 'task',
+    blocked: false,
+    parentId: null,
+    blockedByIds: [],
+    githubAssignee: null,
+    updatedAt: '2026-08-23T12:00:00Z',
+    closedAt: '2026-08-23T12:00:00Z',
+  }));
+}
+
+function managedProjectReadmeBody(rendered: string): string {
+  return `${rendered}\n\n${renderHashMarker(DEFAULT_PROJECT_MARKER, '0'.repeat(64))}`;
+}
+
+function closedHistoryLines(rendered: string): string[] {
+  const section = rendered
+    .split('## Closed history summary\n')[1]
+    ?.split('\n\n## Field guide')[0];
+  expect(section).toBeTruthy();
+  return section!.split('\n').filter((line) => line.startsWith('- `'));
+}
+
+function omittedClosedCount(rendered: string): number {
+  const match = rendered.match(/^- (\d+) additional closed beads omitted\.$/mu);
+  return match == null ? 0 : Number.parseInt(match[1]!, 10);
 }
 
 function renderSourceDescription(description: string): string {
@@ -1141,5 +1185,83 @@ describe('Beads project renderers', () => {
     expect(rendered).toContain('## Field guide');
     expect(rendered).toContain('## Sync behavior');
     expect(rendered).toContain('## Authority');
+  });
+
+  it('fits the current 85-closed-Bead scale while retaining required README sections', () => {
+    const inventory = makeClosedHistoryInventory(
+      85,
+      (index) => `Current closed Bead ${String(index + 1).padStart(3, '0')} ${'x'.repeat(20)}`,
+    );
+
+    const rendered = renderProjectReadme(inventory, buildContext(inventory));
+    const historyLines = closedHistoryLines(rendered);
+    const omittedCount = omittedClosedCount(rendered);
+
+    expect(codePointLength(managedProjectReadmeBody(rendered))).toBeLessThanOrEqual(
+      GITHUB_PROJECT_README_MAX_CODE_POINTS,
+    );
+    expect(historyLines).toHaveLength(85);
+    expect(omittedCount).toBe(0);
+    expect(rendered).toContain('generated public tracking snapshot');
+    expect(rendered).toContain('- Closed beads: 85');
+    expect(rendered).toContain('## Field guide');
+    expect(rendered).toContain('## Sync behavior');
+    expect(rendered).toContain('## Authority');
+  });
+
+  it('bounds long Unicode closed titles, samples sorted history, and reports omissions deterministically', () => {
+    const inventory = makeClosedHistoryInventory(
+      400,
+      (index) => `${String(index + 1).padStart(4, '0')} ${'😀'.repeat(2_000)}`,
+    );
+
+    const rendered = renderProjectReadme(inventory, buildContext(inventory));
+    const reversed = renderProjectReadme([...inventory].reverse(), buildContext(inventory));
+    const historyLines = closedHistoryLines(rendered);
+    const omittedCount = omittedClosedCount(rendered);
+    const managedBody = managedProjectReadmeBody(rendered);
+
+    expect(rendered).toBe(reversed);
+    expect(codePointLength(managedBody)).toBeLessThanOrEqual(
+      GITHUB_PROJECT_README_MAX_CODE_POINTS,
+    );
+    expect(managedBody.length).toBeGreaterThan(codePointLength(managedBody));
+    expect(historyLines.length).toBeGreaterThan(0);
+    expect(historyLines.map((line) => line.match(/`(pb-closed-\d+)`/u)?.[1])).toEqual(
+      [...historyLines]
+        .map((line) => line.match(/`(pb-closed-\d+)`/u)?.[1])
+        .sort(),
+    );
+    expect(Math.max(...historyLines.map(codePointLength))).toBeLessThan(512);
+    expect(historyLines.every((line) => line.includes('... (closed '))).toBe(true);
+    expect(omittedCount).toBe(400 - historyLines.length);
+    expect(rendered).toContain('generated public tracking snapshot');
+    expect(rendered).toContain('- Closed beads: 400');
+    expect(rendered).toContain('## Field guide');
+    expect(rendered).toContain('## Sync behavior');
+    expect(rendered).toContain('## Authority');
+  });
+
+  it('accepts the exact Project README boundary and counts Unicode code points', () => {
+    const seed = renderProjectReadme([], buildContext([], { projectName: '😀' }));
+    const remainingCodePoints =
+      GITHUB_PROJECT_README_MAX_CODE_POINTS - codePointLength(managedProjectReadmeBody(seed));
+    const exact = renderProjectReadme(
+      [],
+      buildContext([], { projectName: '😀'.repeat(remainingCodePoints + 1) }),
+    );
+    const exactManagedBody = managedProjectReadmeBody(exact);
+
+    expect(codePointLength(exactManagedBody)).toBe(GITHUB_PROJECT_README_MAX_CODE_POINTS);
+    expect(exactManagedBody.length).toBeGreaterThan(codePointLength(exactManagedBody));
+    expect(() => {
+      assertProjectReadmeWithinLimit('a'.repeat(GITHUB_PROJECT_README_MAX_CODE_POINTS));
+    }).not.toThrow();
+    expect(() => {
+      assertProjectReadmeWithinLimit('😀'.repeat(GITHUB_PROJECT_README_MAX_CODE_POINTS));
+    }).not.toThrow();
+    expect(() => {
+      assertProjectReadmeWithinLimit('😀'.repeat(GITHUB_PROJECT_README_MAX_CODE_POINTS + 1));
+    }).toThrow(/10001 characters; maximum is 10000/u);
   });
 });

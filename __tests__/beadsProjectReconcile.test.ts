@@ -13,6 +13,7 @@ import {
 } from '../scripts/beads-project-sync/markers.mjs';
 import {
   GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
+  GITHUB_PROJECT_README_MAX_CODE_POINTS,
   renderIssueBody,
   renderIssueTitle,
   renderProjectReadme,
@@ -563,6 +564,80 @@ describe('Beads project reconciliation', () => {
       ),
     });
     expect(adapterCalls).not.toContain('updateIssue');
+  });
+
+  it('plans a validated bounded README for many long closed titles', () => {
+    const inventory = finalizeInventory(
+      Array.from({ length: 400 }, (_, index) => makeBead(
+        `pb-readme-${String(index + 1).padStart(4, '0')}`,
+        {
+          title: `${String(index + 1).padStart(4, '0')} ${'😀'.repeat(2_000)}`,
+          status: 'closed',
+          updatedAt: '2026-08-23T12:00:00Z',
+          closedAt: '2026-08-23T12:00:00Z',
+        },
+      )),
+    );
+
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const readmeOperation = plan.operations.find(
+      (operation) => operation.type === 'updateReadme',
+    );
+
+    expect(plan.operations).toHaveLength(1);
+    expect(readmeOperation?.type).toBe('updateReadme');
+    if (readmeOperation?.type !== 'updateReadme') {
+      throw new Error('Expected an updateReadme operation');
+    }
+    expect(codePointLength(readmeOperation.body)).toBeLessThanOrEqual(
+      GITHUB_PROJECT_README_MAX_CODE_POINTS,
+    );
+    expect(readmeOperation.body).toMatch(/^- \d+ additional closed beads omitted\.$/mu);
+  });
+
+  it('rejects an oversized required README before returning a reconciliation plan', () => {
+    const inventory = finalizeInventory([makeBead('pb-readme-required')]);
+
+    expect(() => planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: {
+        ...baseContext,
+        projectName: 'x'.repeat(GITHUB_PROJECT_README_MAX_CODE_POINTS),
+      },
+    })).toThrow(/Project README required sections.*maximum is 10000/u);
+  });
+
+  it('preflights an oversized planned README before applying any adapter', async () => {
+    const inventory = finalizeInventory([makeBead('pb-readme-apply')]);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const readmeOperation = plan.operations.find(
+      (operation) => operation.type === 'updateReadme',
+    );
+    if (readmeOperation?.type !== 'updateReadme') {
+      throw new Error('Expected an updateReadme operation');
+    }
+    readmeOperation.body = '😀'.repeat(GITHUB_PROJECT_README_MAX_CODE_POINTS + 1);
+
+    const adapterCalls: string[] = [];
+    await expect(applyReconciliation(
+      plan,
+      recordingAdapters((operationType) => adapterCalls.push(operationType)),
+    )).rejects.toThrow(
+      'GitHub Project README is 10001 characters; maximum is 10000',
+    );
+    expect(adapterCalls).toEqual([]);
   });
 
   it('plans deterministic first-run creates, keeps closed history in bodies, and ignores unmanaged issues', () => {

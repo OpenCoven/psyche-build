@@ -8,6 +8,7 @@ import {
   normalizeMarker,
   normalizeRepositoryIdentity,
   projectReadmeMarker,
+  renderHashMarker,
 } from './markers.mjs';
 import {
   assertNoPublishableSecrets,
@@ -42,6 +43,9 @@ const ISSUE_TITLE_MAX_CODE_POINTS = 256;
 const ISSUE_TITLE_TRUNCATION_SUFFIX = '...';
 const MIN_TRUNCATED_TITLE_CODE_POINTS = 1;
 export const GITHUB_ISSUE_BODY_MAX_CODE_POINTS = 65_536;
+export const GITHUB_PROJECT_README_MAX_CODE_POINTS = 10_000;
+const CLOSED_HISTORY_TITLE_MAX_CODE_POINTS = 160;
+const PROJECT_README_TRUNCATION_SUFFIX = '...';
 
 /**
  * @param {string} message
@@ -58,6 +62,28 @@ function fail(message) {
  */
 function compareStrings(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * @param {string} value
+ * @returns {number}
+ */
+function codePointLength(value) {
+  return [...value].length;
+}
+
+/**
+ * @param {string} value
+ * @param {number} maxCodePoints
+ * @param {string} suffix
+ * @returns {string}
+ */
+function truncateCodePoints(value, maxCodePoints, suffix) {
+  const codePoints = [...value];
+  if (codePoints.length <= maxCodePoints) {
+    return value;
+  }
+  return `${codePoints.slice(0, maxCodePoints - codePointLength(suffix)).join('')}${suffix}`;
 }
 
 /**
@@ -609,9 +635,9 @@ function renderPriorityCountLines(inventory) {
 
 /**
  * @param {readonly PublicBead[]} inventory
- * @returns {string}
+ * @returns {string[]}
  */
-function renderClosedHistory(inventory) {
+function renderClosedHistoryLines(inventory) {
   const closed = inventory
     .filter((bead) => bead.status === 'closed')
     .sort((left, right) => {
@@ -620,12 +646,121 @@ function renderClosedHistory(inventory) {
       return compareStrings(rightTimestamp, leftTimestamp) || compareStrings(left.id, right.id);
     });
 
-  return closed.length > 0
-    ? closed.map((bead) => {
-      const closedAt = normalizeInlineText(bead.closedAt ?? bead.updatedAt, 'closedAt');
-      return `- \`${normalizeInlineText(bead.id, 'id')}\` — ${normalizeInlineText(bead.title, 'title')} (closed ${closedAt})`;
-    }).join('\n')
-    : '- No closed beads in this snapshot.';
+  return closed.map((bead) => {
+    const closedAt = normalizeInlineText(bead.closedAt ?? bead.updatedAt, 'closedAt');
+    const title = truncateCodePoints(
+      normalizeInlineText(bead.title, 'title'),
+      CLOSED_HISTORY_TITLE_MAX_CODE_POINTS,
+      PROJECT_README_TRUNCATION_SUFFIX,
+    );
+    return `- \`${normalizeInlineText(bead.id, 'id')}\` — ${title} (closed ${closedAt})`;
+  });
+}
+
+/**
+ * @param {number} count
+ * @returns {string}
+ */
+function renderClosedHistoryOmission(count) {
+  return `- ${count} additional closed beads omitted.`;
+}
+
+/**
+ * @param {readonly string[]} beforeHistory
+ * @param {string} historyBody
+ * @param {readonly string[]} afterHistory
+ * @returns {string}
+ */
+function assembleProjectReadme(beforeHistory, historyBody, afterHistory) {
+  return [
+    ...beforeHistory,
+    `## Closed history summary\n${historyBody}`,
+    ...afterHistory,
+  ].join('\n\n');
+}
+
+/**
+ * @param {readonly string[]} beforeHistory
+ * @param {readonly string[]} historyLines
+ * @param {readonly string[]} afterHistory
+ * @param {string} projectMarker
+ * @returns {string}
+ */
+function renderBudgetedProjectReadme(
+  beforeHistory,
+  historyLines,
+  afterHistory,
+  projectMarker,
+) {
+  const managedSuffix = `\n\n${renderHashMarker(projectMarker, '0'.repeat(64))}`;
+  const renderedCodePointLimit =
+    GITHUB_PROJECT_README_MAX_CODE_POINTS - codePointLength(managedSuffix);
+
+  if (historyLines.length === 0) {
+    const rendered = assembleProjectReadme(
+      beforeHistory,
+      '- No closed beads in this snapshot.',
+      afterHistory,
+    );
+    const managedLength = codePointLength(rendered) + codePointLength(managedSuffix);
+    if (managedLength > GITHUB_PROJECT_README_MAX_CODE_POINTS) {
+      fail(
+        `Project README required sections are ${managedLength} characters; maximum is ${GITHUB_PROJECT_README_MAX_CODE_POINTS}`,
+      );
+    }
+    return rendered;
+  }
+
+  const fixedCodePoints = codePointLength(
+    assembleProjectReadme(beforeHistory, '', afterHistory),
+  );
+  const historyPrefixCodePoints = [0];
+  for (const line of historyLines) {
+    historyPrefixCodePoints.push(
+      (historyPrefixCodePoints.at(-1) ?? 0) + codePointLength(line),
+    );
+  }
+
+  let includedCount = -1;
+  for (let candidateCount = 0; candidateCount <= historyLines.length; candidateCount += 1) {
+    const omittedCount = historyLines.length - candidateCount;
+    let historyBodyCodePoints =
+      historyPrefixCodePoints[candidateCount] + Math.max(0, candidateCount - 1);
+    if (omittedCount > 0) {
+      historyBodyCodePoints +=
+        (candidateCount > 0 ? 1 : 0)
+        + codePointLength(renderClosedHistoryOmission(omittedCount));
+    }
+    if (fixedCodePoints + historyBodyCodePoints <= renderedCodePointLimit) {
+      includedCount = candidateCount;
+    }
+  }
+
+  if (includedCount < 1) {
+    const firstSample = [
+      historyLines[0],
+      historyLines.length > 1
+        ? renderClosedHistoryOmission(historyLines.length - 1)
+        : null,
+    ].filter(Boolean).join('\n');
+    const requiredLength =
+      codePointLength(assembleProjectReadme(beforeHistory, firstSample, afterHistory))
+      + codePointLength(managedSuffix);
+    fail(
+      `Project README required sections and one closed-history sample are ${requiredLength} characters; maximum is ${GITHUB_PROJECT_README_MAX_CODE_POINTS}`,
+    );
+  }
+
+  const historyBodyLines = historyLines.slice(0, includedCount);
+  const omittedCount = historyLines.length - includedCount;
+  if (omittedCount > 0) {
+    historyBodyLines.push(renderClosedHistoryOmission(omittedCount));
+  }
+  return assembleProjectReadme(
+    beforeHistory,
+    historyBodyLines.join('\n'),
+    afterHistory,
+  );
 }
 
 /**
@@ -683,10 +818,26 @@ export function assertIssueBodyWithinLimit(beadId, body) {
     fail(`GitHub issue body for Bead "${normalizedBeadId}" must be a string`);
   }
 
-  const actualCodePoints = [...body].length;
+  const actualCodePoints = codePointLength(body);
   if (actualCodePoints > GITHUB_ISSUE_BODY_MAX_CODE_POINTS) {
     fail(
       `GitHub issue body for Bead "${normalizedBeadId}" is ${actualCodePoints} characters; maximum is ${GITHUB_ISSUE_BODY_MAX_CODE_POINTS}`,
+    );
+  }
+}
+
+/**
+ * @param {string} body
+ */
+export function assertProjectReadmeWithinLimit(body) {
+  if (typeof body !== 'string') {
+    fail('GitHub Project README must be a string');
+  }
+
+  const actualCodePoints = codePointLength(body);
+  if (actualCodePoints > GITHUB_PROJECT_README_MAX_CODE_POINTS) {
+    fail(
+      `GitHub Project README is ${actualCodePoints} characters; maximum is ${GITHUB_PROJECT_README_MAX_CODE_POINTS}`,
     );
   }
 }
@@ -756,7 +907,7 @@ export function renderProjectReadme(inventory, context = {}) {
     context.projectMarker ?? DEFAULT_PROJECT_MARKER,
     'renderProjectReadme projectMarker',
   );
-  const sections = [
+  const beforeHistory = [
     projectReadmeMarker(projectMarker, resolveRepositoryIdentity(context)),
     `# ${title}`,
     'This README is a generated public tracking snapshot for mirrored Beads work. The Beads project remains authoritative, so update the source Bead instead of editing this README.',
@@ -769,7 +920,8 @@ export function renderProjectReadme(inventory, context = {}) {
     ].join('\n')),
     renderSection('Type counts', renderTypeCountLines(summary.typeCounts)),
     renderSection('Priority counts', renderPriorityCountLines(inventory)),
-    renderSection('Closed history summary', renderClosedHistory(inventory)),
+  ].filter((section) => section != null);
+  const afterHistory = [
     renderSection('Field guide', [
       '- Active beads are any source beads whose status is not `closed`.',
       '- Closed beads remain summarized for dependency and audit context.',
@@ -786,7 +938,14 @@ export function renderProjectReadme(inventory, context = {}) {
       'Authority',
       'The Beads project remains authoritative. Public GitHub issues and this README are generated mirrors managed by Psyche Build.',
     ),
-  ];
+  ].filter((section) => section != null);
 
-  return sections.filter(Boolean).join('\n\n');
+  const rendered = renderBudgetedProjectReadme(
+    beforeHistory,
+    renderClosedHistoryLines(inventory),
+    afterHistory,
+    projectMarker,
+  );
+  assertProjectReadmeWithinLimit(rendered);
+  return rendered;
 }
