@@ -4,8 +4,8 @@ import {
   runBeadsGraphqlE2e,
 } from '../scripts/verify-beads-graphql-e2e.mjs';
 import type {
-  GhRun,
-} from '../scripts/beads-project-sync/github.mjs';
+  ExecFileRun,
+} from '../scripts/beads-project-sync/source.mjs';
 
 const token = 'github_pat_DO_NOT_LEAK';
 
@@ -24,7 +24,7 @@ function fakeRunCli(requests: readonly {
   return async (
     _argv: readonly string[],
     dependencies: {
-      run: GhRun;
+      run: ExecFileRun;
       stdout: { write(chunk: string): unknown };
       stderr: { write(chunk: string): unknown };
     },
@@ -53,7 +53,7 @@ function fakeRunCli(requests: readonly {
   };
 }
 
-const delegateRun: GhRun = async () => ({
+const delegateRun: ExecFileRun = async () => ({
   stdout: JSON.stringify({ data: {} }),
   stderr: '',
   exitCode: 0,

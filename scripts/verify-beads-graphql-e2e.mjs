@@ -8,12 +8,22 @@ import { fileURLToPath } from 'node:url';
 import { runBeadsProjectCli } from './beads-project-sync/cli.mjs';
 import { createExecFileRun } from './beads-project-sync/source.mjs';
 
+/** @typedef {import('./verify-beads-graphql-e2e.mjs').GraphqlE2eOptions} GraphqlE2eOptions */
+/** @typedef {import('./verify-beads-graphql-e2e.mjs').GraphqlE2eReport} GraphqlE2eReport */
+/** @typedef {import('./beads-project-sync/source.mjs').ExecFileRun} ExecFileRun */
+
 const REQUIRED_OPERATIONS = Object.freeze([
   'DiscoverManagedProject',
   'DiscoverManagedProjectItems',
 ]);
 const MAX_GRAPHQL_REQUESTS = 2;
 
+/**
+ * @returns {{
+ *   stream: { write(chunk: string): boolean },
+ *   read(): string,
+ * }}
+ */
 function captureStream() {
   let value = '';
   return {
@@ -29,6 +39,14 @@ function captureStream() {
   };
 }
 
+/**
+ * @param {string | undefined} stdin
+ * @returns {{
+ *   kind: 'query' | 'mutation',
+ *   name: string,
+ *   signature: string,
+ * }}
+ */
 function parseGraphqlRequest(stdin) {
   if (typeof stdin !== 'string' || !stdin.trim()) {
     throw new Error('GraphQL request is missing JSON stdin');
@@ -51,6 +69,10 @@ function parseGraphqlRequest(stdin) {
   };
 }
 
+/**
+ * @param {string} stdout
+ * @returns {import('./beads-project-sync/cli.mjs').CliSummary}
+ */
 function parseSummary(stdout) {
   const lines = stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
   const finalLine = lines.at(-1);
@@ -64,10 +86,18 @@ function parseSummary(stdout) {
   }
 }
 
+/**
+ * @param {string} value
+ * @param {string} token
+ */
 function redact(value, token) {
   return value.split(token).join('[REDACTED]');
 }
 
+/**
+ * @param {GraphqlE2eOptions} [options]
+ * @returns {Promise<GraphqlE2eReport>}
+ */
 export async function runBeadsGraphqlE2e(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
@@ -78,9 +108,14 @@ export async function runBeadsGraphqlE2e(options = {}) {
 
   const delegateRun = options.run ?? createExecFileRun();
   const runCli = options.runCli ?? runBeadsProjectCli;
-  const operations = [];
+  const operations = /** @type {{
+   *   kind: 'query',
+   *   name: string,
+   *   signature: string,
+   * }[]} */ ([]);
   const signatures = new Set();
 
+  /** @type {ExecFileRun} */
   const tracedRun = async (command, args, runOptions) => {
     if (command === 'gh' && args[0] === 'api' && args[1] === 'graphql') {
       const operation = parseGraphqlRequest(runOptions.stdin);
@@ -93,7 +128,11 @@ export async function runBeadsGraphqlE2e(options = {}) {
         throw new Error(`Duplicate GraphQL request detected for "${operation.name}"`);
       }
       signatures.add(operation.signature);
-      operations.push(operation);
+      operations.push({
+        kind: 'query',
+        name: operation.name,
+        signature: operation.signature,
+      });
     }
     return delegateRun(command, args, runOptions);
   };

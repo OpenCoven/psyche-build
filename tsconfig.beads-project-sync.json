@@ -12,6 +12,10 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["scripts/beads-project-sync/*.mjs"],
+  "include": [
+    "scripts/beads-project-sync/*.mjs",
+    "scripts/sync-beads-project.mjs",
+    "scripts/verify-beads-graphql-e2e.mjs"
+  ],
   "exclude": ["node_modules", "dist"]
 }

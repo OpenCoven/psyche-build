@@ -1,6 +1,9 @@
 import type {
-  GhRun,
-} from './beads-project-sync/github.mjs';
+  ExecFileRun,
+} from './beads-project-sync/source.mjs';
+import type {
+  CliSummary,
+} from './beads-project-sync/cli.mjs';
 
 export interface GraphqlE2eOperation {
   kind: 'query';
@@ -10,20 +13,20 @@ export interface GraphqlE2eOperation {
 export interface GraphqlE2eReport {
   graphqlRequestCount: number;
   operations: GraphqlE2eOperation[];
-  summary: Record<string, unknown>;
+  summary: CliSummary;
   diagnostics: string;
 }
 
 export interface GraphqlE2eOptions {
   cwd?: string;
   env?: Readonly<Record<string, string | undefined>>;
-  run?: GhRun;
+  run?: ExecFileRun;
   runCli?: (
     argv: readonly string[],
     dependencies: {
       cwd: string;
       env: Readonly<Record<string, string | undefined>>;
-      run: GhRun;
+      run: ExecFileRun;
       stdout: { write(chunk: string): unknown };
       stderr: { write(chunk: string): unknown };
     },
