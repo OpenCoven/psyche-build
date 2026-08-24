@@ -370,6 +370,97 @@ describe('createGhClient', () => {
     }));
   });
 
+  it('plans no mutations for a deferred bead loaded from Backlog on the second run', async () => {
+    const bead: PublicBead = {
+      id: 'pb-deferred',
+      title: 'Defer the public mirror task',
+      description: 'Keep deferred work in the Project backlog.',
+      design: null,
+      specId: null,
+      acceptanceCriteria: '- Repeated syncs are idempotent.',
+      notes: null,
+      status: 'deferred',
+      priority: 2,
+      type: 'task',
+      blocked: false,
+      labels: [],
+      parentId: null,
+      blockedByIds: [],
+      githubAssignee: null,
+      createdAt: '2026-08-20T00:00:00Z',
+      updatedAt: '2026-08-22T12:30:00Z',
+      closedAt: null,
+    };
+    const renderContext = {
+      repositoryIdentity,
+      sourceRepositoryUrl: `https://github.com/${repositoryIdentity}`,
+    };
+    const firstRun = planReconciliation({
+      inventory: [bead],
+      existingIssues: [],
+      readme: null,
+      renderContext,
+    });
+    const createOperation = firstRun.operations.find(
+      (operation) => operation.type === 'createIssue',
+    );
+    const readmeOperation = firstRun.operations.find(
+      (operation) => operation.type === 'updateReadme',
+    );
+    expect(createOperation?.type).toBe('createIssue');
+    expect(readmeOperation?.type).toBe('updateReadme');
+
+    const issueUrl = `https://github.com/${repositoryIdentity}/issues/78`;
+    const runner = createRunner([
+      success([trustedIssue({
+        node_id: 'ISSUE-deferred',
+        number: 78,
+        title: createOperation?.type === 'createIssue' ? createOperation.title : null,
+        body: createOperation?.type === 'createIssue' ? createOperation.body : null,
+        state: 'open',
+        assignees: [],
+        labels: [{ name: 'bead' }, { name: 'bead:task' }, { name: 'priority:P2' }],
+        html_url: issueUrl,
+      })]),
+      projectDiscovery([{
+        id: 'P-deferred',
+        number: 23,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      projectItemsPage([{
+        id: 'ITEM-deferred',
+        isArchived: false,
+        content: { id: 'ISSUE-deferred', url: issueUrl },
+        fieldValues: {
+          nodes: [
+            { text: 'pb-deferred', field: { name: 'Bead ID' } },
+            { name: 'Backlog', field: { name: 'Status' } },
+            { name: 'P2', field: { name: 'Priority' } },
+            { name: 'Task', field: { name: 'Bead Type' } },
+            { date: '2026-08-22', field: { name: 'Source Updated' } },
+          ],
+        },
+      }]),
+      httpError(404, 'parent not found'),
+      success([]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const existingIssues = await client.listManagedIssues();
+
+    const secondRun = planReconciliation({
+      inventory: [bead],
+      existingIssues,
+      readme: {
+        body: readmeOperation?.type === 'updateReadme' ? readmeOperation.body : null,
+      },
+      renderContext,
+    });
+
+    expect(secondRun.operations).toEqual([]);
+  });
+
   it('rejects duplicate markers in one issue and duplicate managed bead IDs across issues', async () => {
     const duplicateInBody = createRunner([
       success([trustedIssue({
@@ -998,7 +1089,7 @@ describe('createGhClient', () => {
     }
   });
 
-  it('recovers one pristine unmarked Project after a restart without creating a duplicate', async () => {
+  it('fails closed instead of adopting a preexisting pristine unmarked Project', async () => {
     const readme = '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n# Public Beads';
     const pristine = {
       id: 'P-crash-window',
@@ -1026,13 +1117,14 @@ describe('createGhClient', () => {
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
 
-    await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
-      id: 'P-crash-window',
-      readme,
-      public: true,
-    });
+    await expect(client.ensureProject({ title: 'Public Beads', readme })).rejects.toThrow(
+      /unmarked Project.*manual recovery.*delete it and rerun/i,
+    );
     expect(runner.calls.some((call) =>
       String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
+    )).toBe(false);
+    expect(runner.calls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation UpdateManagedProject')
     )).toBe(false);
   });
 
@@ -1179,6 +1271,70 @@ describe('createGhClient', () => {
     expect(runner.calls.filter((call) =>
       String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject'),
     )).toHaveLength(1);
+  });
+
+  it('blocks a duplicate when a prior create leaves an unmarked orphan across restart', async () => {
+    const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
+    const transportFailure = Object.assign(new Error('request failed'), { code: 'ECONNRESET' });
+    const orphan = {
+      id: 'P-restart-orphan',
+      number: 24,
+      title: 'Public Beads',
+      readme: '',
+      public: false,
+      closed: false,
+      repositories: {
+        nodes: [],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+      items: { totalCount: 0 },
+    };
+    const firstRunner = createRunner([
+      projectDiscovery([]),
+      transportFailure,
+      httpError(403, 'recovery read forbidden'),
+    ]);
+    const firstClient = createGhClient({
+      run: firstRunner.run,
+      owner,
+      repo,
+      token,
+    });
+
+    await expect(firstClient.ensureProject({ title: 'Public Beads', readme })).rejects.toMatchObject({
+      kind: 'ambiguous',
+    });
+    expect(firstRunner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject'),
+    )).toHaveLength(1);
+
+    const restartRunner = createRunner([
+      projectDiscovery([orphan]),
+      success({
+        data: {
+          updateProjectV2: {
+            projectV2: { ...orphan, readme, public: true },
+          },
+        },
+      }),
+      success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
+    ]);
+    const restartedClient = createGhClient({
+      run: restartRunner.run,
+      owner,
+      repo,
+      token,
+    });
+
+    await expect(restartedClient.ensureProject({ title: 'Public Beads', readme })).rejects.toThrow(
+      /unmarked Project.*manual recovery.*delete it and rerun/i,
+    );
+    expect(restartRunner.calls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
+    )).toBe(false);
+    expect(restartRunner.calls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation UpdateManagedProject')
+    )).toBe(false);
   });
 
   it('discovers fields/options and provisions the required Status and custom field definitions', async () => {

@@ -907,6 +907,22 @@ function normalizeProject(raw) {
 }
 
 /**
+ * @param {ProjectContext} project
+ * @param {string} title
+ * @returns {boolean}
+ */
+function isStrictProjectCreateCandidate(project, title) {
+  return project.title === title
+    && !project.readme.trim()
+    && project.public === false
+    && project.closed === false
+    && project.linkedRepositoriesKnown === true
+    && (project.linkedRepositoryIds?.length ?? 0) === 0
+    && project.linkedRepositoriesHasNextPage !== true
+    && project.itemCount === 0;
+}
+
+/**
  * @param {unknown} raw
  * @returns {ProjectFieldContext | null}
  */
@@ -1985,61 +2001,44 @@ export function createGhClient(options) {
     if (!organizationId || !repositoryId) {
       throw new GhClientError('permission', 'Unable to resolve organization or repository access');
     }
-    const priorProjectIds = new Set(lastDiscoveredProjects.map((project) => project.id));
-    const pristineCandidates = lastDiscoveredProjects.filter((project) =>
-      project.title === title
-      && !project.readme.trim()
-      && project.public === false
-      && project.closed === false
-      && project.linkedRepositoriesKnown === true
-      && (project.linkedRepositoryIds?.length ?? 0) === 0
-      && project.linkedRepositoriesHasNextPage !== true
-      && project.itemCount === 0
+    const preCreateProjectIds = new Set(lastDiscoveredProjects.map((project) => project.id));
+    const preexistingCandidates = lastDiscoveredProjects.filter((project) =>
+      isStrictProjectCreateCandidate(project, title)
     );
-    const recoveryCandidates = [
-      ...pristineCandidates,
-    ];
-    const uniqueRecoveryCandidates = [
-      ...new Map(recoveryCandidates.map((project) => [project.id, project])).values(),
-    ];
-    if (uniqueRecoveryCandidates.length > 1) {
+    if (preexistingCandidates.length > 0) {
+      const projects = preexistingCandidates
+        .map((project) => `#${project.number} (${project.id})`)
+        .join(', ');
       throw new GhClientError(
         'ambiguous',
-        `Multiple Projects are eligible for recovery as "${title}"`,
+        `Unmarked Project ${projects} matches the expected create placeholder for "${title}", `
+          + 'but ownership cannot be proven across process restarts. Manual recovery is required: '
+          + `add the managed README marker and link it to ${repositoryIdentity}, `
+          + 'or delete it and rerun.',
       );
     }
 
-    let created = uniqueRecoveryCandidates[0] ?? null;
-    if (!created) {
-      const createdPayload = await ambiguousMutation(
-        `Project create for "${title}"`,
-        () => graphqlOnce(CREATE_PROJECT_MUTATION, {
-          ownerId: organizationId,
-          title,
-        }),
-        async () => {
-          const candidates = (await discoverProjects()).filter((project) =>
-            project.title === title
-            && !priorProjectIds.has(project.id)
-            && !project.readme.trim()
-            && project.public === false
-            && project.closed === false
-            && project.linkedRepositoriesKnown === true
-            && (project.linkedRepositoryIds?.length ?? 0) === 0
-            && project.linkedRepositoriesHasNextPage !== true
-            && project.itemCount === 0
-          );
-          if (candidates.length > 1) {
-            throw new GhClientError('ambiguous', `Multiple newly created Projects are named "${title}"`);
-          }
-          return candidates[0] == null
-            ? null
-            : { data: { createProjectV2: { projectV2: candidates[0] } } };
-        },
-      );
-      const createdData = record(record(createdPayload.data).createProjectV2);
-      created = normalizeProject(createdData.projectV2);
-    }
+    const createdPayload = await ambiguousMutation(
+      `Project create for "${title}"`,
+      () => graphqlOnce(CREATE_PROJECT_MUTATION, {
+        ownerId: organizationId,
+        title,
+      }),
+      async () => {
+        const candidates = (await discoverProjects()).filter((project) =>
+          !preCreateProjectIds.has(project.id)
+          && isStrictProjectCreateCandidate(project, title)
+        );
+        if (candidates.length > 1) {
+          throw new GhClientError('ambiguous', `Multiple newly created Projects are named "${title}"`);
+        }
+        return candidates[0] == null
+          ? null
+          : { data: { createProjectV2: { projectV2: candidates[0] } } };
+      },
+    );
+    const createdData = record(record(createdPayload.data).createProjectV2);
+    const created = normalizeProject(createdData.projectV2);
 
     if (created.title !== title || !created.public || created.readme !== readme) {
       const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {

@@ -935,12 +935,40 @@ function attachRenderHash(body, renderHash, marker) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {'backlog' | 'ready' | 'in_progress' | 'closed'}
+ */
+function canonicalProjectStatus(value) {
+  const status = String(value ?? '').trim().toLowerCase().replace(/[_-]+/gu, ' ');
+  if (status === 'ready') {
+    return 'ready';
+  }
+  if (status === 'in progress' || status === 'inprogress') {
+    return 'in_progress';
+  }
+  if (status === 'closed' || status === 'done') {
+    return 'closed';
+  }
+  return 'backlog';
+}
+
+/**
  * @param {ProjectFieldValues} currentFields
  * @param {ProjectFieldValues} desiredFields
  * @returns {boolean}
  */
 function hasDesiredFieldValues(currentFields, desiredFields) {
   for (const [key, desiredValue] of Object.entries(desiredFields)) {
+    if (key === 'status') {
+      const currentValue = currentFields[key];
+      if (
+        typeof currentValue !== 'string'
+        || canonicalProjectStatus(currentValue) !== canonicalProjectStatus(desiredValue)
+      ) {
+        return false;
+      }
+      continue;
+    }
     if ((currentFields[key] ?? null) !== desiredValue) {
       return false;
     }
