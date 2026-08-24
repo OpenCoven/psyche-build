@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PaneSlugAllocationState } from '../src/services/PaneSlugRegistry.js';
+import type { CrashSafePaneSlugReservationOptions } from '../src/services/PaneSlugReservation.js';
+import type { TmuxServerIdentity } from '../src/services/TmuxServerIdentity.js';
 import type { PsychePane } from '../src/types.js';
+import type { AgentName, PermissionMode } from '../src/utils/agentLaunch.js';
+
+type SendShellCommandCall = [paneId: string, command: string];
 
 const tmuxService = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%0'),
@@ -18,7 +24,10 @@ const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
 const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
 const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
-const buildAgentCommandMock = vi.hoisted(() => vi.fn(() => 'opencode'));
+const buildAgentCommandMock = vi.hoisted(() => vi.fn<(
+  agent: AgentName,
+  permissionMode: PermissionMode | undefined,
+) => string>(() => 'opencode'));
 const buildInitialPromptCommandMock = vi.hoisted(() => vi.fn(() => 'opencode --prompt'));
 const getPromptTransportMock = vi.hoisted(() => vi.fn(() => 'inline'));
 const buildPromptReadAndDeleteSnippetMock = vi.hoisted(() => vi.fn(() => 'read-prompt'));
@@ -108,15 +117,20 @@ describe('conflict resolution pane transaction', () => {
       throw new Error('use inline prompt');
     });
     const occupiedSlugs = new Set<string>();
-    reserveCrashSafePaneSlugMock.mockImplementation(async (options) => {
-      const candidate = await options.allocate({
+    reserveCrashSafePaneSlugMock.mockImplementation(async (
+      options: CrashSafePaneSlugReservationOptions,
+    ) => {
+      const allocationState: PaneSlugAllocationState = {
         config: { panes: [] },
         occupiedSlugs,
         persistedSlugs: new Set<string>(),
         ownershipRecords: [],
-      });
+      };
+      const candidate = await options.allocate(allocationState);
       occupiedSlugs.add(candidate.slug);
-      let effect: { paneId: string; tmuxServerIdentity?: object } | undefined;
+      let effect:
+        | { paneId: string; tmuxServerIdentity?: TmuxServerIdentity }
+        | undefined;
       return {
         recoveryId: 'recovery-conflict',
         sessionProjectRoot: options.sessionProjectRoot,
@@ -127,7 +141,10 @@ describe('conflict resolution pane transaction', () => {
         get effect() {
           return effect;
         },
-        recordPaneEffect: vi.fn(async (paneId, tmuxServerIdentity) => {
+        recordPaneEffect: vi.fn(async (
+          paneId: string,
+          tmuxServerIdentity?: TmuxServerIdentity,
+        ) => {
           effect = { paneId, tmuxServerIdentity };
         }),
         completeAfterPanePersisted: vi.fn(async () => {
@@ -257,7 +274,10 @@ describe('conflict resolution pane transaction', () => {
     const { buildAgentCommand: buildRealAgentCommand } = await vi.importActual<
       typeof import('../src/utils/agentLaunch.js')
     >('../src/utils/agentLaunch.js');
-    buildAgentCommandMock.mockImplementation((agent, permissionMode) => (
+    buildAgentCommandMock.mockImplementation((
+      agent: AgentName,
+      permissionMode: PermissionMode | undefined,
+    ) => (
       buildRealAgentCommand(agent, permissionMode)
     ));
     getPromptTransportMock.mockReturnValue('launch-only');
@@ -283,6 +303,9 @@ describe('conflict resolution pane transaction', () => {
     expect(buildInitialPromptCommandMock).not.toHaveBeenCalled();
     expect(buildAgentCommandMock).toHaveBeenCalledWith('coven-code', 'plan');
     expect(sendPromptViaTmuxMock).not.toHaveBeenCalled();
-    expect(tmuxService.sendShellCommand.mock.calls.at(-1)?.[1]).toBe('coven');
+    const lastSendShellCommandCall = tmuxService.sendShellCommand.mock.calls.at(-1) as
+      | SendShellCommandCall
+      | undefined;
+    expect(lastSendShellCommandCall?.[1]).toBe('coven');
   });
 });
