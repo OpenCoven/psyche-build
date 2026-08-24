@@ -470,6 +470,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       projectNodeId: config.projectNodeId,
       projectMarker: config.projectMarker,
       issueMarker: config.issueMarker,
+      trustedIssueAuthors: config.trustedIssueAuthors,
       legacyProjectMarkers: [
         ...LEGACY_PROJECT_MARKERS,
         ...(config.legacyProjectMarkers ?? []),
@@ -496,8 +497,12 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       : gh.startApplyLockLease(applyLock);
 
     try {
+      if (options.mode !== 'dry-run') {
+        project = await gh.refreshProject();
+        assertPinnedPublicProject(project, config.projectNodeId);
+      }
+
       if (options.mode !== 'dry-run' && project) {
-        await applyLease?.assertOwned();
         const repairedProject = await gh.ensureProject({
           title: config.projectTitle,
           readme: desiredProjectReadme,

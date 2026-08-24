@@ -5,6 +5,7 @@ export interface BeadsProjectSyncConfig {
   projectTitle: string;
   projectMarker: string;
   issueMarker: string;
+  trustedIssueAuthors: readonly string[];
   legacyProjectMarkers?: readonly string[];
   assigneeMap: Readonly<Record<string, string>>;
   massClose: {

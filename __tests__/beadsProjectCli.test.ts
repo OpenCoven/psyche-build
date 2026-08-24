@@ -57,6 +57,7 @@ interface FakeGhOptions {
   failReleaseLock?: Error;
   failSetFields?: Error;
   project?: ProjectContext | null;
+  projectAfterLock?: ProjectContext | null;
 }
 
 interface FakeClientOptions {
@@ -67,6 +68,7 @@ interface FakeClientOptions {
   projectNodeId?: string;
   projectMarker?: string;
   issueMarker?: string;
+  trustedIssueAuthors?: readonly string[];
   legacyProjectMarkers?: readonly string[];
   legacyIssueMarkers?: readonly string[];
 }
@@ -105,11 +107,12 @@ function createFakeGh(options: FakeGhOptions = {}) {
   const calls: string[] = [];
   const clientOptions: FakeClientOptions[] = [];
   const ensureProjectInputs: Array<{ title: string; readme: string }> = [];
+  const ensureProjectObservedTitles: string[] = [];
   const lockCalls: string[] = [];
   const provisionReadmes: string[] = [];
   const writes: string[] = [];
   let nextIssueNumber = 100;
-  const project = options.project === undefined
+  let project = options.project === undefined
     ? {
       id: projectNodeId,
       number: 11,
@@ -151,9 +154,17 @@ function createFakeGh(options: FakeGhOptions = {}) {
       calls.push('discoverProject');
       return project;
     },
+    async refreshProject() {
+      calls.push('refreshProject');
+      if ('projectAfterLock' in options) {
+        project = options.projectAfterLock ?? null;
+      }
+      return project;
+    },
     async ensureProject(input: { title: string; readme: string }) {
       writes.push('ensureProject');
       ensureProjectInputs.push(input);
+      ensureProjectObservedTitles.push(project?.title ?? '<absent>');
       if (!project) {
         throw new Error('ensureProject requires an existing Project in this fake');
       }
@@ -277,6 +288,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
     client,
     clientOptions,
     ensureProjectInputs,
+    ensureProjectObservedTitles,
     lockCalls,
     provisionReadmes,
     writes,
@@ -324,6 +336,7 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
+      trustedIssueAuthors: ['bunsdev'],
       assigneeMap: {},
       massClose: {
         minimum: 5,
@@ -340,6 +353,7 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
+      trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
     };
 
@@ -376,6 +390,7 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
+      trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
       massClose: { minimum: 5, fraction: 0.25 },
     };
@@ -409,6 +424,7 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'custom-project-sync:v2',
       issueMarker: 'custom-issue-sync:v2',
+      trustedIssueAuthors: ['BunsDev'],
       legacyProjectMarkers: ['prior-project-sync:v1'],
       assigneeMap: {},
       massClose: { minimum: 5, fraction: 0.25 },
@@ -425,9 +441,43 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'custom--project',
       issueMarker: 'custom-issue-sync:v2',
+      trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
       massClose: { minimum: 5, fraction: 0.25 },
     })).toThrow(/safe machine marker/i);
+  });
+
+  it('requires and normalizes a non-empty pinned issue-author allowlist', () => {
+    const base = {
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectNodeId,
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'psyche-beads-project-sync:v1',
+      issueMarker: 'psyche-bead-sync:v1',
+      assigneeMap: {},
+      massClose: { minimum: 5, fraction: 0.25 },
+    };
+
+    expect(parseSyncConfig({
+      ...base,
+      trustedIssueAuthors: ['BunsDev', 'bunsdev'],
+    }).trustedIssueAuthors).toEqual(['bunsdev']);
+
+    for (const trustedIssueAuthors of [
+      undefined,
+      null,
+      [],
+      [''],
+      ['-invalid'],
+      ['invalid--login'],
+      ['invalid login'],
+    ]) {
+      expect(() => parseSyncConfig({
+        ...base,
+        ...(trustedIssueAuthors === undefined ? {} : { trustedIssueAuthors }),
+      })).toThrow(/trustedIssueAuthors/i);
+    }
   });
 });
 
@@ -820,6 +870,7 @@ describe('Beads project sync CLI', () => {
         projectNodeId,
         projectMarker: 'psyche-beads-project-sync:v1',
         issueMarker: 'psyche-bead-sync:v1',
+        trustedIssueAuthors: ['bunsdev'],
         legacyProjectMarkers: ['psyche-bead-sync:v1'],
         legacyIssueMarkers: ['psyche-bead-sync:v1'],
       }),
@@ -979,6 +1030,67 @@ describe('Beads project sync CLI', () => {
     },
   );
 
+  it('refreshes the pinned Project after acquiring the lease and fails closed on new private state', async () => {
+    const fakeGh = createFakeGh({
+      projectAfterLock: {
+        id: projectNodeId,
+        number: 11,
+        title: 'Psyche Build: Goals & Implementation',
+        readme:
+          '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
+        public: false,
+        url: 'https://github.com/orgs/OpenCoven/projects/11',
+      },
+    });
+
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/private.*manual.*visibility/i);
+    expect(fakeGh.calls).toEqual(['verifyAccess', 'discoverProject', 'refreshProject']);
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
+    expect(fakeGh.writes).toEqual([]);
+  });
+
+  it('uses Project title and README state refreshed after lease acquisition for repair', async () => {
+    const fakeGh = createFakeGh({
+      projectAfterLock: {
+        id: projectNodeId,
+        number: 11,
+        title: 'Changed while waiting for the lease',
+        readme:
+          '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n'
+            + '# Changed while waiting',
+        public: true,
+        url: 'https://github.com/orgs/OpenCoven/projects/11',
+      },
+    });
+
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(fakeGh.ensureProjectObservedTitles).toEqual([
+      'Changed while waiting for the lease',
+    ]);
+    expect(fakeGh.calls.slice(0, 3)).toEqual([
+      'verifyAccess',
+      'discoverProject',
+      'refreshProject',
+    ]);
+  });
+
   it('fully applies the reconciliation plan through the GitHub adapter', async () => {
     const fakeGh = createFakeGh();
     const result = await runCli(
@@ -992,7 +1104,12 @@ describe('Beads project sync CLI', () => {
     const summary = JSON.parse(result.stdout);
     expect(result.exitCode).toBe(0);
     expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
-    expect(fakeGh.calls).toEqual(['verifyAccess', 'discoverProject', 'listManagedIssues']);
+    expect(fakeGh.calls).toEqual([
+      'verifyAccess',
+      'discoverProject',
+      'refreshProject',
+      'listManagedIssues',
+    ]);
     expect(fakeGh.writes.slice(0, 4)).toEqual([
       'ensureProject',
       'ensureLabels',

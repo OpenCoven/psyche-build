@@ -19,6 +19,7 @@ export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
  *   projectTitle: string,
  *   projectMarker: string,
  *   issueMarker: string,
+ *   trustedIssueAuthors: readonly string[],
  *   legacyProjectMarkers?: readonly string[],
  *   assigneeMap: Record<string, string>,
  *   massClose: {
@@ -29,6 +30,8 @@ export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
  */
 
 const PROJECT_NODE_ID_PATTERN = /^PVT_[A-Za-z0-9_-]{8,255}$/u;
+const GITHUB_LOGIN_PATTERN =
+  /^(?!-)(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
 
 /**
  * @param {string} message
@@ -50,6 +53,24 @@ function machineMarkers(value, fieldName) {
   return Object.freeze([
     ...new Set(value.map((marker) => machineMarker(marker, fieldName))),
   ]);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {readonly string[]}
+ */
+function trustedIssueAuthors(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    fail('"trustedIssueAuthors" must be a non-empty array');
+  }
+  const normalized = value.map((login) => {
+    const candidate = requiredString(login, 'trustedIssueAuthors entry');
+    if (!GITHUB_LOGIN_PATTERN.test(candidate)) {
+      fail('"trustedIssueAuthors" entries must be valid GitHub logins');
+    }
+    return candidate.toLowerCase();
+  });
+  return Object.freeze([...new Set(normalized)]);
 }
 
 /**
@@ -173,6 +194,7 @@ export function parseSyncConfig(value) {
     'projectTitle',
     'projectMarker',
     'issueMarker',
+    'trustedIssueAuthors',
     'assigneeMap',
     'massClose',
   ], 'root', ['legacyProjectMarkers']);
@@ -190,6 +212,7 @@ export function parseSyncConfig(value) {
     projectTitle: requiredString(input.projectTitle, 'projectTitle'),
     projectMarker,
     issueMarker,
+    trustedIssueAuthors: trustedIssueAuthors(input.trustedIssueAuthors),
     ...(legacyProjectMarkers == null ? {} : { legacyProjectMarkers }),
     assigneeMap: Object.freeze(assigneeMap(input.assigneeMap)),
     massClose: Object.freeze(massClose(input.massClose)),

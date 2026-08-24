@@ -125,6 +125,13 @@ review the Project at the URL above, confirm its node ID and contents, change
 its visibility to public in GitHub, and then rerun a dry-run. Do not use a
 different marked Project as a substitute.
 
+Managed issue marker ownership is pinned separately by
+`trustedIssueAuthors` in `.github/beads-project-sync.json`. Logins are matched
+case-insensitively against GitHub's issue `user.login`; the mutable
+`author_association` value is informational and never authorizes a marker.
+The allowlist must remain non-empty. Every newly created mirror issue is
+re-read and rejected if its actor is not pinned.
+
 For a new repository with no pinned identity, any explicit bootstrap flow must
 create a fresh Project and return its node ID for a maintainer to review and
 commit before future synchronization. It must never adopt an existing marked
@@ -155,6 +162,14 @@ The guard normally refuses to close more than the greater of five managed
 issues or 25% of currently open managed issues. Run a dry-run first and inspect
 its artifact before manually enabling `allow_mass_close`; a refused run still
 publishes the same reviewable summary.
+
+Apply and provision runs acquire the GitHub-backed lease before repairing the
+Project. After acquisition they discard all cached Project discovery, item, and
+field state, then re-read the pinned ID, ownership marker or repository link,
+visibility, title, and README. Every individual REST, GraphQL, and `gh project`
+mutation revalidates lease ownership immediately before sending, including
+each request inside compound Project, view, field, and relationship repairs.
+Dry-runs take no lease and perform no writes.
 
 Project view names, layouts, and filters are automated. GitHub does not expose
 all view grouping and sorting controls through the API used here, so a

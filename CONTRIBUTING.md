@@ -139,6 +139,13 @@ the Project identity and contents, change visibility to public in GitHub, and
 rerun a dry-run. Never repoint `projectNodeId` merely because another Project
 has the managed marker.
 
+`.github/beads-project-sync.json` also pins the non-empty
+`trustedIssueAuthors` allowlist. Managed issue markers are owned only when
+GitHub's issue `user.login` matches a configured login case-insensitively;
+`author_association` does not grant ownership. Keep `BunsDev` pinned unless a
+reviewed ownership migration changes the issue-creation actor. Created issues
+are re-read and fail closed on an actor mismatch.
+
 After that gate is satisfied, the daily
 `.github/workflows/beads-project-sync.yml` run applies automatically. Use
 workflow dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an
@@ -157,8 +164,13 @@ The lock is an atomic, expiring repository tag-ref lease, so a local
 vice versa); dry-runs never acquire it. Do not delete or rewrite the
 `psyche-beads-project-sync-lock` tag manually. A stale lease is taken over with
 a non-forced fast-forward. The 30-minute lease is renewed by a bounded
-heartbeat and revalidated before reconciliation mutations; renewal or ownership
-proof failure stops further writes. Only the current lease owner may release it.
+heartbeat. After acquisition, apply discards all cached Project discovery,
+item, and field state and revalidates the pinned Project's identity, ownership,
+repository link, visibility, title, and README before repair. Lease ownership
+is then awaited immediately before every individual REST, GraphQL, or
+`gh project` mutation, including each sub-request in compound repairs. Renewal
+or ownership proof failure stops the next write. Only the current lease owner
+may release it.
 
 During a Beads version or schema migration, designate one sole migrator and
 stop other bootstrap/migration-capable processes until the migrated Dolt state

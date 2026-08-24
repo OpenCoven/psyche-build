@@ -842,6 +842,36 @@ describe('Beads project renderers', () => {
     }
   });
 
+  it('never promotes an HTTP backslash-path segment into a replacement host', () => {
+    const safeSources = [
+      String.raw`https://trusted.example\alice@evil.example\path`,
+      String.raw`[raw](https://trusted.example\alice@evil.example\path)`,
+      '[percent](https%3A%2F%2Ftrusted.example%5Calice%40evil.example%5Cpath)',
+      '[entity](https&colon;&sol;&sol;trusted.example&bsol;alice&commat;evil.example'
+        + '&bsol;path)',
+      String.raw`https://trusted.example\public\release.md`,
+    ];
+
+    for (const [index, source] of safeSources.entries()) {
+      const sanitized = sanitizePublicText(source);
+      expect(sanitized).toContain('trusted.example');
+      expect(sanitized).not.toMatch(/https:\/\/evil\.example/iu);
+      if (index === safeSources.length - 1) {
+        expect(sanitized).toBe(source);
+      }
+    }
+
+    expect(sanitizePublicText('https://alice@trusted.example/path')).toBe(
+      'https://trusted.example/path',
+    );
+    for (const actualUserinfo of [
+      String.raw`https:\\alice@trusted.example\path`,
+      '[credentials](https%3A%5C%5Calice%40trusted.example%5Cpath)',
+    ]) {
+      expect(() => sanitizePublicText(actualUserinfo)).toThrow(/URL credentials/i);
+    }
+  });
+
   it('preserves safe entity URLs without decoding embedded unsafe HTML', () => {
     const safeDescription = [
       '[public](https&colon;&sol;&sol;example.com&sol;srv&sol;public&sol;release.md "Public")',

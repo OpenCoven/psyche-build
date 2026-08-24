@@ -1425,6 +1425,7 @@ function parseAbsoluteUri(value) {
   if (schemeEnd == null) {
     return null;
   }
+  const scheme = stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase();
 
   const fragmentDelimiter = value.indexOf('#', schemeEnd + 1);
   const resourceEnd = fragmentDelimiter === -1 ? value.length : fragmentDelimiter;
@@ -1435,7 +1436,28 @@ function parseAbsoluteUri(value) {
   let pathStart = hierarchyStart;
   let authority = null;
 
-  if (value.startsWith('//', hierarchyStart)) {
+  if (
+    (scheme === 'http' || scheme === 'https')
+    && (value[hierarchyStart] === '/' || value[hierarchyStart] === '\\')
+  ) {
+    let authorityStart = hierarchyStart;
+    while (value[authorityStart] === '/' || value[authorityStart] === '\\') {
+      authorityStart += 1;
+    }
+    let authorityEnd = authorityStart;
+    while (
+      authorityEnd < hierarchyEnd
+      && value[authorityEnd] !== '/'
+      && value[authorityEnd] !== '\\'
+    ) {
+      authorityEnd += 1;
+    }
+    authority = {
+      start: authorityStart,
+      end: authorityEnd,
+    };
+    pathStart = authorityEnd;
+  } else if (value.startsWith('//', hierarchyStart)) {
     const authorityStart = hierarchyStart + 2;
     const slashIndex = value.indexOf('/', authorityStart);
     const authorityEnd = slashIndex === -1 || slashIndex > hierarchyEnd
@@ -1449,7 +1471,7 @@ function parseAbsoluteUri(value) {
   }
 
   return {
-    scheme: stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase(),
+    scheme,
     authority,
     path: {
       start: pathStart,

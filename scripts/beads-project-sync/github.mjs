@@ -51,7 +51,8 @@ const APPLY_LOCK_PERMISSION_MESSAGE =
   + 'Configure the fine-grained token with repository Contents: read and write, '
   + 'Issues: read and write, Metadata: read, and organization Projects: read and write.';
 const SAFE_LOCK_IDENTITY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
-const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const GITHUB_LOGIN_PATTERN =
+  /^(?!-)(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
 
 const STATUS_OPTIONS = Object.freeze([
   Object.freeze({ name: 'Backlog', color: 'GRAY', description: '' }),
@@ -1315,8 +1316,10 @@ function normalizeFieldMap(rawFields) {
  *   bootstrap?: boolean,
  *   projectMarker?: string,
  *   issueMarker?: string,
+ *   trustedIssueAuthors: readonly string[],
  *   legacyProjectMarkers?: readonly string[],
  *   legacyIssueMarkers?: readonly string[],
+ *   mutationMode?: 'lease-required' | 'trusted-setup',
  *   sleep?: (milliseconds: number) => void | Promise<void>,
  *   now?: () => number,
  *   setTimer?: (callback: () => void, milliseconds: number) => unknown,
@@ -1351,6 +1354,20 @@ export function createGhClient(options) {
   }
   if (projectNodeId != null && bootstrap) {
     fail('projectNodeId and bootstrap mode cannot be combined');
+  }
+  if (!Array.isArray(options.trustedIssueAuthors) || options.trustedIssueAuthors.length === 0) {
+    fail('trustedIssueAuthors must be a non-empty array');
+  }
+  const trustedIssueAuthors = new Set(options.trustedIssueAuthors.map((login) => {
+    const candidate = requiredString(login, 'trustedIssueAuthors entry');
+    if (!GITHUB_LOGIN_PATTERN.test(candidate)) {
+      fail('trustedIssueAuthors entries must be valid GitHub logins');
+    }
+    return candidate.toLowerCase();
+  }));
+  const mutationMode = options.mutationMode ?? 'lease-required';
+  if (mutationMode !== 'lease-required' && mutationMode !== 'trusted-setup') {
+    fail('mutationMode must be "lease-required" or "trusted-setup"');
   }
   /** @type {(milliseconds: number) => void | Promise<void>} */
   const sleep = typeof options.sleep === 'function'
@@ -1443,8 +1460,23 @@ export function createGhClient(options) {
    * @returns {boolean}
    */
   function isTrustedManagedIssue(issue) {
-    const association = stringOrEmpty(issue.author_association).toUpperCase();
-    return TRUSTED_AUTHOR_ASSOCIATIONS.has(association);
+    return trustedIssueAuthors.has(
+      stringOrEmpty(record(issue.user).login).trim().toLowerCase(),
+    );
+  }
+
+  async function assertManagedMutationLease() {
+    if (mutationMode === 'trusted-setup') {
+      return;
+    }
+    if (activeApplyLockLease == null) {
+      throw new GhClientError(
+        'lease',
+        'GitHub mutation refused because no active apply lease is owned',
+        409,
+      );
+    }
+    await activeApplyLockLease.assertOwned();
   }
 
   /**
@@ -1511,12 +1543,32 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {readonly string[]} args
+   * @param {string | undefined} [stdin]
+   * @returns {Promise<GhRunResult>}
+   */
+  async function runManagedGhOnce(args, stdin) {
+    await assertManagedMutationLease();
+    return runGhOnce(args, stdin);
+  }
+
+  /**
+   * @param {readonly string[]} args
+   * @param {string | undefined} [stdin]
+   * @returns {Promise<GhRunResult>}
+   */
+  async function runManagedGh(args, stdin) {
+    return withRetry(() => runManagedGhOnce(args, stdin));
+  }
+
+  /**
    * @param {'GET' | 'POST' | 'PATCH' | 'DELETE'} method
    * @param {string} endpoint
    * @param {Record<string, unknown> | undefined} [body]
+   * @param {'managed' | 'lock'} [mutationScope]
    * @returns {Promise<unknown>}
    */
-  async function rest(method, endpoint, body) {
+  async function rest(method, endpoint, body, mutationScope = 'managed') {
     const args = [
       'api',
       endpoint,
@@ -1525,7 +1577,10 @@ export function createGhClient(options) {
       ...API_HEADERS,
       ...(body === undefined ? [] : ['--input', '-']),
     ];
-    const execute = method === 'POST' || method === 'DELETE' ? runGhOnce : runGh;
+    const isMutation = method !== 'GET';
+    const execute = !isMutation || mutationScope === 'lock'
+      ? (method === 'POST' || method === 'DELETE' ? runGhOnce : runGh)
+      : (method === 'POST' || method === 'DELETE' ? runManagedGhOnce : runManagedGh);
     try {
       const result = await execute(
         args,
@@ -1677,6 +1732,25 @@ export function createGhClient(options) {
    */
   async function graphql(query, variables) {
     return withRetry(() => graphqlOnce(query, variables));
+  }
+
+  /**
+   * @param {string} query
+   * @param {Record<string, unknown>} variables
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function managedGraphqlOnce(query, variables) {
+    await assertManagedMutationLease();
+    return graphqlOnce(query, variables);
+  }
+
+  /**
+   * @param {string} query
+   * @param {Record<string, unknown>} variables
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function managedGraphql(query, variables) {
+    return withRetry(() => managedGraphqlOnce(query, variables));
   }
 
   /**
@@ -1858,7 +1932,7 @@ export function createGhClient(options) {
         message: renderApplyLockMessage(state),
         tree: treeSha,
         parents: [parentSha],
-      }),
+      }, 'lock'),
       async () => null,
     ));
     return requiredString(created.sha, 'apply lock commit sha');
@@ -1876,7 +1950,7 @@ export function createGhClient(options) {
         () => rest('POST', `repos/${owner}/${repo}/git/refs`, {
           ref: APPLY_LOCK_REF,
           sha,
-        }),
+        }, 'lock'),
         async () => {
           const current = await readApplyLock();
           return current?.sha === sha ? {} : null;
@@ -1912,6 +1986,7 @@ export function createGhClient(options) {
           'PATCH',
           `repos/${owner}/${repo}/git/refs/${APPLY_LOCK_REF_ENDPOINT}`,
           { sha, force: false },
+          'lock',
         ),
         async () => {
           const current = await readApplyLock();
@@ -2641,6 +2716,7 @@ export function createGhClient(options) {
         rememberProject(null);
         return null;
       }
+
       const markers = extractProjectReadmeMarkers(
         project.readme,
         recognizedProjectMarkerValues,
@@ -2720,6 +2796,20 @@ export function createGhClient(options) {
   }
 
   /**
+   * Invalidates all Project-derived state before the post-lease ownership read.
+   *
+   * @returns {Promise<ProjectContext | null>}
+   */
+  async function refreshProject() {
+    projectContext = null;
+    fieldContext = new Map();
+    lastDiscoveredProjects = [];
+    projectDiscoveryComplete = false;
+    projectItemsCache = null;
+    return discoverProject();
+  }
+
+  /**
    * @param {string | ProjectContext} projectInput
    * @returns {Promise<boolean>}
    */
@@ -2768,7 +2858,7 @@ export function createGhClient(options) {
     }
     await ambiguousMutation(
       `Repository link for Project "${project.id}"`,
-      () => graphqlOnce(LINK_PROJECT_MUTATION, {
+      () => managedGraphqlOnce(LINK_PROJECT_MUTATION, {
         projectId: project.id,
         repositoryId,
       }),
@@ -2790,7 +2880,7 @@ export function createGhClient(options) {
     const existing = await discoverProject();
     if (existing) {
       if (existing.title !== title || existing.readme !== readme) {
-        const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
+        const updatedPayload = await managedGraphql(UPDATE_PROJECT_MUTATION, {
           projectId: existing.id,
           title,
           readme,
@@ -2846,7 +2936,7 @@ export function createGhClient(options) {
 
     const createdPayload = await ambiguousMutation(
       `Project create for "${title}"`,
-      () => graphqlOnce(CREATE_PROJECT_MUTATION, {
+      () => managedGraphqlOnce(CREATE_PROJECT_MUTATION, {
         ownerId: organizationId,
         title,
       }),
@@ -2867,7 +2957,7 @@ export function createGhClient(options) {
     const created = normalizeProject(createdData.projectV2);
 
     if (created.title !== title || !created.public || created.readme !== readme) {
-      const updatedPayload = await graphql(INITIALIZE_FRESH_PROJECT_MUTATION, {
+      const updatedPayload = await managedGraphql(INITIALIZE_FRESH_PROJECT_MUTATION, {
         projectId: created.id,
         title,
         readme,
@@ -2942,7 +3032,7 @@ export function createGhClient(options) {
       if (!field) {
         await ambiguousMutation(
           `Project field create for "${definition.name}"`,
-          () => graphqlOnce(CREATE_FIELD_MUTATION, {
+          () => managedGraphqlOnce(CREATE_FIELD_MUTATION, {
             input: {
               projectId: project.id,
               name: definition.name,
@@ -2977,7 +3067,7 @@ export function createGhClient(options) {
         );
       }
       if (definition.options.length > 0 && !optionNamesMatch(definition.options, field.options)) {
-        await graphql(UPDATE_FIELD_MUTATION, {
+        await managedGraphql(UPDATE_FIELD_MUTATION, {
           fieldId: field.id,
           options: definition.options.map((option) => {
             const id = field.options.get(option.name);
@@ -3047,7 +3137,7 @@ export function createGhClient(options) {
       if (!existing) {
         const createdPayload = await ambiguousMutation(
           `Project view create for "${desired.name}"`,
-          () => graphqlOnce(CREATE_VIEW_MUTATION, {
+          () => managedGraphqlOnce(CREATE_VIEW_MUTATION, {
             input: {
               projectId: project.id,
               name: desired.name,
@@ -3073,7 +3163,7 @@ export function createGhClient(options) {
         if (!created) {
           throw new GhClientError('response', `GitHub did not return created view "${desired.name}"`);
         }
-        await graphql(UPDATE_VIEW_MUTATION, {
+        await managedGraphql(UPDATE_VIEW_MUTATION, {
           input: {
             viewId: created.id,
             filter: desired.filter,
@@ -3083,7 +3173,7 @@ export function createGhClient(options) {
         continue;
       }
       if (existing.layout !== desired.layout || existing.filter !== desired.filter) {
-        await graphql(UPDATE_VIEW_MUTATION, {
+        await managedGraphql(UPDATE_VIEW_MUTATION, {
           input: {
             viewId: existing.id,
             ...desired,
@@ -3120,9 +3210,32 @@ export function createGhClient(options) {
       () => rest('POST', `repos/${owner}/${repo}/issues`, payload),
       () => findIssueByBeadId(beadId),
     ));
+    const number = positiveInteger(created.number, 'created issue number');
+    const reread = record(await rest(
+      'GET',
+      `repos/${owner}/${repo}/issues/${number}`,
+    ));
+    if (!isTrustedManagedIssue(reread)) {
+      throw new GhClientError(
+        'ownership',
+        `Created issue #${number} actor is not in trustedIssueAuthors`,
+      );
+    }
+    const rereadBeadId = extractBeadId(
+      stringOrEmpty(reread.body),
+      number,
+      recognizedIssueMarkerValues,
+    );
+    if (rereadBeadId !== beadId) {
+      throw new GhClientError(
+        'ownership',
+        `Created issue #${number} did not retain the managed Bead marker for "${beadId}"`,
+      );
+    }
     return {
       ...created,
-      number: positiveInteger(created.number, 'created issue number'),
+      ...reread,
+      number,
     };
   }
 
@@ -3217,7 +3330,7 @@ export function createGhClient(options) {
     const item = await ambiguousMutation(
       `Project item add for issue #${issueNumber}`,
       async () => {
-        const result = await runGhOnce([
+        const result = await runManagedGhOnce([
           'project',
           'item-add',
           String(project.number),
@@ -3305,7 +3418,7 @@ export function createGhClient(options) {
   }`);
     }
 
-    await graphql(`
+    await managedGraphql(`
 mutation UpdateManagedProjectItemFields(
   ${declarations.join('\n  ')}
 ) {
@@ -3702,7 +3815,7 @@ ${selections.join('\n')}
    */
   async function archiveItem(operation) {
     const project = requireProject();
-    await runGh([
+    await runManagedGh([
       'project',
       'item-archive',
       String(project.number),
@@ -3722,7 +3835,7 @@ ${selections.join('\n')}
    */
   async function restoreItem(operation) {
     const project = requireProject();
-    await runGh([
+    await runManagedGh([
       'project',
       'item-archive',
       String(project.number),
@@ -3745,7 +3858,7 @@ ${selections.join('\n')}
     if (!readme.includes(currentProjectReadmeMarker)) {
       fail('project README must contain the managed marker');
     }
-    await graphql(UPDATE_PROJECT_README_MUTATION, {
+    await managedGraphql(UPDATE_PROJECT_README_MUTATION, {
       projectId: project.id,
       readme,
     });
@@ -3774,6 +3887,7 @@ ${selections.join('\n')}
     listManagedIssues,
     ensureLabels,
     discoverProject,
+    refreshProject,
     ensureProject,
     provisionProject,
     discoverFields,

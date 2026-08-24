@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  createGhClient,
+  createGhClient as createGhClientImplementation,
   PROJECT_VIEWS,
 } from '../scripts/beads-project-sync/github.mjs';
 import type {
@@ -35,6 +35,22 @@ const apiHeaders = [
   'X-GitHub-Api-Version: 2026-03-10',
   '--include',
 ];
+
+type TestGhClientOptions = Omit<
+  Parameters<typeof createGhClientImplementation>[0],
+  'mutationMode' | 'trustedIssueAuthors'
+> & {
+  mutationMode?: 'lease-required' | 'trusted-setup';
+  trustedIssueAuthors?: readonly string[];
+};
+
+function createGhClient(options: TestGhClientOptions) {
+  return createGhClientImplementation({
+    ...options,
+    trustedIssueAuthors: options.trustedIssueAuthors ?? ['BunsDev'],
+    mutationMode: options.mutationMode ?? 'trusted-setup',
+  });
+}
 
 interface RunCall {
   command: string;
@@ -243,13 +259,13 @@ function managedBody(id: string, extra = ''): string {
 }
 
 function trustedIssue<T extends Record<string, unknown>>(issue: T): T & {
-  author_association: 'MEMBER';
-  user: { login: 'trusted-maintainer' };
+  author_association: 'NONE';
+  user: { login: 'BunsDev' };
 } {
   return {
     ...issue,
-    author_association: 'MEMBER',
-    user: { login: 'trusted-maintainer' },
+    author_association: 'NONE',
+    user: { login: 'BunsDev' },
   };
 }
 
@@ -634,7 +650,7 @@ describe('createGhClient', () => {
     ).rejects.toThrow(/duplicate managed bead id.*pb-6/i);
   });
 
-  it('ignores attacker-authored markers while accepting trusted associations', async () => {
+  it('uses the pinned author login instead of mutable author association', async () => {
     const runner = createRunner([
       success([
         {
@@ -642,7 +658,7 @@ describe('createGhClient', () => {
           title: 'Attacker collision',
           body: `${managedBody('pb-owned')}\n<!-- psyche-bead-sync:v1 bead-id=pb-shadow -->`,
           state: 'open',
-          author_association: 'NONE',
+          author_association: 'MEMBER',
           user: { login: 'public-attacker' },
         },
         trustedIssue({
@@ -663,6 +679,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      trustedIssueAuthors: ['bunsdev'],
     });
 
     await expect(client.listManagedIssues()).resolves.toEqual([
@@ -670,7 +687,7 @@ describe('createGhClient', () => {
     ]);
   });
 
-  it('still rejects duplicate trusted markers', async () => {
+  it('still rejects duplicate markers from the trusted author case-insensitively', async () => {
     const runner = createRunner([
       success([
         trustedIssue({
@@ -685,7 +702,7 @@ describe('createGhClient', () => {
           body: managedBody('pb-duplicate'),
           state: 'open',
           author_association: 'COLLABORATOR',
-          user: { login: 'trusted-collaborator' },
+          user: { login: 'bUnSdEv' },
         },
       ]),
     ]);
@@ -1021,6 +1038,52 @@ describe('createGhClient', () => {
     })).resolves.toMatchObject({ id: projectNodeId });
 
     expect(runner.calls).toHaveLength(1);
+  });
+
+  it('invalidates Project discovery state and repairs from a fresh post-lock snapshot', async () => {
+    const title = 'Public Beads';
+    const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
+    const stale = {
+      id: projectNodeId,
+      number: 11,
+      title,
+      readme,
+      public: true,
+      url: 'https://github.com/orgs/OpenCoven/projects/11',
+    };
+    const changed = {
+      ...stale,
+      title: 'Changed while waiting for the lock',
+      readme: `${boundProjectReadmeMarker}\n# Changed while waiting`,
+    };
+    const runner = createRunner([
+      projectDiscovery([stale]),
+      projectDiscovery([changed]),
+      success({
+        data: {
+          updateProjectV2: {
+            projectV2: { ...changed, title, readme },
+          },
+        },
+      }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
+
+    await expect(client.discoverProject()).resolves.toMatchObject({ title });
+    await expect(client.refreshProject()).resolves.toMatchObject({
+      title: 'Changed while waiting for the lock',
+    });
+    await expect(client.ensureProject({ title, readme })).resolves.toMatchObject({
+      title,
+      readme,
+    });
+
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('query DiscoverManagedProject')
+    )).toHaveLength(2);
+    expect(parseStdin(runner.calls[2]!)).toMatchObject({
+      variables: { projectId: projectNodeId, title, readme },
+    });
   });
 
   it('uses repository binding when an unbound marked Project is linked elsewhere', async () => {
@@ -1957,6 +2020,163 @@ describe('createGhClient', () => {
     }
   });
 
+  it('rechecks lease ownership between a compound view create and filter update', async () => {
+    const backend = createApplyLockBackend();
+    const timerHarness = createTimerHarness();
+    const businessCalls: RunCall[] = [];
+    const run: GhRun = async (command, args, options) => {
+      if (args[0] !== 'api' || args[1] !== 'graphql') {
+        return backend.run(command, args, options);
+      }
+      const call = { command, args: [...args], options: { ...options } };
+      businessCalls.push(call);
+      const query = String(parseStdin(call).query ?? '');
+      if (query.includes('query DiscoverManagedProject')) {
+        return projectDiscovery([{
+          id: projectNodeId,
+          number: 11,
+          title: 'Public Beads',
+          readme: boundProjectReadmeMarker,
+          public: true,
+        }]);
+      }
+      if (query.includes('query DiscoverManagedProjectViews')) {
+        return success({ data: { node: { views: {
+          nodes: [],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        } } } });
+      }
+      if (query.includes('mutation CreateManagedProjectView')) {
+        backend.stealLock({
+          owner: 'contender',
+          runId: 'other-run',
+          leaseId: 'other-lease',
+          acquiredAt: 20_000,
+          expiresAt: 80_000,
+        });
+        return success({ data: { createProjectV2View: { projectV2View: {
+          id: 'V-created',
+          name: PROJECT_VIEWS[0]?.name,
+          layout: PROJECT_VIEWS[0]?.layout,
+          filter: '',
+        } } } });
+      }
+      throw new Error(`Unexpected business GraphQL request: ${query}`);
+    };
+    const client = createGhClient({
+      run,
+      owner,
+      repo,
+      token,
+      projectNodeId,
+      mutationMode: 'lease-required',
+      now: () => 10_000,
+      setTimer: timerHarness.setTimer,
+      clearTimer: timerHarness.clearTimer,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'test',
+      runId: 'view-fence',
+      leaseId: 'view-lease',
+      ttlMs: 60_000,
+    });
+    const lease = client.startApplyLockLease(handle);
+
+    try {
+      await client.discoverProject();
+      await expect(client.ensureViews()).rejects.toThrow(/lease.*lost|ownership/i);
+    } finally {
+      await lease.stop();
+    }
+
+    expect(businessCalls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProjectView')
+    )).toHaveLength(1);
+    expect(businessCalls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation UpdateManagedProjectView')
+    )).toBe(false);
+  });
+
+  it('rechecks lease ownership between Project repair and repository relinking', async () => {
+    const backend = createApplyLockBackend();
+    const timerHarness = createTimerHarness();
+    const businessCalls: RunCall[] = [];
+    const desiredTitle = 'Public Beads';
+    const desiredReadme = `${boundProjectReadmeMarker}\n# Public Beads`;
+    const stale = {
+      id: projectNodeId,
+      number: 11,
+      title: 'Renamed',
+      readme: `${boundProjectReadmeMarker}\n# Renamed`,
+      public: true,
+      repositories: {
+        nodes: [],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    };
+    const run: GhRun = async (command, args, options) => {
+      if (args[0] !== 'api' || args[1] !== 'graphql') {
+        return backend.run(command, args, options);
+      }
+      const call = { command, args: [...args], options: { ...options } };
+      businessCalls.push(call);
+      const query = String(parseStdin(call).query ?? '');
+      if (query.includes('query DiscoverManagedProject')) {
+        return projectDiscovery([stale]);
+      }
+      if (query.includes('mutation UpdateManagedProject')) {
+        backend.stealLock({
+          owner: 'contender',
+          runId: 'other-run',
+          leaseId: 'other-lease',
+          acquiredAt: 20_000,
+          expiresAt: 80_000,
+        });
+        return success({ data: { updateProjectV2: { projectV2: {
+          ...stale,
+          title: desiredTitle,
+          readme: desiredReadme,
+        } } } });
+      }
+      throw new Error(`Unexpected business GraphQL request: ${query}`);
+    };
+    const client = createGhClient({
+      run,
+      owner,
+      repo,
+      token,
+      projectNodeId,
+      mutationMode: 'lease-required',
+      now: () => 10_000,
+      setTimer: timerHarness.setTimer,
+      clearTimer: timerHarness.clearTimer,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'test',
+      runId: 'project-fence',
+      leaseId: 'project-lease',
+      ttlMs: 60_000,
+    });
+    const lease = client.startApplyLockLease(handle);
+
+    try {
+      await client.discoverProject();
+      await expect(client.ensureProject({
+        title: desiredTitle,
+        readme: desiredReadme,
+      })).rejects.toThrow(/lease.*lost|ownership/i);
+    } finally {
+      await lease.stop();
+    }
+
+    expect(businessCalls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation UpdateManagedProject')
+    )).toHaveLength(1);
+    expect(businessCalls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation LinkManagedProjectRepository')
+    )).toBe(false);
+  });
+
   it('re-reads a Project view by name after an applied-then-5xx create', async () => {
     const transient = Object.assign(new Error('HTTP 503 view response lost'), { status: 503 });
     const existingViews = PROJECT_VIEWS
@@ -2011,6 +2231,7 @@ describe('createGhClient', () => {
     ].join('\n');
     const runner = createRunner([
       success({ number: 42 }),
+      success(trustedIssue({ number: 42, body })),
       success({ number: 42 }),
       success({ number: 42 }),
       success({ number: 42 }),
@@ -2044,6 +2265,7 @@ describe('createGhClient', () => {
 
     expect(runner.calls.map((call) => call.args)).toEqual([
       ['api', `repos/${owner}/${repo}/issues`, '--method', 'POST', ...apiHeaders, '--input', '-'],
+      ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'GET', ...apiHeaders],
       ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
       ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
       ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
@@ -2057,24 +2279,45 @@ describe('createGhClient', () => {
       labels: ['bead', 'bead:feature', 'priority:P1', 'status:blocked'],
       assignees: ['octocat'],
     });
-    expect(parseStdin(runner.calls[1]!)).toEqual({
+    expect(parseStdin(runner.calls[2]!)).toEqual({
       title: '[pb-42] Updated',
       body,
       state: 'open',
       labels: ['bead', 'bead:feature', 'priority:P1', 'status:blocked'],
       assignees: ['BunsDev'],
     });
-    expect(parseStdin(runner.calls[2]!)).toEqual({
+    expect(parseStdin(runner.calls[3]!)).toEqual({
       title: '[pb-42] Cleared',
       body,
       state: 'open',
       labels: ['bead', 'bead:feature', 'priority:P1', 'status:blocked'],
       assignees: [],
     });
-    expect(parseStdin(runner.calls[3]!)).toEqual({ state: 'closed' });
-    expect(parseStdin(runner.calls[4]!)).toEqual({ state: 'open' });
-    expect(parseStdin(runner.calls[5]!)).toEqual({ labels: ['bead', 'priority:P2'] });
-    expect(parseStdin(runner.calls[6]!)).toEqual({ assignees: ['hubot'] });
+    expect(parseStdin(runner.calls[4]!)).toEqual({ state: 'closed' });
+    expect(parseStdin(runner.calls[5]!)).toEqual({ state: 'open' });
+    expect(parseStdin(runner.calls[6]!)).toEqual({ labels: ['bead', 'priority:P2'] });
+    expect(parseStdin(runner.calls[7]!)).toEqual({ assignees: ['hubot'] });
+  });
+
+  it('rejects a created managed issue when its reread actor is outside the pinned allowlist', async () => {
+    const body = managedBody('pb-untrusted-create');
+    const runner = createRunner([
+      success({ number: 91 }),
+      success({
+        number: 91,
+        body,
+        author_association: 'MEMBER',
+        user: { login: 'collaborator-attacker' },
+      }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.createIssue({
+      beadId: 'pb-untrusted-create',
+      title: '[pb-untrusted-create] Verify actor',
+      body,
+    })).rejects.toThrow(/created issue.*actor|trusted issue author|ownership/i);
+    expect(runner.calls[1]?.args).toContain(`repos/${owner}/${repo}/issues/91`);
   });
 
   it('adds one project item and batches each requested field set into one GraphQL invocation', async () => {
@@ -2730,6 +2973,7 @@ describe('createGhClient', () => {
     const runner = createRunner([
       rateLimit,
       success({ number: 88 }),
+      success(trustedIssue({ number: 88, body })),
     ]);
     const client = createGhClient({
       run: runner.run,
@@ -3342,6 +3586,10 @@ describe('createGhClient', () => {
         state: 'open',
         html_url: `https://github.com/${owner}/${repo}/issues/77`,
       })]),
+      success(trustedIssue({
+        number: 77,
+        body,
+      })),
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
@@ -3355,6 +3603,7 @@ describe('createGhClient', () => {
     expect(runner.calls[1]?.args).toContain(
       `repos/${owner}/${repo}/issues?state=all&per_page=100&page=1`,
     );
+    expect(runner.calls[2]?.args).toContain(`repos/${owner}/${repo}/issues/77`);
   });
 
   it('re-reads issue identity after an applied-then-transport failure without repeating the POST', async () => {
@@ -3370,6 +3619,10 @@ describe('createGhClient', () => {
         state: 'open',
         html_url: `https://github.com/${owner}/${repo}/issues/78`,
       })]),
+      success(trustedIssue({
+        number: 78,
+        body,
+      })),
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
 
@@ -3383,6 +3636,7 @@ describe('createGhClient', () => {
     expect(runner.calls[1]?.args).toContain(
       `repos/${owner}/${repo}/issues?state=all&per_page=100&page=1`,
     );
+    expect(runner.calls[2]?.args).toContain(`repos/${owner}/${repo}/issues/78`);
   });
 
   it.each([

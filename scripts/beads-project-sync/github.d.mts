@@ -221,6 +221,7 @@ export interface GhClient {
   ensureLabels(): Promise<readonly ManagedLabel[]>;
 
   discoverProject(): Promise<ProjectContext | null>;
+  refreshProject(): Promise<ProjectContext | null>;
   ensureProject(input: { title: string; readme: string }): Promise<ProjectContext>;
   provisionProject(input: { title: string; readme: string }): Promise<ProvisionedProject>;
 
@@ -299,8 +300,10 @@ export function createGhClient(options: {
   bootstrap?: boolean;
   projectMarker?: string;
   issueMarker?: string;
+  trustedIssueAuthors: readonly string[];
   legacyProjectMarkers?: readonly string[];
   legacyIssueMarkers?: readonly string[];
+  mutationMode?: 'lease-required' | 'trusted-setup';
   sleep?: (milliseconds: number) => void | Promise<void>;
   now?: () => number;
   setTimer?: (callback: () => void, milliseconds: number) => unknown;
