@@ -2541,7 +2541,6 @@
       if (state.activeThreadId === thread.id) {
         setProjectStatus(findProject(thread.projectId), "ok");
       }
-      if (launch.launchKind === "coven-code") refreshCovenSessions();
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
@@ -2600,7 +2599,6 @@
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
-        if (launch.launchKind === "coven-code") refreshCovenSessions();
       } else {
         if (terminalController &&
             typeof terminalController.restoreAfterFailedPtyStart === "function") {

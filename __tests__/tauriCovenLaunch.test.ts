@@ -1456,6 +1456,51 @@ describe('native Coven launch routing', () => {
     expect(writes.join('')).toContain('[process exited]');
   });
 
+  it.each([
+    ['start', async () => undefined],
+    ['reattach', async () => { throw new Error('PTY already running for thread'); }],
+  ])(
+    'does not immediately refresh Coven sessions after bare local CLI %s',
+    async (_mode, invokePtyStart) => {
+      const source = functionSource('spawnPty');
+      expect(source).not.toContain('if (launch.launchKind === "coven-code") refreshCovenSessions();');
+
+      const refreshCalls: string[] = [];
+      const thread = {
+        id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
+        closing: false, closeStarted: false, startInFlight: false, stopRequested: false,
+        ptyStarted: false, launch: {
+          command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+          launchKind: 'coven-code',
+        }, term: { cols: 120, rows: 40, write: () => undefined },
+      };
+      const state = { threads: [thread], activeThreadId: thread.id };
+      const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(source, {
+        ...spawnPtyRuntimeDeps,
+        invoke: async (command: string) => {
+          if (command === 'pty_start') return invokePtyStart();
+          return undefined;
+        },
+        isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+        pendingDataBuffers: new Map(),
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => ({ id: 'project' }),
+        setStatus: () => undefined,
+        stopThreadPty: () => Promise.resolve(false),
+        refreshCovenSessions: async () => { refreshCalls.push('refresh'); },
+      });
+
+      await expect(spawnPty(thread)).resolves.toBe(true);
+      expect(thread.status).toBe('running');
+      expect(thread.ptyStarted).toBe(true);
+      expect(refreshCalls).toEqual([]);
+    },
+  );
+
   it('prevents rapid double retry while a retry start is in flight', async () => {
     let resolveStart: (() => void) | null = null;
     let starts = 0;
