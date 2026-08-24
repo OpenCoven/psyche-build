@@ -13,6 +13,10 @@ import {
   recognizedMarkers,
   recognizedProjectMarkers,
 } from './markers.mjs';
+import {
+  APPLY_LOCK_REF,
+  APPLY_LOCK_REF_ENDPOINT,
+} from './config.mjs';
 
 export const PROJECT_README_MARKER = projectReadmeMarker(DEFAULT_PROJECT_MARKER);
 export const LEGACY_PROJECT_README_MARKER = projectReadmeMarker(LEGACY_PROJECT_MARKERS[0]);
@@ -41,8 +45,6 @@ const MAX_ERROR_DETAIL = 512;
 const MAX_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 25;
 const MAX_RETRY_DELAY_MS = 60_000;
-const APPLY_LOCK_REF = 'refs/tags/psyche-beads-project-sync-lock';
-const APPLY_LOCK_REF_ENDPOINT = 'tags/psyche-beads-project-sync-lock';
 const APPLY_LOCK_MESSAGE_PREFIX = 'psyche-beads-project-lock:v1 ';
 const DEFAULT_APPLY_LOCK_TTL_MS = 30 * 60 * 1_000;
 const MAX_APPLY_LOCK_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -1316,6 +1318,7 @@ function normalizeFieldMap(rawFields) {
  *   bootstrap?: boolean,
  *   projectMarker?: string,
  *   issueMarker?: string,
+ *   applyLockRef?: typeof APPLY_LOCK_REF,
  *   trustedIssueAuthors: readonly string[],
  *   legacyProjectMarkers?: readonly string[],
  *   legacyIssueMarkers?: readonly string[],
@@ -1342,6 +1345,10 @@ export function createGhClient(options) {
     'repository identity',
   );
   const token = requiredString(options.token, 'token');
+  const applyLockRef = options.applyLockRef ?? APPLY_LOCK_REF;
+  if (applyLockRef !== APPLY_LOCK_REF) {
+    fail(`applyLockRef must be the dedicated branch ref "${APPLY_LOCK_REF}"`);
+  }
   const projectNodeId = options.projectNodeId == null
     ? null
     : requiredString(options.projectNodeId, 'projectNodeId');
@@ -1913,7 +1920,7 @@ export function createGhClient(options) {
     const state = parseApplyLockMessage(commit.message);
     return {
       ...state,
-      ref: APPLY_LOCK_REF,
+      ref: applyLockRef,
       sha,
       treeSha: requiredString(record(commit.tree).sha, 'apply lock tree sha'),
     };
@@ -1948,7 +1955,7 @@ export function createGhClient(options) {
       await ambiguousMutation(
         `GitHub apply lock acquisition for "${leaseId}"`,
         () => rest('POST', `repos/${owner}/${repo}/git/refs`, {
-          ref: APPLY_LOCK_REF,
+          ref: applyLockRef,
           sha,
         }, 'lock'),
         async () => {
@@ -2067,7 +2074,7 @@ export function createGhClient(options) {
       }
       return {
         ...state,
-        ref: APPLY_LOCK_REF,
+        ref: applyLockRef,
         sha,
         treeSha,
       };
@@ -2089,7 +2096,7 @@ export function createGhClient(options) {
     if (current == null || !isOwnedApplyLock(handle, current)) {
       throw new GhClientError(
         'lease-lost',
-        'GitHub apply lease lost because the current tag ref is no longer owned by this run',
+        'GitHub apply lease lost because the current lock branch is no longer owned by this run',
         409,
       );
     }
@@ -2110,7 +2117,7 @@ export function createGhClient(options) {
     await updateApplyLockRef(sha, current.leaseId);
     const renewedHandle = {
       ...renewed,
-      ref: APPLY_LOCK_REF,
+      ref: applyLockRef,
       sha,
       treeSha: current.treeSha,
     };
@@ -2245,7 +2252,7 @@ export function createGhClient(options) {
           if (current == null || !isOwnedApplyLock(currentHandle, current)) {
             throw new GhClientError(
               'lease-lost',
-              'GitHub apply lease lost because ownership of the current tag ref could not be proven',
+              'GitHub apply lease lost because ownership of the current lock branch could not be proven',
               409,
             );
           }
@@ -2327,14 +2334,6 @@ export function createGhClient(options) {
     const leaseId = lockIdentity(handle?.leaseId, 'apply lock leaseId');
     const current = await readApplyLock();
     if (
-      current?.state === 'released'
-      && current.owner === lockOwner
-      && current.runId === runId
-      && current.leaseId === leaseId
-    ) {
-      return;
-    }
-    if (
       current == null
       || current.state !== 'acquired'
       || current.sha !== handle.sha
@@ -2349,13 +2348,26 @@ export function createGhClient(options) {
       );
     }
 
-    const released = /** @type {ApplyLockState} */ ({
-      ...current,
-      state: 'released',
-      expiresAt: now(),
-    });
-    const sha = await createApplyLockCommit(released, current.sha, current.treeSha);
-    await updateApplyLockRef(sha, leaseId);
+    try {
+      await ambiguousMutation(
+        `GitHub apply lock release for "${leaseId}"`,
+        () => rest(
+          'DELETE',
+          `repos/${owner}/${repo}/git/refs/${APPLY_LOCK_REF_ENDPOINT}`,
+          undefined,
+          'lock',
+        ),
+        async () => {
+          const afterDelete = await readApplyLock();
+          return afterDelete == null || !isOwnedApplyLock(handle, afterDelete) ? {} : null;
+        },
+      );
+    } catch (error) {
+      if (errorStatus(error) === 404 && await readApplyLock() == null) {
+        return;
+      }
+      throw error;
+    }
   }
 
   /**

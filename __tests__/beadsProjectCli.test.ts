@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  APPLY_LOCK_REF,
   parseSyncConfig,
   readSyncConfig,
 } from '../scripts/beads-project-sync/config.mjs';
@@ -68,6 +69,7 @@ interface FakeClientOptions {
   projectNodeId?: string;
   projectMarker?: string;
   issueMarker?: string;
+  applyLockRef?: string;
   trustedIssueAuthors?: readonly string[];
   legacyProjectMarkers?: readonly string[];
   legacyIssueMarkers?: readonly string[];
@@ -180,7 +182,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
         throw options.failAcquireLock;
       }
       return {
-        ref: 'refs/tags/psyche-beads-project-sync-lock',
+        ref: APPLY_LOCK_REF,
         sha: 'LOCK',
         treeSha: 'TREE',
         owner: 'local-cli',
@@ -336,6 +338,7 @@ describe('Beads project sync configuration', () => {
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
+      applyLockRef: APPLY_LOCK_REF,
       trustedIssueAuthors: ['bunsdev'],
       assigneeMap: {},
       massClose: {
@@ -343,6 +346,34 @@ describe('Beads project sync configuration', () => {
         fraction: 0.25,
       },
     });
+  });
+
+  it('pins the apply lock to its dedicated branch ref', () => {
+    expect(APPLY_LOCK_REF).toBe('refs/heads/psyche-beads-project-sync-lock');
+    expect(parseSyncConfig({
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectNodeId,
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'psyche-beads-project-sync:v1',
+      issueMarker: 'psyche-bead-sync:v1',
+      applyLockRef: APPLY_LOCK_REF,
+      trustedIssueAuthors: ['BunsDev'],
+      assigneeMap: {},
+      massClose: { minimum: 5, fraction: 0.25 },
+    }).applyLockRef).toBe(APPLY_LOCK_REF);
+    expect(() => parseSyncConfig({
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectNodeId,
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'psyche-beads-project-sync:v1',
+      issueMarker: 'psyche-bead-sync:v1',
+      applyLockRef: 'refs/tags/psyche-beads-project-sync-lock',
+      trustedIssueAuthors: ['BunsDev'],
+      assigneeMap: {},
+      massClose: { minimum: 5, fraction: 0.25 },
+    })).toThrow(/applyLockRef.*refs\/heads/i);
   });
 
   it('rejects malformed or unsupported safety configuration', () => {
@@ -870,6 +901,7 @@ describe('Beads project sync CLI', () => {
         projectNodeId,
         projectMarker: 'psyche-beads-project-sync:v1',
         issueMarker: 'psyche-bead-sync:v1',
+        applyLockRef: APPLY_LOCK_REF,
         trustedIssueAuthors: ['bunsdev'],
         legacyProjectMarkers: ['psyche-bead-sync:v1'],
         legacyIssueMarkers: ['psyche-bead-sync:v1'],

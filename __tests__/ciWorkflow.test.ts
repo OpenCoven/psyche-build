@@ -56,6 +56,27 @@ describe('pull request CI workflow contract', () => {
     expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(2);
   });
 
+  it('does not trigger CI, release, or Project sync workflows for the apply lock branch', () => {
+    const workflow = workflowSource();
+    const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8');
+    const beadsProjectSyncWorkflow = readFileSync(
+      beadsProjectSyncWorkflowPath,
+      'utf8',
+    );
+    const lockBranch = 'psyche-beads-project-sync-lock';
+
+    expect(workflow).toMatch(
+      /push:\s*\n\s+branches: \[main, feat\/gpu-accelerated-ade\]/,
+    );
+    expect(releaseWorkflow).toContain('tags: ["v*"]');
+    expect(beadsProjectSyncWorkflow).toContain(
+      "if: github.ref == 'refs/heads/main'",
+    );
+    for (const source of [workflow, releaseWorkflow, beadsProjectSyncWorkflow]) {
+      expect(source).not.toContain(lockBranch);
+    }
+  });
+
   it('bounds the split desktop check matrix independently', () => {
     const workflow = workflowSource();
     const job = workflowJobSource(workflow, 'desktop-check');

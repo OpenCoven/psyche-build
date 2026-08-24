@@ -5,6 +5,7 @@
   "projectTitle": "Psyche Build: Goals & Implementation",
   "projectMarker": "psyche-beads-project-sync:v1",
   "issueMarker": "psyche-bead-sync:v1",
+  "applyLockRef": "refs/heads/psyche-beads-project-sync-lock",
   "trustedIssueAuthors": ["BunsDev"],
   "assigneeMap": {},
   "massClose": {

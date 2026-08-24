@@ -5,6 +5,7 @@ export interface BeadsProjectSyncConfig {
   projectTitle: string;
   projectMarker: string;
   issueMarker: string;
+  applyLockRef: typeof APPLY_LOCK_REF;
   trustedIssueAuthors: readonly string[];
   legacyProjectMarkers?: readonly string[];
   assigneeMap: Readonly<Record<string, string>>;
@@ -16,6 +17,9 @@ export interface BeadsProjectSyncConfig {
 
 export const SUPPORTED_PROJECT_MARKER: typeof import('./markers.mjs').DEFAULT_PROJECT_MARKER;
 export const SUPPORTED_ISSUE_MARKER: typeof import('./markers.mjs').DEFAULT_ISSUE_MARKER;
+export const APPLY_LOCK_BRANCH: 'psyche-beads-project-sync-lock';
+export const APPLY_LOCK_REF: `refs/heads/${typeof APPLY_LOCK_BRANCH}`;
+export const APPLY_LOCK_REF_ENDPOINT: `heads/${typeof APPLY_LOCK_BRANCH}`;
 
 export function parseSyncConfig(value: unknown): BeadsProjectSyncConfig;
 

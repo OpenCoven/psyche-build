@@ -114,7 +114,7 @@ environment must have required reviewers so manual runs remain reviewer-gated.
 Install the fine-grained token as the environment secret `BEADS_PROJECT_TOKEN`
 in both environments, or use a secure equivalent that preserves those
 properties. Its complete fine-grained permission contract is repository
-**Contents: read and write** (for the atomic commit/tag-ref apply lock),
+**Contents: read and write** (for the atomic commit/branch-ref apply lock),
 **Issues: read and write**, and **Metadata: read**, plus organization
 **Projects: read and write**.
 
@@ -159,12 +159,16 @@ request per field. Ambiguous writes deliberately bypass the snapshot and
 re-read GitHub before deciding whether a retry is safe.
 
 Every local or Actions apply also acquires the same GitHub-backed apply lock.
-The lock is an atomic, expiring repository tag-ref lease, so a local
+The lock is an atomic, expiring repository branch-ref lease, so a local
 `pnpm beads:project:sync` fails closed while an Actions apply owns the lease (and
-vice versa); dry-runs never acquire it. Do not delete or rewrite the
-`psyche-beads-project-sync-lock` tag manually. A stale lease is taken over with
-a non-forced fast-forward. The 30-minute lease is renewed by a bounded
-heartbeat. After acquisition, apply discards all cached Project discovery,
+vice versa); dry-runs never acquire it. The ephemeral
+`psyche-beads-project-sync-lock` branch may appear on the remote during an
+apply and is deleted after release. Do not delete or rewrite it manually while
+an apply may own it. Unlike the former moving tag, it does not interfere with
+`git fetch origin main --tags`. Renewal and stale takeover commits are children
+of the current lock commit and update the branch with a non-forced
+fast-forward. The 30-minute lease is renewed by a bounded heartbeat. After
+acquisition, apply discards all cached Project discovery,
 item, and field state and revalidates the pinned Project's identity, ownership,
 repository link, visibility, title, and README before repair. Lease ownership
 is then awaited immediately before every individual REST, GraphQL, or

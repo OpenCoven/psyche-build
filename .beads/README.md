@@ -87,7 +87,7 @@ or an artifact.
 `BEADS_PROJECT_TOKEN` remains a manual fine-grained token setup; the workflow
 does not create or rotate it. Scope it to the `OpenCoven/psyche-build`
 repository with repository **Contents: read and write** (for the atomic
-commit/tag-ref apply lock), **Issues: read and write**, and **Metadata: read**,
+commit/branch-ref apply lock), **Issues: read and write**, and **Metadata: read**,
 plus organization **Projects: read and write**. Create two protected
 environments restricted to the main branch (`main`):
 
@@ -101,6 +101,12 @@ Install the fine-grained token as the environment secret
 preserves unattended scheduled runs and reviewer-gated manual runs). Scheduled
 sync must remain disabled until both environment secrets and their protection
 rules are set.
+
+Apply mode uses the ephemeral remote branch
+`psyche-beads-project-sync-lock`. It may be visible remotely while a sync owns
+the lease and is deleted after release. Renewal and stale takeover commits
+fast-forward from the current lock commit; the branch is excluded from Psyche's
+product-branch discovery and does not affect `git fetch origin main --tags`.
 
 ### Immutable Project binding and visibility safety
 

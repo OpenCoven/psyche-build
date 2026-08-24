@@ -10,6 +10,9 @@ import {
 
 export const SUPPORTED_PROJECT_MARKER = DEFAULT_PROJECT_MARKER;
 export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
+export const APPLY_LOCK_BRANCH = 'psyche-beads-project-sync-lock';
+export const APPLY_LOCK_REF = `refs/heads/${APPLY_LOCK_BRANCH}`;
+export const APPLY_LOCK_REF_ENDPOINT = `heads/${APPLY_LOCK_BRANCH}`;
 
 /**
  * @typedef {{
@@ -19,6 +22,7 @@ export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
  *   projectTitle: string,
  *   projectMarker: string,
  *   issueMarker: string,
+ *   applyLockRef: typeof APPLY_LOCK_REF,
  *   trustedIssueAuthors: readonly string[],
  *   legacyProjectMarkers?: readonly string[],
  *   assigneeMap: Record<string, string>,
@@ -129,6 +133,18 @@ function projectNodeId(value) {
 
 /**
  * @param {unknown} value
+ * @returns {typeof APPLY_LOCK_REF}
+ */
+function applyLockRef(value) {
+  const ref = value == null ? APPLY_LOCK_REF : requiredString(value, 'applyLockRef');
+  if (ref !== APPLY_LOCK_REF) {
+    fail(`"applyLockRef" must be the dedicated branch ref "${APPLY_LOCK_REF}"`);
+  }
+  return APPLY_LOCK_REF;
+}
+
+/**
+ * @param {unknown} value
  * @param {string} fieldName
  * @returns {string}
  */
@@ -197,7 +213,7 @@ export function parseSyncConfig(value) {
     'trustedIssueAuthors',
     'assigneeMap',
     'massClose',
-  ], 'root', ['legacyProjectMarkers']);
+  ], 'root', ['applyLockRef', 'legacyProjectMarkers']);
 
   const projectMarker = machineMarker(input.projectMarker, 'projectMarker');
   const issueMarker = machineMarker(input.issueMarker, 'issueMarker');
@@ -212,6 +228,7 @@ export function parseSyncConfig(value) {
     projectTitle: requiredString(input.projectTitle, 'projectTitle'),
     projectMarker,
     issueMarker,
+    applyLockRef: applyLockRef(input.applyLockRef),
     trustedIssueAuthors: trustedIssueAuthors(input.trustedIssueAuthors),
     ...(legacyProjectMarkers == null ? {} : { legacyProjectMarkers }),
     assigneeMap: Object.freeze(assigneeMap(input.assigneeMap)),

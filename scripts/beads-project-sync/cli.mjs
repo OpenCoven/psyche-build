@@ -470,6 +470,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       projectNodeId: config.projectNodeId,
       projectMarker: config.projectMarker,
       issueMarker: config.issueMarker,
+      applyLockRef: config.applyLockRef,
       trustedIssueAuthors: config.trustedIssueAuthors,
       legacyProjectMarkers: [
         ...LEGACY_PROJECT_MARKERS,

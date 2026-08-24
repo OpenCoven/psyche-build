@@ -105,7 +105,15 @@ function parseStdin(call: RunCall): Record<string, unknown> {
   return JSON.parse(call.options.stdin ?? '') as Record<string, unknown>;
 }
 
+function parseStdinIfPresent(call: RunCall): Record<string, unknown> {
+  return typeof call.options.stdin === 'string'
+    ? JSON.parse(call.options.stdin) as Record<string, unknown>
+    : {};
+}
+
 function createApplyLockBackend() {
+  const lockRef = 'refs/heads/psyche-beads-project-sync-lock';
+  const lockRefEndpoint = 'heads/psyche-beads-project-sync-lock';
   const calls: RunCall[] = [];
   const commits = new Map<string, Record<string, unknown>>([
     ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
@@ -124,7 +132,7 @@ function createApplyLockBackend() {
     const methodIndex = args.indexOf('--method');
     const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
 
-    if (endpoint === `repos/${owner}/${repo}/git/ref/tags/psyche-beads-project-sync-lock`) {
+    if (endpoint === `repos/${owner}/${repo}/git/ref/${lockRefEndpoint}`) {
       if (lockSha == null) {
         throw httpError(404, 'not found');
       }
@@ -163,7 +171,7 @@ function createApplyLockBackend() {
       return success({ object: { sha: lockSha } });
     }
     if (
-      endpoint === `repos/${owner}/${repo}/git/refs/tags/psyche-beads-project-sync-lock`
+      endpoint === `repos/${owner}/${repo}/git/refs/${lockRefEndpoint}`
       && method === 'PATCH'
     ) {
       const nextSha = String(parseStdin(call).sha);
@@ -174,12 +182,23 @@ function createApplyLockBackend() {
       lockSha = nextSha;
       return success({ object: { sha: lockSha } });
     }
+    if (
+      endpoint === `repos/${owner}/${repo}/git/refs/${lockRefEndpoint}`
+      && method === 'DELETE'
+    ) {
+      if (lockSha == null) {
+        throw httpError(404, 'not found');
+      }
+      lockSha = null;
+      return success();
+    }
     throw new Error(`Unexpected runner call ${command} ${args.join(' ')}`);
   };
 
   return {
     calls,
     commits,
+    lockRef,
     run,
     currentSha() {
       return lockSha;
@@ -196,6 +215,10 @@ function createApplyLockBackend() {
         leaseId: string;
         expiresAt: number;
       };
+    },
+    parentOf(sha: string) {
+      const parents = commits.get(sha)?.parents;
+      return Array.isArray(parents) ? parents[0] : undefined;
     },
     failNextCommit(error: Error) {
       nextCommitFailure = error;
@@ -3055,7 +3078,7 @@ describe('createGhClient', () => {
       const endpoint = args[1];
       const methodIndex = args.indexOf('--method');
       const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
-      if (endpoint === `repos/${owner}/${repo}/git/ref/tags/psyche-beads-project-sync-lock`) {
+      if (endpoint === `repos/${owner}/${repo}/git/ref/heads/psyche-beads-project-sync-lock`) {
         if (lockSha == null) {
           throw httpError(404, 'not found');
         }
@@ -3135,8 +3158,7 @@ describe('createGhClient', () => {
       success({ sha: 'LOCK-new', tree: { sha: 'TREE' }, message: acquiredMessage }),
       success({ object: { sha: 'LOCK-new' } }),
       success({ sha: 'LOCK-new', tree: { sha: 'TREE' }, message: acquiredMessage }),
-      success({ sha: 'LOCK-released', tree: { sha: 'TREE' } }),
-      success({ object: { sha: 'LOCK-released' } }),
+      success(),
     ]);
     const client = createGhClient({
       run: runner.run,
@@ -3160,13 +3182,83 @@ describe('createGhClient', () => {
     await expect(client.releaseApplyLock(handle)).resolves.toBeUndefined();
 
     const updates = runner.calls.filter((call) =>
-      call.args.includes(`repos/${owner}/${repo}/git/refs/tags/psyche-beads-project-sync-lock`)
+      call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
       && call.args.includes('PATCH')
     );
-    expect(updates).toHaveLength(2);
+    expect(updates).toHaveLength(1);
     for (const update of updates) {
       expect(parseStdin(update)).toMatchObject({ force: false });
     }
+    expect(parseStdin(
+      runner.calls.find((call) =>
+        call.args.includes(`repos/${owner}/${repo}/git/commits`)
+        && call.args.includes('POST')
+      )!,
+    ).parents).toEqual(['LOCK-old']);
+    expect(runner.calls.filter((call) =>
+      call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
+      && call.args.includes('DELETE')
+    )).toHaveLength(1);
+    expect(runner.calls.some((call) =>
+      call.args.some((arg) => arg.includes('/git/ref/tags/') || arg.includes('/git/refs/tags/'))
+    )).toBe(false);
+  });
+
+  it('keeps standard main-plus-tags fetches independent from the fast-forward lock branch', async () => {
+    const backend = createApplyLockBackend();
+    let currentTime = 1_000;
+    const ownerClient = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+    });
+
+    const initial = await ownerClient.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'fetch-compatible',
+      leaseId: 'lease-initial',
+      ttlMs: 90,
+    });
+    const lease = ownerClient.startApplyLockLease(initial);
+    currentTime = 1_031;
+    const renewed = await lease.renewNow();
+    await lease.stop();
+
+    currentTime = 1_200;
+    const contender = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => currentTime,
+    });
+    const takeover = await contender.acquireApplyLock({
+      owner: 'github-actions',
+      runId: 'stale-takeover',
+      leaseId: 'lease-takeover',
+      ttlMs: 90,
+    });
+
+    expect(initial.ref).toBe('refs/heads/psyche-beads-project-sync-lock');
+    expect(backend.lockRef).toBe('refs/heads/psyche-beads-project-sync-lock');
+    expect(parseStdin(
+      backend.calls.find((call) =>
+        call.args.includes(`repos/${owner}/${repo}/git/refs`)
+        && call.args.includes('POST')
+      )!,
+    ).ref).toBe(backend.lockRef);
+    expect(backend.parentOf(initial.sha)).toBe('BASE');
+    expect(backend.parentOf(renewed.sha)).toBe(initial.sha);
+    expect(backend.parentOf(takeover.sha)).toBe(renewed.sha);
+    expect(backend.calls.some((call) =>
+      call.args.some((arg) => arg.includes('/git/ref/tags/') || arg.includes('/git/refs/tags/'))
+      || parseStdinIfPresent(call).ref === 'refs/tags/psyche-beads-project-sync-lock'
+    )).toBe(false);
+
+    await expect(contender.releaseApplyLock(takeover)).resolves.toBeUndefined();
+    expect(backend.currentSha()).toBeNull();
   });
 
   it('renews a long apply, blocks a contender, releases the renewed lease, and stops heartbeats', async () => {
@@ -3215,12 +3307,7 @@ describe('createGhClient', () => {
     })).rejects.toThrow(/lock is held/i);
 
     await expect(lease.release()).resolves.toBeUndefined();
-    expect(backend.currentState()).toMatchObject({
-      state: 'released',
-      owner: 'local-cli',
-      runId: 'long-run',
-      leaseId: 'long-lease',
-    });
+    expect(backend.currentSha()).toBeNull();
     expect(timers.timers.at(-1)?.cleared).toBe(true);
 
     const callCountAfterRelease = backend.calls.length;
@@ -3400,6 +3487,10 @@ describe('createGhClient', () => {
       state: 'acquired',
       leaseId: 'other-lease',
     });
+    expect(backend.calls.some((call) =>
+      call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
+      && call.args.includes('DELETE')
+    )).toBe(false);
   });
 
   it('reports the fine-grained Contents permission contract on lock preflight 403s', async () => {

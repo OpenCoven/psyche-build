@@ -178,7 +178,7 @@ export interface ApplyLockHandle {
   leaseId: string;
   acquiredAt: number;
   expiresAt: number;
-  ref: string;
+  ref: typeof import('./config.mjs').APPLY_LOCK_REF;
   sha: string;
   treeSha: string;
 }
@@ -300,6 +300,7 @@ export function createGhClient(options: {
   bootstrap?: boolean;
   projectMarker?: string;
   issueMarker?: string;
+  applyLockRef?: typeof import('./config.mjs').APPLY_LOCK_REF;
   trustedIssueAuthors: readonly string[];
   legacyProjectMarkers?: readonly string[];
   legacyIssueMarkers?: readonly string[];
