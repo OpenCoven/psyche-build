@@ -6653,7 +6653,7 @@ pub struct GitCommit {
 fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let n = limit.unwrap_or(30).clamp(1, 200).to_string();
-    let raw = run_git_metadata(
+    let raw = run_git(
         &root,
         &[
             "--no-pager",
