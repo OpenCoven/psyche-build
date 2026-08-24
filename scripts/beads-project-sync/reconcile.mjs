@@ -173,6 +173,7 @@ import {
  *   body: string,
  *   renderHash: string,
  *   assignees: string[],
+ *   labels: string[],
  *   state: string,
  * }} UpdateIssueOperation
  */
@@ -1507,6 +1508,7 @@ export function planReconciliation(input) {
       ?? fail(`Missing preflight issue body for Bead "${bead.id}"`);
     const title = renderIssueTitle(bead);
     const assignees = bead.githubAssignee == null ? [] : [bead.githubAssignee];
+    const labels = desiredIssueLabels(bead);
 
     if (!existingIssue) {
       createIssues.push({
@@ -1528,6 +1530,7 @@ export function planReconciliation(input) {
           body: managedBody,
           renderHash,
           assignees,
+          labels,
           state: 'open',
         });
       }
@@ -1554,11 +1557,11 @@ export function planReconciliation(input) {
           body: managedBody,
           renderHash,
           assignees,
+          labels,
           state: 'open',
         });
       }
 
-      const labels = desiredIssueLabels(bead);
       if (
         existingIssue.labels != null
         && !stringListsEqual(existingIssue.labels, labels)
@@ -1666,6 +1669,56 @@ export function planReconciliation(input) {
     }
 
     const sourceBead = inventoryIndex.byId.get(beadId) ?? null;
+    if (sourceBead != null) {
+      const {
+        renderedBody,
+        renderHash,
+        managedBody,
+      } = renderedManagedBodiesByBeadId.get(beadId)
+        ?? fail(`Missing preflight issue body for Bead "${beadId}"`);
+      const title = renderIssueTitle(sourceBead);
+      const assignees = sourceBead.githubAssignee == null
+        ? []
+        : [sourceBead.githubAssignee];
+      const labels = desiredIssueLabels(sourceBead);
+      if (
+        existingIssue.title !== title
+        || !stringSetsEqual(existingIssue.assignees, assignees)
+        || !hasCurrentRenderedBody(
+          existingIssue,
+          renderedBody,
+          renderHash,
+          markerContext.recognizedIssueMarkers,
+        )
+      ) {
+        updateIssues.push({
+          type: 'updateIssue',
+          phase: 'updateIssues',
+          beadId,
+          issueNumber: existingIssue.number,
+          title,
+          body: managedBody,
+          renderHash,
+          assignees,
+          labels,
+          state: existingIssue.state === 'closed' ? 'closed' : 'open',
+        });
+      }
+
+      if (
+        existingIssue.labels != null
+        && !stringListsEqual(existingIssue.labels, labels)
+      ) {
+        labelIssues.push({
+          type: 'labelIssue',
+          phase: 'labelIssues',
+          beadId,
+          issueNumber: existingIssue.number,
+          labels,
+        });
+      }
+    }
+
     if (existingIssue.state !== 'closed') {
       closeIssues.push({
         type: 'closeIssue',
@@ -1951,7 +2004,8 @@ export async function applyReconciliation(plan, adapters) {
             body: managedBody,
             renderHash,
             assignees: bead.githubAssignee == null ? [] : [bead.githubAssignee],
-            state: 'open',
+            labels: desiredIssueLabels(bead),
+            state: operation.state,
           };
           failingOperation = resolvedOperation;
           const result = await updateIssue(resolvedOperation);

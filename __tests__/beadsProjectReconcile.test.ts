@@ -1246,7 +1246,7 @@ describe('Beads project reconciliation', () => {
     ]);
   });
 
-  it('closes newly closed beads, sets done fields, and archives project items', () => {
+  it('canonicalizes newly closed beads before closing and archiving project items', () => {
     const previousInventory = finalizeInventory([makeBead('pb-01')]);
     const currentInventory = finalizeInventory([
       makeBead('pb-01', {
@@ -1276,17 +1276,89 @@ describe('Beads project reconciliation', () => {
     });
 
     expect(plan.operations.map((operation) => operation.type)).toEqual([
+      'updateIssue',
       'setFields',
       'closeIssue',
       'archiveItem',
     ]);
     expect(plan.operations[0]).toMatchObject({
       beadId: 'pb-01',
+      title: renderIssueTitle(currentBead),
+      body: expect.stringContaining('- Status: `closed`'),
+      assignees: [],
+      labels: ['bead', 'bead:task', 'priority:P0'],
+      state: 'open',
+      type: 'updateIssue',
+    });
+    expect(plan.operations[1]).toMatchObject({
+      beadId: 'pb-01',
       fields: desiredFields(currentBead),
       type: 'setFields',
     });
-    expect(plan.operations[1]).toMatchObject({ beadId: 'pb-01', issueNumber: 501, type: 'closeIssue' });
-    expect(plan.operations[2]).toMatchObject({ beadId: 'pb-01', itemId: 'item-501', type: 'archiveItem' });
+    expect(plan.operations[2]).toMatchObject({ beadId: 'pb-01', issueNumber: 501, type: 'closeIssue' });
+    expect(plan.operations[3]).toMatchObject({ beadId: 'pb-01', itemId: 'item-501', type: 'archiveItem' });
+  });
+
+  it('repairs stale canonical content on an already closed source bead without reopening it', async () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-stale-closed', {
+        title: 'Canonical closed title',
+        status: 'closed',
+        githubAssignee: 'BunsDev',
+        updatedAt: '2026-08-22T02:00:00Z',
+        closedAt: '2026-08-22T02:00:00Z',
+      }),
+    ]);
+    const bead = inventory[0]!;
+    const issueNumbers = new Map([[bead.id, 541]]);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(bead, inventory, issueNumbers, {
+          title: '[pb-stale-closed] Stale title',
+          body: '<!-- psyche-bead-sync:v1 bead-id=pb-stale-closed -->\nStale body',
+          renderHash: null,
+          labels: ['bead', 'priority:P4'],
+          assignees: [],
+          state: 'closed',
+          projectItem: {
+            id: 'item-541',
+            archived: false,
+            fields: desiredFields(bead),
+          },
+        }),
+      ],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations.map((operation) => operation.type)).toEqual([
+      'updateIssue',
+      'labelIssue',
+      'archiveItem',
+    ]);
+    expect(plan.operations[0]).toMatchObject({
+      issueNumber: 541,
+      title: renderIssueTitle(bead),
+      assignees: ['BunsDev'],
+      state: 'closed',
+    });
+
+    const calls: string[] = [];
+    await applyReconciliation(plan, {
+      ...recordingAdapters((type) => calls.push(type)),
+      updateIssue(operation) {
+        calls.push(`updateIssue:${operation.state}`);
+      },
+      labelIssue() {
+        calls.push('labelIssue');
+      },
+      archiveItem() {
+        calls.push('archiveItem');
+      },
+    });
+
+    expect(calls).toEqual(['updateIssue:closed', 'labelIssue', 'archiveItem']);
   });
 
   it('repairs a missing Project item after an interrupted close before archiving', async () => {

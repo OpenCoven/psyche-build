@@ -139,6 +139,13 @@ changes for one Project item are sent as one aliased mutation instead of one
 request per field. Ambiguous writes deliberately bypass the snapshot and
 re-read GitHub before deciding whether a retry is safe.
 
+Every local or Actions apply also acquires the same GitHub-backed apply lock.
+The lock is an atomic, expiring repository tag-ref lease, so a local
+`pnpm beads:project:sync` fails closed while an Actions apply owns the lease (and
+vice versa); dry-runs never acquire it. Do not delete or rewrite the
+`psyche-beads-project-sync-lock` tag manually. A stale lease is taken over with
+a non-forced fast-forward, and only the current lease owner may release it.
+
 During a Beads version or schema migration, designate one sole migrator and
 stop other bootstrap/migration-capable processes until the migrated Dolt state
 has been pushed. See [`.beads/README.md`](.beads/README.md) for export commands,

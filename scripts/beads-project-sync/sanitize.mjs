@@ -78,8 +78,13 @@ const MAX_PERCENT_ENCODED_COMPONENT_LENGTH = 16_384;
 const MAX_HTML_ENTITY_DECODE_ROUNDS = 3;
 const MAX_HTML_ENTITY_INSPECTION_LENGTH = 131_072;
 const MAX_HTML_ENTITY_REFERENCE_LENGTH = 64;
+const MAX_MARKDOWN_DESTINATION_COUNT = 1_024;
+const MAX_MARKDOWN_DESTINATION_LENGTH = 16_384;
+const MAX_MARKDOWN_PARENTHESIS_DEPTH = 32;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
 const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
+const MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN =
+  /^[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]$/u;
 const HTML_ENTITY_REFERENCE_START_PATTERN = /[#A-Za-z]/u;
 const HTML_ENTITY_REFERENCE_BODY_PATTERN = /[#A-Za-z0-9]/u;
 const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
@@ -462,6 +467,176 @@ function appendMappedInspectionValue(output, sourceRanges, value, sourceRange) {
 
 /**
  * @param {string} value
+ * @returns {Uint8Array}
+ */
+function markdownFencedCodeMask(value) {
+  const mask = new Uint8Array(value.length);
+  /** @type {{character: string, length: number} | null} */
+  let activeFence = null;
+  let lineStart = 0;
+
+  while (lineStart <= value.length) {
+    const newlineIndex = value.indexOf('\n', lineStart);
+    const lineEnd = newlineIndex === -1 ? value.length : newlineIndex;
+    const line = value.slice(lineStart, lineEnd);
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
+    const isValidOpening = activeFence == null
+      && fence != null
+      && (fence[1]?.[0] !== '`' || !(fence[2] ?? '').includes('`'));
+    const isClosing = activeFence != null
+      && fence != null
+      && fence[1]?.[0] === activeFence.character
+      && (fence[1]?.length ?? 0) >= activeFence.length
+      && /^[ \t]*$/u.test(fence[2] ?? '');
+
+    if (activeFence != null || isValidOpening) {
+      mask.fill(1, lineStart, newlineIndex === -1 ? lineEnd : lineEnd + 1);
+    }
+    if (isValidOpening && fence != null) {
+      activeFence = {
+        character: fence[1]?.[0] ?? '',
+        length: fence[1]?.length ?? 0,
+      };
+    } else if (isClosing) {
+      activeFence = null;
+    }
+
+    if (newlineIndex === -1) {
+      break;
+    }
+    lineStart = newlineIndex + 1;
+  }
+
+  return mask;
+}
+
+/**
+ * @param {string} value
+ * @param {Uint8Array} protectedMask
+ * @param {number} start
+ * @param {number} runLength
+ * @returns {number | null}
+ */
+function findInlineCodeSpanEnd(value, protectedMask, start, runLength) {
+  let cursor = start + runLength;
+  while (cursor < value.length) {
+    if (protectedMask[cursor] || value[cursor] !== '`') {
+      cursor += 1;
+      continue;
+    }
+    let end = cursor + 1;
+    while (value[end] === '`' && !protectedMask[end]) {
+      end += 1;
+    }
+    if (end - cursor === runLength) {
+      return end;
+    }
+    cursor = end;
+  }
+  return null;
+}
+
+/**
+ * @param {string} value
+ * @returns {Uint8Array}
+ */
+function markdownCodeMask(value) {
+  const mask = markdownFencedCodeMask(value);
+  let cursor = 0;
+  while (cursor < value.length) {
+    if (mask[cursor] || value[cursor] !== '`') {
+      cursor += 1;
+      continue;
+    }
+    let runEnd = cursor + 1;
+    while (value[runEnd] === '`' && !mask[runEnd]) {
+      runEnd += 1;
+    }
+    const spanEnd = findInlineCodeSpanEnd(value, mask, cursor, runEnd - cursor);
+    if (spanEnd == null) {
+      cursor = runEnd;
+      continue;
+    }
+    mask.fill(1, cursor, spanEnd);
+    cursor = spanEnd;
+  }
+  return mask;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeMarkdownEscapesMapped(mapped) {
+  if (!mapped.value.includes('\\')) {
+    return mapped;
+  }
+
+  const protectedMask = markdownFencedCodeMask(mapped.value);
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < mapped.value.length) {
+    if (!protectedMask[cursor] && mapped.value[cursor] === '`') {
+      let runEnd = cursor + 1;
+      while (mapped.value[runEnd] === '`' && !protectedMask[runEnd]) {
+        runEnd += 1;
+      }
+      const spanEnd = findInlineCodeSpanEnd(
+        mapped.value,
+        protectedMask,
+        cursor,
+        runEnd - cursor,
+      );
+      if (spanEnd != null) {
+        for (let index = cursor; index < spanEnd; index += 1) {
+          appendMappedInspectionValue(
+            output,
+            sourceRanges,
+            mapped.value[index] ?? '',
+            mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
+          );
+        }
+        cursor = spanEnd;
+        continue;
+      }
+    }
+
+    const next = mapped.value[cursor + 1];
+    if (
+      !protectedMask[cursor]
+      && mapped.value[cursor] === '\\'
+      && next != null
+      && MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN.test(next)
+    ) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        next,
+        mappedSourceRange(mapped, cursor, cursor + 2),
+      );
+      cursor += 2;
+      continue;
+    }
+
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[cursor] ?? '',
+      mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+    );
+    cursor += 1;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {string} value
  * @param {number} start
  * @returns {number | null}
  */
@@ -495,9 +670,10 @@ function findHtmlEntityReferenceEnd(value, start) {
 
 /**
  * @param {MappedInspectionText} mapped
+ * @param {Uint8Array | undefined} [protectedMask]
  * @returns {MappedInspectionText}
  */
-function decodeHtmlEntitiesMappedOnce(mapped) {
+function decodeHtmlEntitiesMappedOnce(mapped, protectedMask) {
   if (!mapped.value.includes('&')) {
     return mapped;
   }
@@ -507,6 +683,16 @@ function decodeHtmlEntitiesMappedOnce(mapped) {
   let cursor = 0;
 
   while (cursor < mapped.value.length) {
+    if (protectedMask?.[cursor]) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
     const referenceEnd = findHtmlEntityReferenceEnd(mapped.value, cursor);
     if (referenceEnd == null) {
       appendMappedInspectionValue(
@@ -563,6 +749,33 @@ function decodeHtmlEntitiesMapped(mapped) {
   }
 
   if (decodeHtmlEntitiesMappedOnce(current).value !== current.value) {
+    fail('HTML character reference exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeMarkdownHtmlEntitiesMapped(mapped) {
+  let current = mapped;
+
+  for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
+    const decoded = decodeHtmlEntitiesMappedOnce(
+      current,
+      markdownCodeMask(current.value),
+    );
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  if (
+    decodeHtmlEntitiesMappedOnce(current, markdownCodeMask(current.value)).value
+    !== current.value
+  ) {
     fail('HTML character reference exceeds the decoding limit');
   }
   return current;
@@ -693,6 +906,158 @@ function decodeUrlInspectionMapped(mapped) {
     fail('Encoded public URL component exceeds the decoding limit');
   }
   return current;
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ * }} MarkdownDestination
+ */
+
+/**
+ * @param {MarkdownDestination[]} destinations
+ * @param {number} start
+ * @param {number} end
+ */
+function addMarkdownDestination(destinations, start, end) {
+  if (end <= start) {
+    return;
+  }
+  if (end - start > MAX_MARKDOWN_DESTINATION_LENGTH) {
+    fail('Markdown destination exceeds the inspection limit');
+  }
+  if (destinations.length >= MAX_MARKDOWN_DESTINATION_COUNT) {
+    fail('Public text exceeds the Markdown destination inspection limit');
+  }
+  if (destinations.some((destination) =>
+    destination.start === start && destination.end === end
+  )) {
+    return;
+  }
+  destinations.push({ start, end });
+}
+
+/**
+ * @param {string} value
+ * @param {Uint8Array} protectedMask
+ * @param {number} start
+ * @returns {MarkdownDestination | null}
+ */
+function parseMarkdownDestinationAt(value, protectedMask, start) {
+  let cursor = start;
+  while (value[cursor] === ' ' || value[cursor] === '\t' || value[cursor] === '\n') {
+    cursor += 1;
+  }
+  if (cursor >= value.length || protectedMask[cursor]) {
+    return null;
+  }
+
+  if (value[cursor] === '<') {
+    const contentStart = cursor + 1;
+    let end = contentStart;
+    while (
+      end < value.length
+      && !protectedMask[end]
+      && value[end] !== '>'
+      && value[end] !== '\n'
+    ) {
+      end += 1;
+    }
+    return value[end] === '>' ? { start: contentStart, end } : null;
+  }
+
+  const contentStart = cursor;
+  let depth = 0;
+  while (cursor < value.length && !protectedMask[cursor]) {
+    const character = value[cursor];
+    if (character === '(') {
+      depth += 1;
+      if (depth > MAX_MARKDOWN_PARENTHESIS_DEPTH) {
+        fail('Markdown destination exceeds the parenthesis nesting limit');
+      }
+    } else if (character === ')') {
+      if (depth === 0) {
+        break;
+      }
+      depth -= 1;
+    } else if (/\s/u.test(character ?? '')) {
+      break;
+    }
+    if (cursor - contentStart >= MAX_MARKDOWN_DESTINATION_LENGTH) {
+      fail('Markdown destination exceeds the inspection limit');
+    }
+    cursor += 1;
+  }
+  return cursor === contentStart ? null : { start: contentStart, end: cursor };
+}
+
+/**
+ * @param {string} value
+ * @returns {MarkdownDestination[]}
+ */
+function scanMarkdownDestinations(value) {
+  const destinations = /** @type {MarkdownDestination[]} */ ([]);
+  const protectedMask = markdownCodeMask(value);
+
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    if (protectedMask[cursor]) {
+      continue;
+    }
+    if (value[cursor] === ']' && value[cursor + 1] === '(') {
+      const destination = parseMarkdownDestinationAt(
+        value,
+        protectedMask,
+        cursor + 2,
+      );
+      if (destination) {
+        addMarkdownDestination(destinations, destination.start, destination.end);
+      }
+      continue;
+    }
+
+    if (value[cursor] === '<') {
+      const end = value.indexOf('>', cursor + 1);
+      if (
+        end !== -1
+        && end - cursor - 1 <= MAX_MARKDOWN_DESTINATION_LENGTH
+        && !value.slice(cursor + 1, end).includes('\n')
+        && !protectedMask.slice(cursor, end + 1).some(Boolean)
+      ) {
+        const content = value.slice(cursor + 1, end);
+        if (!/\s/u.test(content) && /[:@%&/\\~.]/u.test(content)) {
+          addMarkdownDestination(destinations, cursor + 1, end);
+        }
+        cursor = end;
+      }
+    }
+  }
+
+  let lineStart = 0;
+  while (lineStart <= value.length) {
+    const newlineIndex = value.indexOf('\n', lineStart);
+    const lineEnd = newlineIndex === -1 ? value.length : newlineIndex;
+    if (!protectedMask[lineStart]) {
+      const line = value.slice(lineStart, lineEnd);
+      const definition = line.match(/^ {0,3}\[[^\]\n]+\]:[ \t]*/u);
+      if (definition) {
+        const destination = parseMarkdownDestinationAt(
+          value,
+          protectedMask,
+          lineStart + definition[0].length,
+        );
+        if (destination && destination.end <= lineEnd) {
+          addMarkdownDestination(destinations, destination.start, destination.end);
+        }
+      }
+    }
+    if (newlineIndex === -1) {
+      break;
+    }
+    lineStart = newlineIndex + 1;
+  }
+
+  return destinations.sort((left, right) => left.start - right.start);
 }
 
 /**
@@ -1889,122 +2254,146 @@ function collectMappedEmailReplacements(mapped, original, replacements) {
  * @returns {string}
  */
 function redactDecodedHtmlEntitySensitiveText(value, config) {
-  if (!value.includes('&')) {
-    return value;
-  }
-
-  const decoded = decodeHtmlEntitiesMapped(createMappedInspectionText(value));
-  if (decoded.value === value) {
-    return value;
-  }
+  const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
+  const decoded = decodeMarkdownHtmlEntitiesMapped(markdownDecoded);
 
   const replacements = /** @type {SourceReplacement[]} */ ([]);
   const matchers = buildHomeDirectoryMatchers(config);
-  collectMappedEmailReplacements(decoded, value, replacements);
+  if (decoded.value !== value) {
+    collectMappedEmailReplacements(decoded, value, replacements);
 
-  const candidates = scanUrlCandidates(decoded.value);
-  let cursor = 0;
-  for (const candidate of candidates) {
-    if (candidate.start > cursor) {
-      collectMappedPathReplacements(
-        sliceMappedInspectionText(decoded, cursor, candidate.start),
-        value,
-        matchers,
-        replacements,
-      );
-    }
-
-    const inspectedCandidate = decodeUrlInspectionMapped(
-      sliceMappedInspectionText(decoded, candidate.start, candidate.end),
-    );
-    collectMappedEmailReplacements(
-      inspectedCandidate,
-      value,
-      replacements,
-    );
-    const uri = parseAbsoluteUri(inspectedCandidate.value);
-    if (uri != null) {
-      if (uri.authority != null) {
-        const authority = sliceMappedInspectionText(
-          inspectedCandidate,
-          uri.authority.start,
-          uri.authority.end,
+    const candidates = scanUrlCandidates(decoded.value);
+    let cursor = 0;
+    for (const candidate of candidates) {
+      if (candidate.start > cursor) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(decoded, cursor, candidate.start),
+          value,
+          matchers,
+          replacements,
         );
-        if (containsLocalOperationalPath(authority.value)) {
-          addMappedSourceReplacement(
-            replacements,
-            value,
-            inspectedCandidate,
-            0,
-            inspectedCandidate.value.length,
-            '<redacted-local-path>',
-            3,
-          );
-          cursor = candidate.end;
-          continue;
-        }
       }
 
-      if (uri.scheme !== 'http' && uri.scheme !== 'https') {
-        const path = sliceMappedInspectionText(
-          inspectedCandidate,
-          uri.path.start,
-          uri.path.end,
-        );
-        if (uri.authority == null && containsLocalOperationalPath(path.value)) {
-          addMappedSourceReplacement(
-            replacements,
-            value,
+      const inspectedCandidate = decodeUrlInspectionMapped(
+        sliceMappedInspectionText(decoded, candidate.start, candidate.end),
+      );
+      collectMappedEmailReplacements(
+        inspectedCandidate,
+        value,
+        replacements,
+      );
+      const uri = parseAbsoluteUri(inspectedCandidate.value);
+      if (uri != null) {
+        if (uri.authority != null) {
+          const authority = sliceMappedInspectionText(
+            inspectedCandidate,
+            uri.authority.start,
+            uri.authority.end,
+          );
+          if (containsLocalOperationalPath(authority.value)) {
+            addMappedSourceReplacement(
+              replacements,
+              value,
+              inspectedCandidate,
+              0,
+              inspectedCandidate.value.length,
+              '<redacted-local-path>',
+              3,
+            );
+            cursor = candidate.end;
+            continue;
+          }
+        }
+
+        if (uri.scheme !== 'http' && uri.scheme !== 'https') {
+          const path = sliceMappedInspectionText(
             inspectedCandidate,
             uri.path.start,
             uri.path.end,
-            '<redacted-local-path>',
-            2,
           );
-        } else {
+          if (uri.authority == null && containsLocalOperationalPath(path.value)) {
+            addMappedSourceReplacement(
+              replacements,
+              value,
+              inspectedCandidate,
+              uri.path.start,
+              uri.path.end,
+              '<redacted-local-path>',
+              2,
+            );
+          } else {
+            collectMappedPathReplacements(
+              path,
+              value,
+              matchers,
+              replacements,
+            );
+          }
+        }
+        if (uri.query != null) {
           collectMappedPathReplacements(
-            path,
+            sliceMappedInspectionText(
+              inspectedCandidate,
+              uri.query.start,
+              uri.query.end,
+            ),
+            value,
+            matchers,
+            replacements,
+          );
+        }
+        if (uri.fragment != null) {
+          collectMappedPathReplacements(
+            sliceMappedInspectionText(
+              inspectedCandidate,
+              uri.fragment.start,
+              uri.fragment.end,
+            ),
             value,
             matchers,
             replacements,
           );
         }
       }
-      if (uri.query != null) {
-        collectMappedPathReplacements(
-          sliceMappedInspectionText(
-            inspectedCandidate,
-            uri.query.start,
-            uri.query.end,
-          ),
-          value,
-          matchers,
-          replacements,
-        );
-      }
-      if (uri.fragment != null) {
-        collectMappedPathReplacements(
-          sliceMappedInspectionText(
-            inspectedCandidate,
-            uri.fragment.start,
-            uri.fragment.end,
-          ),
-          value,
-          matchers,
-          replacements,
-        );
-      }
+      cursor = candidate.end;
     }
-    cursor = candidate.end;
-  }
 
-  if (cursor < decoded.value.length) {
-    collectMappedPathReplacements(
-      sliceMappedInspectionText(decoded, cursor, decoded.value.length),
-      value,
-      matchers,
-      replacements,
+    if (cursor < decoded.value.length) {
+      collectMappedPathReplacements(
+        sliceMappedInspectionText(decoded, cursor, decoded.value.length),
+        value,
+        matchers,
+        replacements,
+      );
+    }
+  }
+  for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
+    const inspectedDestination = decodeUrlInspectionMapped(
+      sliceMappedInspectionText(
+        markdownDecoded,
+        destination.start,
+        destination.end,
+      ),
     );
+    assertNoDirectPublishableSecrets(inspectedDestination.value);
+    const uri = parseAbsoluteUri(inspectedDestination.value);
+    if (
+      uri == null
+      && (
+        containsLocalOperationalPath(inspectedDestination.value)
+        || homeDirectoryDecodedRanges(inspectedDestination.value, matchers).length > 0
+      )
+    ) {
+      addMappedSourceReplacement(
+        replacements,
+        value,
+        inspectedDestination,
+        0,
+        inspectedDestination.value.length,
+        '<redacted-local-path>',
+        4,
+      );
+    }
   }
   if (replacements.length === 0) {
     return value;
@@ -2239,6 +2628,35 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
 }
 
 /**
+ * @param {MappedInspectionText} markdownDecoded
+ */
+function assertNoMarkdownDestinationSecrets(markdownDecoded) {
+  for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
+    const inspectedDestination = decodeUrlInspectionMapped(
+      sliceMappedInspectionText(
+        markdownDecoded,
+        destination.start,
+        destination.end,
+      ),
+    );
+    assertNoDirectPublishableSecrets(inspectedDestination.value);
+  }
+}
+
+/**
+ * @param {string} value
+ */
+function assertNoMarkdownReconstructedSecrets(value) {
+  const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
+  if (markdownDecoded.value !== value) {
+    const decoded = decodeMarkdownHtmlEntitiesMapped(markdownDecoded);
+    assertNoDirectPublishableSecrets(decoded.value);
+    assertNoEncodedUrlSecrets(markdownDecoded.value, true);
+  }
+  assertNoMarkdownDestinationSecrets(markdownDecoded);
+}
+
+/**
  * @param {string} value
  */
 export function assertNoPublishableSecrets(value) {
@@ -2252,6 +2670,7 @@ export function assertNoPublishableSecrets(value) {
 
   assertNoDirectPublishableSecrets(value);
   assertNoEncodedUrlSecrets(value, true);
+  assertNoMarkdownReconstructedSecrets(value);
 }
 
 /**
@@ -2269,6 +2688,7 @@ export function sanitizePublicText(value, config = {}) {
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
   assertNoEncodedUrlSecrets(sanitized);
+  assertNoMarkdownReconstructedSecrets(sanitized);
   sanitized = redactDecodedHtmlEntitySensitiveText(sanitized, config);
   sanitized = replaceUrlCandidates(sanitized, (url) => {
     const uri = parseAbsoluteUri(url);

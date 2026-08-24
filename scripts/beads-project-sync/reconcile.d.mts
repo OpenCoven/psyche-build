@@ -128,6 +128,7 @@ export interface UpdateIssueOperation {
   body: string;
   renderHash: string;
   assignees: string[];
+  labels: string[];
   state: string;
 }
 

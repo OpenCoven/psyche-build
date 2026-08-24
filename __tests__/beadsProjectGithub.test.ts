@@ -1231,6 +1231,44 @@ describe('createGhClient', () => {
     });
   });
 
+  it('resumes a marker-written Project after repository linking failed without creating a duplicate', async () => {
+    const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
+    const existing = {
+      id: 'P-marker-written',
+      number: 19,
+      title: 'Public Beads',
+      readme,
+      public: true,
+      repositories: {
+        nodes: [],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    };
+    const firstRunner = createRunner([
+      projectDiscovery([existing]),
+      httpError(503, 'link response lost'),
+      linkedRepositoriesPage([]),
+    ]);
+    const firstClient = createGhClient({ run: firstRunner.run, owner, repo, token });
+
+    await expect(firstClient.ensureProject({ title: 'Public Beads', readme })).rejects.toMatchObject({
+      kind: 'ambiguous',
+    });
+
+    const restartRunner = createRunner([
+      projectDiscovery([existing]),
+      success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
+    ]);
+    const restartedClient = createGhClient({ run: restartRunner.run, owner, repo, token });
+
+    await expect(restartedClient.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
+      id: 'P-marker-written',
+    });
+    expect([...firstRunner.calls, ...restartRunner.calls].some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
+    )).toBe(false);
+  });
+
   it('re-reads a newly created Project by name after an applied-then-5xx response', async () => {
     const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
     const transient = Object.assign(new Error('HTTP 503 project response lost'), { status: 503 });
@@ -1453,6 +1491,81 @@ describe('createGhClient', () => {
       const variables = parseStdin(call).variables as { input: { name: string } };
       return variables.input.name;
     })).toEqual(['Priority', 'Bead Type', 'Bead ID', 'Parent Goal', 'Source Updated']);
+  });
+
+  it('preserves existing single-select option IDs while adding missing options idempotently', async () => {
+    const statusOptions = ['Backlog', 'Ready', 'In Progress', 'Blocked']
+      .map((name, index) => ({ id: `S-${index}`, name }));
+    const allFields = [
+      {
+        __typename: 'ProjectV2SingleSelectField',
+        id: 'F-status',
+        name: 'Status',
+        dataType: 'SINGLE_SELECT',
+        options: [...statusOptions, { id: 'S-done', name: 'Done' }],
+      },
+      {
+        __typename: 'ProjectV2SingleSelectField',
+        id: 'F-priority',
+        name: 'Priority',
+        dataType: 'SINGLE_SELECT',
+        options: ['P0', 'P1', 'P2', 'P3', 'P4']
+          .map((name, index) => ({ id: `P-${index}`, name })),
+      },
+      {
+        __typename: 'ProjectV2SingleSelectField',
+        id: 'F-type',
+        name: 'Bead Type',
+        dataType: 'SINGLE_SELECT',
+        options: ['Epic', 'Feature', 'Task', 'Bug', 'Chore', 'Decision']
+          .map((name, index) => ({ id: `T-${index}`, name })),
+      },
+      { __typename: 'ProjectV2Field', id: 'F-id', name: 'Bead ID', dataType: 'TEXT' },
+      { __typename: 'ProjectV2Field', id: 'F-parent', name: 'Parent Goal', dataType: 'TEXT' },
+      { __typename: 'ProjectV2Field', id: 'F-updated', name: 'Source Updated', dataType: 'DATE' },
+    ];
+    const fieldsPage = (nodes: unknown[]) => success({ data: { node: { fields: {
+      nodes,
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } } } });
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-option-ids',
+        number: 18,
+        title: 'Public Beads',
+        readme: PROJECT_README_MARKER,
+        public: true,
+      }]),
+      fieldsPage([
+        { ...allFields[0], options: statusOptions },
+        ...allFields.slice(1),
+      ]),
+      success({ data: { updateProjectV2Field: { projectV2Field: allFields[0] } } }),
+      fieldsPage(allFields),
+      fieldsPage(allFields),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+    await client.discoverProject();
+
+    await client.ensureFields();
+    await client.ensureFields();
+
+    const updates = runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation UpdateManagedProjectField')
+    );
+    expect(updates).toHaveLength(1);
+    expect(parseStdin(updates[0]!)).toMatchObject({
+      variables: {
+        fieldId: 'F-status',
+        options: [
+          { id: 'S-0', name: 'Backlog', color: 'GRAY', description: '' },
+          { id: 'S-1', name: 'Ready', color: 'BLUE', description: '' },
+          { id: 'S-2', name: 'In Progress', color: 'YELLOW', description: '' },
+          { id: 'S-3', name: 'Blocked', color: 'RED', description: '' },
+          { name: 'Done', color: 'GREEN', description: '' },
+        ],
+      },
+    });
   });
 
   it('re-reads a custom field by name after an applied-then-5xx create', async () => {
@@ -2377,6 +2490,232 @@ describe('createGhClient', () => {
     await client.verifyAccess();
 
     expect(waits).toEqual([2_000, 2_500]);
+  });
+
+  it('retries rate-limited ambiguous creates without rereading because rejection is definite', async () => {
+    const waits: number[] = [];
+    const body = managedBody('pb-rate-limited-create');
+    const rateLimit = Object.assign(new Error('HTTP 429 slow down'), {
+      status: 429,
+      headers: { 'Retry-After': '2' },
+    });
+    const runner = createRunner([
+      rateLimit,
+      success({ number: 88 }),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      sleep(milliseconds) {
+        waits.push(milliseconds);
+      },
+    });
+
+    await expect(client.createIssue({
+      beadId: 'pb-rate-limited-create',
+      title: '[pb-rate-limited-create] Retry safely',
+      body,
+    })).resolves.toMatchObject({ number: 88 });
+    expect(waits).toEqual([2_000]);
+    expect(runner.calls.filter((call) =>
+      call.args.includes('--method') && call.args.includes('POST')
+    )).toHaveLength(2);
+    expect(runner.calls.some((call) =>
+      call.args.includes(`repos/${owner}/${repo}/issues?state=all&per_page=100&page=1`)
+    )).toBe(false);
+  });
+
+  it('retries GraphQL creates after rate-limit rejection without a discovery reread', async () => {
+    const waits: number[] = [];
+    const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
+    const rateLimit = Object.assign(new Error('HTTP 403 API rate limit exceeded'), {
+      status: 403,
+      headers: { 'X-RateLimit-Reset': '13' },
+    });
+    const runner = createRunner([
+      projectDiscovery([]),
+      rateLimit,
+      success({ data: { createProjectV2: { projectV2: {
+        id: 'P-rate-retry',
+        number: 31,
+        title: 'Public Beads',
+        readme,
+        public: true,
+      } } } }),
+      linkedRepositoriesPage([{ id: 'REPO_node' }]),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      now: () => 10_000,
+      sleep(milliseconds) {
+        waits.push(milliseconds);
+      },
+    });
+
+    await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
+      id: 'P-rate-retry',
+    });
+    expect(waits).toEqual([3_000]);
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
+    )).toHaveLength(2);
+    expect(runner.calls.filter((call) =>
+      String(parseStdin(call).query ?? '').includes('query DiscoverManagedProject')
+    )).toHaveLength(1);
+  });
+
+  it('serializes two lock contenders with atomic ref creation', async () => {
+    const calls: RunCall[] = [];
+    const commits = new Map<string, Record<string, unknown>>([
+      ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
+    ]);
+    let lockSha: string | null = null;
+    let nextCommit = 0;
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args: [...args], options: { ...options } };
+      calls.push(call);
+      const endpoint = args[1];
+      const methodIndex = args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      if (endpoint === `repos/${owner}/${repo}/git/ref/tags/psyche-beads-project-sync-lock`) {
+        if (lockSha == null) {
+          throw httpError(404, 'not found');
+        }
+        return success({ object: { sha: lockSha } });
+      }
+      if (endpoint?.startsWith(`repos/${owner}/${repo}/git/commits/`) && method === 'GET') {
+        const sha = endpoint.split('/').at(-1) ?? '';
+        return success(commits.get(sha));
+      }
+      if (endpoint === `repos/${owner}/${repo}/git/commits` && method === 'POST') {
+        const body = parseStdin(call);
+        const sha = `LOCK-${++nextCommit}`;
+        commits.set(sha, { sha, ...body, tree: { sha: body.tree } });
+        return success({ sha, tree: { sha: body.tree } });
+      }
+      if (endpoint === `repos/${owner}/${repo}/git/refs` && method === 'POST') {
+        if (lockSha != null) {
+          throw httpError(422, 'Reference already exists');
+        }
+        lockSha = String(parseStdin(call).sha);
+        return success({ object: { sha: lockSha } });
+      }
+      throw new Error(`Unexpected runner call ${command} ${args.join(' ')}`);
+    };
+    const first = createGhClient({ run, owner, repo, token });
+    const second = createGhClient({ run, owner, repo, token });
+
+    const results = await Promise.allSettled([
+      first.acquireApplyLock({
+        owner: 'local-cli',
+        runId: 'run-1',
+        leaseId: 'lease-1',
+        ttlMs: 60_000,
+      }),
+      second.acquireApplyLock({
+        owner: 'github-actions',
+        runId: 'run-2',
+        leaseId: 'lease-2',
+        ttlMs: 60_000,
+      }),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(String(
+      (results.find((result) => result.status === 'rejected') as PromiseRejectedResult).reason,
+    )).toMatch(/lock.*held|contention/i);
+    expect(calls.filter((call) => call.args.includes('POST')
+      && call.args.includes(`repos/${owner}/${repo}/git/refs`))).toHaveLength(2);
+  });
+
+  it('takes over an expired lock with a non-forced fast-forward and releases only its owner', async () => {
+    const acquiredMessage = `psyche-beads-project-lock:v1 ${JSON.stringify({
+      version: 1,
+      state: 'acquired',
+      owner: 'local-cli',
+      runId: 'new-run',
+      leaseId: 'new-lease',
+      acquiredAt: 10_000,
+      expiresAt: 70_000,
+    })}`;
+    const runner = createRunner([
+      success({ object: { sha: 'LOCK-old' } }),
+      success({ sha: 'LOCK-old', tree: { sha: 'TREE' }, message:
+        `psyche-beads-project-lock:v1 ${JSON.stringify({
+          version: 1,
+          state: 'acquired',
+          owner: 'github-actions',
+          runId: 'old-run',
+          leaseId: 'old-lease',
+          acquiredAt: 1_000,
+          expiresAt: 2_000,
+        })}` }),
+      success({ sha: 'LOCK-new', tree: { sha: 'TREE' } }),
+      success({ object: { sha: 'LOCK-new' } }),
+      success({ object: { sha: 'LOCK-new' } }),
+      success({ sha: 'LOCK-new', tree: { sha: 'TREE' }, message: acquiredMessage }),
+      success({ object: { sha: 'LOCK-new' } }),
+      success({ sha: 'LOCK-new', tree: { sha: 'TREE' }, message: acquiredMessage }),
+      success({ sha: 'LOCK-released', tree: { sha: 'TREE' } }),
+      success({ object: { sha: 'LOCK-released' } }),
+    ]);
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      now: () => 10_000,
+    });
+
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'new-run',
+      leaseId: 'new-lease',
+      ttlMs: 60_000,
+    });
+    await expect(client.releaseApplyLock({
+      ...handle,
+      leaseId: 'not-the-owner',
+    })).rejects.toThrow(/ownership/i);
+    await expect(client.releaseApplyLock(handle)).resolves.toBeUndefined();
+
+    const updates = runner.calls.filter((call) =>
+      call.args.includes(`repos/${owner}/${repo}/git/refs/tags/psyche-beads-project-sync-lock`)
+      && call.args.includes('PATCH')
+    );
+    expect(updates).toHaveLength(2);
+    for (const update of updates) {
+      expect(parseStdin(update)).toMatchObject({ force: false });
+    }
+  });
+
+  it('redacts tokens from lock API failures', async () => {
+    const runner = createRunner([
+      httpError(404, 'not found'),
+      success({ sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }),
+      Object.assign(new Error(`HTTP 422 invalid lock ${token}`), { status: 422 }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    let thrown: unknown;
+    try {
+      await client.acquireApplyLock({
+        owner: 'local-cli',
+        runId: 'run-redacted',
+        leaseId: 'lease-redacted',
+        ttlMs: 60_000,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(String(thrown)).toMatch(/invalid lock/i);
+    expect(String(thrown)).not.toContain(token);
   });
 
   it('parses gh api response headers so production retries honor server timing', async () => {

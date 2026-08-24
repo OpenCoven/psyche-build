@@ -40,6 +40,12 @@ const MAX_ERROR_DETAIL = 512;
 const MAX_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 25;
 const MAX_RETRY_DELAY_MS = 60_000;
+const APPLY_LOCK_REF = 'refs/tags/psyche-beads-project-sync-lock';
+const APPLY_LOCK_REF_ENDPOINT = 'tags/psyche-beads-project-sync-lock';
+const APPLY_LOCK_MESSAGE_PREFIX = 'psyche-beads-project-lock:v1 ';
+const DEFAULT_APPLY_LOCK_TTL_MS = 30 * 60 * 1_000;
+const MAX_APPLY_LOCK_TTL_MS = 24 * 60 * 60 * 1_000;
+const SAFE_LOCK_IDENTITY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 const STATUS_OPTIONS = Object.freeze([
@@ -469,6 +475,26 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  * }} ErrorLike
  */
 
+/**
+ * @typedef {{
+ *   version: 1,
+ *   state: 'acquired' | 'released',
+ *   owner: string,
+ *   runId: string,
+ *   leaseId: string,
+ *   acquiredAt: number,
+ *   expiresAt: number,
+ * }} ApplyLockState
+ */
+
+/**
+ * @typedef {ApplyLockState & {
+ *   ref: string,
+ *   sha: string,
+ *   treeSha: string,
+ * }} ApplyLockHandle
+ */
+
 export class GhClientError extends Error {
   /**
    * @param {string} kind
@@ -589,7 +615,7 @@ function errorDetail(error) {
  * @param {unknown} error
  * @returns {boolean}
  */
-function isRetryable(error) {
+function isDefiniteRateLimit(error) {
   const status = errorStatus(error);
   const detail = errorDetail(error);
   if (status === 429) {
@@ -598,9 +624,6 @@ function isRetryable(error) {
   if (status === 403) {
     return /(?:rate[\s-]*limit|secondary rate|abuse detection)/iu.test(detail);
   }
-  if (status === 500 || status === 502 || status === 503 || status === 504) {
-    return true;
-  }
 
   const graphqlErrors = array(/** @type {ErrorLike} */ (error ?? {}).graphqlErrors);
   return graphqlErrors.length > 0 && graphqlErrors.every((entry) => {
@@ -608,6 +631,21 @@ function isRetryable(error) {
     return item.type === 'RATE_LIMITED'
       || /rate[\s-]*limit/iu.test(stringOrEmpty(item.message));
   });
+}
+
+/**
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isRetryable(error) {
+  const status = errorStatus(error);
+  if (isDefiniteRateLimit(error)) {
+    return true;
+  }
+  if (status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -708,11 +746,24 @@ function toClientError(error) {
   if (error instanceof GhClientError) {
     return error;
   }
-  return new GhClientError(
+  const clientError = new GhClientError(
     isTransportFailure(error) ? 'transport' : 'github',
     errorDetail(error),
     errorStatus(error),
   );
+  const source = record(error);
+  for (const key of ['headers', 'retryAfter', 'rateLimitReset', 'graphqlErrors']) {
+    if (source[key] == null) {
+      continue;
+    }
+    Object.defineProperty(clientError, key, {
+      configurable: false,
+      enumerable: false,
+      value: source[key],
+      writable: false,
+    });
+  }
+  return clientError;
 }
 
 /**
@@ -1310,6 +1361,7 @@ export function createGhClient(options) {
   let organizationId = null;
   /** @type {string | null} */
   let repositoryId = null;
+  let repositoryDefaultBranch = 'main';
   /** @type {Map<number, number>} */
   const issueDatabaseIds = new Map();
   /** @type {ProjectContext[]} */
@@ -1445,32 +1497,43 @@ export function createGhClient(options) {
    * @returns {Promise<TValue>}
    */
   async function ambiguousMutation(description, mutate, reread) {
-    try {
-      return await mutate();
-    } catch (error) {
-      if (!isRetryable(error) && !isTransportFailure(error)) {
-        throw toClientError(error);
-      }
-
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       try {
-        const applied = await reread();
-        if (applied != null) {
-          return applied;
+        return await mutate();
+      } catch (error) {
+        if (isDefiniteRateLimit(error)) {
+          if (attempt === MAX_ATTEMPTS - 1) {
+            throw toClientError(error);
+          }
+          await sleep(retryWaitMilliseconds(error, attempt, now(), maxRetryWaitMs));
+          continue;
         }
-      } catch {
+
+        if (!isRetryable(error) && !isTransportFailure(error)) {
+          throw toClientError(error);
+        }
+
+        try {
+          const applied = await reread();
+          if (applied != null) {
+            return applied;
+          }
+        } catch {
+          throw new GhClientError(
+            'ambiguous',
+            `${description} may have succeeded, but its identity could not be verified`,
+            errorStatus(error),
+          );
+        }
+
         throw new GhClientError(
           'ambiguous',
-          `${description} may have succeeded, but its identity could not be verified`,
+          `${description} may have succeeded, but no matching identity was found`,
           errorStatus(error),
         );
       }
-
-      throw new GhClientError(
-        'ambiguous',
-        `${description} may have succeeded, but no matching identity was found`,
-        errorStatus(error),
-      );
     }
+    throw new GhClientError('github', `${description} exhausted retries`);
   }
 
   /**
@@ -1585,7 +1648,316 @@ export function createGhClient(options) {
     await runGh(['auth', 'status', '--hostname', 'github.com', '--active']);
     const repository = record(await rest('GET', `repos/${owner}/${repo}`));
     const organization = record(await rest('GET', `orgs/${owner}`));
+    if (
+      typeof repository.default_branch === 'string'
+      && SAFE_BEAD_ID_PATTERN.test(repository.default_branch)
+    ) {
+      repositoryDefaultBranch = repository.default_branch;
+    }
     return { organization, repository };
+  }
+
+  /**
+   * @param {unknown} value
+   * @param {string} fieldName
+   * @returns {string}
+   */
+  function lockIdentity(value, fieldName) {
+    const identity = requiredString(value, fieldName);
+    if (!SAFE_LOCK_IDENTITY_PATTERN.test(identity)) {
+      fail(`${fieldName} contains unsupported characters`);
+    }
+    return identity;
+  }
+
+  /**
+   * @param {unknown} value
+   * @returns {number}
+   */
+  function lockTtl(value) {
+    if (value == null) {
+      return DEFAULT_APPLY_LOCK_TTL_MS;
+    }
+    if (
+      typeof value !== 'number'
+      || !Number.isSafeInteger(value)
+      || value <= 0
+      || value > MAX_APPLY_LOCK_TTL_MS
+    ) {
+      fail(`apply lock ttlMs must be an integer from 1 to ${MAX_APPLY_LOCK_TTL_MS}`);
+    }
+    return value;
+  }
+
+  /**
+   * @param {ApplyLockState} state
+   * @returns {string}
+   */
+  function renderApplyLockMessage(state) {
+    return `${APPLY_LOCK_MESSAGE_PREFIX}${JSON.stringify(state)}`;
+  }
+
+  /**
+   * @param {unknown} value
+   * @param {string} fieldName
+   * @returns {number}
+   */
+  function lockTimestamp(value, fieldName) {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+      throw new GhClientError('lock', `GitHub apply lock has an invalid ${fieldName}`);
+    }
+    return value;
+  }
+
+  /**
+   * @param {unknown} message
+   * @returns {ApplyLockState}
+   */
+  function parseApplyLockMessage(message) {
+    const text = requiredString(message, 'apply lock commit message');
+    if (!text.startsWith(APPLY_LOCK_MESSAGE_PREFIX)) {
+      throw new GhClientError('lock', 'GitHub apply lock contains an unrecognized state');
+    }
+    /** @type {Record<string, unknown>} */
+    let parsed;
+    try {
+      parsed = record(JSON.parse(text.slice(APPLY_LOCK_MESSAGE_PREFIX.length)));
+    } catch {
+      throw new GhClientError('lock', 'GitHub apply lock contains invalid JSON');
+    }
+    if (
+      parsed.version !== 1
+      || (parsed.state !== 'acquired' && parsed.state !== 'released')
+    ) {
+      throw new GhClientError('lock', 'GitHub apply lock contains an unsupported state');
+    }
+    return {
+      version: 1,
+      state: parsed.state,
+      owner: lockIdentity(parsed.owner, 'apply lock owner'),
+      runId: lockIdentity(parsed.runId, 'apply lock runId'),
+      leaseId: lockIdentity(parsed.leaseId, 'apply lock leaseId'),
+      acquiredAt: lockTimestamp(parsed.acquiredAt, 'acquiredAt'),
+      expiresAt: lockTimestamp(parsed.expiresAt, 'expiresAt'),
+    };
+  }
+
+  /**
+   * @returns {Promise<ApplyLockHandle | null>}
+   */
+  async function readApplyLock() {
+    const rawRef = await getOrNull(
+      `repos/${owner}/${repo}/git/ref/${APPLY_LOCK_REF_ENDPOINT}`,
+    );
+    if (rawRef == null) {
+      return null;
+    }
+    const ref = record(rawRef);
+    const sha = requiredString(record(ref.object).sha, 'apply lock ref sha');
+    const commit = record(await rest(
+      'GET',
+      `repos/${owner}/${repo}/git/commits/${encodeURIComponent(sha)}`,
+    ));
+    const state = parseApplyLockMessage(commit.message);
+    return {
+      ...state,
+      ref: APPLY_LOCK_REF,
+      sha,
+      treeSha: requiredString(record(commit.tree).sha, 'apply lock tree sha'),
+    };
+  }
+
+  /**
+   * @param {ApplyLockState} state
+   * @param {string} parentSha
+   * @param {string} treeSha
+   * @returns {Promise<string>}
+   */
+  async function createApplyLockCommit(state, parentSha, treeSha) {
+    const created = record(await ambiguousMutation(
+      `GitHub apply lock state commit for "${state.leaseId}"`,
+      () => rest('POST', `repos/${owner}/${repo}/git/commits`, {
+        message: renderApplyLockMessage(state),
+        tree: treeSha,
+        parents: [parentSha],
+      }),
+      async () => null,
+    ));
+    return requiredString(created.sha, 'apply lock commit sha');
+  }
+
+  /**
+   * @param {string} sha
+   * @param {string} leaseId
+   * @returns {Promise<void>}
+   */
+  async function createApplyLockRef(sha, leaseId) {
+    try {
+      await ambiguousMutation(
+        `GitHub apply lock acquisition for "${leaseId}"`,
+        () => rest('POST', `repos/${owner}/${repo}/git/refs`, {
+          ref: APPLY_LOCK_REF,
+          sha,
+        }),
+        async () => {
+          const current = await readApplyLock();
+          return current?.sha === sha ? {} : null;
+        },
+      );
+    } catch (error) {
+      if (errorStatus(error) !== 422) {
+        throw error;
+      }
+      const current = await readApplyLock();
+      if (current?.sha === sha) {
+        return;
+      }
+      throw new GhClientError(
+        'lock',
+        `GitHub apply lock contention: lock is held by ${current?.owner ?? 'another contender'}`
+          + `${current?.runId ? ` (${current.runId})` : ''}`,
+        409,
+      );
+    }
+  }
+
+  /**
+   * @param {string} sha
+   * @param {string} leaseId
+   * @returns {Promise<void>}
+   */
+  async function updateApplyLockRef(sha, leaseId) {
+    try {
+      await ambiguousMutation(
+        `GitHub apply lock update for "${leaseId}"`,
+        () => rest(
+          'PATCH',
+          `repos/${owner}/${repo}/git/refs/${APPLY_LOCK_REF_ENDPOINT}`,
+          { sha, force: false },
+        ),
+        async () => {
+          const current = await readApplyLock();
+          return current?.sha === sha ? {} : null;
+        },
+      );
+    } catch (error) {
+      if (errorStatus(error) !== 422) {
+        throw error;
+      }
+      const current = await readApplyLock();
+      if (current?.sha === sha) {
+        return;
+      }
+      throw new GhClientError(
+        'lock',
+        `GitHub apply lock contention: lock is held by ${current?.owner ?? 'another contender'}`
+          + `${current?.runId ? ` (${current.runId})` : ''}`,
+        409,
+      );
+    }
+  }
+
+  /**
+   * @param {{
+   *   owner: string,
+   *   runId: string,
+   *   leaseId: string,
+   *   ttlMs?: number,
+   * }} input
+   * @returns {Promise<ApplyLockHandle>}
+   */
+  async function acquireApplyLock(input) {
+    const lockOwner = lockIdentity(input?.owner, 'apply lock owner');
+    const runId = lockIdentity(input?.runId, 'apply lock runId');
+    const leaseId = lockIdentity(input?.leaseId, 'apply lock leaseId');
+    const ttlMs = lockTtl(input?.ttlMs);
+    const acquiredAt = now();
+    const state = /** @type {ApplyLockState} */ ({
+      version: 1,
+      state: 'acquired',
+      owner: lockOwner,
+      runId,
+      leaseId,
+      acquiredAt,
+      expiresAt: acquiredAt + ttlMs,
+    });
+    const current = await readApplyLock();
+    if (current?.state === 'acquired' && current.expiresAt > acquiredAt) {
+      throw new GhClientError(
+        'lock',
+        `GitHub apply lock is held by ${current.owner} (${current.runId}) until `
+          + new Date(current.expiresAt).toISOString(),
+        409,
+      );
+    }
+
+    let parentSha;
+    let treeSha;
+    if (current) {
+      parentSha = current.sha;
+      treeSha = current.treeSha;
+    } else {
+      const base = record(await rest(
+        'GET',
+        `repos/${owner}/${repo}/git/commits/${encodeURIComponent(repositoryDefaultBranch)}`,
+      ));
+      parentSha = requiredString(base.sha, 'apply lock base commit sha');
+      treeSha = requiredString(record(base.tree).sha, 'apply lock base tree sha');
+    }
+
+    const sha = await createApplyLockCommit(state, parentSha, treeSha);
+    if (current) {
+      await updateApplyLockRef(sha, leaseId);
+    } else {
+      await createApplyLockRef(sha, leaseId);
+    }
+    return {
+      ...state,
+      ref: APPLY_LOCK_REF,
+      sha,
+      treeSha,
+    };
+  }
+
+  /**
+   * @param {ApplyLockHandle} handle
+   * @returns {Promise<void>}
+   */
+  async function releaseApplyLock(handle) {
+    const lockOwner = lockIdentity(handle?.owner, 'apply lock owner');
+    const runId = lockIdentity(handle?.runId, 'apply lock runId');
+    const leaseId = lockIdentity(handle?.leaseId, 'apply lock leaseId');
+    const current = await readApplyLock();
+    if (
+      current?.state === 'released'
+      && current.owner === lockOwner
+      && current.runId === runId
+      && current.leaseId === leaseId
+    ) {
+      return;
+    }
+    if (
+      current == null
+      || current.state !== 'acquired'
+      || current.sha !== handle.sha
+      || current.owner !== lockOwner
+      || current.runId !== runId
+      || current.leaseId !== leaseId
+    ) {
+      throw new GhClientError(
+        'lock',
+        'GitHub apply lock release refused because ownership could not be proven',
+        409,
+      );
+    }
+
+    const released = /** @type {ApplyLockState} */ ({
+      ...current,
+      state: 'released',
+      expiresAt: now(),
+    });
+    const sha = await createApplyLockCommit(released, current.sha, current.treeSha);
+    await updateApplyLockRef(sha, leaseId);
   }
 
   /**
@@ -2219,7 +2591,13 @@ export function createGhClient(options) {
       if (definition.options.length > 0 && !optionNamesMatch(definition.options, field.options)) {
         await graphql(UPDATE_FIELD_MUTATION, {
           fieldId: field.id,
-          options: definition.options.map((option) => ({ ...option })),
+          options: definition.options.map((option) => {
+            const id = field.options.get(option.name);
+            return {
+              ...(id == null ? {} : { id }),
+              ...option,
+            };
+          }),
         });
         changed = true;
       }
@@ -2368,11 +2746,15 @@ export function createGhClient(options) {
     const issueNumber = issueNumberFrom(operation);
     const body = requiredString(operation?.body, 'issue body');
     const assignees = operationAssignees(operation);
+    const labels = Array.isArray(operation?.labels)
+      && operation.labels.every((label) => typeof label === 'string')
+      ? [...operation.labels]
+      : labelsFromBody(body);
     const payload = {
       title: requiredString(operation?.title, 'issue title'),
       body,
       ...(typeof operation?.state === 'string' ? { state: operation.state } : {}),
-      labels: labelsFromBody(body),
+      labels,
       ...(assignees === undefined ? {} : { assignees }),
     };
     return record(await rest('PATCH', `repos/${owner}/${repo}/issues/${issueNumber}`, payload));
@@ -3012,6 +3394,8 @@ ${selections.join('\n')}
 
   return Object.freeze({
     verifyAccess,
+    acquireApplyLock,
+    releaseApplyLock,
     listRepositoryIssues,
     listManagedIssues,
     ensureLabels,

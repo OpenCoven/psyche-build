@@ -1,5 +1,6 @@
 // @ts-check
 
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { readSyncConfig } from './config.mjs';
@@ -337,6 +338,22 @@ function writeSummary(summary, stdout) {
 }
 
 /**
+ * @param {Readonly<Record<string, string | undefined>>} env
+ * @returns {{owner: string, runId: string, leaseId: string}}
+ */
+function createApplyLockIdentity(env) {
+  const actionsRunId = env.GITHUB_RUN_ID?.trim();
+  const actionsAttempt = env.GITHUB_RUN_ATTEMPT?.trim();
+  return {
+    owner: actionsRunId ? 'github-actions' : 'local-cli',
+    runId: actionsRunId
+      ? `actions-${actionsRunId}-${actionsAttempt || '1'}`
+      : `local-${randomUUID()}`,
+    leaseId: randomUUID(),
+  };
+}
+
+/**
  * @param {readonly string[]} argv
  * @param {CliDependencies} [dependencies]
  * @returns {Promise<number>}
@@ -432,136 +449,160 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     await gh.verifyAccess();
     let project = await gh.discoverProject();
     let provisionedThisRun = false;
+    const firstRunPlan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext,
+    });
+    validatePlanSafety(firstRunPlan, config.massClose, false);
+    const desiredProjectReadme = plannedReadme(firstRunPlan);
+    const applyLock = options.mode === 'dry-run'
+      ? null
+      : await gh.acquireApplyLock(createApplyLockIdentity(env));
 
-    if (options.provision) {
-      const firstRunPlan = planReconciliation({
-        inventory,
-        existingIssues: [],
-        readme: null,
-        renderContext,
-      });
-      validatePlanSafety(firstRunPlan, config.massClose, false);
-      if (!project) {
-        const provisioned = await gh.provisionProject({
+    try {
+      if (options.mode !== 'dry-run' && project) {
+        const repairedProject = await gh.ensureProject({
           title: config.projectTitle,
-          readme: plannedReadme(firstRunPlan),
+          readme: desiredProjectReadme,
         });
-        project = provisioned.project;
-        provisionedThisRun = true;
+        if (options.mode === 'provision') {
+          project = repairedProject;
+        }
       }
 
-      if (options.mode === 'provision') {
-        const url = project.url
-          ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
-        if (provisionedThisRun) {
-          warnings.push('Project infrastructure was provisioned; run --apply to reconcile issues and items.');
-          stderr.write(`Provisioned marked GitHub Project at ${url}.\n`);
-        } else {
-          warnings.push('The marked Project already exists; provisioning made no changes.');
-          stderr.write(`Marked GitHub Project already exists at ${url}; provisioning made no changes.\n`);
+      if (options.provision) {
+        if (!project) {
+          const provisioned = await gh.provisionProject({
+            title: config.projectTitle,
+            readme: desiredProjectReadme,
+          });
+          project = provisioned.project;
+          provisionedThisRun = true;
         }
+
+        if (options.mode === 'provision') {
+          const url = project.url
+            ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
+          if (provisionedThisRun) {
+            warnings.push(
+              'Project infrastructure was provisioned; run --apply to reconcile issues and items.',
+            );
+            stderr.write(`Provisioned marked GitHub Project at ${url}.\n`);
+          } else {
+            warnings.push(
+              'The marked Project already exists; provisioning verified and repaired its managed configuration.',
+            );
+            stderr.write(`Marked GitHub Project at ${url} was verified and repaired.\n`);
+          }
+          writeSummary({
+            mode: options.mode,
+            inventory: inventorySummary,
+            ...summarizePlan(firstRunPlan, diagnosticSecrets),
+            appliedOperationCount: 0,
+            warnings,
+            projectUrl: url,
+          }, stdout);
+          return 0;
+        }
+      }
+
+      if (!project && options.mode === 'apply') {
+        fail('No marked GitHub Project exists; run --provision first');
+      }
+
+      const existingIssues = await gh.listManagedIssues();
+      const plan = planReconciliation({
+        inventory,
+        existingIssues,
+        readme: project == null ? null : { body: project.readme, public: project.public },
+        renderContext,
+      });
+      const url = project == null
+        ? null
+        : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
+      try {
+        validatePlanSafety(plan, config.massClose, options.allowMassClose);
+      } catch (error) {
+        const maxCloseCount = massCloseLimit(plan.summary.managedOpenCount, config.massClose);
+        const failure = {
+          kind: /** @type {const} */ ('mass-close-safety'),
+          cause: errorMessage(error, diagnosticSecrets),
+          closeIssueCount: plan.summary.closeIssueCount,
+          maxCloseCount,
+        };
+        stderr.write(`Beads Project sync safety check failed: ${failure.cause}\n`);
         writeSummary({
           mode: options.mode,
           inventory: inventorySummary,
-          ...summarizePlan(firstRunPlan, diagnosticSecrets),
+          ...summarizePlan(plan, diagnosticSecrets),
           appliedOperationCount: 0,
           warnings,
           projectUrl: url,
+          failure,
+        }, stdout);
+        return 1;
+      }
+
+      if (options.mode === 'dry-run') {
+        if (!project) {
+          warnings.push('No marked GitHub Project exists; this remains a first-run plan.');
+        }
+        stderr.write(`Beads Project sync dry run planned ${plan.operations.length} operations.\n`);
+        writeSummary({
+          mode: options.mode,
+          inventory: inventorySummary,
+          ...summarizePlan(plan, diagnosticSecrets),
+          appliedOperationCount: 0,
+          warnings,
+          projectUrl: project == null
+            ? null
+            : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`,
         }, stdout);
         return 0;
       }
-    }
 
-    if (!project && options.mode === 'apply') {
-      fail('No marked GitHub Project exists; run --provision first');
-    }
-
-    const existingIssues = await gh.listManagedIssues();
-    const plan = planReconciliation({
-      inventory,
-      existingIssues,
-      readme: project == null ? null : { body: project.readme, public: project.public },
-      renderContext,
-    });
-    const url = project == null
-      ? null
-      : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
-    try {
-      validatePlanSafety(plan, config.massClose, options.allowMassClose);
-    } catch (error) {
-      const maxCloseCount = massCloseLimit(plan.summary.managedOpenCount, config.massClose);
-      const failure = {
-        kind: /** @type {const} */ ('mass-close-safety'),
-        cause: errorMessage(error, diagnosticSecrets),
-        closeIssueCount: plan.summary.closeIssueCount,
-        maxCloseCount,
-      };
-      stderr.write(`Beads Project sync safety check failed: ${failure.cause}\n`);
+      if (!provisionedThisRun) {
+        await gh.ensureLabels();
+        await gh.ensureFields();
+        await gh.ensureViews();
+      }
+      let applied;
+      try {
+        applied = await applyReconciliation(plan, gh);
+      } catch (error) {
+        if (!(error instanceof ReconciliationApplyError)) {
+          throw error;
+        }
+        const failure = summarizeApplyFailure(error, diagnosticSecrets);
+        writeApplyFailureDiagnostics(error, plan.operations.length, failure, stderr);
+        writeSummary({
+          mode: options.mode,
+          inventory: inventorySummary,
+          ...summarizePlan(plan, diagnosticSecrets),
+          appliedOperationCount: error.applied.length,
+          warnings,
+          projectUrl: url,
+          failure,
+        }, stdout);
+        return 1;
+      }
+      stderr.write(`Applied ${applied.applied.length} Beads Project reconciliation operations.\n`);
       writeSummary({
         mode: options.mode,
         inventory: inventorySummary,
         ...summarizePlan(plan, diagnosticSecrets),
-        appliedOperationCount: 0,
+        appliedOperationCount: applied.applied.length,
         warnings,
         projectUrl: url,
-        failure,
-      }, stdout);
-      return 1;
-    }
-
-    if (options.mode === 'dry-run') {
-      if (!project) {
-        warnings.push('No marked GitHub Project exists; this remains a first-run plan.');
-      }
-      stderr.write(`Beads Project sync dry run planned ${plan.operations.length} operations.\n`);
-      writeSummary({
-        mode: options.mode,
-        inventory: inventorySummary,
-        ...summarizePlan(plan, diagnosticSecrets),
-        appliedOperationCount: 0,
-        warnings,
-        projectUrl: project == null
-          ? null
-          : project.url ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`,
       }, stdout);
       return 0;
-    }
-
-    if (!provisionedThisRun) {
-      await gh.ensureLabels();
-      await gh.ensureFields();
-      await gh.ensureViews();
-    }
-    let applied;
-    try {
-      applied = await applyReconciliation(plan, gh);
-    } catch (error) {
-      if (!(error instanceof ReconciliationApplyError)) {
-        throw error;
+    } finally {
+      if (applyLock) {
+        await gh.releaseApplyLock(applyLock);
       }
-      const failure = summarizeApplyFailure(error, diagnosticSecrets);
-      writeApplyFailureDiagnostics(error, plan.operations.length, failure, stderr);
-      writeSummary({
-        mode: options.mode,
-        inventory: inventorySummary,
-        ...summarizePlan(plan, diagnosticSecrets),
-        appliedOperationCount: error.applied.length,
-        warnings,
-        projectUrl: url,
-        failure,
-      }, stdout);
-      return 1;
     }
-    stderr.write(`Applied ${applied.applied.length} Beads Project reconciliation operations.\n`);
-    writeSummary({
-      mode: options.mode,
-      inventory: inventorySummary,
-      ...summarizePlan(plan, diagnosticSecrets),
-      appliedOperationCount: applied.applied.length,
-      warnings,
-      projectUrl: url,
-    }, stdout);
-    return 0;
   } catch (error) {
     stderr.write(`Beads Project sync failed: ${errorMessage(error, diagnosticSecrets)}\n`);
     return 1;

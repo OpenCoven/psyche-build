@@ -668,6 +668,72 @@ describe('Beads project renderers', () => {
     }
   });
 
+  it('rejects secrets reconstructed by CommonMark backslash escapes', () => {
+    for (const unsafeDescription of [
+      'Publish ghp\\_abcdefghijklmnopqrstuvwxyz123456',
+      'api\\_key = "live-secret-value"',
+      'token \\= github_pat\\_abcdefghijklmnopqrstuvwxyz1234567890',
+      'https\\://alice\\@example.com/releases',
+    ]) {
+      expect(() => renderSourceDescription(unsafeDescription)).toThrow(
+        /Publishable (?:GitHub token|API key|credential|URL credentials)/i,
+      );
+    }
+  });
+
+  it('inspects encoded Markdown destinations and preserves safe escaped Markdown', () => {
+    const rendered = renderSourceDescription([
+      '[worktree](%2Epsyche%2Fworktrees%2Frun%2Fplan.md)',
+      '![session](&period;copilot&sol;session-state&sol;run&sol;shot.png)',
+      '[checkout](%252Eworktrees%252Frun%252Fnotes.md)',
+      '[macOS home](%2FUsers%2Falice%2Fprivate%2Fnotes.md)',
+      '[Linux home](&sol;home&sol;alice&sol;private&sol;notes.md)',
+      'Safe escaped prose: \\*literal emphasis\\* and \\[not a link\\].',
+      '[safe route](docs/My%20Project.md)',
+      '```md',
+      '[literal](%2Epsyche%2Fworktrees%2Finside-code.md)',
+      '[entity literal](&period;copilot&sol;session-state&sol;inside-code.md)',
+      '\\*literal fenced prose\\*',
+      '```',
+    ].join('\n'));
+
+    expect(countMatches(rendered, '<redacted-local-path>')).toBe(5);
+    expect(rendered).toContain('Safe escaped prose: \\*literal emphasis\\* and \\[not a link\\].');
+    expect(rendered).toContain('[safe route](docs/My%20Project.md)');
+    expect(rendered).toContain([
+      '```md',
+      '[literal](%2Epsyche%2Fworktrees%2Finside-code.md)',
+      '[entity literal](&period;copilot&sol;session-state&sol;inside-code.md)',
+      '\\*literal fenced prose\\*',
+      '```',
+    ].join('\n'));
+    expect(countMatches(rendered, '%2Epsyche')).toBe(1);
+    expect(countMatches(rendered, '&period;copilot')).toBe(1);
+    expect(rendered).not.toMatch(
+      /%252Eworktrees|%2FUsers|&sol;home/iu,
+    );
+  });
+
+  it('does not treat an invalid backtick fence opener as protected Markdown code', () => {
+    expect(() => renderSourceDescription([
+      '```invalid`info',
+      'Publish ghp\\_abcdefghijklmnopqrstuvwxyz123456',
+    ].join('\n'))).toThrow(/Publishable GitHub token/i);
+  });
+
+  it('rejects credentials and tokens reconstructed inside Markdown destinations', () => {
+    const token = 'github_pat_abcdefghijklmnopqrstuvwxyz1234567890';
+    for (const unsafeDescription of [
+      '[credentials](https%3A%2F%2Falice%40example.com%2Freleases)',
+      `![token](assets/${token.replaceAll('_', '%5F')}.png)`,
+      `<https://example.com/${token.replaceAll('_', '&lowbar;')}>`,
+    ]) {
+      expect(() => renderSourceDescription(unsafeDescription)).toThrow(
+        /Publishable (?:GitHub token|URL credentials)/i,
+      );
+    }
+  });
+
   it('preserves safe entities, prose, code fences, and percent encoding', () => {
     const safeDescription = [
       'Safe &amp; sound with &lt;example&gt; in normal prose.',
@@ -1178,6 +1244,46 @@ describe('Beads project renderers', () => {
     expect(rendered).toContain('\n### After fences');
     expect(rendered).not.toContain('```ts\n## Inside backtick fence\n```');
     expect(rendered).not.toContain('~~~md\n### Inside tilde fence\n~~~');
+  });
+
+  it('closes unclosed source fences with the matching marker before generated sections', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        description: '````ts\n# Description code',
+        design: '~~~md\n## Design code',
+        specId: null,
+        notes: '```\n### Notes code',
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(rendered).toContain(
+      '## Description\n````ts\n# Description code\n````\n\n## Design',
+    );
+    expect(rendered).toContain(
+      '## Design\n~~~md\n## Design code\n~~~\n\n## Acceptance criteria',
+    );
+    expect(rendered).toContain(
+      '## Implementation notes\n```\n### Notes code\n```\n\n## Dependencies',
+    );
+  });
+
+  it('preserves already closed source fences and their original lengths', () => {
+    const rendered = renderSourceDescription([
+      '`````ts',
+      '# literal',
+      '`````',
+      '~~~~md',
+      '## literal',
+      '~~~~',
+    ].join('\n'));
+
+    expect(countMatches(rendered, '`````')).toBe(2);
+    expect(countMatches(rendered, '~~~~')).toBe(2);
   });
 
   it('renders labels with locale-independent deterministic ordering', () => {

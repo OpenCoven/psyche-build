@@ -103,6 +103,16 @@ describe('pull request CI workflow contract', () => {
     }
   });
 
+  it('keeps workflow concurrency and documents the shared local/Actions apply lock', () => {
+    const workflow = readFileSync(beadsProjectSyncWorkflowPath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    expect(workflow).toContain('group: beads-project-sync');
+    expect(workflow).toContain('cancel-in-progress: false');
+    expect(contributing).toMatch(/GitHub-backed.*apply lock/i);
+    expect(contributing).toMatch(/local.*Actions/i);
+  });
+
   it('defines the tiered workflow topology and job contracts', () => {
     const workflow = workflowSource();
 

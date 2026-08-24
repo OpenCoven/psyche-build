@@ -170,6 +170,19 @@ export interface ProvisionedProject {
   views: ProjectViewContext[];
 }
 
+export interface ApplyLockHandle {
+  version: 1;
+  state: 'acquired' | 'released';
+  owner: string;
+  runId: string;
+  leaseId: string;
+  acquiredAt: number;
+  expiresAt: number;
+  ref: string;
+  sha: string;
+  treeSha: string;
+}
+
 export class GhClientError extends Error {
   readonly kind: string;
   readonly status?: number;
@@ -186,6 +199,13 @@ export interface GhClient {
     organization: Record<string, unknown>;
     repository: Record<string, unknown>;
   }>;
+  acquireApplyLock(input: {
+    owner: string;
+    runId: string;
+    leaseId: string;
+    ttlMs?: number;
+  }): Promise<ApplyLockHandle>;
+  releaseApplyLock(handle: ApplyLockHandle): Promise<void>;
   listRepositoryIssues(): Promise<unknown[]>;
   listManagedIssues(): Promise<ManagedIssueSnapshot[]>;
   ensureLabels(): Promise<readonly ManagedLabel[]>;
@@ -217,6 +237,7 @@ export interface GhClient {
     body: string;
     state?: string;
     assignees?: readonly string[];
+    labels?: readonly string[];
     beadId?: string;
     renderHash?: string;
     type?: 'updateIssue';

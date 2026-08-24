@@ -144,14 +144,18 @@ function promoteHeadingsOutsideCodeFences(value) {
   /** @type {string | null} */
   let activeFence = null;
 
-  return lines.map((line) => {
+  const normalized = lines.map((line) => {
     const fenceMatch = line.match(/^\s*(`{3,}|~{3,})(.*)$/u);
     if (fenceMatch) {
       const [, marker, suffix] = fenceMatch;
-      if (activeFence == null) {
+      if (
+        activeFence == null
+        && (marker[0] !== '`' || !suffix.includes('`'))
+      ) {
         activeFence = marker;
       } else if (
-        marker[0] === activeFence[0]
+        activeFence != null
+        && marker[0] === activeFence[0]
         && marker.length >= activeFence.length
         && /^[ \t]*$/u.test(suffix)
       ) {
@@ -161,7 +165,12 @@ function promoteHeadingsOutsideCodeFences(value) {
     }
 
     return activeFence == null ? normalizeHeadingLine(line) : line;
-  }).join('\n');
+  });
+
+  if (activeFence != null) {
+    normalized.push(activeFence);
+  }
+  return normalized.join('\n');
 }
 
 /**
@@ -557,11 +566,19 @@ function renderLabelsSection(bead) {
  */
 function renderDesignSection(bead, context) {
   const lines = /** @type {string[]} */ ([]);
-  const designLink = renderSourceLink(bead.design, context);
+  const designIsMarkdownBlock = typeof bead.design === 'string' && /[\r\n]/u.test(bead.design);
+  const designLink = typeof bead.design === 'string' && !designIsMarkdownBlock
+    ? renderSourceLink(bead.design, context)
+    : null;
   const planLink = renderSourceLink(bead.specId, context);
 
   if (designLink) {
     lines.push(`- Design doc: ${designLink}`);
+  } else if (designIsMarkdownBlock) {
+    const design = normalizeMarkdownBlock(bead.design, 'design');
+    if (design) {
+      lines.push(design);
+    }
   }
   if (planLink) {
     lines.push(`- Plan: ${planLink}`);

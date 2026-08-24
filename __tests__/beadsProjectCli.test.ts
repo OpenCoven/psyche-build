@@ -50,6 +50,8 @@ interface CapturedCli {
 
 interface FakeGhOptions {
   existingIssues?: readonly Record<string, unknown>[];
+  failAcquireLock?: Error;
+  failReleaseLock?: Error;
   failSetFields?: Error;
   project?: ProjectContext | null;
 }
@@ -98,6 +100,8 @@ function managedIssue(beadId: string, number: number) {
 function createFakeGh(options: FakeGhOptions = {}) {
   const calls: string[] = [];
   const clientOptions: FakeClientOptions[] = [];
+  const ensureProjectInputs: Array<{ title: string; readme: string }> = [];
+  const lockCalls: string[] = [];
   const provisionReadmes: string[] = [];
   const writes: string[] = [];
   let nextIssueNumber = 100;
@@ -121,6 +125,40 @@ function createFakeGh(options: FakeGhOptions = {}) {
     async discoverProject() {
       calls.push('discoverProject');
       return project;
+    },
+    async ensureProject(input: { title: string; readme: string }) {
+      writes.push('ensureProject');
+      ensureProjectInputs.push(input);
+      if (!project) {
+        throw new Error('ensureProject requires an existing Project in this fake');
+      }
+      return {
+        ...project,
+        title: input.title,
+        readme: input.readme,
+        public: true,
+      };
+    },
+    async acquireApplyLock() {
+      lockCalls.push('acquire');
+      if (options.failAcquireLock) {
+        throw options.failAcquireLock;
+      }
+      return {
+        ref: 'refs/tags/psyche-beads-project-sync-lock',
+        sha: 'LOCK',
+        treeSha: 'TREE',
+        owner: 'local-cli',
+        runId: 'test-run',
+        leaseId: 'test-lease',
+        expiresAt: Date.now() + 60_000,
+      };
+    },
+    async releaseApplyLock() {
+      lockCalls.push('release');
+      if (options.failReleaseLock) {
+        throw options.failReleaseLock;
+      }
     },
     async listManagedIssues() {
       calls.push('listManagedIssues');
@@ -201,7 +239,15 @@ function createFakeGh(options: FakeGhOptions = {}) {
     },
   } as unknown as GhClient;
 
-  return { calls, client, clientOptions, provisionReadmes, writes };
+  return {
+    calls,
+    client,
+    clientOptions,
+    ensureProjectInputs,
+    lockCalls,
+    provisionReadmes,
+    writes,
+  };
 }
 
 async function runCli(
@@ -698,6 +744,7 @@ describe('Beads project sync CLI', () => {
 
     expect(result.exitCode).toBe(0);
     expect(fakeGh.calls).toEqual(['verifyAccess', 'discoverProject', 'listManagedIssues']);
+    expect(fakeGh.lockCalls).toEqual([]);
     expect(fakeGh.writes).toEqual([]);
     expect(fakeGh.clientOptions).toEqual([
       expect.objectContaining({
@@ -755,6 +802,7 @@ describe('Beads project sync CLI', () => {
 
     expect(created.exitCode).toBe(0);
     expect(absentProject.calls).toEqual(['verifyAccess', 'discoverProject']);
+    expect(absentProject.lockCalls).toEqual(['acquire', 'release']);
     expect(absentProject.writes).toEqual(['provisionProject']);
     expect(absentProject.provisionReadmes[0]).toContain(
       '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
@@ -778,8 +826,48 @@ describe('Beads project sync CLI', () => {
     );
 
     expect(unchanged.exitCode).toBe(0);
-    expect(existingProject.writes).toEqual([]);
-    expect(unchanged.stderr).toMatch(/already exists/i);
+    expect(existingProject.lockCalls).toEqual(['acquire', 'release']);
+    expect(existingProject.writes).toEqual(['ensureProject']);
+    expect(existingProject.ensureProjectInputs).toHaveLength(1);
+    expect(existingProject.ensureProjectInputs[0]).toMatchObject({
+      title: 'Psyche Build: Goals & Implementation',
+    });
+    expect(existingProject.ensureProjectInputs[0]?.readme).toContain(
+      '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
+    );
+    expect(unchanged.stderr).toMatch(/verified and repaired/i);
+  });
+
+  it('repairs a renamed marked Project during apply without creating a duplicate', async () => {
+    const fakeGh = createFakeGh({
+      project: {
+        id: 'PVT_renamed',
+        number: 12,
+        title: 'Former public inventory title',
+        readme:
+          '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n# Former title',
+        public: false,
+        url: 'https://github.com/orgs/OpenCoven/projects/12',
+      },
+    });
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
+    expect(fakeGh.writes[0]).toBe('ensureProject');
+    expect(fakeGh.writes).not.toContain('provisionProject');
+    expect(fakeGh.ensureProjectInputs[0]).toMatchObject({
+      title: 'Psyche Build: Goals & Implementation',
+    });
+    expect(fakeGh.ensureProjectInputs[0]?.readme).toContain(
+      '# Psyche Build: Goals & Implementation',
+    );
   });
 
   it('can provision an absent Project and apply the full plan in one run', async () => {
@@ -794,6 +882,7 @@ describe('Beads project sync CLI', () => {
 
     const summary = JSON.parse(result.stdout);
     expect(result.exitCode).toBe(0);
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
     expect(fakeGh.writes[0]).toBe('provisionProject');
     expect(fakeGh.writes).toContain('createIssue');
     expect(fakeGh.writes).not.toContain('updateReadme');
@@ -814,8 +903,14 @@ describe('Beads project sync CLI', () => {
 
     const summary = JSON.parse(result.stdout);
     expect(result.exitCode).toBe(0);
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
     expect(fakeGh.calls).toEqual(['verifyAccess', 'discoverProject', 'listManagedIssues']);
-    expect(fakeGh.writes.slice(0, 3)).toEqual(['ensureLabels', 'ensureFields', 'ensureViews']);
+    expect(fakeGh.writes.slice(0, 4)).toEqual([
+      'ensureProject',
+      'ensureLabels',
+      'ensureFields',
+      'ensureViews',
+    ]);
     expect(fakeGh.writes).toContain('createIssue');
     expect(fakeGh.writes).toContain('setFields');
     expect(fakeGh.writes.at(-1)).toBe('updateReadme');
@@ -870,6 +965,27 @@ describe('Beads project sync CLI', () => {
     expect(`${result.stdout}${result.stderr}`).not.toContain(leakedRecord.body);
     expect(`${result.stdout}${result.stderr}`).not.toContain(leakedRecord.title);
     expect(summary.failure.failingOperation).not.toHaveProperty('fields');
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
+  });
+
+  it('fails closed on lock contention without writes and redacts the token', async () => {
+    const fakeGh = createFakeGh({
+      failAcquireLock: new Error(`lock held by ${token}`),
+    });
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/lock held/i);
+    expect(result.stderr).not.toContain(token);
+    expect(fakeGh.lockCalls).toEqual(['acquire']);
+    expect(fakeGh.writes).toEqual([]);
   });
 
   it('lets --allow-mass-close override only the configured close threshold', async () => {
