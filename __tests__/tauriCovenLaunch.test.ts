@@ -786,6 +786,45 @@ describe('native Coven launch routing', () => {
     });
   });
 
+  it('serializes bare Coven CLI native session requests without a Coven session id', () => {
+    const nativeSessionRequest = compileFunction<(
+      thread: Record<string, any>,
+    ) => Record<string, unknown>>(functionSource('nativeSessionRequest'), {});
+
+    const codeRequest = nativeSessionRequest({
+      id: 'code-thread',
+      launch: {
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-code',
+        covenSessionId: 'stale-session-id',
+      },
+    });
+    expect(codeRequest).toEqual({
+      id: 'code-thread',
+      projectRoot: '/repo',
+      cwd: '/repo/wt',
+      launchKind: 'coven-code',
+    });
+    expect(codeRequest).not.toHaveProperty('covenSessionId');
+
+    expect(nativeSessionRequest({
+      id: 'attach-thread',
+      launch: {
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-attach',
+        covenSessionId: 'remote-session',
+      },
+    })).toEqual({
+      id: 'attach-thread',
+      projectRoot: '/repo',
+      cwd: '/repo/wt',
+      launchKind: 'coven-attach',
+      covenSessionId: 'remote-session',
+    });
+  });
+
   it('rejects duplicate requests for non-PTY tool panes', () => {
     let creates = 0;
     const duplicateThread = compileFunction<(
@@ -853,7 +892,7 @@ describe('native Coven launch routing', () => {
     const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
     let frame: (() => void) | null = null;
     const calls: Array<Record<string, any>> = [];
-    const launch = {
+    const launch: Record<string, any> = {
       command: '/bin/coven', args: [],
       env: {}, projectRoot: '/repo', cwd: '/repo/wt',
       launchKind: 'coven-code',
@@ -1580,6 +1619,50 @@ describe('native Coven launch routing', () => {
     expect(statuses).toEqual([[
       'Coven session is no longer available; refresh the rail before retrying', 'warn',
     ]]);
+  });
+
+  it('retries a bare Coven CLI durable session without a stale Coven session id', async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const nativeSessionRequest = compileFunction<(
+      thread: Record<string, any>,
+    ) => Record<string, unknown>>(functionSource('nativeSessionRequest'), {});
+    const thread = {
+      id: 'code-thread',
+      name: 'Coven CLI',
+      projectId: 'alpha',
+      status: 'failed',
+      startInFlight: false,
+      closeStarted: false,
+      persistentLive: false,
+      launch: {
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-code',
+        covenSessionId: 'stale-session-id',
+      },
+    };
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('retryThread'),
+      {
+        findThread: () => thread,
+        invoke: async (_command: string, payload: Record<string, unknown>) => {
+          requests.push(payload);
+        },
+        nativeSessionRequest,
+        attachThreadClient: async () => true,
+      },
+    );
+
+    await expect(retryThread(thread.id)).resolves.toBe(true);
+    expect(requests).toEqual([{
+      request: {
+        id: 'code-thread',
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-code',
+      },
+    }]);
+    expect(requests[0]?.request).not.toHaveProperty('covenSessionId');
   });
 
   it('adopts an already-running Rust PTY response as the live retry', async () => {

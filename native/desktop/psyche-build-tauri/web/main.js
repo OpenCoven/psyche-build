@@ -1184,7 +1184,7 @@
         ["shell", "psyche", "coven-code", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
       return null;
     }
-    return {
+    var persisted = {
       id: thread.id,
       projectId: thread.projectId,
       worktreePath: thread.worktreePath,
@@ -1192,8 +1192,11 @@
       kind: thread.kind,
       launchKind: thread.launch.launchKind,
       hidden: thread.hidden === true,
-      covenSessionId: thread.launch.covenSessionId || null,
     };
+    if (thread.launch.launchKind === "coven-attach") {
+      persisted.covenSessionId = thread.launch.covenSessionId || null;
+    }
+    return persisted;
   }
   function persistableFilesPanes() {
     var records = [];
@@ -2258,13 +2261,16 @@
   }
 
   function nativeSessionRequest(thread) {
-    return {
+    var request = {
       id: thread.id,
       projectRoot: thread.launch.projectRoot,
       cwd: thread.launch.cwd,
       launchKind: thread.launch.launchKind,
-      covenSessionId: thread.launch.covenSessionId || null,
     };
+    if (thread.launch.launchKind === "coven-attach") {
+      request.covenSessionId = thread.launch.covenSessionId || null;
+    }
+    return request;
   }
 
   // An exited pane is not an attachment you can focus, so it must not make a
@@ -2294,6 +2300,9 @@
       covenSessionId: opts.covenSessionId || null,
       metricsProvider: opts.metricsProvider || null,
     };
+    var sourceLaunchKind = sourceLaunch.launchKind || null;
+    var isCovenCodeLaunch = sourceLaunchKind === "coven-code";
+    var isCovenAttachLaunch = sourceLaunchKind === "coven-attach";
     var launch = {
       command: sourceLaunch.command,
       args: Array.isArray(sourceLaunch.args) ? sourceLaunch.args.slice() : [],
@@ -2301,9 +2310,11 @@
       projectRoot: sourceLaunch.projectRoot || (project && project.root) || null,
       cwd: sourceLaunch.cwd || opts.worktreePath || sourceLaunch.projectRoot ||
         (project && activeWorkspaceRoot(project)) || null,
-      launchKind: sourceLaunch.launchKind || null,
-      covenSessionId: sourceLaunch.covenSessionId || null,
-      metricsProvider: sourceLaunch.metricsProvider || opts.metricsProvider || null,
+      launchKind: sourceLaunchKind,
+      covenSessionId: isCovenAttachLaunch ? sourceLaunch.covenSessionId || null : null,
+      metricsProvider: isCovenCodeLaunch
+        ? null
+        : sourceLaunch.metricsProvider || opts.metricsProvider || null,
     };
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
@@ -13657,21 +13668,21 @@
 
   function restoredSessionLaunch(descriptor, project) {
     var launchKind = descriptor.launchKind;
-    var hasCovenSessionId = typeof descriptor.covenSessionId === "string" &&
-      descriptor.covenSessionId.length > 0;
-    return {
+    var launch = {
       command: null,
       args: [],
       env: {},
       projectRoot: project.root,
       cwd: descriptor.worktreePath,
       launchKind: launchKind,
-      covenSessionId: descriptor.covenSessionId || null,
-      metricsProvider: hasCovenSessionId &&
-        (launchKind === "coven-code" || launchKind === "coven-attach")
-        ? "coven"
-        : null,
     };
+    if (launchKind === "coven-attach") {
+      launch.covenSessionId = descriptor.covenSessionId || null;
+      launch.metricsProvider = launch.covenSessionId ? "coven" : null;
+    } else {
+      launch.metricsProvider = null;
+    }
+    return launch;
   }
 
   function restoredSessionThread(descriptor, project) {
