@@ -1072,6 +1072,84 @@ describe('Beads project renderers', () => {
     expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
   });
 
+  it.each([
+    ['comma', ',', '//user%20name:password@[2001:db8::1]:8443/releases(foo)'],
+    ['semicolon', ';', 'https:user%2Fname:password@host.example:8443/releases(foo)'],
+    ['colon', '::', '//user%20name:password@host.example/releases(foo)'],
+    ['opening parenthesis', '(', '//user%2Fname:password@host.example/releases(foo)'],
+    ['opening bracket', '[', 'https:user%20name:password@[2001:db8::1]:8443/releases(foo)'],
+    ['opening brace', '{', '//user%2Fname:password@host.example/releases(foo)'],
+    ['double quote', '"', 'https:user%20name:password@host.example/releases(foo)'],
+    ['single quote', "'", '//user%2Fname:password@[2001:db8::1]:8443/releases(foo)'],
+  ])(
+    'rejects a raw credential URL candidate after an ordinary %s prefix',
+    (_name, prefix, candidate) => {
+      expect(() =>
+        sanitizePublicText(`Publish${prefix}${candidate} next.`)
+      ).toThrow(/URL credentials/i);
+    },
+  );
+
+  it.each([
+    ['percent whitespace in username', '//user%20name:password@host.example/releases'],
+    ['percent slash in username', '//user%2Fname:password@host.example/releases'],
+    ['percent whitespace before encoded at', '//user%20name%40host.example/releases'],
+    [
+      'percent slash and encoded password separators',
+      '//user%2Fname%3Apass%2Fword%40host.example/releases',
+    ],
+    [
+      'entity whitespace and separators',
+      '//user&Tab;name&colon;pass&sol;word&commat;host.example/releases',
+    ],
+    [
+      'conventional percent whitespace in username',
+      'https://user%20name:password@host.example/releases',
+    ],
+    [
+      'conventional percent slash before encoded at',
+      'https://user%2Fname%40host.example/releases',
+    ],
+    ['slashless percent whitespace', 'https:user%20name:password@host.example/releases'],
+    [
+      'backslash percent slash with IPv6 and port',
+      String.raw`https:\\user%2Fname:password@[2001:db8::1]:8443\releases(foo)`,
+    ],
+  ])('inspects the complete raw candidate with %s', (_name, unsafeDescription) => {
+    expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
+  });
+
+  it.each([
+    [
+      'plain text',
+      'Publish {//user%20name%40host.example:8443/releases(foo)} next.',
+    ],
+    [
+      'Markdown destination',
+      '[credentials](//user%2Fname%3Apass%40host.example:8443/releases(foo))',
+    ],
+    [
+      'Markdown image destination',
+      '![credentials](https:user%20name:password@[2001:db8::1]:8443/releases(foo))',
+    ],
+    [
+      'raw HTML attribute',
+      '<a href="//user&sol;name&colon;pass&commat;host.example/releases(foo)">private</a>',
+    ],
+  ])('rejects same-span decoded URL credentials in %s', (_context, unsafeDescription) => {
+    expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
+  });
+
+  it.each([
+    ['safe protocol-relative URL', '//cdn.example.com/a', '//cdn.example.com/a'],
+    ['arithmetic token', 'a//b', 'a//b'],
+    ['line comment', '// comment about the public release', '// comment about the public release'],
+    ['block comment', '/* // comment */', '/* // comment */'],
+    ['ordinary email', 'Contact user@example.com.', 'Contact <redacted-email>.'],
+  ])('keeps %s safe during structural URL discovery', (_name, source, expected) => {
+    expect(sanitizePublicText(source)).toBe(expected);
+  });
+
   it('preserves safe protocol-relative URLs and redacts ordinary email prose', () => {
     const safeDescription = [
       'Plain //cdn.example.com/assets/release.png.',

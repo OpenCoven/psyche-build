@@ -65,6 +65,17 @@ const URI_WRAPPER_DELIMITERS = new Map([
   ["'", "'"],
   ['`', '`'],
 ]);
+const CREDENTIAL_URL_PREFIX_PUNCTUATION = new Set([
+  ',', ';', ':', '(', ')', '[', ']', '{', '}', '"', "'", '`', '<', '>', '=',
+]);
+const CREDENTIAL_URL_NESTING_DELIMITERS = new Map([
+  ['(', ')'],
+  ['[', ']'],
+  ['{', '}'],
+]);
+const CREDENTIAL_URL_CLOSING_DELIMITERS = new Set(
+  CREDENTIAL_URL_NESTING_DELIMITERS.values(),
+);
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
 const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
 const LOCAL_PATH_FILE_EXTENSION_PATTERN =
@@ -412,11 +423,142 @@ function scanUrlCandidates(value) {
 }
 
 /**
- * @param {string | undefined} value
+ * @param {string} value
+ * @param {number} start
  * @returns {boolean}
  */
-function isCredentialUrlReferenceBoundary(value) {
-  return value == null || /\s|[("'`<=>\[]/u.test(value);
+function hasCredentialUrlCandidatePrefixBoundary(value, start) {
+  if (start === 0) {
+    return true;
+  }
+  const previous = value[start - 1];
+  if (previous === ':') {
+    let schemeStart = start - 1;
+    while (schemeStart > 0 && isUriSchemeCharacter(value[schemeStart - 1])) {
+      schemeStart -= 1;
+    }
+    if (findUriSchemeEnd(value, schemeStart) === start - 1) {
+      return false;
+    }
+  }
+  return (
+    isUriCandidateBoundary(previous)
+    || CREDENTIAL_URL_PREFIX_PUNCTUATION.has(previous)
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {boolean}
+ */
+function couldStartCredentialUrlCandidate(value, start) {
+  if (!hasCredentialUrlCandidatePrefixBoundary(value, start)) {
+    return false;
+  }
+
+  const first = value[start];
+  const second = value[start + 1];
+  if (
+    (first === '/' || first === '\\')
+    && (second === '/' || second === '\\')
+  ) {
+    return true;
+  }
+  if (first === '%' || first === '&') {
+    return true;
+  }
+  if (!isAsciiLetter(first)) {
+    return false;
+  }
+
+  for (const scheme of WHATWG_SPECIAL_CREDENTIAL_SCHEMES) {
+    if (value.slice(start, start + scheme.length).toLowerCase() !== scheme) {
+      continue;
+    }
+    const delimiterStart = start + scheme.length;
+    const delimiter = value[delimiterStart];
+    if (delimiter === ':' || delimiter === '%' || delimiter === '&') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {{ end: number, exceeded: boolean }}
+ */
+function findCredentialUrlCandidateEnd(value, start) {
+  const wrapperClose = URI_WRAPPER_DELIMITERS.get(value[start - 1]);
+  const nesting = /** @type {string[]} */ ([]);
+  let end = start;
+
+  while (end < value.length) {
+    if (end - start >= MAX_URL_CANDIDATE_LENGTH) {
+      return { end, exceeded: true };
+    }
+    const character = value[end];
+    if (isUriCandidateBoundary(character)) {
+      break;
+    }
+    if (
+      nesting.length === 0
+      && (
+        character === '<'
+        || character === '>'
+        || character === '"'
+        || character === "'"
+        || character === '`'
+        || character === wrapperClose
+      )
+    ) {
+      break;
+    }
+
+    const nestedClose = CREDENTIAL_URL_NESTING_DELIMITERS.get(character);
+    if (nestedClose != null) {
+      nesting.push(nestedClose);
+      end += 1;
+      continue;
+    }
+    if (CREDENTIAL_URL_CLOSING_DELIMITERS.has(character)) {
+      if (nesting.at(-1) !== character) {
+        break;
+      }
+      nesting.pop();
+    }
+    end += 1;
+  }
+
+  while (
+    end > start
+    && URL_TRAILING_PROSE_PUNCTUATION.has(value[end - 1])
+  ) {
+    end -= 1;
+  }
+  return { end, exceeded: false };
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isCredentialUrlReference(value) {
+  const normalized = normalizeCredentialUrlCandidateMapped(
+    createMappedInspectionText(value),
+  ).value;
+  if (normalized.startsWith('//')) {
+    return true;
+  }
+  const schemeEnd = findUriSchemeEnd(normalized, 0);
+  return (
+    schemeEnd != null
+    && WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(
+      stripGitPlusPrefix(normalized.slice(0, schemeEnd)).toLowerCase(),
+    )
+  );
 }
 
 /**
@@ -428,37 +570,37 @@ function scanCredentialUrlCandidates(value) {
   let cursor = 0;
 
   while (cursor < value.length) {
-    const schemeEnd = findUriSchemeEnd(value, cursor);
-    const protocolRelative =
-      (value.startsWith('//', cursor) || value.startsWith('\\\\', cursor))
-      && isCredentialUrlReferenceBoundary(value[cursor - 1]);
-    if (schemeEnd == null && !protocolRelative) {
+    if (!couldStartCredentialUrlCandidate(value, cursor)) {
       cursor += 1;
       continue;
+    }
+
+    const { end, exceeded } = findCredentialUrlCandidateEnd(value, cursor);
+    if (end <= cursor) {
+      cursor += 1;
+      continue;
+    }
+    const candidateValue = value.slice(cursor, end);
+    if (
+      !credentialUrlStructuralVariants(candidateValue)
+        .some((variant) => isCredentialUrlReference(variant))
+    ) {
+      cursor = exceeded ? end : cursor + 1;
+      continue;
+    }
+    if (exceeded) {
+      fail('Public credential URL candidate exceeds the inspection limit');
     }
     if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
       fail('Public text exceeds the credential URL candidate inspection limit');
     }
 
-    const start = cursor;
-    let scanEnd = schemeEnd == null ? cursor + 2 : schemeEnd + 1;
-    while (scanEnd < value.length && !isUriCandidateBoundary(value[scanEnd])) {
-      if (scanEnd - start >= MAX_URL_CANDIDATE_LENGTH) {
-        fail('Public credential URL candidate exceeds the inspection limit');
-      }
-      scanEnd += 1;
-    }
-
-    const contentEnd = Math.max(
-      schemeEnd == null ? start + 2 : schemeEnd + 1,
-      trimUriCandidateEnd(value, start, scanEnd),
-    );
     candidates.push({
-      start,
-      end: contentEnd,
-      value: value.slice(start, contentEnd),
+      start: cursor,
+      end,
+      value: candidateValue,
     });
-    cursor = Math.max(contentEnd, start + 2);
+    cursor = end;
   }
 
   return candidates;
@@ -1087,6 +1229,180 @@ function decodeDataUriDiscoveryMapped(value) {
 }
 
 /**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isCredentialUrlStructuralCharacter(value) {
+  const codePoint = value.codePointAt(0) ?? 0;
+  return (
+    value.length === 1
+    && codePoint >= 0x21
+    && codePoint <= 0x7e
+    && value !== '/'
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {{ end: number, value: string } | null}
+ */
+function credentialUrlSeparatorAt(value, start) {
+  const character = value[start];
+  if (character === '/' || character === '\\') {
+    return { end: start + 1, value: character };
+  }
+
+  const escape = value.slice(start, start + 3);
+  if (/^%[A-F0-9]{2}$/iu.test(escape)) {
+    const decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 16));
+    if (decoded === '/' || decoded === '\\') {
+      return { end: start + 3, value: decoded };
+    }
+  }
+
+  const referenceEnd = findHtmlEntityReferenceEnd(value, start);
+  if (referenceEnd == null) {
+    return null;
+  }
+  const decoded = decodeHTMLStrict(value.slice(start, referenceEnd + 1));
+  return decoded === '/' || decoded === '\\'
+    ? { end: referenceEnd + 1, value: decoded }
+    : null;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeCredentialUrlPrefixSeparators(value) {
+  let separatorStart = 0;
+  let minimumSeparatorCount = 2;
+  const schemeEnd = findUriSchemeEnd(value, 0);
+  if (schemeEnd != null) {
+    const scheme = stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase();
+    if (!WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(scheme)) {
+      return value;
+    }
+    separatorStart = schemeEnd + 1;
+    minimumSeparatorCount = 1;
+  }
+
+  const separators = /** @type {string[]} */ ([]);
+  let separatorEnd = separatorStart;
+  while (separatorEnd < value.length) {
+    const separator = credentialUrlSeparatorAt(value, separatorEnd);
+    if (separator == null) {
+      break;
+    }
+    separators.push(separator.value);
+    separatorEnd = separator.end;
+  }
+  if (separators.length < minimumSeparatorCount) {
+    return value;
+  }
+  return `${value.slice(0, separatorStart)}${separators.join('')}${
+    value.slice(separatorEnd)
+  }`;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeCredentialUrlStructureOnce(value) {
+  const output = /** @type {string[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const escape = value.slice(cursor, cursor + 3);
+    if (/^%[A-F0-9]{2}$/iu.test(escape)) {
+      const decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 16));
+      if (isCredentialUrlStructuralCharacter(decoded)) {
+        output.push(decoded);
+        cursor += 3;
+        continue;
+      }
+    }
+
+    const referenceEnd = findHtmlEntityReferenceEnd(value, cursor);
+    if (referenceEnd != null) {
+      const reference = value.slice(cursor, referenceEnd + 1);
+      const decoded = decodeHTMLStrict(reference);
+      if (
+        decoded !== reference
+        && [...decoded].every((character) =>
+          isCredentialUrlStructuralCharacter(character)
+        )
+      ) {
+        output.push(decoded);
+        cursor = referenceEnd + 1;
+        continue;
+      }
+    }
+
+    output.push(value[cursor] ?? '');
+    cursor += 1;
+  }
+
+  return decodeCredentialUrlPrefixSeparators(output.join(''));
+}
+
+/**
+ * @param {string} value
+ * @returns {string[]}
+ */
+function credentialUrlStructuralVariants(value) {
+  const variants = [value];
+  let current = value;
+
+  for (
+    let round = 0;
+    round < MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS;
+    round += 1
+  ) {
+    const decoded = decodeCredentialUrlStructureOnce(current);
+    if (decoded === current) {
+      return variants;
+    }
+    variants.push(decoded);
+    current = decoded;
+  }
+
+  if (decodeCredentialUrlStructureOnce(current) !== current) {
+    fail('Encoded credential URL discovery exceeds the decoding limit');
+  }
+  return variants;
+}
+
+/**
+ * @param {string} value
+ * @returns {string[]}
+ */
+function credentialUrlInspectionVariants(value) {
+  const variants = new Set(credentialUrlStructuralVariants(value));
+  let current = createMappedInspectionText(value);
+
+  for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
+    const percentDecoded = decodePercentMappedOnce(current, round > 0);
+    variants.add(percentDecoded.value);
+    const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
+    variants.add(entityDecoded.value);
+    if (entityDecoded.value === current.value) {
+      return [...variants];
+    }
+    current = entityDecoded;
+  }
+
+  const percentDecoded = decodePercentMappedOnce(current, true);
+  const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
+  if (entityDecoded.value !== current.value) {
+    fail('Encoded credential URL exceeds the decoding limit');
+  }
+  return [...variants];
+}
+
+/**
  * @param {MappedInspectionText} mapped
  * @returns {MappedInspectionText}
  */
@@ -1098,7 +1414,7 @@ function normalizeSpecialSchemeSeparatorsMapped(mapped) {
   const scheme = stripGitPlusPrefix(mapped.value.slice(0, schemeEnd)).toLowerCase();
   const hierarchyStart = schemeEnd + 1;
   if (
-    (scheme !== 'http' && scheme !== 'https')
+    !WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(scheme)
     || !mapped.value.includes('\\', hierarchyStart)
   ) {
     return mapped;
@@ -1158,8 +1474,10 @@ function inspectUrlCandidateMapped(mapped) {
 function normalizeCredentialUrlCandidateMapped(mapped) {
   const inspected = normalizeSpecialSchemeSeparatorsMapped(mapped);
   if (
-    !inspected.value.startsWith('//')
-    && !inspected.value.startsWith('\\\\')
+    !(
+      (inspected.value[0] === '/' || inspected.value[0] === '\\')
+      && (inspected.value[1] === '/' || inspected.value[1] === '\\')
+    )
   ) {
     return inspected;
   }
@@ -1188,19 +1506,6 @@ function normalizeCredentialUrlCandidateMapped(mapped) {
     value: output.join(''),
     sourceRanges,
   };
-}
-
-/**
- * @param {MappedInspectionText} candidate
- * @param {string} source
- * @returns {boolean}
- */
-function credentialUrlCandidateWasDecoded(candidate, source) {
-  if (candidate.sourceRanges.length === 0) {
-    return false;
-  }
-  const range = mappedSourceRange(candidate, 0, candidate.sourceRanges.length);
-  return candidate.value !== source.slice(range.start, range.end);
 }
 
 /**
@@ -1264,25 +1569,50 @@ function credentialUrlUserinfo(value) {
 
 /**
  * @param {string} value
+ * @returns {boolean}
+ */
+function containsEncodedCredentialUrlUserinfo(value) {
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    if (/^%[A-F0-9]{2}$/iu.test(value.slice(cursor, cursor + 3))) {
+      return true;
+    }
+    const referenceEnd = findHtmlEntityReferenceEnd(value, cursor);
+    if (
+      referenceEnd != null
+      && decodeHTMLStrict(value.slice(cursor, referenceEnd + 1))
+        !== value.slice(cursor, referenceEnd + 1)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @param {string} value
  */
 function assertNoCredentialUrlReferences(value) {
-  const decoded = decodeAsciiEntityDiscoveryMapped(value, 'credential URL');
-  for (const candidate of scanCredentialUrlCandidates(decoded.value)) {
-    const mappedCandidate = normalizeCredentialUrlCandidateMapped(
-      sliceMappedInspectionText(decoded, candidate.start, candidate.end),
-    );
-    const parsed = credentialUrlUserinfo(mappedCandidate.value);
-    if (parsed == null) {
-      continue;
-    }
-    const candidateWasDecoded = credentialUrlCandidateWasDecoded(mappedCandidate, value);
-    const protocolRelative = mappedCandidate.value.startsWith('//');
-    if (
-      candidateWasDecoded
-      || protocolRelative
-      || !parsed.conventionalAuthority
-    ) {
-      fail('Publishable URL credentials detected');
+  for (const candidate of scanCredentialUrlCandidates(value)) {
+    for (const variant of credentialUrlInspectionVariants(candidate.value)) {
+      const normalized = normalizeCredentialUrlCandidateMapped(
+        createMappedInspectionText(variant),
+      ).value;
+      const parsed = credentialUrlUserinfo(normalized);
+      if (parsed == null) {
+        continue;
+      }
+      const candidateWasDecoded = normalized !== candidate.value;
+      const protocolRelative = normalized.startsWith('//');
+      if (
+        candidateWasDecoded
+        || protocolRelative
+        || !parsed.conventionalAuthority
+        || containsEncodedCredentialUrlUserinfo(parsed.userinfo)
+      ) {
+        fail(
+          'Publishable URL credentials detected; publishable credential URL detected',
+        );
+      }
     }
   }
 }
@@ -1645,6 +1975,7 @@ function escapeRawHtmlAttributeValue(value, quote) {
  * @returns {string}
  */
 function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
+  assertNoCredentialUrlReferences(rawValue);
   const decoded = inspectUrlCandidateMapped(
     createMappedInspectionText(rawValue),
   ).value;
@@ -3696,6 +4027,7 @@ function assertNoDirectPublishableSecrets(value) {
  * @param {boolean} [rejectDirectUserinfo=false]
  */
 function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
+  assertNoCredentialUrlReferences(value);
   const decodedText = decodeHtmlEntitiesMapped(createMappedInspectionText(value));
   if (decodedText.value !== value) {
     assertNoDirectPublishableSecrets(decodedText.value);
@@ -3769,7 +4101,6 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
       }
     }
   }
-  assertNoCredentialUrlReferences(value);
 }
 
 /**
@@ -3838,7 +4169,6 @@ export function sanitizePublicText(value, config = {}) {
   if (typeof value !== 'string') {
     fail('sanitizePublicText expected a string when present');
   }
-
   let sanitized = value.replace(/\r\n?/gu, '\n');
   sanitized = sanitizeRawHtmlUrlAttributes(sanitized, config, 0);
   assertSafeDataUrisInText(sanitized, config, 0);
