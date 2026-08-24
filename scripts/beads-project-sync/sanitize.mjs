@@ -1,6 +1,7 @@
 // @ts-check
 
 import os from 'node:os';
+import { decodeHTMLStrict } from 'entities';
 
 /** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
 
@@ -74,8 +75,13 @@ const MAX_URL_CANDIDATE_COUNT = 1_024;
 const MAX_URL_CANDIDATE_LENGTH = 16_384;
 const MAX_PERCENT_DECODE_ROUNDS = 3;
 const MAX_PERCENT_ENCODED_COMPONENT_LENGTH = 16_384;
+const MAX_HTML_ENTITY_DECODE_ROUNDS = 3;
+const MAX_HTML_ENTITY_INSPECTION_LENGTH = 131_072;
+const MAX_HTML_ENTITY_REFERENCE_LENGTH = 64;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
 const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
+const HTML_ENTITY_REFERENCE_START_PATTERN = /[#A-Za-z]/u;
+const HTML_ENTITY_REFERENCE_BODY_PATTERN = /[#A-Za-z0-9]/u;
 const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
   /file:\/\/\/(?:Users|home)\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
   /file:\/\/\/[A-Za-z]:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
@@ -373,6 +379,320 @@ function replaceUrlCandidates(value, replace) {
   }
 
   return replaced + value.slice(cursor);
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ * }} SourceRange
+ */
+
+/**
+ * @typedef {{
+ *   value: string,
+ *   sourceRanges: SourceRange[],
+ * }} MappedInspectionText
+ */
+
+/**
+ * @param {string} value
+ * @returns {MappedInspectionText}
+ */
+function createMappedInspectionText(value) {
+  if (value.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Public text exceeds the HTML character reference inspection limit');
+  }
+
+  return {
+    value,
+    sourceRanges: Array.from(
+      { length: value.length },
+      (_, index) => ({ start: index, end: index + 1 }),
+    ),
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @returns {MappedInspectionText}
+ */
+function sliceMappedInspectionText(mapped, start, end) {
+  return {
+    value: mapped.value.slice(start, end),
+    sourceRanges: mapped.sourceRanges.slice(start, end),
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @returns {SourceRange}
+ */
+function mappedSourceRange(mapped, start, end) {
+  const first = mapped.sourceRanges[start];
+  const last = mapped.sourceRanges[end - 1];
+  if (first == null || last == null) {
+    fail('Invalid public text inspection range');
+  }
+  return {
+    start: first.start,
+    end: last.end,
+  };
+}
+
+/**
+ * @param {string[]} output
+ * @param {SourceRange[]} sourceRanges
+ * @param {string} value
+ * @param {SourceRange} sourceRange
+ */
+function appendMappedInspectionValue(output, sourceRanges, value, sourceRange) {
+  output.push(value);
+  for (let index = 0; index < value.length; index += 1) {
+    sourceRanges.push(sourceRange);
+  }
+  if (sourceRanges.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Decoded public text exceeds the HTML character reference inspection limit');
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {number | null}
+ */
+function findHtmlEntityReferenceEnd(value, start) {
+  if (
+    value[start] !== '&'
+    || !HTML_ENTITY_REFERENCE_START_PATTERN.test(value[start + 1] ?? '')
+  ) {
+    return null;
+  }
+
+  const boundedEnd = Math.min(
+    value.length,
+    start + MAX_HTML_ENTITY_REFERENCE_LENGTH,
+  );
+  for (let index = start + 1; index < boundedEnd; index += 1) {
+    const character = value[index] ?? '';
+    if (character === ';') {
+      return index;
+    }
+    if (!HTML_ENTITY_REFERENCE_BODY_PATTERN.test(character)) {
+      return null;
+    }
+  }
+  if (boundedEnd === start + MAX_HTML_ENTITY_REFERENCE_LENGTH) {
+    fail('HTML character reference exceeds the inspection limit');
+  }
+
+  return null;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeHtmlEntitiesMappedOnce(mapped) {
+  if (!mapped.value.includes('&')) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < mapped.value.length) {
+    const referenceEnd = findHtmlEntityReferenceEnd(mapped.value, cursor);
+    if (referenceEnd == null) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+
+    const reference = mapped.value.slice(cursor, referenceEnd + 1);
+    const decoded = decodeHTMLStrict(reference);
+    if (decoded === reference) {
+      for (let index = cursor; index <= referenceEnd; index += 1) {
+        appendMappedInspectionValue(
+          output,
+          sourceRanges,
+          mapped.value[index] ?? '',
+          mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
+        );
+      }
+    } else {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        decoded,
+        mappedSourceRange(mapped, cursor, referenceEnd + 1),
+      );
+    }
+    cursor = referenceEnd + 1;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeHtmlEntitiesMapped(mapped) {
+  let current = mapped;
+
+  for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
+    const decoded = decodeHtmlEntitiesMappedOnce(current);
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  if (decodeHtmlEntitiesMappedOnce(current).value !== current.value) {
+    fail('HTML character reference exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
+ * @param {number} byte
+ * @returns {number}
+ */
+function percentEncodedCodePointByteLength(byte) {
+  if (byte <= 0x7f) {
+    return 1;
+  }
+  if (byte >= 0xc2 && byte <= 0xdf) {
+    return 2;
+  }
+  if (byte >= 0xe0 && byte <= 0xef) {
+    return 3;
+  }
+  if (byte >= 0xf0 && byte <= 0xf4) {
+    return 4;
+  }
+  return 0;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {boolean} [allowDecodedLiteralPercent=false]
+ * @returns {MappedInspectionText}
+ */
+function decodePercentMappedOnce(mapped, allowDecodedLiteralPercent = false) {
+  if (!mapped.value.includes('%')) {
+    return mapped;
+  }
+  if (mapped.value.length > MAX_PERCENT_ENCODED_COMPONENT_LENGTH) {
+    fail('Percent-encoded public URL component exceeds the inspection limit');
+  }
+  if (INVALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)) {
+    if (
+      allowDecodedLiteralPercent
+      && !VALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)
+    ) {
+      return mapped;
+    }
+    fail('Malformed percent encoding in public URL component');
+  }
+  if (!VALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < mapped.value.length) {
+    if (mapped.value[cursor] !== '%') {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+
+    const firstByte = Number.parseInt(mapped.value.slice(cursor + 1, cursor + 3), 16);
+    const byteLength = percentEncodedCodePointByteLength(firstByte);
+    if (byteLength === 0) {
+      fail('Malformed percent encoding in public URL component');
+    }
+
+    const encodedEnd = cursor + (byteLength * 3);
+    if (encodedEnd > mapped.value.length) {
+      fail('Malformed percent encoding in public URL component');
+    }
+    for (let index = cursor; index < encodedEnd; index += 3) {
+      if (
+        mapped.value[index] !== '%'
+        || !/^[A-F0-9]{2}$/iu.test(mapped.value.slice(index + 1, index + 3))
+      ) {
+        fail('Malformed percent encoding in public URL component');
+      }
+    }
+
+    const encoded = mapped.value.slice(cursor, encodedEnd);
+    /** @type {string} */
+    let decoded;
+    try {
+      decoded = decodeURIComponent(encoded);
+    } catch {
+      fail('Malformed percent encoding in public URL component');
+    }
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      decoded,
+      mappedSourceRange(mapped, cursor, encodedEnd),
+    );
+    cursor = encodedEnd;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeUrlInspectionMapped(mapped) {
+  let current = mapped;
+
+  for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
+    const percentDecoded = decodePercentMappedOnce(current, round > 0);
+    const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
+    if (entityDecoded.value === current.value) {
+      return current;
+    }
+    current = entityDecoded;
+  }
+
+  const percentDecoded = decodePercentMappedOnce(current, true);
+  const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
+  if (entityDecoded.value !== current.value) {
+    fail('Encoded public URL component exceeds the decoding limit');
+  }
+  return current;
 }
 
 /**
@@ -1366,10 +1686,10 @@ function findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex) {
 
 /**
  * @param {string} value
- * @returns {string}
+ * @returns {{ start: number, end: number }[]}
  */
-function redactLocalOperationalPaths(value) {
-  let sanitized = '';
+function localOperationalPathRanges(value) {
+  const ranges = [];
   let cursor = 0;
 
   while (cursor < value.length) {
@@ -1385,11 +1705,332 @@ function redactLocalOperationalPaths(value) {
     const enclosure = findLocalPathEnclosure(value, pathStart, markerIndex);
     const pathEnd = enclosure?.contentEnd
       ?? findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex);
-    sanitized += `${value.slice(cursor, pathStart)}<redacted-local-path>`;
+    ranges.push({ start: pathStart, end: pathEnd });
     cursor = pathEnd;
   }
 
-  return cursor > 0 ? sanitized + value.slice(cursor) : value;
+  return ranges;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function redactLocalOperationalPaths(value) {
+  const ranges = localOperationalPathRanges(value);
+  if (ranges.length === 0) {
+    return value;
+  }
+
+  let sanitized = '';
+  let cursor = 0;
+  for (const range of ranges) {
+    sanitized += `${value.slice(cursor, range.start)}<redacted-local-path>`;
+    cursor = range.end;
+  }
+  return sanitized + value.slice(cursor);
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   value: string,
+ *   priority: number,
+ * }} SourceReplacement
+ */
+
+/**
+ * @param {SourceReplacement[]} replacements
+ * @param {string} original
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @param {string} replacement
+ * @param {number} priority
+ */
+function addMappedSourceReplacement(
+  replacements,
+  original,
+  mapped,
+  start,
+  end,
+  replacement,
+  priority,
+) {
+  if (start >= end) {
+    return;
+  }
+  const sourceRange = mappedSourceRange(mapped, start, end);
+  if (
+    original.slice(sourceRange.start, sourceRange.end)
+    === mapped.value.slice(start, end)
+  ) {
+    return;
+  }
+  replacements.push({
+    ...sourceRange,
+    value: replacement,
+    priority,
+  });
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {{ start: number, end: number, value: string }[]}
+ */
+function homeDirectoryDecodedRanges(value, matchers) {
+  const ranges = [];
+
+  for (const matcher of matchers) {
+    let cursor = 0;
+    while (cursor < value.length) {
+      const start = value.indexOf(matcher.prefix, cursor);
+      if (start === -1) {
+        break;
+      }
+      const end = start + matcher.prefix.length;
+      if (hasHomePathBoundary(value, start) && hasHomePathFollower(value, end)) {
+        ranges.push({ start, end, value: matcher.replacement });
+      }
+      cursor = start + 1;
+    }
+  }
+
+  for (const pattern of HOME_PATH_GENERIC_FILE_URI_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const match of value.matchAll(pattern)) {
+      const start = match.index ?? -1;
+      if (start < 0) {
+        continue;
+      }
+      const end = start + match[0].length;
+      if (hasHomePathBoundary(value, start) && hasHomePathFollower(value, end)) {
+        ranges.push({ start, end, value: 'file:///~' });
+      }
+    }
+  }
+  for (const pattern of HOME_PATH_GENERIC_PATH_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const match of value.matchAll(pattern)) {
+      const start = match.index ?? -1;
+      if (start < 0) {
+        continue;
+      }
+      const end = start + match[0].length;
+      if (hasHomePathBoundary(value, start) && hasHomePathFollower(value, end)) {
+        ranges.push({ start, end, value: '~' });
+      }
+    }
+  }
+
+  return ranges;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {string} original
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMappedPathReplacements(mapped, original, matchers, replacements) {
+  for (const range of homeDirectoryDecodedRanges(mapped.value, matchers)) {
+    addMappedSourceReplacement(
+      replacements,
+      original,
+      mapped,
+      range.start,
+      range.end,
+      range.value,
+      1,
+    );
+  }
+  for (const range of localOperationalPathRanges(mapped.value)) {
+    addMappedSourceReplacement(
+      replacements,
+      original,
+      mapped,
+      range.start,
+      range.end,
+      '<redacted-local-path>',
+      2,
+    );
+  }
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {string} original
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMappedEmailReplacements(mapped, original, replacements) {
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of mapped.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+    addMappedSourceReplacement(
+      replacements,
+      original,
+      mapped,
+      start,
+      start + match[0].length,
+      '<redacted-email>',
+      1,
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string}
+ */
+function redactDecodedHtmlEntitySensitiveText(value, config) {
+  if (!value.includes('&')) {
+    return value;
+  }
+
+  const decoded = decodeHtmlEntitiesMapped(createMappedInspectionText(value));
+  if (decoded.value === value) {
+    return value;
+  }
+
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+  const matchers = buildHomeDirectoryMatchers(config);
+  collectMappedEmailReplacements(decoded, value, replacements);
+
+  const candidates = scanUrlCandidates(decoded.value);
+  let cursor = 0;
+  for (const candidate of candidates) {
+    if (candidate.start > cursor) {
+      collectMappedPathReplacements(
+        sliceMappedInspectionText(decoded, cursor, candidate.start),
+        value,
+        matchers,
+        replacements,
+      );
+    }
+
+    const inspectedCandidate = decodeUrlInspectionMapped(
+      sliceMappedInspectionText(decoded, candidate.start, candidate.end),
+    );
+    collectMappedEmailReplacements(
+      inspectedCandidate,
+      value,
+      replacements,
+    );
+    const uri = parseAbsoluteUri(inspectedCandidate.value);
+    if (uri != null) {
+      if (uri.authority != null) {
+        const authority = sliceMappedInspectionText(
+          inspectedCandidate,
+          uri.authority.start,
+          uri.authority.end,
+        );
+        if (containsLocalOperationalPath(authority.value)) {
+          addMappedSourceReplacement(
+            replacements,
+            value,
+            inspectedCandidate,
+            0,
+            inspectedCandidate.value.length,
+            '<redacted-local-path>',
+            3,
+          );
+          cursor = candidate.end;
+          continue;
+        }
+      }
+
+      if (uri.scheme !== 'http' && uri.scheme !== 'https') {
+        const path = sliceMappedInspectionText(
+          inspectedCandidate,
+          uri.path.start,
+          uri.path.end,
+        );
+        if (uri.authority == null && containsLocalOperationalPath(path.value)) {
+          addMappedSourceReplacement(
+            replacements,
+            value,
+            inspectedCandidate,
+            uri.path.start,
+            uri.path.end,
+            '<redacted-local-path>',
+            2,
+          );
+        } else {
+          collectMappedPathReplacements(
+            path,
+            value,
+            matchers,
+            replacements,
+          );
+        }
+      }
+      if (uri.query != null) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(
+            inspectedCandidate,
+            uri.query.start,
+            uri.query.end,
+          ),
+          value,
+          matchers,
+          replacements,
+        );
+      }
+      if (uri.fragment != null) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(
+            inspectedCandidate,
+            uri.fragment.start,
+            uri.fragment.end,
+          ),
+          value,
+          matchers,
+          replacements,
+        );
+      }
+    }
+    cursor = candidate.end;
+  }
+
+  if (cursor < decoded.value.length) {
+    collectMappedPathReplacements(
+      sliceMappedInspectionText(decoded, cursor, decoded.value.length),
+      value,
+      matchers,
+      replacements,
+    );
+  }
+  if (replacements.length === 0) {
+    return value;
+  }
+
+  const selected = /** @type {SourceReplacement[]} */ ([]);
+  for (const replacement of [...replacements].sort((left, right) =>
+    right.priority - left.priority
+    || (right.end - right.start) - (left.end - left.start)
+    || left.start - right.start
+  )) {
+    if (selected.some((existing) =>
+      replacement.start < existing.end && replacement.end > existing.start
+    )) {
+      continue;
+    }
+    selected.push(replacement);
+  }
+
+  let sanitized = value;
+  for (const replacement of selected.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
 }
 
 /**
@@ -1522,64 +2163,76 @@ function assertNoDirectPublishableSecrets(value) {
  * @param {boolean} [rejectDirectUserinfo=false]
  */
 function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
-  for (const candidate of scanUrlCandidates(value)) {
-    for (const [index, variant] of percentDecodedVariants(candidate.value).entries()) {
-      if (index > 0) {
-        assertNoDirectPublishableSecrets(variant);
-      }
+  const decodedText = decodeHtmlEntitiesMapped(createMappedInspectionText(value));
+  if (decodedText.value !== value) {
+    assertNoDirectPublishableSecrets(decodedText.value);
+  }
 
-      const uri = parseAbsoluteUri(variant);
-      if (uri == null) {
+  for (const candidate of scanUrlCandidates(decodedText.value)) {
+    const mappedCandidate = sliceMappedInspectionText(
+      decodedText,
+      candidate.start,
+      candidate.end,
+    );
+    const inspectedCandidate = decodeUrlInspectionMapped(mappedCandidate);
+    const candidateWasDecoded = inspectedCandidate.value !== candidate.value;
+    if (candidateWasDecoded) {
+      assertNoDirectPublishableSecrets(inspectedCandidate.value);
+    }
+
+    const uri = parseAbsoluteUri(inspectedCandidate.value);
+    if (uri == null) {
+      continue;
+    }
+
+    const components = [
+      uri.authority == null
+        ? null
+        : {
+            kind: 'authority',
+            value: inspectedCandidate.value.slice(
+              uri.authority.start,
+              uri.authority.end,
+            ),
+          },
+      {
+        kind: 'path',
+        value: inspectedCandidate.value.slice(uri.path.start, uri.path.end),
+      },
+      uri.query == null
+        ? null
+        : {
+            kind: 'query',
+            value: inspectedCandidate.value.slice(uri.query.start, uri.query.end),
+          },
+      uri.fragment == null
+        ? null
+        : {
+            kind: 'fragment',
+            value: inspectedCandidate.value.slice(
+              uri.fragment.start,
+              uri.fragment.end,
+            ),
+          },
+    ].filter((component) => component != null);
+
+    for (const component of components) {
+      assertNoDirectPublishableSecrets(component.value);
+      if (component.kind !== 'authority') {
         continue;
       }
-
-      const components = [
-        uri.authority == null
-          ? null
-          : {
-              kind: 'authority',
-              value: variant.slice(uri.authority.start, uri.authority.end),
-            },
-        {
-          kind: 'path',
-          value: variant.slice(uri.path.start, uri.path.end),
-        },
-        uri.query == null
-          ? null
-          : {
-              kind: 'query',
-              value: variant.slice(uri.query.start, uri.query.end),
-            },
-        uri.fragment == null
-          ? null
-          : {
-              kind: 'fragment',
-              value: variant.slice(uri.fragment.start, uri.fragment.end),
-            },
-      ].filter((component) => component != null);
-
-      for (const component of components) {
-        for (const [componentIndex, componentVariant] of percentDecodedVariants(
-          component.value,
-        ).entries()) {
-          assertNoDirectPublishableSecrets(componentVariant);
-          if (component.kind !== 'authority') {
-            continue;
-          }
-          const atIndex = componentVariant.lastIndexOf('@');
-          if (atIndex === -1) {
-            continue;
-          }
-          const userinfo = componentVariant.slice(0, atIndex);
-          if (
-            rejectDirectUserinfo
-            || index > 0
-            || componentIndex > 0
-            || /[\[\]{}<>"'`\\]/u.test(userinfo)
-          ) {
-            fail('Publishable URL credentials detected');
-          }
-        }
+      const atIndex = component.value.lastIndexOf('@');
+      if (atIndex === -1) {
+        continue;
+      }
+      const userinfo = component.value.slice(0, atIndex);
+      if (
+        rejectDirectUserinfo
+        || decodedText.value !== value
+        || candidateWasDecoded
+        || /[\[\]{}<>"'`\\]/u.test(userinfo)
+      ) {
+        fail('Publishable URL credentials detected');
       }
     }
   }
@@ -1616,6 +2269,7 @@ export function sanitizePublicText(value, config = {}) {
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
   assertNoEncodedUrlSecrets(sanitized);
+  sanitized = redactDecodedHtmlEntitySensitiveText(sanitized, config);
   sanitized = replaceUrlCandidates(sanitized, (url) => {
     const uri = parseAbsoluteUri(url);
     return uri == null ? url : stripUriUserinfo(url, uri);

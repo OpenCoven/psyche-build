@@ -9,7 +9,9 @@ import {
   toPublicBead,
 } from '../scripts/beads-project-sync/sanitize.mjs';
 import {
+  assertIssueBodyWithinLimit,
   assertProjectReadmeWithinLimit,
+  GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
   GITHUB_PROJECT_README_MAX_CODE_POINTS,
   renderIssueBody,
   renderIssueTitle,
@@ -600,6 +602,95 @@ describe('Beads project renderers', () => {
         /Publishable|malformed percent encoding/i,
       );
     }
+  });
+
+  it('redacts HTML5 entity-reconstructed emails and local paths end to end', () => {
+    const rendered = renderSourceDescription([
+      'Decimal email: alice&#64;example.com.',
+      'Hex email: bob&#x40;example.com.',
+      'Named email: carol&commat;example.com.',
+      'Recursive email: dave&amp;#64;example.com.',
+      'macOS path: /&#85;sers/alice/private/notes.md.',
+      'Linux path: /&#x68;ome/bob/private/notes.md.',
+      'Copilot path: .copilot&sol;session-state&sol;run-1&sol;plan.md.',
+      'Worktree path: &period;worktrees&sol;run-2&sol;plan.md.',
+      'Psyche path: &period;psyche&sol;worktrees&sol;run-3&sol;plan.md.',
+    ].join('\n'));
+
+    expect(countMatches(rendered, '<redacted-email>')).toBe(4);
+    expect(rendered).toContain('macOS path: ~/private/notes.md.');
+    expect(rendered).toContain('Linux path: ~/private/notes.md.');
+    expect(countMatches(rendered, '<redacted-local-path>')).toBe(3);
+    expect(rendered).not.toMatch(
+      /alice&#64;|bob&#x40;|carol&commat;|dave&amp;#64;|&#85;sers|&#x68;ome|session-state|&period;worktrees|&period;psyche/u,
+    );
+  });
+
+  it('sanitizes entity-reconstructed URL components while preserving safe public routes', () => {
+    const safeRoute = 'https://example.com/&sol;Users&sol;alice&sol;docs';
+    const rendered = renderSourceDescription([
+      'Query https://example.com/docs?cwd=&sol;Users&sol;alice&sol;private.',
+      'Fragment https://example.com/docs#preview=&sol;home&sol;bob&sol;private.',
+      'Email https://example.com/docs?owner=alice%26%2364%3Bexample.com.',
+      'Opaque urn:psyche:&period;psyche&sol;worktrees&sol;run.',
+      `Safe route ${safeRoute}.`,
+    ].join('\n'));
+
+    expect(rendered).toContain('https://example.com/docs?cwd=~&sol;private.');
+    expect(rendered).toContain('https://example.com/docs#preview=~&sol;private.');
+    expect(rendered).toContain('https://example.com/docs?owner=<redacted-email>.');
+    expect(rendered).toContain('Opaque urn:<redacted-local-path>.');
+    expect(rendered).toContain(`Safe route ${safeRoute}.`);
+    expect(rendered).not.toContain('&sol;Users&sol;alice&sol;private');
+    expect(rendered).not.toContain('&sol;home&sol;bob&sol;private');
+    expect(rendered).not.toContain('&period;psyche&sol;worktrees');
+  });
+
+  it('rejects secrets reconstructed through recursive entity and percent decoding', () => {
+    const legacyToken = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+    const fineGrainedToken = 'github_pat_abcdefghijklmnopqrstuvwxyz1234567890';
+
+    for (const unsafeDescription of [
+      `Publish ${legacyToken.replace('_', '&#95;')}`,
+      `Publish ${fineGrainedToken.replaceAll('_', '&lowbar;')}`,
+      'api&lowbar;key = "live-secret-value"',
+      'https&colon;&sol;&sol;alice&commat;example.com/releases',
+      `https://example.com/releases?value=${
+        fineGrainedToken.replaceAll('_', '%26%2395%3B')
+      }`,
+      `data:text/plain,${
+        fineGrainedToken.replaceAll('_', '&percnt;5F')
+      }`,
+    ]) {
+      expect(() => renderSourceDescription(unsafeDescription)).toThrow(
+        /Publishable (?:GitHub token|API key|URL credentials)/i,
+      );
+    }
+  });
+
+  it('preserves safe entities, prose, code fences, and percent encoding', () => {
+    const safeDescription = [
+      'Safe &amp; sound with &lt;example&gt; in normal prose.',
+      'Keep https://example.com/My%20Project?redirect=%252Fpublic%252Fdocs.',
+      'Keep https://example.com/%25done as a literal encoded percent.',
+      'Malformed references stay literal: &bogus; &#xZZ; &#; &amp.',
+      '```html',
+      '&lt;script&gt;safe example&lt;/script&gt;',
+      '```',
+    ].join('\n');
+    const rendered = renderSourceDescription(safeDescription);
+
+    expect(rendered).toContain(safeDescription);
+    expect(rendered).not.toContain('<script>');
+    expect(rendered).not.toContain('https://example.com/My Project');
+  });
+
+  it('rejects overlong HTML character references within a bounded inspection pass', () => {
+    const overlongReference = `&#${'1'.repeat(20_000)};`;
+
+    expect(() => renderSourceDescription(`Keep ${overlongReference} bounded.`)).toThrow(
+      /HTML character reference exceeds the inspection limit/i,
+    );
   });
 
   it('redacts complete delimiter-aware operational paths', () => {
@@ -1263,5 +1354,41 @@ describe('Beads project renderers', () => {
     expect(() => {
       assertProjectReadmeWithinLimit('😀'.repeat(GITHUB_PROJECT_README_MAX_CODE_POINTS + 1));
     }).toThrow(/10001 characters; maximum is 10000/u);
+  });
+
+  it('counts preserved character references in final issue and README limits', () => {
+    const issueSeed = renderSourceDescription('x');
+    const issueDescriptionBudget =
+      GITHUB_ISSUE_BODY_MAX_CODE_POINTS - (codePointLength(issueSeed) - 1);
+    const issueEntityCount = Math.floor(issueDescriptionBudget / 5);
+    const issueRemainder = issueDescriptionBudget - (issueEntityCount * 5);
+    const exactIssue = renderSourceDescription(
+      `${'&amp;'.repeat(issueEntityCount)}${'x'.repeat(issueRemainder)}`,
+    );
+
+    expect(codePointLength(exactIssue)).toBe(GITHUB_ISSUE_BODY_MAX_CODE_POINTS);
+    expect(() => assertIssueBodyWithinLimit('pb-feature', exactIssue)).not.toThrow();
+    expect(() =>
+      assertIssueBodyWithinLimit('pb-feature', `${exactIssue}&amp;`)
+    ).toThrow(/65541 characters; maximum is 65536/u);
+
+    const readmeSeed = renderProjectReadme([], buildContext([], { projectName: 'x' }));
+    const readmeTitleBudget =
+      GITHUB_PROJECT_README_MAX_CODE_POINTS
+      - codePointLength(managedProjectReadmeBody(readmeSeed))
+      + 1;
+    const readmeEntityCount = Math.floor(readmeTitleBudget / 5);
+    const readmeRemainder = readmeTitleBudget - (readmeEntityCount * 5);
+    const exactReadme = renderProjectReadme(
+      [],
+      buildContext([], {
+        projectName: `${'&amp;'.repeat(readmeEntityCount)}${'x'.repeat(readmeRemainder)}`,
+      }),
+    );
+
+    expect(codePointLength(managedProjectReadmeBody(exactReadme))).toBe(
+      GITHUB_PROJECT_README_MAX_CODE_POINTS,
+    );
+    expect(exactReadme).toContain('&amp;');
   });
 });
