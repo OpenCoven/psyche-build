@@ -18,7 +18,7 @@ describe('post-release execution documentation', () => {
     expect(execution).toContain('57c6c71bd5264fde960b062e95de278c8438c94f');
     expect(execution).toMatch(/v0\.0\.1[\s\S]{0,100}(?:released and supported|supported)/i);
     expect(execution).toMatch(/iOS companion remains[\s\S]{0,100}planned/i);
-    expect(execution).toMatch(/does not establish live TestFlight availability/i);
+    expect(execution).toMatch(/do not establish live TestFlight availability/i);
     expect(execution).toMatch(/#241 atomic readiness[\s\S]{0,200}#242 publication/i);
     expect(execution).toMatch(/#242 publication precedes execution[\s\S]{0,100}execution precedes mobile controls/i);
   });
@@ -60,7 +60,8 @@ describe('post-release execution documentation', () => {
   it('states merge and closure gates in evidence terms rather than test-count terms', async () => {
     const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
 
-    expect(execution).toMatch(/exact final head[\s\S]{0,180}terminal successful required checks/i);
+    expect(execution).toContain('exact final head');
+    expect(execution).toMatch(/required checks are terminal and successful on the exact head/i);
     expect(execution).toMatch(/no unresolved current review finding/i);
     expect(execution).toMatch(/Documentation and test counts[\s\S]{0,100}not substitutes/i);
     expect(execution).toMatch(/Closing a public outcome requires every child gate/i);
