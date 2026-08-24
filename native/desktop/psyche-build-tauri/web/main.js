@@ -3151,11 +3151,13 @@
     body.appendChild(fileViewEl);
     pane.appendChild(header);
     pane.appendChild(body);
-    pane.addEventListener("pointerdown", function () {
-      focusCanvasSurface(filesPane);
+    pane.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      if (!filesPaneHasCanvasFocus(filesPane)) focusCanvasSurface(filesPane);
     }, true);
-    pane.addEventListener("focusin", function () {
-      focusCanvasSurface(filesPane);
+    pane.addEventListener("focusin", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      if (!filesPaneHasCanvasFocus(filesPane)) focusCanvasSurface(filesPane);
     });
 
     filesPane.pane = pane;
