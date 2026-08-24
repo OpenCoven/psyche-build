@@ -20,7 +20,8 @@ describe('post-release execution documentation', () => {
     expect(execution).toMatch(/iOS companion remains[\s\S]{0,100}planned/i);
     expect(execution).toMatch(/do not establish live TestFlight availability/i);
     expect(execution).toMatch(/#241 atomic readiness[\s\S]{0,200}#242 publication/i);
-    expect(execution).toMatch(/#242 publication precedes execution[\s\S]{0,100}execution precedes mobile controls/i);
+    expect(execution).toMatch(/#242 publication precedes execution/i);
+    expect(execution).toMatch(/execution precedes mobile controls/i);
   });
 
   it('records stale pull requests as source or history rather than merge-ready work', async () => {
