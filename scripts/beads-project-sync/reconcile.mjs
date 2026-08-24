@@ -19,7 +19,12 @@ import {
   recognizedProjectMarkers as resolveRecognizedProjectMarkers,
   renderHashMarker,
 } from './markers.mjs';
-import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render.mjs';
+import {
+  assertIssueBodyWithinLimit,
+  renderIssueBody,
+  renderIssueTitle,
+  renderProjectReadme,
+} from './render.mjs';
 
 /** @typedef {import('./render.mjs').RenderContext} RenderContext */
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
@@ -378,6 +383,14 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   operation: ReconciliationOperation,
  *   result: unknown,
  * }} AppliedReconciliationOperation
+ */
+
+/**
+ * @typedef {{
+ *   renderedBody: string,
+ *   renderHash: string,
+ *   managedBody: string,
+ * }} RenderedManagedIssueBody
  */
 
 /**
@@ -957,6 +970,24 @@ function attachRenderHash(body, renderHash, marker) {
 }
 
 /**
+ * @param {PublicBead} bead
+ * @param {RenderContext} renderContext
+ * @param {string} issueMarker
+ * @returns {RenderedManagedIssueBody}
+ */
+function renderValidatedManagedIssueBody(bead, renderContext, issueMarker) {
+  const renderedBody = renderIssueBody(bead, renderContext);
+  const renderHash = hashRenderedBody(renderedBody);
+  const managedBody = attachRenderHash(renderedBody, renderHash, issueMarker);
+  assertIssueBodyWithinLimit(bead.id, managedBody);
+  return {
+    renderedBody,
+    renderHash,
+    managedBody,
+  };
+}
+
+/**
  * @param {unknown} value
  * @returns {'backlog' | 'ready' | 'in_progress' | 'closed'}
  */
@@ -1425,6 +1456,15 @@ export function planReconciliation(input) {
   );
   const sortedActiveBeads = activeBeads(inventory).slice().sort((left, right) => compareStrings(left.id, right.id));
   const activeBeadIds = new Set(sortedActiveBeads.map((bead) => bead.id));
+  const renderedManagedBodiesByBeadId = new Map(
+    inventory
+      .filter((bead) => activeBeadIds.has(bead.id) || managedIssuesByBeadId.has(bead.id))
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map((bead) => [
+        bead.id,
+        renderValidatedManagedIssueBody(bead, issueRenderContext, markerContext.issueMarker),
+      ]),
+  );
 
   /** @type {CreateIssueOperation[]} */
   const createIssues = [];
@@ -1458,9 +1498,12 @@ export function planReconciliation(input) {
       inventoryIndex.byId,
       mirroredIssueUrlsByBeadId,
     );
-    const renderedBody = renderIssueBody(bead, issueRenderContext);
-    const renderHash = hashRenderedBody(renderedBody);
-    const managedBody = attachRenderHash(renderedBody, renderHash, markerContext.issueMarker);
+    const {
+      renderedBody,
+      renderHash,
+      managedBody,
+    } = renderedManagedBodiesByBeadId.get(bead.id)
+      ?? fail(`Missing preflight issue body for Bead "${bead.id}"`);
     const title = renderIssueTitle(bead);
     const assignees = bead.githubAssignee == null ? [] : [bead.githubAssignee];
 
@@ -1829,6 +1872,12 @@ export async function applyReconciliation(plan, adapters) {
     fail('applyReconciliation expected an adapters object');
   }
 
+  for (const operation of plan.operations) {
+    if (operation.type === 'createIssue' || operation.type === 'updateIssue') {
+      assertIssueBodyWithinLimit(operation.beadId, operation.body);
+    }
+  }
+
   const issueNumbersByBeadId = /** @type {Map<string, number>} */ (new Map());
   const projectItemIdsByBeadId = /** @type {Map<string, string>} */ (new Map());
   for (const [beadId, issue] of plan.managedIssuesByBeadId.entries()) {
@@ -1873,21 +1922,24 @@ export async function applyReconciliation(plan, adapters) {
             issueNumbersByBeadId,
             plan.renderContext,
           );
-          const renderedBody = renderIssueBody(
+          const markerContext = resolveMarkerContext(plan.renderContext);
+          const {
+            renderHash,
+            managedBody,
+          } = renderValidatedManagedIssueBody(
             bead,
             buildIssueRenderContext(
               plan.inventory,
               plan.renderContext,
               mirroredIssueUrlsByBeadId,
             ),
+            markerContext.issueMarker,
           );
-          const renderHash = hashRenderedBody(renderedBody);
-          const markerContext = resolveMarkerContext(plan.renderContext);
           const resolvedOperation = {
             ...operation,
             issueNumber,
             title: renderIssueTitle(bead),
-            body: attachRenderHash(renderedBody, renderHash, markerContext.issueMarker),
+            body: managedBody,
             renderHash,
             assignees: bead.githubAssignee == null ? [] : [bead.githubAssignee],
             state: 'open',

@@ -8,11 +8,17 @@ import {
   ReconciliationApplyError,
 } from '../scripts/beads-project-sync/reconcile.mjs';
 import {
+  DEFAULT_ISSUE_MARKER,
+  renderHashMarker,
+} from '../scripts/beads-project-sync/markers.mjs';
+import {
+  GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
   renderIssueBody,
   renderIssueTitle,
   renderProjectReadme,
 } from '../scripts/beads-project-sync/render.mjs';
 import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
+import type { ReconciliationAdapters } from '../scripts/beads-project-sync/reconcile.mjs';
 
 type FieldMap = Record<string, string | number | boolean | null>;
 
@@ -23,6 +29,8 @@ const baseContext = Object.freeze({
   sourceRef: 'main',
   sourceRepositoryUrl: 'https://github.com/OpenCoven/psyche-build',
 });
+const MANAGED_BODY_HASH_SUFFIX =
+  `\n\n${renderHashMarker(DEFAULT_ISSUE_MARKER, '0'.repeat(64))}`;
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -30,6 +38,10 @@ function compareStrings(left: string, right: string): number {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function codePointLength(value: string): number {
+  return [...value].length;
 }
 
 function makeBead(id: string, overrides: Partial<PublicBead> = {}): PublicBead {
@@ -94,6 +106,79 @@ function canonicalIssueBody(
 
 function canonicalReadmeBody(inventory: readonly PublicBead[]): string {
   return renderProjectReadme(inventory, baseContext);
+}
+
+function makeBeadWithManagedBodyLength(
+  id: string,
+  targetCodePoints: number,
+  fill: string,
+  overrides: Partial<PublicBead> = {},
+): PublicBead {
+  const seedInventory = finalizeInventory([
+    makeBead(id, {
+      ...overrides,
+      description: fill,
+    }),
+  ]);
+  const seedBody = `${canonicalIssueBody(seedInventory[0]!, seedInventory)}${MANAGED_BODY_HASH_SUFFIX}`;
+  const fixedCodePoints = codePointLength(seedBody) - codePointLength(fill);
+  const fillCodePoints = codePointLength(fill);
+  const requiredFillCodePoints = targetCodePoints - fixedCodePoints;
+  if (fillCodePoints !== 1 || requiredFillCodePoints < 1) {
+    throw new Error('Managed body test fixture requires a single-code-point fill');
+  }
+
+  return makeBead(id, {
+    ...overrides,
+    description: fill.repeat(requiredFillCodePoints),
+  });
+}
+
+function recordingAdapters(
+  record: (operationType: keyof ReconciliationAdapters) => void,
+): ReconciliationAdapters {
+  let nextIssueNumber = 1_000;
+  return {
+    createIssue() {
+      record('createIssue');
+      nextIssueNumber += 1;
+      return { number: nextIssueNumber };
+    },
+    updateIssue() {
+      record('updateIssue');
+    },
+    labelIssue() {
+      record('labelIssue');
+    },
+    closeIssue() {
+      record('closeIssue');
+    },
+    ensureProjectItem(operation) {
+      record('ensureProjectItem');
+      return { id: `item-${operation.beadId}` };
+    },
+    restoreItem() {
+      record('restoreItem');
+    },
+    setFields() {
+      record('setFields');
+    },
+    syncParent() {
+      record('syncParent');
+    },
+    syncBlocker() {
+      record('syncBlocker');
+    },
+    archiveItem() {
+      record('archiveItem');
+    },
+    updateReadme() {
+      record('updateReadme');
+    },
+    setProjectVisibility() {
+      record('setProjectVisibility');
+    },
+  };
 }
 
 function desiredLabels(bead: PublicBead): string[] {
@@ -231,6 +316,255 @@ function managedIssue(
 }
 
 describe('Beads project reconciliation', () => {
+  it('accepts a complete ASCII managed issue body at exactly 65,536 code points', () => {
+    const inventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        'pb-body-exact',
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
+        'a',
+      ),
+    ]);
+
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const createOperation = plan.operations.find(
+      (operation) => operation.type === 'createIssue',
+    );
+
+    expect(createOperation?.type).toBe('createIssue');
+    if (createOperation?.type !== 'createIssue') {
+      throw new Error('Expected a create operation');
+    }
+    expect(codePointLength(createOperation.body)).toBe(GITHUB_ISSUE_BODY_MAX_CODE_POINTS);
+  });
+
+  it('rejects an over-limit ASCII body during planning before any adapter can run', () => {
+    const beadId = 'pb-body-over';
+    const inventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        beadId,
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS + 1,
+        'a',
+      ),
+    ]);
+    let adapterCalls = 0;
+
+    expect(() => {
+      const plan = planReconciliation({
+        inventory,
+        existingIssues: [],
+        readme: null,
+        renderContext: baseContext,
+      });
+      void applyReconciliation(
+        plan,
+        recordingAdapters(() => {
+          adapterCalls += 1;
+        }),
+      );
+    }).toThrow(
+      `GitHub issue body for Bead "${beadId}" is 65537 characters; maximum is 65536`,
+    );
+    expect(adapterCalls).toBe(0);
+  });
+
+  it('counts emoji as one code point at the exact issue body boundary', () => {
+    const inventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        'pb-body-emoji-exact',
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
+        '😀',
+      ),
+    ]);
+
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const createOperation = plan.operations.find(
+      (operation) => operation.type === 'createIssue',
+    );
+
+    expect(createOperation?.type).toBe('createIssue');
+    if (createOperation?.type !== 'createIssue') {
+      throw new Error('Expected a create operation');
+    }
+    expect(codePointLength(createOperation.body)).toBe(GITHUB_ISSUE_BODY_MAX_CODE_POINTS);
+    expect(createOperation.body.length).toBeGreaterThan(GITHUB_ISSUE_BODY_MAX_CODE_POINTS);
+  });
+
+  it('rejects an emoji body that exceeds the code-point limit by one', () => {
+    const beadId = 'pb-body-emoji-over';
+    const inventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        beadId,
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS + 1,
+        '😀',
+      ),
+    ]);
+
+    expect(() => planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    })).toThrow(
+      `GitHub issue body for Bead "${beadId}" is 65537 characters; maximum is 65536`,
+    );
+  });
+
+  it('preflights an over-limit body before planning an existing issue update', () => {
+    const beadId = 'pb-body-update';
+    const previousInventory = finalizeInventory([makeBead(beadId)]);
+    const currentInventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        beadId,
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS + 1,
+        'a',
+        { title: 'Refresh the managed body' },
+      ),
+    ]);
+    const issueNumbers = new Map([[beadId, 100]]);
+
+    expect(() => planReconciliation({
+      inventory: currentInventory,
+      existingIssues: [
+        managedIssue(previousInventory[0]!, previousInventory, issueNumbers),
+      ],
+      readme: { body: canonicalReadmeBody(currentInventory) },
+      renderContext: baseContext,
+    })).toThrow(
+      `GitHub issue body for Bead "${beadId}" is 65537 characters; maximum is 65536`,
+    );
+  });
+
+  it('preflights an over-limit managed body before planning a newly closed flow', () => {
+    const beadId = 'pb-body-closed';
+    const previousInventory = finalizeInventory([makeBead(beadId)]);
+    const currentInventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        beadId,
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS + 1,
+        'a',
+        {
+          status: 'closed',
+          updatedAt: '2026-08-22T02:00:00Z',
+          closedAt: '2026-08-22T02:00:00Z',
+        },
+      ),
+    ]);
+    const issueNumbers = new Map([[beadId, 101]]);
+
+    expect(() => planReconciliation({
+      inventory: currentInventory,
+      existingIssues: [
+        managedIssue(previousInventory[0]!, previousInventory, issueNumbers),
+      ],
+      readme: { body: canonicalReadmeBody(currentInventory) },
+      renderContext: baseContext,
+    })).toThrow(
+      `GitHub issue body for Bead "${beadId}" is 65537 characters; maximum is 65536`,
+    );
+  });
+
+  it('rejects an oversized planned issue body before applying any adapter', async () => {
+    const beadId = 'pb-body-apply';
+    const inventory = finalizeInventory([
+      makeBeadWithManagedBodyLength(
+        beadId,
+        GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
+        'a',
+      ),
+    ]);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const createOperation = plan.operations.find(
+      (operation) => operation.type === 'createIssue',
+    );
+    if (createOperation?.type !== 'createIssue') {
+      throw new Error('Expected a create operation');
+    }
+    createOperation.body += 'a';
+
+    const adapterCalls: string[] = [];
+    await expect(applyReconciliation(
+      plan,
+      recordingAdapters((operationType) => adapterCalls.push(operationType)),
+    )).rejects.toThrow(
+      `GitHub issue body for Bead "${beadId}" is 65537 characters; maximum is 65536`,
+    );
+    expect(adapterCalls).toEqual([]);
+  });
+
+  it('rejects a dependency-linked rerender before calling the update adapter', async () => {
+    const childId = 'pb-body-linked-child';
+    const seedInventory = finalizeInventory([
+      makeBead('pb-body-linked-parent', { type: 'feature' }),
+      makeBead(childId, {
+        parentId: 'pb-body-linked-parent',
+        description: 'a',
+      }),
+    ]);
+    const seedChild = seedInventory.find((bead) => bead.id === childId);
+    if (!seedChild) {
+      throw new Error('Expected the child Bead fixture');
+    }
+    const seedBody = `${canonicalIssueBody(seedChild, seedInventory)}${MANAGED_BODY_HASH_SUFFIX}`;
+    const descriptionCodePoints =
+      GITHUB_ISSUE_BODY_MAX_CODE_POINTS - (codePointLength(seedBody) - 1);
+    const inventory = finalizeInventory([
+      seedInventory[0]!,
+      {
+        ...seedChild,
+        description: 'a'.repeat(descriptionCodePoints),
+      },
+    ]);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const initialChildCreate = plan.operations.find(
+      (operation) => operation.type === 'createIssue' && operation.beadId === childId,
+    );
+    if (initialChildCreate?.type !== 'createIssue') {
+      throw new Error('Expected a child create operation');
+    }
+    expect(codePointLength(initialChildCreate.body)).toBe(
+      GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
+    );
+
+    const adapterCalls: string[] = [];
+    let failure: unknown;
+    try {
+      await applyReconciliation(
+        plan,
+        recordingAdapters((operationType) => adapterCalls.push(operationType)),
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(ReconciliationApplyError);
+    expect((failure as ReconciliationApplyError).cause).toMatchObject({
+      message: expect.stringMatching(
+        new RegExp(`GitHub issue body for Bead "${childId}" is \\d+ characters; maximum is 65536`, 'u'),
+      ),
+    });
+    expect(adapterCalls).not.toContain('updateIssue');
+  });
+
   it('plans deterministic first-run creates, keeps closed history in bodies, and ignores unmanaged issues', () => {
     const active = Array.from({ length: 25 }, (_, index) => {
       const sequence = String(index + 1).padStart(2, '0');

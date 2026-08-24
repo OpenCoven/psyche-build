@@ -14,7 +14,11 @@ export interface RenderContext {
   legacyIssueMarkers?: readonly string[];
 }
 
+export const GITHUB_ISSUE_BODY_MAX_CODE_POINTS: 65536;
+
 export function renderIssueTitle(bead: PublicBead): string;
+
+export function assertIssueBodyWithinLimit(beadId: string, body: string): void;
 
 export function renderIssueBody(
   bead: PublicBead,

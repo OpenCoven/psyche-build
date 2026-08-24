@@ -41,6 +41,7 @@ const UNSAFE_REPOSITORY_PATH_SEGMENTS = new Set(['..']);
 const ISSUE_TITLE_MAX_CODE_POINTS = 256;
 const ISSUE_TITLE_TRUNCATION_SUFFIX = '...';
 const MIN_TRUNCATED_TITLE_CODE_POINTS = 1;
+export const GITHUB_ISSUE_BODY_MAX_CODE_POINTS = 65_536;
 
 /**
  * @param {string} message
@@ -670,6 +671,24 @@ export function renderIssueTitle(bead) {
   return `${prefix}${titleCodePoints
     .slice(0, availableTitleCodePoints - ISSUE_TITLE_TRUNCATION_SUFFIX.length)
     .join('')}${ISSUE_TITLE_TRUNCATION_SUFFIX}`;
+}
+
+/**
+ * @param {string} beadId
+ * @param {string} body
+ */
+export function assertIssueBodyWithinLimit(beadId, body) {
+  const normalizedBeadId = normalizeInlineText(beadId, 'Bead id');
+  if (typeof body !== 'string') {
+    fail(`GitHub issue body for Bead "${normalizedBeadId}" must be a string`);
+  }
+
+  const actualCodePoints = [...body].length;
+  if (actualCodePoints > GITHUB_ISSUE_BODY_MAX_CODE_POINTS) {
+    fail(
+      `GitHub issue body for Bead "${normalizedBeadId}" is ${actualCodePoints} characters; maximum is ${GITHUB_ISSUE_BODY_MAX_CODE_POINTS}`,
+    );
+  }
 }
 
 /**
