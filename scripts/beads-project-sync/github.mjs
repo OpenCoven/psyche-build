@@ -1353,7 +1353,7 @@ export function createGhClient(options) {
       ...API_HEADERS,
       ...(body === undefined ? [] : ['--input', '-']),
     ];
-    const execute = method === 'POST' ? runGhOnce : runGh;
+    const execute = method === 'POST' || method === 'DELETE' ? runGhOnce : runGh;
     try {
       const result = await execute(
         args,
@@ -1397,6 +1397,47 @@ export function createGhClient(options) {
         'ambiguous',
         `${description} may have succeeded, but no matching identity was found`,
         errorStatus(error),
+      );
+    }
+  }
+
+  /**
+   * @template TValue
+   * @param {string} description
+   * @param {() => Promise<TValue>} mutate
+   * @param {() => Promise<unknown | null>} reread
+   * @returns {Promise<TValue | null>}
+   */
+  async function idempotentRelationshipDelete(description, mutate, reread) {
+    try {
+      return await mutate();
+    } catch (error) {
+      const status = errorStatus(error);
+      if (status === 404) {
+        return null;
+      }
+
+      const kind = /** @type {ErrorLike} */ (error ?? {}).kind;
+      if (!isRetryable(error) && !isTransportFailure(error) && kind !== 'ambiguous') {
+        throw toClientError(error);
+      }
+
+      try {
+        if (await reread() == null) {
+          return null;
+        }
+      } catch {
+        throw new GhClientError(
+          'ambiguous',
+          `${description} may have succeeded, but the relationship could not be verified`,
+          status,
+        );
+      }
+
+      throw new GhClientError(
+        'ambiguous',
+        `${description} failed ambiguously and the relationship is still present`,
+        status,
       );
     }
   }
@@ -2590,10 +2631,16 @@ export function createGhClient(options) {
       operation?.parentRepository ?? repositoryIdentity,
       'parent repository identity',
     );
-    return rest(
-      'DELETE',
-      `repos/${parentRepository}/issues/${parentIssueNumber}/sub_issue`,
-      { sub_issue_id: subIssueId },
+    const connectionEndpoint =
+      `repos/${parentRepository}/issues/${parentIssueNumber}/sub_issues`;
+    return idempotentRelationshipDelete(
+      `Sub-issue relationship removal for parent ${parentRepository}#${parentIssueNumber}`,
+      () => rest(
+        'DELETE',
+        `repos/${parentRepository}/issues/${parentIssueNumber}/sub_issue`,
+        { sub_issue_id: subIssueId },
+      ),
+      () => findIssueInConnection(connectionEndpoint, subIssueId),
     );
   }
 
@@ -2619,9 +2666,15 @@ export function createGhClient(options) {
   async function removeBlockedBy(operation) {
     const issueNumber = positiveInteger(operation?.issueNumber, 'issue number');
     const blockerIssueId = positiveInteger(operation?.blockerIssueId, 'blocker issue database id');
-    return rest(
-      'DELETE',
-      `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by/${blockerIssueId}`,
+    const connectionEndpoint =
+      `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by`;
+    return idempotentRelationshipDelete(
+      `Blocked-by relationship removal for issue #${issueNumber}`,
+      () => rest(
+        'DELETE',
+        `${connectionEndpoint}/${blockerIssueId}`,
+      ),
+      () => findIssueInConnection(connectionEndpoint, blockerIssueId),
     );
   }
 

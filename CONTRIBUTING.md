@@ -104,11 +104,14 @@ pnpm beads:project:sync
 
 The check is read-only. Applying requires the maintainer-only
 `BEADS_PROJECT_TOKEN`; load it from a password manager rather than storing it in
-the repository. Store the workflow credential only in the protected
-beads-project-sync environment as the environment secret
-`BEADS_PROJECT_TOKEN`. Configure required reviewers and restrict deployments to
-the main branch (`main`) before enabling the workflow. The token needs
-repository Issues read/write and organization Projects read/write permissions.
+the repository. Create two protected environments restricted to the main branch
+(`main`): the `beads-project-sync-automation` environment must have no required
+reviewers so scheduled runs remain unattended, while the `beads-project-sync`
+environment must have required reviewers so manual runs remain reviewer-gated.
+Install the fine-grained token as the environment secret `BEADS_PROJECT_TOKEN`
+in both environments, or use a secure equivalent that preserves those
+properties. The token needs repository Issues read/write and organization
+Projects read/write permissions.
 
 The workflow intentionally does not provision the Project. Task 8 must first
 complete the one-time maintainer command

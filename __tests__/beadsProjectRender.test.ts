@@ -105,20 +105,20 @@ describe('Beads project renderers', () => {
       'Keep https://example.com/?path=~/docs public.',
     );
     expect(sanitizePublicText('Keep https://example.com/?route=/home/alice/docs public.')).toBe(
-      'Keep https://example.com/?route=/home/alice/docs public.',
+      'Keep https://example.com/?route=~/docs public.',
     );
     expect(sanitizePublicText(`Keep https://example.com/#${runtimeHomeDirectory}/docs public.`)).toBe(
       'Keep https://example.com/#~/docs public.',
     );
     expect(sanitizePublicText('Keep https://example.com/#/home/alice/docs public.')).toBe(
-      'Keep https://example.com/#/home/alice/docs public.',
+      'Keep https://example.com/#~/docs public.',
     );
     expect(
       sanitizePublicText(
         'Keep https://example.com/?path=%2FUsers%2Fbuns%2Fdocs#%2Fhome%2Falice%2Fdocs public.',
       ),
     ).toBe(
-      'Keep https://example.com/?path=~/docs#%2Fhome%2Falice%2Fdocs public.',
+      'Keep https://example.com/?path=~/docs#~/docs public.',
     );
     expect(sanitizePublicText('Plan: ~/.copilot/session-state/run-1/plan.md')).toBe(
       'Plan: <redacted-local-path>',
@@ -213,6 +213,35 @@ describe('Beads project renderers', () => {
       ),
     ).toBe(
       'Open ssh://host/srv/public?workspace=<redacted-local-path>#~/private.',
+    );
+  });
+
+  it('sanitizes operational paths in HTTP query and fragment components only', () => {
+    expect(
+      sanitizePublicText(
+        'Keep https://example.com/.worktrees/releases?cwd=.psyche/worktrees/run-1'
+          + '#/.copilot/session-state/run-2/plan.md public.',
+      ),
+    ).toBe(
+      'Keep https://example.com/.worktrees/releases?cwd=<redacted-local-path>'
+        + '#<redacted-local-path> public.',
+    );
+    expect(
+      sanitizePublicText(
+        'Keep https://example.com/docs?workspace=%2Eworktrees%2Frun-1'
+          + '#route?plan=%2Epsyche%2Fworktrees%2Frun-2 public.',
+      ),
+    ).toBe(
+      'Keep https://example.com/docs?workspace=<redacted-local-path>'
+        + '#route?plan=<redacted-local-path> public.',
+    );
+    expect(
+      sanitizePublicText(
+        'Keep https://example.com/home/alice/docs'
+          + '?source=/Users/alice/private#preview=/home/bob/private public.',
+      ),
+    ).toBe(
+      'Keep https://example.com/home/alice/docs?source=~/private#preview=~/private public.',
     );
   });
 
@@ -417,12 +446,12 @@ describe('Beads project renderers', () => {
       '- Parent: `pb-feature` — Model Beads project inventory',
     );
     expect(rendered).toContain(
-      '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3#/home/alice/file) `pb-in-progress` — Track in-progress beads',
+      '- Blocked by: [#3](https://github.com/OpenCoven/psyche-build-public/issues/3#~/file) `pb-in-progress` — Track in-progress beads',
     );
     expect(rendered).not.toContain('mirror-user');
     expect(rendered).not.toContain('mirror-pass');
     expect(rendered).not.toContain('/Users/buns/private');
-    expect(rendered).toContain('/issues/3#/home/alice/file');
+    expect(rendered).toContain('/issues/3#~/file');
     expect(rendered).not.toMatch(/https:\/\/[^)\s]*@/u);
   });
 

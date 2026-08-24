@@ -69,7 +69,6 @@ const HOME_PATH_GENERIC_PATH_PATTERNS = [
   /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
   /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
 ];
-const URL_PATH_LIKE_QUERY_KEYS = new Set(['path', 'cwd', 'file', 'root', 'worktree']);
 
 /**
  * @param {string} message
@@ -233,14 +232,6 @@ function decodeUrlComponent(value) {
 
 /**
  * @param {string} value
- * @returns {boolean}
- */
-function isPathLikeUrlQueryKey(value) {
-  return URL_PATH_LIKE_QUERY_KEYS.has(decodeUrlComponent(value).trim().toLowerCase());
-}
-
-/**
- * @param {string} value
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @param {HomeDirectoryRedactionOptions} [options={}]
  * @returns {string}
@@ -284,6 +275,20 @@ function redactLocalOperationalPathsInUrlComponent(value) {
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
+function sanitizeUrlComponent(value, matchers) {
+  return redactLocalOperationalPathsInUrlComponent(
+    redactHomeDirectoriesInUrlComponent(value, matchers, {
+      allowGenericFileUriPatterns: true,
+      allowGenericPathPatterns: true,
+    }),
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
 function sanitizeUrlQuery(value, matchers) {
   if (!value) {
     return value;
@@ -297,10 +302,7 @@ function sanitizeUrlQuery(value, matchers) {
 
     const separatorIndex = segment.indexOf('=');
     if (separatorIndex === -1) {
-      const sanitizedSegment = redactHomeDirectoriesInUrlComponent(segment, matchers, {
-        allowGenericFileUriPatterns: true,
-        allowGenericPathPatterns: false,
-      });
+      const sanitizedSegment = sanitizeUrlComponent(segment, matchers);
       if (sanitizedSegment !== segment) {
         changed = true;
       }
@@ -309,13 +311,11 @@ function sanitizeUrlQuery(value, matchers) {
 
     const key = segment.slice(0, separatorIndex);
     const rawValue = segment.slice(separatorIndex + 1);
-    const sanitizedValue = redactHomeDirectoriesInUrlComponent(rawValue, matchers, {
-      allowGenericFileUriPatterns: true,
-      allowGenericPathPatterns: isPathLikeUrlQueryKey(key),
-    });
-    if (sanitizedValue !== rawValue) {
+    const sanitizedKey = sanitizeUrlComponent(key, matchers);
+    const sanitizedValue = sanitizeUrlComponent(rawValue, matchers);
+    if (sanitizedKey !== key || sanitizedValue !== rawValue) {
       changed = true;
-      return `${key}=${sanitizedValue}`;
+      return `${sanitizedKey}=${sanitizedValue}`;
     }
     return segment;
   }).join('&');
@@ -346,18 +346,12 @@ function sanitizeUrlHash(value, matchers) {
     if (looksLikeUrlParameterList(value)) {
       return sanitizeUrlQuery(value, matchers);
     }
-    return redactHomeDirectoriesInUrlComponent(value, matchers, {
-      allowGenericFileUriPatterns: true,
-      allowGenericPathPatterns: false,
-    });
+    return sanitizeUrlComponent(value, matchers);
   }
 
   const rawRoute = value.slice(0, queryIndex);
   const rawQuery = value.slice(queryIndex + 1);
-  const sanitizedRoute = redactHomeDirectoriesInUrlComponent(rawRoute, matchers, {
-    allowGenericFileUriPatterns: true,
-    allowGenericPathPatterns: false,
-  });
+  const sanitizedRoute = sanitizeUrlComponent(rawRoute, matchers);
   const sanitizedQuery = sanitizeUrlQuery(rawQuery, matchers);
 
   return sanitizedRoute !== rawRoute || sanitizedQuery !== rawQuery

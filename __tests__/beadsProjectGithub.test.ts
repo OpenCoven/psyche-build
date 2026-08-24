@@ -1692,6 +1692,94 @@ describe('createGhClient', () => {
     ]);
   });
 
+  it.each([
+    {
+      name: 'sub-issue',
+      invoke: (client: ReturnType<typeof createGhClient>) => client.removeSubIssue({
+        parentIssueNumber: 10,
+        subIssueId: 2001,
+        parentRepository: 'OpenCoven/parent-repo',
+      }),
+      deleteEndpoint: 'repos/OpenCoven/parent-repo/issues/10/sub_issue',
+      readEndpoint: 'repos/OpenCoven/parent-repo/issues/10/sub_issues?per_page=100&page=1',
+    },
+    {
+      name: 'blocked-by',
+      invoke: (client: ReturnType<typeof createGhClient>) => client.removeBlockedBy({
+        issueNumber: 20,
+        blockerIssueId: 3001,
+      }),
+      deleteEndpoint: `repos/${owner}/${repo}/issues/20/dependencies/blocked_by/3001`,
+      readEndpoint:
+        `repos/${owner}/${repo}/issues/20/dependencies/blocked_by?per_page=100&page=1`,
+    },
+  ])('confirms an applied $name delete after a transport failure', async ({
+    invoke,
+    deleteEndpoint,
+    readEndpoint,
+  }) => {
+    const transportFailure = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    const runner = createRunner([transportFailure, success([])]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(invoke(client)).resolves.toBeNull();
+    expect(runner.calls.map((call) => call.args[1])).toEqual([
+      deleteEndpoint,
+      readEndpoint,
+    ]);
+    expect(runner.calls.filter((call) => call.args.includes('DELETE'))).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: 'sub-issue',
+      invoke: (client: ReturnType<typeof createGhClient>) => client.removeSubIssue({
+        parentIssueNumber: 10,
+        subIssueId: 2001,
+        parentRepository: 'OpenCoven/parent-repo',
+      }),
+      relationship: { id: 2001, node_id: 'ISSUE-child', number: 2 },
+    },
+    {
+      name: 'blocked-by',
+      invoke: (client: ReturnType<typeof createGhClient>) => client.removeBlockedBy({
+        issueNumber: 20,
+        blockerIssueId: 3001,
+      }),
+      relationship: { id: 3001, node_id: 'ISSUE-blocker', number: 3 },
+    },
+  ])('surfaces ambiguity when a failed $name delete leaves the relationship present', async ({
+    invoke,
+    relationship,
+  }) => {
+    const transient = Object.assign(new Error('HTTP 503 delete response lost'), { status: 503 });
+    const runner = createRunner([transient, success([relationship])]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(invoke(client)).rejects.toMatchObject({
+      kind: 'ambiguous',
+      status: 503,
+    });
+    expect(runner.calls.filter((call) => call.args.includes('DELETE'))).toHaveLength(1);
+  });
+
+  it.each([
+    (client: ReturnType<typeof createGhClient>) => client.removeSubIssue({
+      parentIssueNumber: 10,
+      subIssueId: 2001,
+    }),
+    (client: ReturnType<typeof createGhClient>) => client.removeBlockedBy({
+      issueNumber: 20,
+      blockerIssueId: 3001,
+    }),
+  ])('treats a missing relationship delete as idempotent success', async (invoke) => {
+    const runner = createRunner([httpError(404, 'Not Found')]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(invoke(client)).resolves.toBeNull();
+    expect(runner.calls).toHaveLength(1);
+  });
+
   it('maps reconciliation parent/blocker operations and archive/restore names directly', async () => {
     const project = {
       id: 'P-rel',
@@ -1958,18 +2046,6 @@ describe('createGhClient', () => {
 
     await expect(client.discoverProject()).resolves.toBeNull();
     expect(waits).toEqual([3_000]);
-  });
-
-  it('retries idempotent deletes after transport failures', async () => {
-    const transportFailure = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
-    const runner = createRunner([transportFailure, success({})]);
-    const client = createGhClient({ run: runner.run, owner, repo, token, sleep() {} });
-
-    await expect(client.removeBlockedBy({
-      issueNumber: 20,
-      blockerIssueId: 3001,
-    })).resolves.toEqual({});
-    expect(runner.calls).toHaveLength(2);
   });
 
   it('retries transport failures for safe reads and idempotent updates', async () => {

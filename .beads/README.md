@@ -84,11 +84,19 @@ or an artifact.
 does not create or rotate it. Scope it to the `OpenCoven/psyche-build`
 repository with repository **Issues: read and write** and organization
 **Projects: read and write** permissions (plus the implicit metadata read
-permission). Create the protected beads-project-sync environment and store the
-automation token only as the environment secret `BEADS_PROJECT_TOKEN`,
-configure required reviewers, and restrict deployments to the main branch
-(`main`). Scheduled sync must remain disabled until that environment secret and
-its protection rules are set.
+permission). Create two protected environments restricted to the main branch
+(`main`):
+
+- The `beads-project-sync-automation` environment has no required reviewers, so
+  the daily schedule remains unattended.
+- The `beads-project-sync` environment has required reviewers, so every manual
+  `workflow_dispatch` run is reviewer-gated.
+
+Install the fine-grained token as the environment secret
+`BEADS_PROJECT_TOKEN` in both environments (or use a secure equivalent that
+preserves unattended scheduled runs and reviewer-gated manual runs). Scheduled
+sync must remain disabled until both environment secrets and their protection
+rules are set.
 
 ### Required one-time bootstrap gate
 

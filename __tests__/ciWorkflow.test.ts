@@ -246,7 +246,9 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain(
       "if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')",
     );
-    expect(workflow).toContain('environment: beads-project-sync');
+    expect(workflow).toContain(
+      "environment: ${{ github.event_name == 'schedule' && 'beads-project-sync-automation' || 'beads-project-sync' }}",
+    );
     expect(workflow).toContain('args=(--apply)');
     expect(workflow).toContain('args=(--dry-run)');
     expect(workflow).toContain('args+=(--allow-mass-close)');
@@ -340,15 +342,18 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).not.toContain('if-no-files-found: error');
   });
 
-  it('documents the protected environment secret and its deployment rules', () => {
+  it('documents both protected environment secrets and their deployment rules', () => {
     const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
     const contributing = readFileSync(contributingPath, 'utf8');
 
     for (const document of [beadsReadme, contributing]) {
-      expect(document).toMatch(/beads-project-sync environment/i);
+      expect(document).toMatch(/`?beads-project-sync`?\s+environment/i);
+      expect(document).toMatch(/`?beads-project-sync-automation`?\s+environment/i);
       expect(document).toMatch(/environment secret.*BEADS_PROJECT_TOKEN/is);
       expect(document).toMatch(/required reviewers?/i);
+      expect(document).toMatch(/no required\s+reviewers?/i);
       expect(document).toMatch(/main branch/i);
+      expect(document).toMatch(/BEADS_PROJECT_TOKEN.*both environments?/is);
     }
     expect(beadsReadme).not.toMatch(/repository Actions secret\s+named `BEADS_PROJECT_TOKEN`/i);
   });
