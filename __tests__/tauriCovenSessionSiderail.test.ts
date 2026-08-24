@@ -680,6 +680,7 @@ function createRenderer(options: {
   const openProjectAppearancePopover = vi.fn(
     options.openProjectAppearancePopover ?? (() => undefined),
   );
+  const removeProject = vi.fn().mockResolvedValue(true);
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
@@ -771,7 +772,7 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'showProjectFiles', 'setSessionTypeFilter',
-    'openSessionContextMenu', 'openProjectAppearancePopover',
+    'openSessionContextMenu', 'openProjectAppearancePopover', 'removeProject',
     'invoke', 'refreshCovenSessions', 'localStorage', 'seedStatusAlertEl', 'seedToastEl',
     `"use strict"; ${sources.join('\n')}; return {
       render: function () {
@@ -858,6 +859,7 @@ function createRenderer(options: {
     setSessionTypeFilter,
     openSessionContextMenu,
     openProjectAppearancePopover,
+    removeProject,
     invoke,
     refreshCovenSessions,
     localStorage,
@@ -922,10 +924,13 @@ function createRenderer(options: {
     toastTimeouts,
     canvasThreadIds,
     openProjectAppearancePopover,
+    removeProject,
   };
 }
 
-function createSessionContextMenuHarness() {
+function createSessionContextMenuHarness(options: {
+  removeProject?: () => Promise<boolean> | boolean;
+} = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
   document.connectRoot(sessionListEl);
@@ -939,16 +944,19 @@ function createSessionContextMenuHarness() {
   sessionListEl.appendChild(project);
 
   const openProjectAppearancePopover = vi.fn();
+  const removeProject = vi.fn(options.removeProject ?? (() => Promise.resolve(true)));
   const windowValue = { innerWidth: 1280, innerHeight: 720 };
   const projectValue = { id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build' };
   const harness = Function(
-    'document', 'window', 'sessionListEl', 'findProject', 'openProjectAppearancePopover',
+    'document', 'window', 'sessionListEl', 'findProject', 'openProjectAppearancePopover', 'removeProject',
     `"use strict";
     var sessionTreeFocusKey = "";
     var projectAppearancePopover = null;
+    var state = { activeProjectId: "psyche" };
     function closeProjectAppearancePopover() {}
     var sessionContextMenu = null;
     var sessionContextMenuRestoreKey = "";
+    var state = { activeProjectId: null };
     ${extractFunctionSource(mainJs, 'visibleSessionTreeItems')}
     ${extractFunctionSource(mainJs, 'focusSessionTreeItem')}
     ${extractFunctionSource(mainJs, 'parentSessionTreeItem')}
@@ -964,7 +972,8 @@ function createSessionContextMenuHarness() {
       closeSessionContextMenu: closeSessionContextMenu,
       handleTreeKeydown: handleSessionTreeKeydown,
       sessionContextMenu: function () { return sessionContextMenu; },
-      sessionTreeFocusKey: function () { return sessionTreeFocusKey; }
+      sessionTreeFocusKey: function () { return sessionTreeFocusKey; },
+      removeProject: removeProject
     };`,
   )(
     document,
@@ -972,11 +981,13 @@ function createSessionContextMenuHarness() {
     sessionListEl,
     (id: string) => (id === projectValue.id ? projectValue : null),
     openProjectAppearancePopover,
+    removeProject,
   ) as {
     closeSessionContextMenu: (options?: { restoreFocus?: boolean }) => void;
     handleTreeKeydown: (event: FakeEvent) => void;
     sessionContextMenu: () => FakeElement | null;
     sessionTreeFocusKey: () => string;
+    removeProject: typeof removeProject;
   };
 
   return {
@@ -985,6 +996,7 @@ function createSessionContextMenuHarness() {
     sessionListEl,
     project,
     openProjectAppearancePopover,
+    removeProject,
   };
 }
 
@@ -1316,7 +1328,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.document.activeElement).toBe(rerenderedProject);
   });
 
-  it('opens a project header context menu with customize appearance anchored to the treeitem', async () => {
+  it('opens a project header context menu with appearance and close actions anchored to the treeitem', async () => {
     const renderer = createRenderer({
       projects: [{
         id: 'psyche',
@@ -1361,8 +1373,9 @@ describe('Tauri Coven session project rail', () => {
     expect(projectTreeitem?.dataset.projectId).toBe('psyche');
     expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
     const [, actions, anchor] = renderer.openSessionContextMenu.mock.calls[0];
-    expect(actions).toHaveLength(1);
+    expect(actions).toHaveLength(2);
     expect(actions[0]).toMatchObject({ label: 'Customize appearance' });
+    expect(actions[1]).toMatchObject({ label: 'Close project', danger: true });
     expect(anchor).toBe(projectTreeitem);
     expect(renderer.sessionTreeFocusKey()).toBe(projectTreeitem?.dataset.treeKey);
 
@@ -1371,6 +1384,9 @@ describe('Tauri Coven session project rail', () => {
       renderer.state.projects[0],
       projectTreeitem,
     );
+    await actions[1].run();
+    expect(renderer.removeProject).toHaveBeenCalledOnce();
+    expect(renderer.removeProject).toHaveBeenCalledWith('psyche');
   });
 
   it('renders daemon-backed Coven sessions inside Agents with Coven metadata', () => {
@@ -1604,8 +1620,13 @@ describe('Tauri Coven session project rail', () => {
     expect(contextMenu.propagationStopped).toBe(true);
     expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
     expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1]).toHaveLength(2);
     expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
       label: 'Customize appearance',
+    });
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][1]).toMatchObject({
+      label: 'Close project',
+      danger: true,
     });
 
     renderer.openSessionContextMenu.mockClear();
@@ -1616,8 +1637,13 @@ describe('Tauri Coven session project rail', () => {
     expect(shiftF10.propagationStopped).toBe(true);
     expect(renderer.openSessionContextMenu).toHaveBeenCalledTimes(1);
     expect(renderer.openSessionContextMenu.mock.calls[0][2]).toBe(project);
+    expect(renderer.openSessionContextMenu.mock.calls[0][1]).toHaveLength(2);
     expect(renderer.openSessionContextMenu.mock.calls[0][1][0]).toMatchObject({
       label: 'Customize appearance',
+    });
+    expect(renderer.openSessionContextMenu.mock.calls[0][1][1]).toMatchObject({
+      label: 'Close project',
+      danger: true,
     });
   });
 
@@ -1641,6 +1667,50 @@ describe('Tauri Coven session project rail', () => {
 
     expect(harness.document.activeElement).toBe(harness.project);
     expect(harness.project.focused).toBe(true);
+  });
+
+  it('restores focus when a keyboard-opened project close action returns false', async () => {
+    let successHarness: ReturnType<typeof createSessionContextMenuHarness>;
+    const failureHarness = createSessionContextMenuHarness({
+      removeProject: () => Promise.resolve(false),
+    });
+
+    failureHarness.project.focus();
+    failureHarness.handleTreeKeydown(new FakeEvent(failureHarness.project, 'ContextMenu'));
+
+    const failureCloseButton = failureHarness.sessionContextMenu()?.querySelectorAll('button')[1];
+    expect(failureCloseButton?.textContent).toBe('Close project');
+
+    failureCloseButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(failureHarness.removeProject).toHaveBeenCalledOnce();
+    expect(failureHarness.removeProject).toHaveBeenCalledWith('psyche');
+    expect(failureHarness.document.activeElement).toBe(failureHarness.project);
+    expect(failureHarness.project.focused).toBe(true);
+
+    successHarness = createSessionContextMenuHarness({
+      removeProject: () => {
+        successHarness.sessionListEl.removeChild(successHarness.project);
+        return Promise.resolve(true);
+      },
+    });
+
+    successHarness.project.focus();
+    successHarness.handleTreeKeydown(new FakeEvent(successHarness.project, 'ContextMenu'));
+
+    const successCloseButton = successHarness.sessionContextMenu()?.querySelectorAll('button')[1];
+    expect(successCloseButton?.textContent).toBe('Close project');
+
+    successCloseButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(successHarness.removeProject).toHaveBeenCalledOnce();
+    expect(successHarness.removeProject).toHaveBeenCalledWith('psyche');
+    expect(successHarness.project.isConnected).toBe(false);
+    expect(successHarness.document.activeElement).not.toBe(successHarness.project);
   });
 
   it('activates focused branch treeitems on Enter and toggles them on Space', async () => {
@@ -2177,9 +2247,10 @@ describe('Tauri Coven session project rail', () => {
       renderer.render();
 
       expect(covenRows(renderer.sessionListEl)).toHaveLength(0);
-      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(1);
+      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
       expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-        .toEqual(['Parent']);
+        .toEqual([]);
+      expect(renderer.state.projects.map((project) => project.id)).toEqual(['parent']);
     },
   );
 
@@ -2195,9 +2266,10 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     expect(covenRows(renderer.sessionListEl)).toHaveLength(0);
-    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual([project.name]);
+      .toEqual([]);
+    expect(renderer.state.projects.map((candidate) => candidate.id)).toEqual([project.id]);
   });
 
   it('keeps exact-root ownership even when the matching project worktree is flagged', () => {
@@ -2306,7 +2378,7 @@ describe('Tauri Coven session project rail', () => {
       .toContain('coven-tone-warn');
   });
 
-  it('renders one global loading state across empty projects while keeping project headers', () => {
+  it('renders one global loading state across empty projects while omitting empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2319,9 +2391,9 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Loading Coven sessions');
-    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(2);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(0);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual(['Alpha', 'Beta']);
+      .toEqual([]);
     expect(renderer.sessionListEl.querySelectorAll('.session-row')).toHaveLength(0);
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
@@ -2344,18 +2416,29 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.textContent).not.toContain('Finished');
   });
 
-  it('drops a project group whose threads have all exited', () => {
+  it('omits a truly empty project while preserving state.projects', () => {
     const renderer = createRenderer({
-      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
-      threads: [{ id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' }],
+      projects: [
+        { id: 'alpha', name: 'Alpha', root: '/alpha' },
+        { id: 'beta', name: 'Beta', root: '/beta' },
+      ],
+      threads: [
+        { id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' },
+        { id: 'beta-live', projectId: 'beta', name: 'Visible Beta', status: 'running' },
+      ],
     });
 
     renderer.render();
 
-    expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Beta']);
+    expect(renderer.sessionListEl.querySelector('.session-group')?.dataset.projectId).toBe('beta');
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId)
+      .toBe('beta-live');
+    expect(renderer.state.projects.map((project) => project.id)).toEqual(['alpha', 'beta']);
   });
 
-  it('groups local threads by pane kind, in input order, while keeping zero-session project headers', () => {
+  it('groups local threads by pane kind, in input order, while omitting empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2374,9 +2457,9 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     const groups = renderer.sessionListEl.querySelectorAll('.session-group');
-    expect(groups).toHaveLength(2);
+    expect(groups).toHaveLength(1);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual(['Alpha', 'Beta']);
+      .toEqual(['Alpha']);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-category-name')))
       .toEqual(['Agents', 'Shells']);
     const populated = groups.find((group) => group.querySelector('.session-row'));
@@ -2384,7 +2467,86 @@ describe('Tauri Coven session project rail', () => {
       .toEqual(['attached', 'local']);
   });
 
-  it('renders one global error across empty projects while keeping project headers', () => {
+  it('keeps a hidden running project rendered without a session row and shows the empty message', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'hidden-alpha',
+        projectId: 'alpha',
+        name: 'Hidden Alpha',
+        status: 'running',
+        hidden: true,
+        worktreePath: '/alpha',
+      }],
+    });
+
+    renderer.render();
+
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha']);
+    expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No sessions yet.');
+  });
+
+  it('keeps a project with an assigned Coven session rendered with one Coven row', () => {
+    const renderer = createRenderer({
+      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
+      sessions: [{
+        id: 'daemon-alpha',
+        projectRoot: '/alpha',
+        title: 'Daemon Alpha',
+        status: 'waiting',
+        labels: ['source:psyche-build'],
+      }],
+    });
+
+    renderer.render();
+
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha']);
+    expect(covenRows(renderer.sessionListEl)).toHaveLength(1);
+    expect(covenRows(renderer.sessionListEl)[0].dataset.sessionId).toBe('daemon-alpha');
+  });
+
+  it('keeps a running shell project rendered when the agents filter hides its only row', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'alpha',
+        name: 'Shell task',
+        status: 'running',
+        kind: 'shell',
+        worktreePath: '/alpha',
+      }],
+      typeFilter: 'agents',
+    });
+
+    renderer.render();
+
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
+      .toEqual(['Alpha']);
+    expect(localRows(renderer.sessionListEl)).toHaveLength(0);
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No sessions match the agents filter.');
+  });
+
+  it('renders one global error across empty projects while omitting empty projects', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -2398,9 +2560,9 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Discovery failed');
-    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(2);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group')).toHaveLength(0);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-project-name')))
-      .toEqual(['Alpha', 'Beta']);
+      .toEqual([]);
     expect(renderer.sessionListEl.querySelectorAll('.session-row')).toHaveLength(0);
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
@@ -4202,7 +4364,7 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toContain('.session-inline-state');
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
     expect(rendererSource).toContain('PsycheSessions.buildSidebarProjectModel');
-    expect(rendererSource).toContain('localSessions: localRows');
+    expect(rendererSource).toContain('localSessions: visibleLocalRows');
     expect(rendererSource).toContain('covenSessions: remoteRows');
     expect(rendererSource).toContain('covenDiscovery');
     expect(rendererSource).toContain('createSessionRow');

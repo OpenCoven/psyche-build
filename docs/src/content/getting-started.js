@@ -6,9 +6,10 @@ export function render() {
     <p>Install a supported AI coding agent when you want prompt-launched agent panes.</p>
 
     <h2>Install Psyche Build</h2>
-    <p>After the v0.0.1 release and Cask are available, install and open the supported public macOS GUI:</p>
+    <p>Install and open the supported public macOS <code>v0.0.1</code> GUI from the OpenCoven Homebrew tap:</p>
     <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"</code></pre>
+    <p>The matching signed and notarized Apple Silicon and Intel DMGs and <code>SHA256SUMS</code> are available from the <a href="https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1" target="_blank" rel="noopener">v0.0.1 GitHub Release</a>.</p>
     <p>The Cask installs only <code>Psyche Build.app</code>. For source CLI development, use the repository checkout and contributing guide, then invoke it explicitly:</p>
     <pre><code data-lang="bash">node /path/to/psyche-build/psyche</code></pre>
     <p>The Node CLI is not an npm release in 0.0.1.</p>

@@ -1869,7 +1869,8 @@ describe('tauri status controller', () => {
     expect(elements.detailBody.textContent).toContain('rAF cadence 60 Hz');
 
     // A sparse sample (fps and renderLatencyMs available, cadence not yet
-    // calibrated) must still show the Frame rate cell while omitting Dropped.
+    // calibrated) still keeps Dropped visible as zero so the card does not
+    // disappear from the performance grid.
     controller.render(buildSample({
       nativeSnapshot,
       frame: {
@@ -1881,8 +1882,9 @@ describe('tauri status controller', () => {
     }));
 
     expect(classTexts(elements.detailBody, 'status-cell-label')).toContain('Frame rate');
-    expect(classTexts(elements.detailBody, 'status-cell-label')).not.toContain('Dropped');
+    expect(classTexts(elements.detailBody, 'status-cell-label')).toContain('Dropped');
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('60 FPS');
+    expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('0');
   });
 
   it('renders Agent tools only for finite structured counts', () => {

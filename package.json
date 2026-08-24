@@ -1,7 +1,7 @@
 {
   "name": "psyche-build",
   "version": "0.0.1",
-  "description": "Multiagent coding harness: parallel agent lanes in isolated tmux panes and git worktrees.",
+  "description": "OpenCoven's local-first coding cockpit for visible, isolated agent lanes in tmux and git worktrees.",
   "type": "module",
   "author": "Valentina Alexander",
   "license": "MIT",
@@ -19,7 +19,7 @@
     "tmux",
     "worktree",
     "git",
-    "openclaw",
+    "opencoven",
     "coding-agents"
   ],
   "engines": {
@@ -46,10 +46,14 @@
     "docs/AGENT-SURFACE-CONTROL.md",
     "docs/BREAKING-CHANGES.md",
     "docs/BRIDGE-SECURITY.md",
+    "docs/CONTROL-PLANE.md",
     "docs/INTEGRATIONS.md",
     "docs/PRODUCT-SPEC.md",
+    "docs/RELEASE-ACCEPTANCE.md",
     "docs/RELEASE.md",
+    "docs/ROADMAP.md",
     "docs/SMOKE.md",
+    "docs/SUPPORT-MATRIX.md",
     "CONTRIBUTING.md",
     "LICENSE"
   ],

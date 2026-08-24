@@ -29,7 +29,7 @@ export function renderHero(starCount) {
               <svg class="hero-check-icon hidden text-text-secondary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
             </button>
           </div>
-          <p class="text-[12px] text-text-dimmer mt-3">Homebrew Cask available after the v0.0.1 release.</p>
+          <p class="text-[12px] text-text-dimmer mt-3">Public macOS v0.0.1 via the OpenCoven Homebrew tap.</p>
           <div class="hero-proof-strip" style="animation: fade-up 0.7s 0.38s cubic-bezier(0.16,1,0.3,1) both">
             <span>tmux-native</span>
             <span>one worktree per pane</span>

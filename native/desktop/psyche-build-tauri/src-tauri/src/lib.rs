@@ -110,7 +110,6 @@ const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
 const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
-const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
 #[cfg(test)]
 std::thread_local! {
@@ -1570,11 +1569,6 @@ fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedP
     Ok((pending_start, resolved_cwd))
 }
 
-fn has_exact_psyche_source(env: Option<&HashMap<String, String>>) -> bool {
-    matches!(env, Some(values) if values.len() == 1
-        && values.get(COVEN_SESSION_SOURCE).map(String::as_str) == Some(PSYCHE_SESSION_SOURCE))
-}
-
 fn has_no_launch_env(env: Option<&HashMap<String, String>>) -> bool {
     env.map_or(true, HashMap::is_empty)
 }
@@ -1597,28 +1591,15 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-code" => {
-            if !has_exact_psyche_source(options.env.as_ref()) {
-                return Err(
-                    "coven-code requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string(),
-                );
+            if !has_no_launch_env(options.env.as_ref()) {
+                return Err("coven-code does not accept launch environment entries".to_string());
             }
-            let session_id = options
-                .coven_session_id
-                .as_deref()
-                .ok_or_else(|| "coven-code requires a session id".to_string())?;
-            if !is_safe_session_id(session_id) {
-                return Err("coven-code session id is unsafe".to_string());
+            if options.coven_session_id.is_some() {
+                return Err("coven-code does not accept a session id".to_string());
             }
             match options.args.as_deref() {
-                Some([verb, flag, argument])
-                    if verb == "code" && flag == "--session-id" && argument == session_id =>
-                {
-                    Ok(())
-                }
-                _ => Err(
-                    "coven-code requires exactly 'code --session-id' and the validated session id"
-                        .to_string(),
-                ),
+                None | Some([]) => Ok(()),
+                _ => Err("coven-code does not accept launch arguments".to_string()),
             }
         }
         "coven-attach" => {
@@ -1665,7 +1646,7 @@ fn apply_launch_env(
             }
         }
     }
-    if launch_kind == Some("coven-attach") {
+    if matches!(launch_kind, Some("coven-code" | "coven-attach")) {
         cmd.env_remove(COVEN_SESSION_SOURCE);
     }
 }
@@ -5222,16 +5203,11 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
                     .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
             ),
             NativeLaunchKind::CovenCode => {
-                let id = request
-                    .coven_session_id
-                    .clone()
-                    .filter(|id| is_safe_session_id(id))
-                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
                 (
                     environment
                         .coven_path
                         .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
-                    vec!["code".to_string(), "--session-id".to_string(), id],
+                    Vec::new(),
                 )
             }
             NativeLaunchKind::CovenAttach => {
@@ -5263,8 +5239,12 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
             "PSYCHE_TAURI=1".to_string(),
             "PSYCHE_NATIVE_CONTAINER=1".to_string(),
         ];
-        if matches!(request.launch_kind, NativeLaunchKind::CovenCode) {
-            args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
+        if matches!(
+            request.launch_kind,
+            NativeLaunchKind::CovenCode | NativeLaunchKind::CovenAttach
+        ) {
+            args.push("-u".to_string());
+            args.push(COVEN_SESSION_SOURCE.to_string());
         }
         if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
             let home = environment
@@ -11723,24 +11703,14 @@ mod workspace_panel_tests {
         command: Option<&str>,
         args: Option<&[&str]>,
     ) -> StartOptions {
-        launch_options_with_env(
-            Some("coven-code"),
-            session_id,
-            command,
-            args,
-            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
-        )
+        launch_options_with_env(Some("coven-code"), session_id, command, args, None)
     }
 
     #[test]
     fn accepts_exact_native_coven_code_and_attach_launches() {
         let coven = "/canonical/bin/coven";
         let session_id = "12345678-1234-4abc-8def-1234567890ab";
-        let code = native_code_options(
-            Some(session_id),
-            Some(coven),
-            Some(&["code", "--session-id", session_id]),
-        );
+        let code = native_code_options(None, Some(coven), Some(&[]));
         let attach = launch_options(
             Some("coven-attach"),
             Some(session_id),
@@ -11756,14 +11726,10 @@ mod workspace_panel_tests {
     fn rejects_legacy_native_coven_chat_launch_kind_after_workspace_migration() {
         let legacy = launch_options_with_env(
             Some("coven-chat"),
-            Some("12345678-1234-4abc-8def-1234567890ab"),
+            None,
             Some("/canonical/bin/coven"),
-            Some(&[
-                "code",
-                "--session-id",
-                "12345678-1234-4abc-8def-1234567890ab",
-            ]),
-            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
+            None,
+            Some(&[]),
         );
 
         assert_eq!(
@@ -11776,10 +11742,8 @@ mod workspace_panel_tests {
     fn rejects_invalid_native_coven_launch_environments() {
         let coven = "/canonical/bin/coven";
         let code_envs = [
-            None,
-            Some(&[][..]),
-            Some(&[("COVEN_SESSION_SOURCE", "other")][..]),
-            Some(&[("OTHER", "psyche-build")][..]),
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
+            Some(&[("OTHER", "value")][..]),
             Some(&[("COVEN_SESSION_SOURCE", "psyche-build"), ("OTHER", "value")][..]),
         ];
         for env in code_envs {
@@ -11787,14 +11751,21 @@ mod workspace_panel_tests {
                 Some("coven-code"),
                 None,
                 Some(coven),
-                Some(&["code"]),
+                Some(&[]),
                 env,
             );
             assert_eq!(
                 validate_coven_launch_with(&code, Some(coven)),
-                Err("coven-code requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string())
+                Err("coven-code does not accept launch environment entries".to_string())
             );
         }
+
+        let no_env_code = launch_options_with_env(Some("coven-code"), None, Some(coven), None, None);
+        assert_eq!(validate_coven_launch_with(&no_env_code, Some(coven)), Ok(()));
+
+        let empty_env_code =
+            launch_options_with_env(Some("coven-code"), None, Some(coven), Some(&[]), Some(&[]));
+        assert_eq!(validate_coven_launch_with(&empty_env_code, Some(coven)), Ok(()));
 
         for env in [
             Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
@@ -11827,15 +11798,25 @@ mod workspace_panel_tests {
     }
 
     #[test]
-    fn applies_effective_launch_environment_without_relabeling_attachments() {
+    fn scrubs_inherited_coven_source_from_native_coven_launches() {
+        let mut code_without_env = CommandBuilder::new("/bin/coven");
+        code_without_env.env(COVEN_SESSION_SOURCE, "psyche-build");
+        apply_launch_env(&mut code_without_env, None, Some("coven-code"));
+        assert_eq!(code_without_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let empty_env = HashMap::new();
+        let mut code_with_empty_env = CommandBuilder::new("/bin/coven");
+        code_with_empty_env.env(COVEN_SESSION_SOURCE, "psyche-build");
+        apply_launch_env(&mut code_with_empty_env, Some(&empty_env), Some("coven-code"));
+        assert_eq!(code_with_empty_env.get_env(COVEN_SESSION_SOURCE), None);
+
         let mut attach_without_env = CommandBuilder::new("/bin/coven");
-        attach_without_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        attach_without_env.env(COVEN_SESSION_SOURCE, "psyche-build");
         apply_launch_env(&mut attach_without_env, None, Some("coven-attach"));
         assert_eq!(attach_without_env.get_env(COVEN_SESSION_SOURCE), None);
 
-        let empty_env = HashMap::new();
         let mut attach_with_empty_env = CommandBuilder::new("/bin/coven");
-        attach_with_empty_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        attach_with_empty_env.env(COVEN_SESSION_SOURCE, "psyche-build");
         apply_launch_env(
             &mut attach_with_empty_env,
             Some(&empty_env),
@@ -11849,18 +11830,6 @@ mod workspace_panel_tests {
         assert_eq!(
             legacy.get_env(COVEN_SESSION_SOURCE),
             Some(std::ffi::OsStr::new("inherited"))
-        );
-
-        let code_env = HashMap::from([(
-            COVEN_SESSION_SOURCE.to_string(),
-            PSYCHE_SESSION_SOURCE.to_string(),
-        )]);
-        let mut code = CommandBuilder::new("/bin/coven");
-        code.env(COVEN_SESSION_SOURCE, "inherited");
-        apply_launch_env(&mut code, Some(&code_env), Some("coven-code"));
-        assert_eq!(
-            code.get_env(COVEN_SESSION_SOURCE),
-            Some(std::ffi::OsStr::new(PSYCHE_SESSION_SOURCE))
         );
     }
 
@@ -11894,7 +11863,7 @@ mod workspace_panel_tests {
         let invalid = [
             (
                 native_code_options(Some(session_id), Some(coven), None),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept a session id",
             ),
             (
                 native_code_options(
@@ -11902,7 +11871,7 @@ mod workspace_panel_tests {
                     Some(coven),
                     Some(&["code", "--session-id", session_id]),
                 ),
-                "coven-code requires a session id",
+                "coven-code does not accept launch arguments",
             ),
             (
                 native_code_options(
@@ -11914,35 +11883,31 @@ mod workspace_panel_tests {
                         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                     ]),
                 ),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept a session id",
+            ),
+            (
+                native_code_options(Some("../unsafe"), Some(coven), None),
+                "coven-code does not accept a session id",
             ),
             (
                 native_code_options(
-                    Some("../unsafe"),
-                    Some(coven),
-                    Some(&["code", "--session-id", "../unsafe"]),
-                ),
-                "coven-code session id is unsafe",
-            ),
-            (
-                native_code_options(
-                    Some(session_id),
+                    None,
                     Some("/wrong/coven"),
-                    Some(&["code", "--session-id", session_id]),
+                    Some(&[]),
                 ),
                 "Coven launch command does not match the resolved executable",
             ),
             (
-                native_code_options(Some(session_id), Some(coven), Some(&["code", session_id])),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                native_code_options(None, Some(coven), Some(&["code", session_id])),
+                "coven-code does not accept launch arguments",
             ),
             (
                 native_code_options(
-                    Some(session_id),
+                    None,
                     Some(coven),
                     Some(&["code", "--session-id", session_id, "extra"]),
                 ),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept launch arguments",
             ),
             (
                 launch_options(
@@ -11992,11 +11957,7 @@ mod workspace_panel_tests {
                 Err(expected.to_string())
             );
         }
-        let code = native_code_options(
-            Some(session_id),
-            Some(coven),
-            Some(&["code", "--session-id", session_id]),
-        );
+        let code = native_code_options(None, Some(coven), Some(&[]));
         assert_eq!(
             validate_coven_launch_with(&code, None),
             Err("Coven executable not found".to_string())
