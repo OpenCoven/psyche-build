@@ -61,13 +61,17 @@ const LOCAL_PATH_CLOSING_DELIMITERS = new Set(
 const LOCAL_PATH_QUOTE_DELIMITERS = new Set(['"', "'", '`']);
 const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
 const PROTECTED_URL_PLACEHOLDER_SUFFIX = '\u0000';
+const MAX_PERCENT_DECODE_ROUNDS = 3;
+const MAX_PERCENT_ENCODED_COMPONENT_LENGTH = 16_384;
+const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
+const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
 const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
   /file:\/\/\/(?:Users|home)\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
   /file:\/\/\/[A-Za-z]:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
 ];
 const HOME_PATH_GENERIC_PATH_PATTERNS = [
-  /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
   /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+  /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
 ];
 
 /**
@@ -209,18 +213,88 @@ function stripGitPlusPrefix(value) {
 
 /**
  * @param {string} value
- * @returns {string}
+ * @returns {string[]}
  */
-function decodeUrlComponent(value) {
-  if (!value) {
-    return value;
+function percentDecodedVariants(value) {
+  const variants = [value];
+  if (!value.includes('%')) {
+    return variants;
+  }
+  if (value.length > MAX_PERCENT_ENCODED_COMPONENT_LENGTH) {
+    fail('Percent-encoded public URL component exceeds the inspection limit');
   }
 
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+  let current = value;
+  for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
+    if (INVALID_PERCENT_ESCAPE_PATTERN.test(current)) {
+      if (round === 0 || VALID_PERCENT_ESCAPE_PATTERN.test(current)) {
+        fail('Malformed percent encoding in public URL component');
+      }
+      break;
+    }
+    if (!VALID_PERCENT_ESCAPE_PATTERN.test(current)) {
+      break;
+    }
+
+    /** @type {string} */
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      fail('Malformed percent encoding in public URL component');
+    }
+    if (decoded === current) {
+      break;
+    }
+    variants.push(decoded);
+    current = decoded;
   }
+
+  if (
+    VALID_PERCENT_ESCAPE_PATTERN.test(current)
+    && !INVALID_PERCENT_ESCAPE_PATTERN.test(current)
+  ) {
+    fail('Percent-encoded public URL component exceeds the decoding limit');
+  }
+
+  return variants;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function encodeSanitizedDecodedUrlComponent(value) {
+  if (value.includes('<redacted-local-path>')) {
+    return '<redacted-local-path>';
+  }
+
+  return encodeURIComponent(value)
+    .replace(/[!'()*]/gu, (character) =>
+      `%${character.codePointAt(0)?.toString(16).toUpperCase()}`
+    )
+    .replace(/%2F/giu, '/');
+}
+
+/**
+ * @param {string} value
+ * @param {(variant: string) => string} sanitize
+ * @returns {string}
+ */
+function sanitizePercentDecodedUrlComponent(value, sanitize) {
+  const variants = percentDecodedVariants(value);
+
+  for (const [index, variant] of variants.entries()) {
+    const sanitized = sanitize(variant);
+    if (sanitized === variant) {
+      continue;
+    }
+    return index === 0
+      ? sanitized
+      : encodeSanitizedDecodedUrlComponent(sanitized);
+  }
+
+  return value;
 }
 
 /**
@@ -237,18 +311,10 @@ function decodeUrlComponent(value) {
  * @returns {string}
  */
 function redactHomeDirectoriesInUrlComponent(value, matchers, options = {}) {
-  const directlySanitized = redactHomeDirectoryToken(value, matchers, options);
-  if (directlySanitized !== value) {
-    return directlySanitized;
-  }
-
-  const decoded = decodeUrlComponent(value);
-  if (decoded === value) {
-    return value;
-  }
-
-  const decodedSanitized = redactHomeDirectoryToken(decoded, matchers, options);
-  return decodedSanitized !== decoded ? decodedSanitized : value;
+  return sanitizePercentDecodedUrlComponent(
+    value,
+    (variant) => redactHomeDirectoryToken(variant, matchers, options),
+  );
 }
 
 /**
@@ -256,18 +322,7 @@ function redactHomeDirectoriesInUrlComponent(value, matchers, options = {}) {
  * @returns {string}
  */
 function redactLocalOperationalPathsInUrlComponent(value) {
-  const directlySanitized = redactLocalOperationalPaths(value);
-  if (directlySanitized !== value) {
-    return directlySanitized;
-  }
-
-  const decoded = decodeUrlComponent(value);
-  if (decoded === value) {
-    return value;
-  }
-
-  const decodedSanitized = redactLocalOperationalPaths(decoded);
-  return decodedSanitized !== decoded ? decodedSanitized : value;
+  return sanitizePercentDecodedUrlComponent(value, redactLocalOperationalPaths);
 }
 
 /**
@@ -402,12 +457,7 @@ function sanitizeProtectedUrl(value, matchers) {
       const suffixOffset = value.slice(pathStart).search(/[?#]/u);
       const pathEnd = suffixOffset === -1 ? value.length : pathStart + suffixOffset;
       const rawPath = value.slice(pathStart, pathEnd);
-      const sanitizedPath = redactLocalOperationalPaths(
-        redactHomeDirectoriesInUrlComponent(rawPath, matchers, {
-          allowGenericFileUriPatterns: true,
-          allowGenericPathPatterns: true,
-        }),
-      );
+      const sanitizedPath = sanitizeUrlComponent(rawPath, matchers);
       if (sanitizedPath !== rawPath) {
         const normalizedPath = rawPath.startsWith('/') && !sanitizedPath.startsWith('/')
           ? `/${sanitizedPath}`
@@ -467,14 +517,9 @@ function sanitizeProtectedUrl(value, matchers) {
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {ProtectedUrlState}
  */
-function protectNonFileUrls(value, matchers) {
+function protectUrls(value, matchers) {
   const protectedUrls = /** @type {string[]} */ ([]);
   const protectedValue = value.replace(PROTECTED_URL_PATTERN, (match) => {
-    const scheme = stripGitPlusPrefix(match).split('://', 1)[0]?.toLowerCase();
-    if (scheme === 'file') {
-      return match;
-    }
-
     const placeholder = `${PROTECTED_URL_PLACEHOLDER_PREFIX}${protectedUrls.length}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`;
     protectedUrls.push(sanitizeProtectedUrl(match, matchers));
     return placeholder;
@@ -1071,7 +1116,7 @@ function redactLocalOperationalPaths(value) {
  */
 function redactLocalPaths(value, config) {
   const matchers = buildHomeDirectoryMatchers(config);
-  const { protectedValue, protectedUrls } = protectNonFileUrls(value, matchers);
+  const { protectedValue, protectedUrls } = protectUrls(value, matchers);
   const sanitized = redactLocalOperationalPaths(
     redactHomeDirectories(protectedValue, matchers),
   );
@@ -1171,15 +1216,7 @@ function normalizePriority(value) {
 /**
  * @param {string} value
  */
-export function assertNoPublishableSecrets(value) {
-  if (typeof value !== 'string') {
-    fail('assertNoPublishableSecrets expected a string');
-  }
-
-  if (!value) {
-    return;
-  }
-
+function assertNoDirectPublishableSecrets(value) {
   if (GITHUB_TOKEN_PATTERN.test(value)) {
     fail('Publishable GitHub token detected');
   }
@@ -1198,6 +1235,53 @@ export function assertNoPublishableSecrets(value) {
 }
 
 /**
+ * @param {string} value
+ */
+function assertNoEncodedUrlSecrets(value) {
+  for (const match of value.matchAll(PROTECTED_URL_PATTERN)) {
+    const rawUrl = match[0];
+
+    /** @type {URL} */
+    let url;
+    try {
+      url = new URL(stripGitPlusPrefix(rawUrl));
+    } catch {
+      percentDecodedVariants(rawUrl);
+      continue;
+    }
+
+    const components = [
+      url.username,
+      url.password,
+      url.pathname,
+      url.search.startsWith('?') ? url.search.slice(1) : url.search,
+      url.hash.startsWith('#') ? url.hash.slice(1) : url.hash,
+    ];
+    for (const component of components) {
+      for (const variant of percentDecodedVariants(component)) {
+        assertNoDirectPublishableSecrets(variant);
+      }
+    }
+  }
+}
+
+/**
+ * @param {string} value
+ */
+export function assertNoPublishableSecrets(value) {
+  if (typeof value !== 'string') {
+    fail('assertNoPublishableSecrets expected a string');
+  }
+
+  if (!value) {
+    return;
+  }
+
+  assertNoDirectPublishableSecrets(value);
+  assertNoEncodedUrlSecrets(value);
+}
+
+/**
  * @param {string | null | undefined} value
  * @param {SanitizePublicTextConfig} [config={}]
  * @returns {string | null}
@@ -1211,6 +1295,7 @@ export function sanitizePublicText(value, config = {}) {
   }
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
+  assertNoEncodedUrlSecrets(sanitized);
   sanitized = sanitized.replace(PROTECTED_URL_PATTERN, (url) => {
     const authorityStart = url.indexOf('://') + 3;
     const authorityEndOffset = url.slice(authorityStart).search(/[/?#]/u);

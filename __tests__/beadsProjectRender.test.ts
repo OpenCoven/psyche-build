@@ -245,6 +245,67 @@ describe('Beads project renderers', () => {
     );
   });
 
+  it('recursively inspects encoded URL components without rewriting safe public encoding', () => {
+    expect(
+      sanitizePublicText(
+        [
+          'file:///%252FUsers%252Fbuns%252Fprivate%2520notes.md',
+          'ssh://host/%252Epsyche%252Fworktrees%252Frun',
+          'https://example.com/releases?cwd=%252FUsers%252Fbuns%252Fprivate'
+            + '%2526admin%253Dtrue&workspace=%252Epsyche%252Fworktrees%252Frun'
+            + '#%252Fhome%252Falice%252Fsecret%2529preview',
+          'https://example.com/releases/My%20Project'
+            + '?redirect=%252Fpublic%252Fdocs#section%202',
+        ].join('\n'),
+      ),
+    ).toBe([
+      'file:///~/private%20notes.md',
+      'ssh://host/<redacted-local-path>',
+      'https://example.com/releases?cwd=~/private%26admin%3Dtrue'
+        + '&workspace=<redacted-local-path>#~/secret%29preview',
+      'https://example.com/releases/My%20Project'
+        + '?redirect=%252Fpublic%252Fdocs#section%202',
+    ].join('\n'));
+  });
+
+  it('rejects recursively encoded URL secrets and malformed percent encodings', () => {
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+    const encodedToken = token.replace('_', '%5F');
+    const doubleEncodedToken = token.replace('_', '%255F');
+    const overEncodedToken = token.replace('_', '%2525255F');
+
+    for (const unsafeUrl of [
+      `https://example.com/releases/${encodedToken}`,
+      `https://example.com/releases?access_token=${doubleEncodedToken}`,
+      `https://example.com/releases#token=${encodedToken}`,
+      `https://x-access-token:${doubleEncodedToken}@example.com/releases`,
+    ]) {
+      expect(() => sanitizePublicText(`Publish ${unsafeUrl}`)).toThrow(
+        /Publishable (?:GitHub token|API key|credential)/i,
+      );
+    }
+    expect(() =>
+      sanitizePublicText(`Publish https://example.com/releases/${overEncodedToken}`)
+    ).toThrow(/decoding limit/i);
+    expect(() =>
+      sanitizePublicText(`Publish https://example.com/releases/%25x${overEncodedToken}`)
+    ).toThrow(/malformed percent encoding/i);
+    expect(() =>
+      sanitizePublicText(`Publish https://example.com/${'%41'.repeat(6_000)}`)
+    ).toThrow(/inspection limit/i);
+
+    for (const malformedUrl of [
+      'https://example.com/%',
+      'https://example.com/?path=%2',
+      'https://example.com/#route=%GG',
+      'ssh://host/%FF',
+    ]) {
+      expect(() => sanitizePublicText(`Publish ${malformedUrl}`)).toThrow(
+        /malformed percent encoding/i,
+      );
+    }
+  });
+
   it('redacts complete delimiter-aware operational paths', () => {
     expect(
       sanitizePublicText(
@@ -482,6 +543,35 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain('ssh://ghe.example.com/OpenCoven/psyche-build-public/issues/2');
     expect(rendered).not.toContain(token);
     expect(rendered).not.toContain('access_token=');
+  });
+
+  it('omits recursively encoded secrets and malformed mirrored issue URLs', () => {
+    const inventory = buildPublicInventory();
+    const blocked = inventory.find((bead) => bead.id === 'pb-blocked');
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+
+    expect(blocked).toBeTruthy();
+
+    const rendered = renderIssueBody(
+      blocked!,
+      buildContext(inventory, {
+        mirroredIssueUrlsByBeadId: {
+          'pb-feature': `https://example.com/issues/2?access_token=${
+            token.replace('_', '%255F')
+          }`,
+          'pb-in-progress': 'https://example.com/issues/3#route=%GG',
+          'pb-closed': 'https://github.com/OpenCoven/psyche-build-public/issues/4',
+        },
+      }),
+    );
+
+    expect(rendered).toContain('- Parent: `pb-feature` — Model Beads project inventory');
+    expect(rendered).toContain(
+      '- Blocked by: `pb-in-progress` — Track in-progress beads',
+    );
+    expect(rendered).not.toContain('access_token=');
+    expect(rendered).not.toContain('%GG');
+    expect(rendered).not.toContain(token);
   });
 
   it('rejects credential-bearing HTTP URLs instead of rendering stripped links', () => {
