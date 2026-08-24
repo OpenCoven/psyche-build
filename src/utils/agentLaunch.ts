@@ -12,7 +12,7 @@ import { sendPromptViaTmux } from './agentPromptDispatch.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
- * enabled-agents settings list, and the default-enabled set. Coven Code leads
+ * enabled-agents settings list, and the default-enabled set. Coven CLI leads
  * because Coven CLI is this project's own default agent experience.
  */
 export const AGENT_IDS = [

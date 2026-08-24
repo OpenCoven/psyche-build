@@ -342,7 +342,7 @@ mod tests {
             "cwd": "/repo/worktree",
             "launchKind": "coven-code"
         }))
-        .expect("bare Coven Code request should deserialize");
+        .expect("bare Coven CLI request should deserialize");
 
         let create_args = build_create_args(
             Path::new("/tmp/socket"),
@@ -365,7 +365,7 @@ mod tests {
             "cwd": "/repo/worktree",
             "launchKind": "coven-code"
         }))
-        .expect("canonical Coven Code request should deserialize");
+        .expect("canonical Coven CLI request should deserialize");
 
         assert_eq!(launch.launch_kind, NativeLaunchKind::CovenCode);
         assert_eq!(
