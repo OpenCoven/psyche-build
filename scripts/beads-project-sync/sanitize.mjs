@@ -42,7 +42,7 @@ const API_KEY_ASSIGNMENT_PATTERN =
 const CREDENTIAL_ASSIGNMENT_PATTERN =
   /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const URL_USERINFO_PATTERN =
-  /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s"'`()\[\]{}<>@]+@/iu;
+  /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\\\s"'`()\[\]{}<>@]+@/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
 const URL_TRAILING_PROSE_PUNCTUATION = new Set(['.', ',', ';', '!']);
@@ -909,6 +909,71 @@ function decodeUrlInspectionMapped(mapped) {
 }
 
 /**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function normalizeSpecialSchemeSeparatorsMapped(mapped) {
+  const schemeEnd = findUriSchemeEnd(mapped.value, 0);
+  if (schemeEnd == null) {
+    return mapped;
+  }
+  const scheme = stripGitPlusPrefix(mapped.value.slice(0, schemeEnd)).toLowerCase();
+  const hierarchyStart = schemeEnd + 1;
+  if (
+    (scheme !== 'http' && scheme !== 'https')
+    || !mapped.value.includes('\\', hierarchyStart)
+  ) {
+    return mapped;
+  }
+
+  let separatorEnd = hierarchyStart;
+  while (mapped.value[separatorEnd] === '/' || mapped.value[separatorEnd] === '\\') {
+    separatorEnd += 1;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  for (let index = 0; index <= schemeEnd; index += 1) {
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[index] ?? '',
+      mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
+    );
+  }
+
+  const separatorSourceRange = separatorEnd > hierarchyStart
+    ? mappedSourceRange(mapped, hierarchyStart, separatorEnd)
+    : mapped.sourceRanges[hierarchyStart]
+      ?? mapped.sourceRanges[schemeEnd]
+      ?? { start: hierarchyStart, end: hierarchyStart };
+  appendMappedInspectionValue(output, sourceRanges, '/', separatorSourceRange);
+  appendMappedInspectionValue(output, sourceRanges, '/', separatorSourceRange);
+
+  for (let index = separatorEnd; index < mapped.value.length; index += 1) {
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[index] === '\\' ? '/' : mapped.value[index] ?? '',
+      mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
+    );
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function inspectUrlCandidateMapped(mapped) {
+  return normalizeSpecialSchemeSeparatorsMapped(decodeUrlInspectionMapped(mapped));
+}
+
+/**
  * @typedef {{
  *   start: number,
  *   end: number,
@@ -1513,7 +1578,7 @@ function sanitizeParsedUri(value, uri, matchers) {
  * @returns {string | null}
  */
 function redactStructurallyDecodedHttpPath(value, matchers) {
-  const inspected = decodeUrlInspectionMapped(createMappedInspectionText(value)).value;
+  const inspected = inspectUrlCandidateMapped(createMappedInspectionText(value)).value;
   const parsed = parseAbsoluteUri(inspected);
   if (parsed == null || (parsed.scheme !== 'http' && parsed.scheme !== 'https')) {
     return null;
@@ -1565,6 +1630,11 @@ function redactStructurallyDecodedHttpPath(value, matchers) {
  * @returns {string}
  */
 function sanitizeProtectedUrl(value, matchers) {
+  const structurallyRedacted = redactStructurallyDecodedHttpPath(value, matchers);
+  if (structurallyRedacted != null) {
+    return structurallyRedacted;
+  }
+
   for (const [index, variant] of percentDecodedVariants(value).entries()) {
     const uri = parseAbsoluteUri(variant);
     if (uri == null) {
@@ -1578,7 +1648,7 @@ function sanitizeProtectedUrl(value, matchers) {
     }
     const sanitized = sanitizeParsedUri(withoutUserinfo, reparsed, matchers);
     if (index === 0) {
-      return redactStructurallyDecodedHttpPath(sanitized, matchers) ?? sanitized;
+      return sanitized;
     }
     if (sanitized !== variant) {
       return '<redacted-local-path>';
@@ -2418,7 +2488,7 @@ function redactDecodedHtmlEntitySensitiveText(value, config) {
         );
       }
 
-      const inspectedCandidate = decodeUrlInspectionMapped(
+      const inspectedCandidate = inspectUrlCandidateMapped(
         sliceMappedInspectionText(decoded, candidate.start, candidate.end),
       );
       collectMappedEmailReplacements(
@@ -2519,7 +2589,7 @@ function redactDecodedHtmlEntitySensitiveText(value, config) {
     }
   }
   for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
-    const inspectedDestination = decodeUrlInspectionMapped(
+    const inspectedDestination = inspectUrlCandidateMapped(
       sliceMappedInspectionText(
         markdownDecoded,
         destination.start,
@@ -2720,7 +2790,7 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
       candidate.start,
       candidate.end,
     );
-    const inspectedCandidate = decodeUrlInspectionMapped(mappedCandidate);
+    const inspectedCandidate = inspectUrlCandidateMapped(mappedCandidate);
     const candidateWasDecoded = inspectedCandidate.value !== candidate.value;
     if (candidateWasDecoded) {
       assertNoDirectPublishableSecrets(inspectedCandidate.value);
@@ -2789,7 +2859,7 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
  */
 function assertNoMarkdownDestinationSecrets(markdownDecoded) {
   for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
-    const inspectedDestination = decodeUrlInspectionMapped(
+    const inspectedDestination = inspectUrlCandidateMapped(
       sliceMappedInspectionText(
         markdownDecoded,
         destination.start,

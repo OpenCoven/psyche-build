@@ -760,6 +760,88 @@ describe('Beads project renderers', () => {
     ].join('\n'));
   });
 
+  it('normalizes raw, entity, percent, and mixed HTTP backslashes before path redaction', () => {
+    const config = { homeDirectories: ['/srv/build-user'] };
+
+    expect(
+      sanitizePublicText(
+        [
+          String.raw`https://example.com\srv\build-user\private\client-plan.md?view=public#summary`,
+          String.raw`https://example.com/srv\build-user\private\client-plan.md`,
+          'https&colon;&sol;&sol;example.com&bsol;srv&bsol;build-user'
+            + '&bsol;private&bsol;client-plan.md',
+          'https&#58;&#47;&#47;example.com&#92;srv&#92;build-user'
+            + '&#92;private&#92;client-plan.md',
+          'https&#x3a;&#x2f;&#x2f;example.com&#x5c;srv&#x5c;build-user'
+            + '&#x5c;private&#x5c;client-plan.md',
+          'https://example.com%5Csrv%5Cbuild-user%5Cprivate%5Cclient-plan.md',
+          'https&amp;colon;&percnt;2F&percnt;2Fexample.com&amp;bsol;srv'
+            + '&percnt;255Cbuild-user&#x5c;private&bsol;client-plan.md',
+          'https://example.com%5Cpublic%5C.psyche%5Cworktrees%5Crun-1%5Cplan.md',
+        ].join('\n'),
+        config,
+      ),
+    ).toBe([
+      'https://example.com/<redacted-local-path>?view=public#summary',
+      'https://example.com/<redacted-local-path>',
+      'https&colon;&sol;&sol;example.com/<redacted-local-path>',
+      'https&#58;&#47;&#47;example.com/<redacted-local-path>',
+      'https&#x3a;&#x2f;&#x2f;example.com/<redacted-local-path>',
+      'https://example.com/<redacted-local-path>',
+      'https&amp;colon;&percnt;2F&percnt;2Fexample.com/<redacted-local-path>',
+      'https://example.com/<redacted-local-path>',
+    ].join('\n'));
+  });
+
+  it('normalizes encoded HTTP backslashes in Markdown destinations before path redaction', () => {
+    const config = { homeDirectories: ['/srv/build-user'] };
+
+    expect(
+      sanitizePublicText(
+        [
+          String.raw`[raw](https://example.com\srv\build-user\private\plan.md)`,
+          '[entity](https&colon;&sol;&sol;example.com&bsol;srv&bsol;build-user'
+            + '&bsol;private&bsol;plan.md "Private")',
+          '[percent](https%3A%2F%2Fexample.com%5Csrv%5Cbuild-user'
+            + '%5Cprivate%5Cplan.md)',
+          '[mixed](https&amp;colon;&percnt;2F&percnt;2Fexample.com'
+            + '&amp;bsol;srv%255Cbuild-user&#x5c;private&bsol;plan.md)',
+        ].join('\n'),
+        config,
+      ),
+    ).toBe([
+      '[raw](https://example.com/<redacted-local-path>)',
+      '[entity](https&colon;&sol;&sol;example.com/<redacted-local-path> "Private")',
+      '[percent](https%3A%2F%2Fexample.com/<redacted-local-path>)',
+      '[mixed](https&amp;colon;&percnt;2F&percnt;2Fexample.com/<redacted-local-path>)',
+    ].join('\n'));
+  });
+
+  it('uses normalized HTTP authority boundaries without changing safe URLs or prose', () => {
+    const safeDescription = [
+      String.raw`Keep https://example.com\public\release.md public.`,
+      'Keep https&colon;&sol;&sol;example.com&bsol;public&bsol;release.md public.',
+      'Keep https://example.com%5Cpublic%5Crelease.md public.',
+      '[safe](https%3A%2F%2Fexample.com%5Cpublic%5Crelease.md)',
+      'Keep https&colon;&sol;&sol;example.com&bsol;alice&commat;public'
+        + '&bsol;release.md public.',
+      'Keep https://example.com%5Calice%40public%5Crelease.md public.',
+      String.raw`Safe escaped prose: \*literal emphasis\* and \[not a link\].`,
+      String.raw`Keep ssh://host\srv\public and vscode://file\srv\public unchanged.`,
+    ].join('\n');
+
+    expect(sanitizePublicText(safeDescription)).toBe(safeDescription);
+
+    for (const unsafeDescription of [
+      'https&colon;&sol;&sol;alice&commat;example.com&bsol;releases',
+      '[credentials](https%3A%5C%5Calice%40example.com%5Creleases)',
+      '[recursive](https&amp;colon;&percnt;255C&percnt;255Calice'
+        + '&percnt;2540example.com&amp;bsol;releases)',
+    ]) {
+      expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
+    }
+  });
+
   it('preserves safe entity URLs without decoding embedded unsafe HTML', () => {
     const safeDescription = [
       '[public](https&colon;&sol;&sol;example.com&sol;srv&sol;public&sol;release.md "Public")',
