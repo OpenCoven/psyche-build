@@ -1338,9 +1338,9 @@ describe('Tauri workspace persistence model', () => {
       'Shell — login shell<span class="new-pane-key">⌃T</span>',
     );
     expect(indexHtml).toContain(
-      'Agent — Coven Code<span class="new-pane-key">⌃A</span>',
+      'Agent — Coven CLI<span class="new-pane-key">⌃A</span>',
     );
     expect(mainSource).toContain('["New shell pane", "⌃T"]');
-    expect(mainSource).toContain('["New agent pane (Coven Code)", "⌃A"]');
+    expect(mainSource).toContain('["New agent pane (Coven CLI)", "⌃A"]');
   });
 });

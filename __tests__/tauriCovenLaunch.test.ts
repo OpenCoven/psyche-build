@@ -546,8 +546,8 @@ describe('Tauri Coven launch project scope', () => {
     const spawnAgentThread = functionSource('spawnAgentThread');
     expect(spawnAgentThread).toContain('launchKind: null');
 
-    const covenCodeLaunch = functionSource('covenCodeLaunch');
-    expect(covenCodeLaunch).toContain('launchKind: "coven-code"');
+    const covenCliLaunch = functionSource('covenCliLaunch');
+    expect(covenCliLaunch).toContain('launchKind: "coven-code"');
   });
 
   it('deduplicates canonical aliases while preserving the active project identity', async () => {
@@ -688,133 +688,49 @@ describe('Tauri Coven launch project scope', () => {
 });
 
 describe('native Coven launch routing', () => {
-  it('prefers crypto.randomUUID for exact Coven session identity', () => {
-    const randomUUID = () => COVEN_SESSION_ID;
-    const makeCovenSessionId = compileFunction<() => string | null>(
-      functionSource('makeCovenSessionId'),
-      {
-        window: {
-          crypto: {
-            randomUUID,
-            getRandomValues: () => { throw new Error('fallback must not run'); },
-          },
-        },
-        setStatus: () => { throw new Error('error status must not run'); },
-      },
-    );
-
-    expect(makeCovenSessionId()).toBe(COVEN_SESSION_ID);
-  });
-
-  it('formats a secure RFC4122 v4 UUID fallback with version and variant bits', () => {
-    const bytes = Uint8Array.from([
-      0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x77,
-      0x00, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-    ]);
-    const makeCovenSessionId = compileFunction<() => string | null>(
-      functionSource('makeCovenSessionId'),
-      {
-        window: {
-          crypto: {
-            getRandomValues: (target: Uint8Array) => {
-              target.set(bytes);
-              return target;
-            },
-          },
-        },
-        setStatus: () => { throw new Error('error status must not run'); },
-        Uint8Array,
-      },
-    );
-
-    const sessionId = makeCovenSessionId();
-    expect(sessionId).toBe('00112233-4455-4077-8099-aabbccddeeff');
-    expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  });
-
-  it('fails visibly when secure UUID generation is unavailable', () => {
-    const statuses: Array<[string, string]> = [];
-    const makeCovenSessionId = compileFunction<() => string | null>(
-      functionSource('makeCovenSessionId'),
-      {
-        window: {},
-        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
-      },
-    );
-
-    expect(makeCovenSessionId()).toBeNull();
-    expect(statuses).toEqual([['Secure session ID generation is unavailable', 'error']]);
-  });
-
-  it('builds a Coven Code descriptor scoped to the project and selected worktree', () => {
+  it('builds a bare Coven CLI descriptor scoped to the project and selected worktree', () => {
     const state = { env: { coven_path: '/opt/homebrew/bin/coven' } };
     const project = { root: '/repo', selectedWorktreePath: '/repo/.worktrees/feature' };
-    const covenCodeLaunch = compileFunction<(
+    const covenCliLaunch = compileFunction<(
       value: typeof project,
       worktreePath?: string,
     ) => Record<string, unknown>>(
-      functionSource('covenCodeLaunch'),
+      functionSource('covenCliLaunch'),
       {
         state,
         selectedWorktree: () => { throw new Error('explicit worktree path should win'); },
-        makeCovenSessionId: () => COVEN_SESSION_ID,
       },
     );
 
-    expect(covenCodeLaunch(project, project.selectedWorktreePath)).toEqual({
+    expect(covenCliLaunch(project, project.selectedWorktreePath)).toEqual({
       command: '/opt/homebrew/bin/coven',
-      args: ['code', '--session-id', COVEN_SESSION_ID],
-      env: { COVEN_SESSION_SOURCE: 'psyche-build' },
+      args: [],
+      env: {},
       projectRoot: '/repo',
       cwd: '/repo/.worktrees/feature',
       kind: 'coven-code',
       launchKind: 'coven-code',
-      covenSessionId: COVEN_SESSION_ID,
-      metricsProvider: 'coven',
     });
   });
 
-  it('does not create a thread when secure session identity cannot be generated', async () => {
-    const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo' };
-    let creates = 0;
-    const spawnCovenThread = compileFunction<(value: typeof project) => Promise<null>>(
-      functionSource('spawnCovenThread'),
-      {
-        state: { env: { coven_path: '/bin/coven' } },
-        activeProject: () => project,
-        selectedWorktree: () => ({ path: '/repo' }),
-        setStatus: () => undefined,
-        showTerminalView: async () => true,
-        requestAnimationFrame: (callback: () => void) => callback(),
-        covenCodeLaunch: () => null,
-        createThread: () => { creates += 1; },
-      },
-    );
-
-    await expect(spawnCovenThread(project)).resolves.toBeNull();
-    expect(creates).toBe(0);
-  });
-
-  it('duplicates Coven Code threads with a fresh secure session launch', () => {
+  it('duplicates Coven CLI threads with the canonical bare launch', () => {
     const project = { id: 'project', root: '/repo' };
     const originalLaunch = {
       command: '/bin/coven',
-      args: ['code', '--session-id', COVEN_SESSION_ID],
-      env: { TOKEN: 'before' },
+      args: [],
+      env: {},
       projectRoot: '/repo',
       cwd: '/repo/wt',
+      kind: 'coven-code',
       launchKind: 'coven-code',
-      covenSessionId: COVEN_SESSION_ID,
-      metricsProvider: 'coven',
     };
-    const covenCodeLaunch = compileFunction<(
+    const covenCliLaunch = compileFunction<(
       value: { root: string },
       path: string,
     ) => Record<string, unknown> | null>(
-      functionSource('covenCodeLaunch'),
+      functionSource('covenCliLaunch'),
       {
         selectedWorktree: () => { throw new Error('expected explicit worktree path'); },
-        makeCovenSessionId: () => DUPLICATE_COVEN_SESSION_ID,
         state: { env: { coven_path: '/bin/coven' } },
       },
     );
@@ -826,7 +742,7 @@ describe('native Coven launch routing', () => {
       {
         threadIsToolPane: () => false,
         findProject: () => project,
-        covenCodeLaunch,
+        covenCliLaunch,
         createThread: (options: Record<string, any>) => {
           created = options;
           return options;
@@ -837,7 +753,7 @@ describe('native Coven launch routing', () => {
     const duplicate = duplicateThread({
       id: 'thread-1',
       projectId: project.id,
-      name: 'Coven Code',
+      name: 'Coven CLI',
       kind: 'coven-code',
       worktreePath: '/repo/wt',
       status: 'running',
@@ -846,30 +762,27 @@ describe('native Coven launch routing', () => {
 
     expect(created).toMatchObject({
       project,
-      name: 'Coven Code copy',
+      name: 'Coven CLI copy',
       kind: 'coven-code',
       worktreePath: '/repo/wt',
     });
     expect(duplicate?.launch).toEqual({
       command: '/bin/coven',
-      args: ['code', '--session-id', DUPLICATE_COVEN_SESSION_ID],
-      env: { COVEN_SESSION_SOURCE: 'psyche-build' },
+      args: [],
+      env: {},
       projectRoot: '/repo',
       cwd: '/repo/wt',
       kind: 'coven-code',
       launchKind: 'coven-code',
-      covenSessionId: DUPLICATE_COVEN_SESSION_ID,
-      metricsProvider: 'coven',
     });
     expect(originalLaunch).toEqual({
       command: '/bin/coven',
-      args: ['code', '--session-id', COVEN_SESSION_ID],
-      env: { TOKEN: 'before' },
+      args: [],
+      env: {},
       projectRoot: '/repo',
       cwd: '/repo/wt',
+      kind: 'coven-code',
       launchKind: 'coven-code',
-      covenSessionId: COVEN_SESSION_ID,
-      metricsProvider: 'coven',
     });
   });
 
@@ -883,7 +796,7 @@ describe('native Coven launch routing', () => {
         threadIsToolPane: (thread: Record<string, unknown>) =>
           thread.kind === 'git' || thread.kind === 'web',
         findProject: () => ({ id: 'project' }),
-        covenCodeLaunch: () => null,
+        covenCliLaunch: () => null,
         createThread: () => { creates += 1; return {}; },
       },
     );
@@ -891,67 +804,6 @@ describe('native Coven launch routing', () => {
     expect(duplicateThread({ kind: 'git', status: 'running' })).toBeNull();
     expect(duplicateThread({ kind: 'web', status: 'running' })).toBeNull();
     expect(creates).toBe(0);
-  });
-
-  it('does not create a duplicate Coven Code thread when secure session generation fails', () => {
-    const project = { id: 'project', root: '/repo' };
-    const statuses: Array<{ text: string; tone: string | undefined }> = [];
-    const makeCovenSessionId = compileFunction<() => string | null>(
-      functionSource('makeCovenSessionId'),
-      {
-        window: { crypto: null },
-        setStatus: (text: string, tone?: string) => { statuses.push({ text, tone }); },
-      },
-    );
-    const covenCodeLaunch = compileFunction<(
-      value: { root: string },
-      path: string,
-    ) => Record<string, unknown> | null>(
-      functionSource('covenCodeLaunch'),
-      {
-        selectedWorktree: () => { throw new Error('expected explicit worktree path'); },
-        makeCovenSessionId,
-        state: { env: { coven_path: '/bin/coven' } },
-      },
-    );
-    let creates = 0;
-    const duplicateThread = compileFunction<(
-      value: Record<string, any>,
-    ) => Record<string, any> | null>(
-      functionSource('duplicateThread'),
-      {
-        threadIsToolPane: () => false,
-        findProject: () => project,
-        covenCodeLaunch,
-        createThread: () => {
-          creates += 1;
-          return { id: 'unexpected' };
-        },
-      },
-    );
-
-    expect(duplicateThread({
-      id: 'thread-1',
-      projectId: project.id,
-      name: 'Coven Code',
-      kind: 'coven-code',
-      worktreePath: '/repo/wt',
-      status: 'running',
-      launch: {
-        command: '/bin/coven',
-        args: ['code', '--session-id', COVEN_SESSION_ID],
-        env: {},
-        projectRoot: '/repo',
-        cwd: '/repo/wt',
-        launchKind: 'coven-code',
-        covenSessionId: COVEN_SESSION_ID,
-        metricsProvider: 'coven',
-      },
-    })).toBeNull();
-    expect(creates).toBe(0);
-    expect(statuses).toEqual([
-      { text: 'Secure session ID generation is unavailable', tone: 'error' },
-    ]);
   });
 
   it('does not relabel an attached Coven session as Psyche-owned', async () => {
@@ -1002,9 +854,9 @@ describe('native Coven launch routing', () => {
     let frame: (() => void) | null = null;
     const calls: Array<Record<string, any>> = [];
     const launch = {
-      command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID],
-      env: { TOKEN: 'before' }, projectRoot: '/repo', cwd: '/repo/wt',
-      launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+      command: '/bin/coven', args: [],
+      env: {}, projectRoot: '/repo', cwd: '/repo/wt',
+      launchKind: 'coven-code',
     };
     const createThread = compileFunction<(opts: Record<string, any>) => Promise<Record<string, any>>>(
       functionSource('createThread'),
@@ -1033,32 +885,15 @@ describe('native Coven launch routing', () => {
       project: { id: 'project' }, worktreePath: '/repo/wt', kind: 'coven-code', launch,
     });
     launch.args.push('mutated');
-    launch.env.TOKEN = 'after';
+    launch.env.MUTATED = 'after';
     expect(thread.launch).toEqual({
-      command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID],
-      env: { TOKEN: 'before' }, projectRoot: '/repo', cwd: '/repo/wt',
-      launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+      command: '/bin/coven', args: [],
+      env: {}, projectRoot: '/repo', cwd: '/repo/wt',
+      launchKind: 'coven-code', covenSessionId: null, metricsProvider: null,
     });
     expect(thread).toMatchObject({
       metricsGeneration: 0,
-      metrics: {
-        phase: 'loading',
-        provider: 'coven',
-        sessionId: COVEN_SESSION_ID,
-        model: null,
-        contextUsed: null,
-        contextLimit: null,
-        cumulativeInputTokens: null,
-        cumulativeOutputTokens: null,
-        cacheCreationTokens: null,
-        cacheReadTokens: null,
-        spendUsd: null,
-        costKind: 'unknown',
-        updatedAt: null,
-        stale: false,
-        error: null,
-        canSwitchModel: false,
-      },
+      metrics: null,
       metricsRefreshTimer: 0,
     });
     expect(frame).not.toBeNull();
@@ -1092,9 +927,9 @@ describe('native Coven launch routing', () => {
         threadId: 'thread-1', thread_id: 'thread-1',
         projectRoot: '/repo', project_root: '/repo', cwd: '/repo/wt',
         launchKind: 'coven-code', launch_kind: 'coven-code',
-        covenSessionId: COVEN_SESSION_ID, coven_session_id: COVEN_SESSION_ID,
-        command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID],
-        env: { TOKEN: 'before' },
+        covenSessionId: null, coven_session_id: null,
+        command: '/bin/coven', args: [],
+        env: {},
       }),
     });
     expect((invoked[0].options as Record<string, unknown>)).not.toHaveProperty('metricsProvider');
@@ -1219,7 +1054,7 @@ describe('native Coven launch routing', () => {
         setStatus: (message: string) => { status = message; },
         showTerminalView: async () => { shown += 1; return true; },
         requestAnimationFrame: (callback: () => void) => callback(),
-        covenCodeLaunch: () => { throw new Error('must not build launch'); },
+        covenCliLaunch: () => { throw new Error('must not build launch'); },
         createThread: () => { created += 1; },
       },
     );
@@ -1241,13 +1076,11 @@ describe('native Coven launch routing', () => {
         setStatus: () => undefined,
         showTerminalView: async () => { order.push('show'); return true; },
         requestAnimationFrame: (callback: () => void) => { order.push('frame'); callback(); },
-        covenCodeLaunch: () => ({
+        covenCliLaunch: () => ({
           command: '/bin/coven',
-          args: ['code', '--session-id', COVEN_SESSION_ID],
+          args: [],
           cwd: '/repo',
           launchKind: 'coven-code',
-          covenSessionId: COVEN_SESSION_ID,
-          metricsProvider: 'coven',
         }),
         createThread: (options: Record<string, unknown>) => { order.push('create'); return options; },
       },
@@ -1255,7 +1088,7 @@ describe('native Coven launch routing', () => {
 
     const thread = await spawnCovenThread(project);
     expect(order).toEqual(['show', 'frame', 'create']);
-    expect(thread).toMatchObject({ project, kind: 'coven-code', name: 'Coven Code' });
+    expect(thread).toMatchObject({ project, kind: 'coven-code', name: 'Coven CLI' });
   });
 
   it('coalesces concurrent explicit ensures through one animation-frame launch', async () => {
@@ -1275,13 +1108,11 @@ describe('native Coven launch routing', () => {
         setStatus: () => undefined,
         showTerminalView: async () => true,
         requestAnimationFrame: (callback: () => void) => { frames.push(callback); },
-        covenCodeLaunch: (_value: typeof project, path: string) => ({
+        covenCliLaunch: (_value: typeof project, path: string) => ({
           command: '/bin/coven',
-          args: ['code', '--session-id', COVEN_SESSION_ID],
+          args: [],
           cwd: path,
           launchKind: 'coven-code',
-          covenSessionId: COVEN_SESSION_ID,
-          metricsProvider: 'coven',
         }),
         createThread: (options: Record<string, unknown>) => {
           creates += 1;
@@ -1354,13 +1185,11 @@ describe('native Coven launch routing', () => {
         setStatus: () => undefined,
         showTerminalView: async () => true,
         requestAnimationFrame: (callback: () => void) => { frame = callback; },
-        covenCodeLaunch: () => ({
+        covenCliLaunch: () => ({
           command: '/bin/coven',
-          args: ['code', '--session-id', COVEN_SESSION_ID],
+          args: [],
           cwd: '/repo/wt',
           launchKind: 'coven-code',
-          covenSessionId: COVEN_SESSION_ID,
-          metricsProvider: 'coven',
         }),
         createThread: () => { creates += 1; return {}; },
       },
@@ -1389,13 +1218,11 @@ describe('native Coven launch routing', () => {
         setStatus: () => undefined,
         showTerminalView: async () => true,
         requestAnimationFrame: (callback: () => void) => { frame = callback; },
-        covenCodeLaunch: () => ({
+        covenCliLaunch: () => ({
           command: '/bin/coven',
-          args: ['code', '--session-id', COVEN_SESSION_ID],
+          args: [],
           cwd: '/repo/one',
           launchKind: 'coven-code',
-          covenSessionId: COVEN_SESSION_ID,
-          metricsProvider: 'coven',
         }),
         createThread: () => { creates += 1; return {}; },
       },
@@ -1423,13 +1250,11 @@ describe('native Coven launch routing', () => {
         setStatus: () => undefined,
         showTerminalView: async () => true,
         requestAnimationFrame: (callback: () => void) => { frame = callback; },
-        covenCodeLaunch: () => ({
+        covenCliLaunch: () => ({
           command: '/bin/coven',
-          args: ['code', '--session-id', COVEN_SESSION_ID],
+          args: [],
           cwd: '/repo/one',
           launchKind: 'coven-code',
-          covenSessionId: COVEN_SESSION_ID,
-          metricsProvider: 'coven',
         }),
         createThread: () => { creates += 1; return {}; },
       },
@@ -1500,7 +1325,7 @@ describe('native Coven launch routing', () => {
     expect(activationLaunches).toBe(0);
   });
 
-  it('deduplicates only a visible live Coven Code thread in the exact workspace', async () => {
+  it('deduplicates only a visible live Coven CLI thread in the exact workspace', async () => {
     const project = { id: 'project', root: '/repo' };
     const running = {
       id: 'running', projectId: project.id, worktreePath: '/repo/wt',
@@ -1551,10 +1376,10 @@ describe('native Coven launch routing', () => {
     const project = { id: 'project' };
     const writes: string[] = [];
     const thread = {
-      id: 'thread-1', projectId: project.id, worktreePath: '/repo', name: 'Coven Code',
+      id: 'thread-1', projectId: project.id, worktreePath: '/repo', name: 'Coven CLI',
       launch: {
-        command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
-        launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+        command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-code',
       },
       status: 'starting', spawning: true, closing: false, closeStarted: false,
       startInFlight: false, stopRequested: false, ptyStarted: false,
@@ -1638,8 +1463,8 @@ describe('native Coven launch routing', () => {
       id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
       closing: false, closeStarted: false, startInFlight: false, stopRequested: false,
       ptyStarted: false, launch: {
-        command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
-        launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+        command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-code',
       }, term: null,
     };
     const state = { threads: [thread], activeThreadId: thread.id };
@@ -1751,8 +1576,8 @@ describe('native Coven launch routing', () => {
       id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
       closing: false, closeStarted: false, startInFlight: false, stopRequested: true,
       ptyStarted: false, launch: {
-        command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
-        launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+        command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-code',
       }, term: { cols: 120, rows: 40, write: () => undefined },
       terminalController: controller,
     };
@@ -1910,8 +1735,8 @@ describe('native Coven launch routing', () => {
       spawning: false, closing: false, closeStarted: false, startInFlight: false,
       stopRequested: true, ptyStarted: false,
       launch: {
-        command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
-        launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+        command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-code',
       }, term: { cols: 120, rows: 40, dispose: () => { calls.push('dispose'); } },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
@@ -2027,8 +1852,8 @@ describe('native Coven launch routing', () => {
       spawning: true, closing: false, closeStarted: false, startInFlight: false,
       stopRequested: false, ptyStarted: false,
       launch: {
-        command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
-        launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+        command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-code',
       }, term: { cols: 120, rows: 40, dispose: () => undefined },
     };
     const state = { threads: [thread], activeThreadId: thread.id };
@@ -2103,8 +1928,8 @@ describe('native Coven launch routing', () => {
         id: 'thread-1', projectId: 'project', status: 'starting', spawning: true,
         closing: false, closeStarted: false, startInFlight: false, exitDuringStart: false,
         stopRequested: false, ptyStarted: false, launch: {
-          command: '/bin/coven', args: ['code', '--session-id', COVEN_SESSION_ID], env: {}, projectRoot: '/repo', cwd: '/repo',
-          launchKind: 'coven-code', covenSessionId: COVEN_SESSION_ID, metricsProvider: 'coven',
+          command: '/bin/coven', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+          launchKind: 'coven-code',
         }, term: { cols: 120, rows: 40, write: () => undefined },
       };
       const state = { threads: [thread], activeThreadId: thread.id };
@@ -2214,9 +2039,9 @@ describe('native Coven launch routing', () => {
     expect(functionSource('setActiveProject')).not.toContain('ensureCoven');
     expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
     expect(functionSource('boot')).not.toContain('ensureProjectCoven');
-    expect(mainJs).toContain('label: "Open Coven Terminal"');
+    expect(mainJs).toContain('label: "Open Coven CLI"');
     expect(mainJs).toMatch(
-      /label: "Open Coven Terminal"[\s\S]*await ensureProjectCoven\(project\);/,
+      /label: "Open Coven CLI"[\s\S]*await ensureProjectCoven\(project\);/,
     );
     expect(mainJs).toMatch(/\/new-thread[\s\S]*\/new-shell[\s\S]*\/new-psyche/);
   });

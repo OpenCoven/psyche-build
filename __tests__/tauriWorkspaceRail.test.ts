@@ -447,7 +447,7 @@ describe('Tauri project/worktree/pane rail', () => {
       'if (branchModel.expanded) {',
     );
     const worktreeContextMenu = renderSessionList.slice(contextMenuStart, contextMenuEnd);
-    expect(worktreeContextMenu).toContain('label: "Open Coven Terminal"');
+    expect(worktreeContextMenu).toContain('label: "Open Coven CLI"');
     expect(worktreeContextMenu).toContain(
       'await activateProjectWorktree(project, worktree.path)',
     );
@@ -569,7 +569,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('label: "Hide"');
     expect(mainJs).toContain('label: "Interrupt"');
     expect(mainJs).toContain('label: "Stop and close"');
-    expect(mainJs).toContain('label: "Open Coven Terminal"');
+    expect(mainJs).toContain('label: "Open Coven CLI"');
     expect(mainJs).toContain('" hidden session"');
     expect(styles).toMatch(/\.session-context-menu\s*\{/);
     expect(styles).toMatch(/\.session-context-item\.danger\s*\{/);

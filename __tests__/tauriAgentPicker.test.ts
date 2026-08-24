@@ -85,7 +85,7 @@ describe('Tauri agent picker', () => {
     );
 
     expect(agentLaunchOptions()).toEqual([
-      { id: 'coven-code', label: 'Coven Code', command: null, args: ['code'], kind: 'coven-code' },
+      { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code' },
       { id: 'copilot', label: 'Copilot CLI', command: 'copilot', args: [], kind: 'agent-copilot' },
       { id: 'codex', label: 'Codex CLI', command: 'codex', args: [], kind: 'agent-codex' },
       { id: 'anthropic', label: 'Anthropic CLI', command: 'claude', args: [], kind: 'agent-anthropic' },
@@ -147,7 +147,7 @@ describe('Tauri agent picker', () => {
     expect(commandReads).toBe(1);
   });
 
-  it('delegates Coven Code launches to ensureProjectCoven(project)', async () => {
+  it('delegates Coven CLI launches to ensureProjectCoven(project)', async () => {
     const project: PickerProject = { id: 'project', root: '/repo' };
     const result = { kind: 'coven-code' };
     let ensured: PickerProject | null = null;
@@ -158,7 +158,7 @@ describe('Tauri agent picker', () => {
         selectedWorktree: () => ({ path: '/repo' }),
         showTerminalView: async () => { throw new Error('showTerminalView must not be called'); },
         agentLaunchOptions: () => [
-          { id: 'coven-code', label: 'Coven Code', command: null, args: ['code'], kind: 'coven-code' },
+          { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code' },
         ],
         state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
         setStatus: () => undefined,
@@ -176,7 +176,7 @@ describe('Tauri agent picker', () => {
     expect(launched).toBe(result);
   });
 
-  it('does not fall back when Coven Code is unavailable', async () => {
+  it('does not fall back when Coven CLI is unavailable', async () => {
     let status: [string, string] | null = null;
     const spawnAgentThread = compileFunction<(agentId: string) => Promise<Record<string, unknown> | null>>(
       functionSource('spawnAgentThread'),
@@ -185,7 +185,7 @@ describe('Tauri agent picker', () => {
         selectedWorktree: () => ({ path: '/repo' }),
         showTerminalView: async () => true,
         agentLaunchOptions: () => [
-          { id: 'coven-code', label: 'Coven Code', command: null, args: ['code'], kind: 'coven-code' },
+          { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code' },
         ],
         state: { env: {} },
         setStatus: (message: string, level: string) => { status = [message, level]; },
@@ -222,7 +222,7 @@ describe('Tauri agent picker', () => {
   it('uses the planned picker command class and visual contract', () => {
     expect(mainJs).toContain('<span class="agent-picker-option-command">');
     expect(mainJs).toContain(
-      'escapeHtml(entry.id === "coven-code" ? "coven code" : (entry.command || ""))',
+      'escapeHtml(entry.command || "")',
     );
     expect(mainJs).not.toContain('agent-picker-command');
     expect(stylesCss).not.toContain('.agent-picker-command');
@@ -1195,7 +1195,7 @@ describe('Tauri agent picker', () => {
     expect(spawnedAgentId).toBe('codex');
   });
 
-  it('does not persist an agent preference and always reselects Coven Code', () => {
+  it('does not persist an agent preference and always reselects Coven CLI', () => {
     expect(mainJs).not.toMatch(/localStorage\.(?:getItem|setItem)\([^)]*agent/i);
     expect(functionSource('openAgentPicker')).toContain('agentPickerIndex = 0;');
   });
@@ -1205,7 +1205,7 @@ describe('Tauri agent picker', () => {
       /id="new-pane-term"[\s\S]*?Shell — login shell[\s\S]*?<span class="new-pane-key">⌃T<\/span>/,
     );
     expect(indexHtml).toMatch(
-      /id="new-pane-agent"[\s\S]*?Agent — Coven Code[\s\S]*?<span class="new-pane-key">⌃A<\/span>/,
+      /id="new-pane-agent"[\s\S]*?Agent — Coven CLI[\s\S]*?<span class="new-pane-key">⌃A<\/span>/,
     );
     expect(indexHtml).toMatch(
       /id="new-pane-web"[\s\S]*?Browser — web[\s\S]*?<span class="new-pane-key">Web \+<\/span>/,
@@ -1229,13 +1229,13 @@ describe('Tauri agent picker', () => {
     expect(mainJs).toMatch(/\["New shell pane", "⌃T"\]/);
     expect(mainJs).toMatch(/\["Open the composer", "⌘F"\]/);
     expect(mainJs).toMatch(/\["Choose an agent", "⌘D"\]/);
-    expect(mainJs).toMatch(/\["New agent pane \(Coven Code\)", "⌃A"\]/);
+    expect(mainJs).toMatch(/\["New agent pane \(Coven CLI\)", "⌃A"\]/);
     expect(mainJs).toMatch(/\["New browser tab", "Web pane \+"\]/);
     expect(mainJs).toMatch(/\["Open or focus Git", "⌘G"\]/);
-    expect(mainJs).toContain('desc: "Spawn a new Coven Code thread"');
-    expect(mainJs).toContain('toast("Coven Code opened")');
+    expect(mainJs).toContain('desc: "Spawn a new Coven CLI thread"');
+    expect(mainJs).toContain('toast("Coven CLI opened")');
     expect(mainJs).not.toMatch(/\["Toggle the tools dock", "⌘⌥B"\]/);
-    expect(mainJs).not.toMatch(/\["New agent pane \(Coven Code\)", "⌘T"\]/);
+    expect(mainJs).not.toMatch(/\["New agent pane \(Coven CLI\)", "⌘T"\]/);
     expect(mainJs).not.toMatch(/\["New browser tab", "focus Web, then ⌘T"\]/);
     expect(mainJs).not.toMatch(/\["Open the composer", "⌘K"\]/);
     expect(mainJs).not.toMatch(/\["Choose an agent", "⌘P"\]/);
