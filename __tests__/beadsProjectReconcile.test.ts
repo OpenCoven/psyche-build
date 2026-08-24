@@ -171,7 +171,7 @@ function managedIssue(
   inventory: readonly PublicBead[],
   issueNumbers: ReadonlyMap<string, number>,
   overrides: Partial<{
-    assignee: string | null,
+    assignees: readonly string[],
     blockerIssues: readonly {
       id: number,
       nodeId: string,
@@ -208,7 +208,7 @@ function managedIssue(
     title: renderIssueTitle(bead),
     body: canonicalIssueBody(bead, inventory, issueNumbers),
     state: bead.status === 'closed' ? 'closed' : 'open',
-    assignee: bead.githubAssignee,
+    assignees: bead.githubAssignee == null ? [] : [bead.githubAssignee],
     labels: desiredLabels(bead),
     renderHash: null,
     projectItem: {
@@ -533,9 +533,104 @@ describe('Beads project reconciliation', () => {
       beadId: 'pb-01',
       issueNumber: 401,
       title: '[pb-01] Refresh the public issue body',
-      assignee: 'BunsDev',
+      assignees: ['BunsDev'],
     });
     expect(updateOps[0]?.body).toContain('Refresh the canonical mirror output.');
+  });
+
+  it('updates when the desired assignee set contains an extra login', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-assignee-extra', { githubAssignee: 'BunsDev' }),
+    ]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 410);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(inventory[0]!, inventory, issueNumbers, {
+          assignees: ['octocat', 'BunsDev'],
+        }),
+      ],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.managedIssuesByBeadId.get('pb-assignee-extra')?.assignees).toEqual([
+      'BunsDev',
+      'octocat',
+    ]);
+    expect(plan.operations.filter((operation) => operation.type === 'updateIssue')).toEqual([
+      expect.objectContaining({
+        beadId: 'pb-assignee-extra',
+        assignees: ['BunsDev'],
+      }),
+    ]);
+  });
+
+  it('treats a reordered normalized exact assignee set as a no-op', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-assignee-exact', { githubAssignee: 'BunsDev' }),
+    ]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 420);
+
+    for (const assignees of [
+      ['BunsDev', ' BunsDev '],
+      [' BunsDev ', 'BunsDev'],
+    ]) {
+      const plan = planReconciliation({
+        inventory,
+        existingIssues: [
+          managedIssue(inventory[0]!, inventory, issueNumbers, { assignees }),
+        ],
+        readme: { body: canonicalReadmeBody(inventory) },
+        renderContext: baseContext,
+      });
+
+      expect(plan.operations.filter((operation) => operation.type === 'updateIssue')).toEqual([]);
+    }
+  });
+
+  it('clears every existing assignee when the source has no desired assignee', () => {
+    const inventory = finalizeInventory([makeBead('pb-assignee-clear')]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 430);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(inventory[0]!, inventory, issueNumbers, {
+          assignees: ['hubot', 'octocat'],
+        }),
+      ],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations.filter((operation) => operation.type === 'updateIssue')).toEqual([
+      expect.objectContaining({
+        beadId: 'pb-assignee-clear',
+        assignees: [],
+      }),
+    ]);
+  });
+
+  it('adds the desired assignee when it is missing from the existing set', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-assignee-missing', { githubAssignee: 'BunsDev' }),
+    ]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 440);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(inventory[0]!, inventory, issueNumbers, { assignees: [] }),
+      ],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations.filter((operation) => operation.type === 'updateIssue')).toEqual([
+      expect.objectContaining({
+        beadId: 'pb-assignee-missing',
+        assignees: ['BunsDev'],
+      }),
+    ]);
   });
 
   it('repairs required labels with a separate idempotent label operation', () => {
@@ -875,12 +970,14 @@ describe('Beads project reconciliation', () => {
   });
 
   it('links newly created active dependencies after issue identities become available and stays idempotent', async () => {
+    const childSourceTitle = '😀'.repeat(300);
     const inventory = finalizeInventory([
       makeBead('pb-parent', { type: 'feature' }),
       makeBead('pb-blocker'),
       makeBead('pb-child', {
         parentId: 'pb-parent',
         blockedByIds: ['pb-blocker'],
+        title: childSourceTitle,
       }),
     ]);
     const firstPlan = planReconciliation({
@@ -902,6 +999,9 @@ describe('Beads project reconciliation', () => {
     }
     expect(initialChildCreate.body).toContain('- Parent: `pb-parent`');
     expect(initialChildCreate.body).not.toContain('/issues/');
+    expect([...initialChildCreate.title]).toHaveLength(256);
+    expect(initialChildCreate.title.endsWith('...')).toBe(true);
+    expect(initialChildCreate.body).toContain(`## Goal\n${childSourceTitle}`);
     expect(childLinkUpdate).toMatchObject({
       type: 'updateIssue',
       beadId: 'pb-child',
@@ -909,16 +1009,19 @@ describe('Beads project reconciliation', () => {
 
     const issueNumbers = new Map<string, number>();
     const finalBodies = new Map<string, string>();
+    const finalTitles = new Map<string, string>();
     let nextIssueNumber = 800;
     await applyReconciliation(firstPlan, {
       createIssue(operation) {
         nextIssueNumber += 1;
         issueNumbers.set(operation.beadId, nextIssueNumber);
         finalBodies.set(operation.beadId, operation.body);
+        finalTitles.set(operation.beadId, operation.title);
         return { number: nextIssueNumber };
       },
       updateIssue(operation) {
         finalBodies.set(operation.beadId, operation.body);
+        finalTitles.set(operation.beadId, operation.title);
       },
       labelIssue() {},
       closeIssue() {
@@ -949,6 +1052,8 @@ describe('Beads project reconciliation', () => {
     expect(childBody).toContain(
       `[#${issueNumbers.get('pb-blocker')}](https://github.com/OpenCoven/psyche-build/issues/${issueNumbers.get('pb-blocker')}) \`pb-blocker\``,
     );
+    expect([...(finalTitles.get('pb-child') ?? '')]).toHaveLength(256);
+    expect(finalTitles.get('pb-child')).toBe(initialChildCreate.title);
 
     const secondPlan = planReconciliation({
       inventory,

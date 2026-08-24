@@ -171,7 +171,7 @@ describe('createGhClient', () => {
       title: 'Child',
       body: managedBody('pb-child'),
       state: 'open',
-      assignee: null,
+      assignees: [],
       labels: ['bead', 'bead:task', 'priority:P1'],
       renderHash: null,
       projectItem: null,
@@ -227,7 +227,7 @@ describe('createGhClient', () => {
       title: `Issue ${index + 1}`,
       body: managedBody(`pb-${index + 1}`),
       state: index === 0 ? 'closed' : 'open',
-      assignees: index === 0 ? [{ login: 'octocat' }] : [],
+      assignees: index === 0 ? [{ login: 'zeta' }, { login: 'octocat' }] : [],
       html_url: `https://github.com/${owner}/${repo}/issues/${index + 1}`,
     }));
     const runner = createRunner([
@@ -269,7 +269,7 @@ describe('createGhClient', () => {
       beadId: 'pb-1',
       number: 1,
       state: 'closed',
-      assignee: 'octocat',
+      assignees: ['octocat', 'zeta'],
     });
     expect(issues.at(-1)).toMatchObject({ beadId: 'pb-102', number: 102 });
     expect(runner.calls.slice(0, 2).map((call) => call.args)).toEqual([
@@ -1606,7 +1606,7 @@ describe('createGhClient', () => {
     });
   });
 
-  it('creates, updates, closes, reopens, labels, and assigns issues with JSON stdin', async () => {
+  it('creates, replaces, clears, closes, reopens, labels, and assigns issues with JSON stdin', async () => {
     const body = [
       '<!-- psyche-bead-sync:v1 bead-id=pb-42 -->',
       '## Bead',
@@ -1621,18 +1621,26 @@ describe('createGhClient', () => {
       success({ number: 42 }),
       success({ number: 42 }),
       success({ number: 42 }),
+      success({ number: 42 }),
     ]);
     const client = createGhClient({ run: runner.run, owner, repo, token });
 
     await expect(
-      client.createIssue({ title: '[pb-42] Work', body, assignee: 'octocat' }),
+      client.createIssue({ title: '[pb-42] Work', body, assignees: ['octocat'] }),
     ).resolves.toMatchObject({ number: 42 });
     await client.updateIssue({
       issueNumber: 42,
       title: '[pb-42] Updated',
       body,
       state: 'open',
-      assignee: null,
+      assignees: ['BunsDev'],
+    });
+    await client.updateIssue({
+      issueNumber: 42,
+      title: '[pb-42] Cleared',
+      body,
+      state: 'open',
+      assignees: [],
     });
     await client.closeIssue({ issueNumber: 42 });
     await client.reopenIssue({ issueNumber: 42 });
@@ -1641,6 +1649,7 @@ describe('createGhClient', () => {
 
     expect(runner.calls.map((call) => call.args)).toEqual([
       ['api', `repos/${owner}/${repo}/issues`, '--method', 'POST', ...apiHeaders, '--input', '-'],
+      ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
       ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
       ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
       ['api', `repos/${owner}/${repo}/issues/42`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
@@ -1658,12 +1667,19 @@ describe('createGhClient', () => {
       body,
       state: 'open',
       labels: ['bead', 'bead:feature', 'priority:P1', 'status:blocked'],
+      assignees: ['BunsDev'],
+    });
+    expect(parseStdin(runner.calls[2]!)).toEqual({
+      title: '[pb-42] Cleared',
+      body,
+      state: 'open',
+      labels: ['bead', 'bead:feature', 'priority:P1', 'status:blocked'],
       assignees: [],
     });
-    expect(parseStdin(runner.calls[2]!)).toEqual({ state: 'closed' });
-    expect(parseStdin(runner.calls[3]!)).toEqual({ state: 'open' });
-    expect(parseStdin(runner.calls[4]!)).toEqual({ labels: ['bead', 'priority:P2'] });
-    expect(parseStdin(runner.calls[5]!)).toEqual({ assignees: ['hubot'] });
+    expect(parseStdin(runner.calls[3]!)).toEqual({ state: 'closed' });
+    expect(parseStdin(runner.calls[4]!)).toEqual({ state: 'open' });
+    expect(parseStdin(runner.calls[5]!)).toEqual({ labels: ['bead', 'priority:P2'] });
+    expect(parseStdin(runner.calls[6]!)).toEqual({ assignees: ['hubot'] });
   });
 
   it('adds one project item per invocation and updates each requested field in its own invocation', async () => {

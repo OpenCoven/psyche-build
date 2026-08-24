@@ -46,6 +46,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   title?: unknown,
  *   body?: unknown,
  *   state?: unknown,
+ *   assignees?: unknown,
  *   assignee?: unknown,
  *   labels?: unknown,
  *   renderHash?: unknown,
@@ -102,7 +103,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   title: string | null,
  *   body: string | null,
  *   state: string,
- *   assignee: string | null,
+ *   assignees: string[],
  *   labels: string[] | null,
  *   renderHash: string | null,
  *   projectItem: ProjectItemSnapshot | null,
@@ -151,7 +152,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   title: string,
  *   body: string,
  *   renderHash: string,
- *   assignee: string | null,
+ *   assignees: string[],
  *   state: 'open',
  * }} CreateIssueOperation
  */
@@ -165,7 +166,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   title: string,
  *   body: string,
  *   renderHash: string,
- *   assignee: string | null,
+ *   assignees: string[],
  *   state: string,
  * }} UpdateIssueOperation
  */
@@ -621,6 +622,27 @@ function normalizeIssueLabels(value, context) {
 
 /**
  * @param {unknown} value
+ * @param {unknown} legacyAssignee
+ * @param {string} context
+ * @returns {string[]}
+ */
+function normalizeAssigneeLogins(value, legacyAssignee, context) {
+  const rawAssignees = value === undefined
+    ? legacyAssignee == null ? [] : [legacyAssignee]
+    : value == null ? [] : value;
+  if (!Array.isArray(rawAssignees)) {
+    fail(`${context} must be an array when present`);
+  }
+
+  const assignees = new Set();
+  for (const entry of rawAssignees) {
+    assignees.add(normalizeRequiredTrimmedString(entry, 'assignee', context));
+  }
+  return [...assignees].sort(compareStrings);
+}
+
+/**
+ * @param {unknown} value
  * @param {string} context
  * @returns {IssueIdentity | null}
  */
@@ -726,7 +748,7 @@ function normalizeIssueSnapshot(value, context) {
     title: normalizeOptionalTrimmedString(issue.title, 'title', context),
     body: normalizeOptionalMultilineString(issue.body, 'body', context),
     state: normalizeOptionalTrimmedString(issue.state, 'state', context)?.toLowerCase() ?? 'open',
-    assignee: normalizeOptionalTrimmedString(issue.assignee, 'assignee', context),
+    assignees: normalizeAssigneeLogins(issue.assignees, issue.assignee, `${context} assignees`),
     labels: normalizeIssueLabels(issue.labels, `${context} labels`),
     renderHash: normalizeRenderHash(issue.renderHash, 'renderHash', context),
     projectItem: normalizeProjectItem(issue.projectItem, context),
@@ -1272,6 +1294,19 @@ function stringListsEqual(left, right) {
 }
 
 /**
+ * @param {readonly string[]} left
+ * @param {readonly string[]} right
+ * @returns {boolean}
+ */
+function stringSetsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
+/**
  * @param {readonly PublicBead[]} inventory
  * @param {ReadonlyMap<string, ManagedIssueSnapshot>} managedIssuesByBeadId
  * @param {CreateIssueOperation[]} createIssues
@@ -1427,7 +1462,7 @@ export function planReconciliation(input) {
     const renderHash = hashRenderedBody(renderedBody);
     const managedBody = attachRenderHash(renderedBody, renderHash, markerContext.issueMarker);
     const title = renderIssueTitle(bead);
-    const assignee = bead.githubAssignee ?? null;
+    const assignees = bead.githubAssignee == null ? [] : [bead.githubAssignee];
 
     if (!existingIssue) {
       createIssues.push({
@@ -1437,7 +1472,7 @@ export function planReconciliation(input) {
         title,
         body: managedBody,
         renderHash,
-        assignee,
+        assignees,
         state: 'open',
       });
       if (hasDeferredDependencyLinks) {
@@ -1448,14 +1483,14 @@ export function planReconciliation(input) {
           title,
           body: managedBody,
           renderHash,
-          assignee,
+          assignees,
           state: 'open',
         });
       }
     } else {
       const issueNeedsUpdate = (
         existingIssue.title !== title
-        || existingIssue.assignee !== assignee
+        || !stringSetsEqual(existingIssue.assignees, assignees)
         || existingIssue.state === 'closed'
         || !hasCurrentRenderedBody(
           existingIssue,
@@ -1474,7 +1509,7 @@ export function planReconciliation(input) {
           title,
           body: managedBody,
           renderHash,
-          assignee,
+          assignees,
           state: 'open',
         });
       }
@@ -1854,7 +1889,7 @@ export async function applyReconciliation(plan, adapters) {
             title: renderIssueTitle(bead),
             body: attachRenderHash(renderedBody, renderHash, markerContext.issueMarker),
             renderHash,
-            assignee: bead.githubAssignee ?? null,
+            assignees: bead.githubAssignee == null ? [] : [bead.githubAssignee],
             state: 'open',
           };
           failingOperation = resolvedOperation;

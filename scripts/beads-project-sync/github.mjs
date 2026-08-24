@@ -1164,6 +1164,41 @@ function optionalAssignee(value) {
 }
 
 /**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @returns {string[]}
+ */
+function assigneeLogins(value, fieldName) {
+  if (!Array.isArray(value)) {
+    fail(`${fieldName} must be an array`);
+  }
+  const logins = new Set();
+  for (const rawAssignee of value) {
+    const assignee = record(rawAssignee);
+    const login = typeof rawAssignee === 'string'
+      ? requiredString(rawAssignee, 'assignee')
+      : requiredString(assignee.login, 'assignee login');
+    logins.add(login);
+  }
+  return [...logins].sort();
+}
+
+/**
+ * @param {Record<string, unknown>} operation
+ * @returns {string[] | undefined}
+ */
+function operationAssignees(operation) {
+  if (operation.assignees !== undefined) {
+    return assigneeLogins(operation.assignees, 'assignees');
+  }
+  if (operation.assignee !== undefined) {
+    const assignee = optionalAssignee(operation.assignee);
+    return assignee == null ? [] : [assignee];
+  }
+  return undefined;
+}
+
+/**
  * @param {readonly {name: string}[]} expected
  * @param {ReadonlyMap<string, string>} actual
  * @returns {boolean}
@@ -1677,7 +1712,7 @@ export function createGhClient(options) {
      *   title: string | null,
      *   body: string | null,
      *   state: string,
-     *   assignee: string | null,
+     *   assignees: string[],
      *   labels: string[],
      *   renderHash: string | null,
      *   projectItem: {
@@ -1718,8 +1753,7 @@ export function createGhClient(options) {
       }
       seen.set(beadId, number);
 
-      const assignees = array(issue.assignees);
-      const firstAssignee = record(assignees[0]);
+      const assignees = assigneeLogins(array(issue.assignees), 'issue assignees');
       const renderHash = extractRenderHash(body, recognizedIssueMarkerValues);
       managed.push({
         beadId,
@@ -1729,7 +1763,7 @@ export function createGhClient(options) {
         title: typeof issue.title === 'string' ? issue.title : null,
         body: typeof issue.body === 'string' ? issue.body : null,
         state: typeof issue.state === 'string' ? issue.state : 'open',
-        assignee: typeof firstAssignee.login === 'string' ? firstAssignee.login : null,
+        assignees,
         labels: issueLabelNames(issue.labels),
         renderHash,
         projectItem: null,
@@ -2272,12 +2306,12 @@ export function createGhClient(options) {
   async function createIssue(operation) {
     const title = requiredString(operation?.title, 'issue title');
     const body = requiredString(operation?.body, 'issue body');
-    const assignee = optionalAssignee(operation?.assignee);
+    const assignees = operationAssignees(operation);
     const payload = {
       title,
       body,
       labels: labelsFromBody(body),
-      ...(operation?.assignee === undefined ? {} : { assignees: assignee ? [assignee] : [] }),
+      ...(assignees === undefined ? {} : { assignees }),
     };
     const bodyBeadId = extractBeadId(body, 1, [issueMarker]);
     const beadId = requiredString(operation?.beadId ?? bodyBeadId, 'managed Bead id');
@@ -2302,13 +2336,13 @@ export function createGhClient(options) {
   async function updateIssue(operation) {
     const issueNumber = issueNumberFrom(operation);
     const body = requiredString(operation?.body, 'issue body');
-    const assignee = optionalAssignee(operation?.assignee);
+    const assignees = operationAssignees(operation);
     const payload = {
       title: requiredString(operation?.title, 'issue title'),
       body,
       ...(typeof operation?.state === 'string' ? { state: operation.state } : {}),
       labels: labelsFromBody(body),
-      ...(operation?.assignee === undefined ? {} : { assignees: assignee ? [assignee] : [] }),
+      ...(assignees === undefined ? {} : { assignees }),
     };
     return record(await rest('PATCH', `repos/${owner}/${repo}/issues/${issueNumber}`, payload));
   }

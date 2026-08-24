@@ -87,7 +87,7 @@ function managedIssue(beadId: string, number: number) {
     title: `[${beadId}] Historical managed issue`,
     body: `<!-- psyche-bead-sync:v1 bead-id=${beadId} -->`,
     state: 'open',
-    assignee: null,
+    assignees: [],
     renderHash: null,
     projectItem: null,
     parentIssueNumber: null,

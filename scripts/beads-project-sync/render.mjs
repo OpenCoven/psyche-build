@@ -38,6 +38,9 @@ const GENERATED_MARKER_PATTERN =
 const TYPE_SORT_ORDER = ['epic', 'feature', 'task'];
 const ABSOLUTE_URL_PATTERN = /^(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//iu;
 const UNSAFE_REPOSITORY_PATH_SEGMENTS = new Set(['..']);
+const ISSUE_TITLE_MAX_CODE_POINTS = 256;
+const ISSUE_TITLE_TRUNCATION_SUFFIX = '...';
+const MIN_TRUNCATED_TITLE_CODE_POINTS = 1;
 
 /**
  * @param {string} message
@@ -650,7 +653,23 @@ function resolveInventoryTimestamp(inventory, context) {
  * @returns {string}
  */
 export function renderIssueTitle(bead) {
-  return `[${normalizeInlineText(bead.id, 'id')}] ${normalizeInlineText(bead.title, 'title')}`;
+  const prefix = `[${normalizeInlineText(bead.id, 'id')}] `;
+  const title = normalizeInlineText(bead.title, 'title');
+  const availableTitleCodePoints = ISSUE_TITLE_MAX_CODE_POINTS - [...prefix].length;
+  const minimumTitleRoom =
+    ISSUE_TITLE_TRUNCATION_SUFFIX.length + MIN_TRUNCATED_TITLE_CODE_POINTS;
+  if (availableTitleCodePoints < minimumTitleRoom) {
+    fail('Bead id leaves no meaningful issue title room within GitHub\'s 256-code-point limit');
+  }
+
+  const titleCodePoints = [...title];
+  if (titleCodePoints.length <= availableTitleCodePoints) {
+    return `${prefix}${title}`;
+  }
+
+  return `${prefix}${titleCodePoints
+    .slice(0, availableTitleCodePoints - ISSUE_TITLE_TRUNCATION_SUFFIX.length)
+    .join('')}${ISSUE_TITLE_TRUNCATION_SUFFIX}`;
 }
 
 /**

@@ -36,7 +36,7 @@ export interface IssueSnapshotInput {
   title?: string | null;
   body?: string | null;
   state?: string | null;
-  assignee?: string | null;
+  assignees?: readonly string[] | null;
   labels?: readonly string[] | null;
   renderHash?: string | null;
   projectItem?: ProjectItemSnapshotInput | null;
@@ -55,7 +55,7 @@ export interface IssueSnapshot {
   title: string | null;
   body: string | null;
   state: string;
-  assignee: string | null;
+  assignees: string[];
   labels: string[] | null;
   renderHash: string | null;
   projectItem: ProjectItemSnapshot | null;
@@ -115,7 +115,7 @@ export interface CreateIssueOperation {
   title: string;
   body: string;
   renderHash: string;
-  assignee: string | null;
+  assignees: string[];
   state: 'open';
 }
 
@@ -127,7 +127,7 @@ export interface UpdateIssueOperation {
   title: string;
   body: string;
   renderHash: string;
-  assignee: string | null;
+  assignees: string[];
   state: string;
 }
 

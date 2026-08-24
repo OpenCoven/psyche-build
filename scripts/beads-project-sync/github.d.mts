@@ -62,7 +62,7 @@ export interface ManagedIssueSnapshot {
   title: string | null;
   body: string | null;
   state: string;
-  assignee: string | null;
+  assignees: string[];
   labels: string[];
   renderHash: string | null;
   projectItem: {
@@ -204,7 +204,7 @@ export interface GhClient {
   createIssue(operation: {
     title: string;
     body: string;
-    assignee?: string | null;
+    assignees?: readonly string[];
     beadId?: string;
     renderHash?: string;
     state?: 'open';
@@ -216,7 +216,7 @@ export interface GhClient {
     title: string;
     body: string;
     state?: string;
-    assignee?: string | null;
+    assignees?: readonly string[];
     beadId?: string;
     renderHash?: string;
     type?: 'updateIssue';

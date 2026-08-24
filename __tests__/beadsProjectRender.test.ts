@@ -58,6 +58,10 @@ function countMatches(value: string, search: string): number {
   return value.split(search).length - 1;
 }
 
+function codePointLength(value: string): number {
+  return [...value].length;
+}
+
 function renderSourceDescription(description: string): string {
   const source = parseBeadExport(issuesJsonl, {
     assigneeMap: {
@@ -74,6 +78,79 @@ function renderSourceDescription(description: string): string {
 }
 
 describe('Beads project renderers', () => {
+  it('keeps an ASCII issue title unchanged when it fits', () => {
+    const bead = {
+      ...buildPublicInventory()[0]!,
+      id: 'pb-ascii',
+      title: 'Ship the public project sync',
+    };
+
+    expect(renderIssueTitle(bead)).toBe('[pb-ascii] Ship the public project sync');
+  });
+
+  it('counts emoji as Unicode code points when truncating issue titles', () => {
+    const beadId = 'pb-emoji';
+    const prefix = `[${beadId}] `;
+    const availableTitleCodePoints = 256 - codePointLength(prefix);
+    const bead = {
+      ...buildPublicInventory()[0]!,
+      id: beadId,
+      title: '😀'.repeat(availableTitleCodePoints + 5),
+    };
+
+    const rendered = renderIssueTitle(bead);
+
+    expect(codePointLength(rendered)).toBe(256);
+    expect(rendered).toBe(
+      `${prefix}${'😀'.repeat(availableTitleCodePoints - 3)}...`,
+    );
+  });
+
+  it('preserves an issue title that is exactly 256 Unicode code points', () => {
+    const beadId = 'pb-exact';
+    const prefix = `[${beadId}] `;
+    const availableTitleCodePoints = 256 - codePointLength(prefix);
+    const bead = {
+      ...buildPublicInventory()[0]!,
+      id: beadId,
+      title: 'a'.repeat(availableTitleCodePoints),
+    };
+
+    const rendered = renderIssueTitle(bead);
+
+    expect(codePointLength(rendered)).toBe(256);
+    expect(rendered).toBe(`${prefix}${bead.title}`);
+  });
+
+  it('truncates an over-limit ASCII issue title and preserves the full Goal', () => {
+    const beadId = 'pb-over';
+    const prefix = `[${beadId}] `;
+    const availableTitleCodePoints = 256 - codePointLength(prefix);
+    const bead = {
+      ...buildPublicInventory()[0]!,
+      id: beadId,
+      title: 'a'.repeat(availableTitleCodePoints + 1),
+    };
+
+    const rendered = renderIssueTitle(bead);
+
+    expect(codePointLength(rendered)).toBe(256);
+    expect(rendered).toBe(
+      `${prefix}${'a'.repeat(availableTitleCodePoints - 3)}...`,
+    );
+    expect(renderIssueBody(bead)).toContain(`## Goal\n${bead.title}`);
+  });
+
+  it('rejects a Bead id that leaves no meaningful issue title room', () => {
+    const bead = {
+      ...buildPublicInventory()[0]!,
+      id: 'a'.repeat(250),
+      title: 'Ship the public project sync',
+    };
+
+    expect(() => renderIssueTitle(bead)).toThrow(/meaningful.*title room/i);
+  });
+
   it('redacts emails and local home paths but rejects publishable secrets', () => {
     expect(
       sanitizePublicText(
