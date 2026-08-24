@@ -1051,24 +1051,22 @@ public actor ConnectionManager {
         session: UUID,
         generation: ConnectionGeneration
     ) async throws -> Bool {
-        await workspaceStore.applySnapshot(
-            workspace: result.workspace,
-            sequence: result.sequence,
-            for: generation
-        )
-        guard isActive(session: session, generation: generation) else { return false }
-
         if let readyHost = pendingReadyHost {
             let committed = try await pairedHostStore.recordSuccessfulConnection(
                 readyHost,
                 for: generation
             )
             guard committed else { return false }
-            guard isActive(session: session, generation: generation) else {
-                return false
-            }
+            guard isActive(session: session, generation: generation) else { return false }
             pendingReadyHost = nil
         }
+
+        await workspaceStore.applySnapshot(
+            workspace: result.workspace,
+            sequence: result.sequence,
+            for: generation
+        )
+        guard isActive(session: session, generation: generation) else { return false }
 
         workspaceReadyGeneration = generation
         completeWorkspaceReadiness(for: generation, with: .success(()))
