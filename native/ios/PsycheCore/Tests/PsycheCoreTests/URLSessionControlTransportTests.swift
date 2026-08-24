@@ -145,7 +145,7 @@ final class URLSessionControlTransportTests: XCTestCase {
     }
 
     func testRejectedPinSurfacesRepairGuidanceWhenTheSocketDies() async throws {
-        let session = TestWebSocketSession()
+        let session = TestWebSocketSession(blockInvalidation: true)
         let factory = TestWebSocketSessionFactory(sessions: [session])
         let transport = URLSessionControlTransport(sessionFactory: factory)
         try await transport.connect(to: endpoint())
@@ -159,6 +159,7 @@ final class URLSessionControlTransportTests: XCTestCase {
         var messageIterator = messages.makeAsyncIterator()
         let message = await messageIterator.next()
         let failure = await transport.lastFailure()
+        await session.releaseInvalidation()
         XCTAssertNil(message)
         XCTAssertEqual(failure, .certificatePinRejected)
         XCTAssertTrue(
@@ -259,6 +260,13 @@ private actor TestWebSocketSession: ControlWebSocketSession {
     let socket = TestWebSocketTask()
     private(set) var requestedURLs: [URL] = []
     private(set) var invalidationCount = 0
+    private let blockInvalidation: Bool
+    private var invalidationReleased = false
+    private var invalidationContinuation: CheckedContinuation<Void, Never>?
+
+    init(blockInvalidation: Bool = false) {
+        self.blockInvalidation = blockInvalidation
+    }
 
     func makeWebSocketTask(with url: URL) async -> any ControlWebSocketTask {
         requestedURLs.append(url)
@@ -267,6 +275,17 @@ private actor TestWebSocketSession: ControlWebSocketSession {
 
     func invalidateAndCancel() async {
         invalidationCount += 1
+        if blockInvalidation, !invalidationReleased {
+            await withCheckedContinuation { continuation in
+                invalidationContinuation = continuation
+            }
+        }
+    }
+
+    func releaseInvalidation() {
+        invalidationReleased = true
+        invalidationContinuation?.resume()
+        invalidationContinuation = nil
     }
 }
 

@@ -46,21 +46,29 @@ function blockingClosureBody(command: string): string {
 }
 
 describe('Tauri Coven session native contract', () => {
-  test('wires Psyche provenance through native Coven Code and attach launch seams', async () => {
+  test('wires bare Coven CLI and attach launch seams', async () => {
     const [mainSource, libSource] = await Promise.all([
       readFile(mainSourcePath, 'utf8'),
       readFile(libSourcePath, 'utf8'),
     ]);
-    const codeStart = mainSource.indexOf('function covenCodeLaunch');
+    const codeStart = mainSource.indexOf('function covenCliLaunch');
     const codeEnd = mainSource.indexOf('async function spawnCovenThread', codeStart);
     expect(codeStart).toBeGreaterThanOrEqual(0);
     expect(codeEnd).toBeGreaterThan(codeStart);
     const codeLaunch = mainSource.slice(codeStart, codeEnd);
-    expect(codeLaunch).toContain('env: { COVEN_SESSION_SOURCE: "psyche-build" }');
+    expect(codeLaunch).toContain('args: []');
+    expect(codeLaunch).toContain('env: {}');
+    expect(codeLaunch).not.toContain('COVEN_SESSION_SOURCE');
 
     const applyLaunchEnv = functionBody(libSource, 'apply_launch_env');
-    expect(applyLaunchEnv).toContain('launch_kind == Some("coven-attach")');
+    expect(applyLaunchEnv).toMatch(
+      /matches!\s*\(\s*launch_kind\s*,\s*Some\("coven-code"\s*\|\s*"coven-attach"\)\s*\)/,
+    );
     expect(applyLaunchEnv).toContain('cmd.env_remove(COVEN_SESSION_SOURCE)');
+
+    const nativeLaunchCommand = functionBody(libSource, 'native_launch_command');
+    expect(nativeLaunchCommand).not.toContain('"code".to_string()');
+    expect(nativeLaunchCommand).not.toContain('--session-id');
 
     const ptyStart = functionBody(libSource, 'pty_start_blocking');
     expect(ptyStart.indexOf('prepare_pty_start(&options)?')).toBeLessThan(

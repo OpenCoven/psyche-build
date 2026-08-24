@@ -152,12 +152,14 @@ jobs:
           grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
           grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
 
-      - uses: ./.github/actions/setup-xcodegen
+      - name: Set up XcodeGen for iOS verification
+        if: steps.release.outputs.desktop_only != 'true'
+        uses: ./.github/actions/setup-xcodegen
 
       - name: Require matching release versions
         run: pnpm release:check -- "$RELEASE_TAG"
 
-      - name: Verify TypeScript and package surfaces
+      - name: Verify shared TypeScript, protocol, and package surfaces
         run: |
           set -euo pipefail
           pnpm docs:focus:check
@@ -177,6 +179,7 @@ jobs:
           pnpm --dir native/desktop/psyche-build-tauri build:web
 
       - name: Require iOS 26.2 iPhone 16 Pro simulator
+        if: steps.release.outputs.desktop_only != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -191,6 +194,7 @@ jobs:
           fi
 
       - name: Verify generated iOS project, Core, app, and UI tests
+        if: steps.release.outputs.desktop_only != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -355,6 +359,10 @@ jobs:
             --bundles dmg
 
       - name: Verify Gatekeeper and notarization
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -364,6 +372,12 @@ jobs:
             echo "::error::No DMG found in $BUNDLE_DIR"
             exit 1
           fi
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
           MOUNT_POINT="$(mktemp -d "$RUNNER_TEMP/psyche-dmg.XXXXXX")"
           hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
           APP_PATH="$MOUNT_POINT/Psyche Build.app"
@@ -894,6 +908,7 @@ jobs:
   notify-homebrew:
     name: Notify OpenCoven Homebrew tap
     needs: publish
+    if: always() && needs.publish.result == 'success'
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 5

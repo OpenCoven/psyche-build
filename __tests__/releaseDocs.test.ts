@@ -92,6 +92,25 @@ function releaseEnvironmentSecretNames(runbook: string): string[] {
 }
 
 describe('v0.0.1 release documentation contract', () => {
+  it('tracks post-release changes without claiming TestFlight availability', async () => {
+    const changelog = await readFile('CHANGELOG.md', 'utf8');
+    const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/);
+    const release = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
+
+    expect(unreleased).not.toBeNull();
+    expect(unreleased?.[1]).toContain('bare Coven CLI (`coven`)');
+    expect(unreleased?.[1]).toContain('graphite surfaces');
+    expect(unreleased?.[1]).toContain('Files-pane toolbar controls');
+    expect(release).not.toBeNull();
+    expect(release?.[1]).toContain('### Performance');
+    expect(release?.[1]).toContain('### Security');
+    expect(release?.[1]).toContain('### Reliability');
+    expect(release?.[1]).toContain('### Documentation');
+    expect(release?.[1]).toMatch(/internal distribution remains pending #200\./i);
+    expect(changelog).not.toMatch(/release-candidate record/i);
+    expect(changelog).not.toMatch(/Public macOS\/Homebrew availability remains pending/i);
+  });
+
   it('parses an aligned Markdown secret table without weakening exact-name checks', () => {
     expect(
       releaseEnvironmentSecretNames(`  | Secret | Purpose |\n | :--- | ---: |\n  |   \`ONE_SECRET\`   | first |\n | \`TWO_SECRET\` | second |`),
@@ -241,6 +260,65 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain(
       'Tag pushes always run the coordinated macOS and internal TestFlight release',
     );
+    expect(runbook).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
+    );
+    expect(runbook).toMatch(/shared protocol\/schema validation[\s\S]{0,180}(?:mandatory|required)/i);
+    expect(runbook).toMatch(/retain[\s\S]{0,240}workflow run URL[\s\S]{0,160}release SHA/i);
+  });
+
+  it('records the implemented desktop-only workflow contract and dry-run evidence', async () => {
+    const acceptance = await readFile('docs/RELEASE-ACCEPTANCE.md', 'utf8');
+
+    expect(acceptance).not.toContain('The current release workflow does not yet enforce that contract');
+    expect(acceptance).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true',
+    );
+    expect(acceptance).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false',
+    );
+    expect(acceptance).toMatch(/iOS\/TestFlight[\s\S]{0,160}(?:separate|non-blocking)/i);
+    for (const [label, evidence] of [
+      ['workflow run URL', /workflow\s+run URL/i],
+      ['release SHA', /release SHA/i],
+      ['desktop_only', /desktop_only/],
+      ['build-macos', /build-macos/],
+      ['upload-ios', /upload-ios/],
+      ['publish', /publish/],
+    ] as const) {
+      expect(acceptance, label).toMatch(evidence);
+    }
+  });
+
+  it('keeps canonical support and roadmap docs aligned with the implemented offline contract', async () => {
+    const canonicalDocs = await Promise.all(
+      ['docs/SUPPORT-MATRIX.md', 'docs/ROADMAP.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of canonicalDocs) {
+      expect(source, filePath).not.toMatch(/verify job runs iOS checks unconditionally/i);
+      expect(source, filePath).not.toMatch(/workflow coupling is a known implementation (?:fact|defect)/i);
+      expect(source, filePath).toContain(
+        '57c6c71bd5264fde960b062e95de278c8438c94f',
+      );
+      expect(source, filePath).toContain(
+        'https://github.com/OpenCoven/psyche-build/actions/runs/32629730508',
+      );
+      expect(source, filePath).toContain(
+        'https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1',
+      );
+      expect(source, filePath).toMatch(/Homebrew Cask/i);
+      expect(source, filePath).toMatch(
+        /(?:#194[\s\S]{0,220}#203|#203[\s\S]{0,220}#194)[\s\S]{0,80}(?:are\s+)?closed/i,
+      );
+      expect(source, filePath).toMatch(/iOS[\s\S]{0,180}skip/i);
+      expect(source, filePath).toMatch(
+        /(?:preserv(?:ing|ed)|mandatory)[\s\S]{0,80}shared\s+validation|shared\s+validation[\s\S]{0,80}(?:preserv(?:ing|ed)|mandatory)/i,
+      );
+    }
   });
 
   it('validates and tags the exact clean fetched origin/main commit', async () => {
@@ -288,7 +366,12 @@ describe('v0.0.1 release documentation contract', () => {
       expect(contents, filePath).toContain('brew install --cask opencoven/tap/psyche-build');
       expect(contents, filePath).toContain('open -a "Psyche Build"');
       expect(contents, filePath).toContain('node /path/to/psyche-build/psyche');
-      expect(contents, filePath).toMatch(/(?:after|when)[^\n]{0,100}v0\.0\.1[^\n]{0,100}(?:release|Cask)|v0\.0\.1[^\n]{0,100}(?:release|Cask)[^\n]{0,100}(?:available|published)/i);
+      expect(contents, filePath).toMatch(
+        /(?:supported public|published)[\s\S]{0,120}(?:macOS|v0\.0\.1|Cask)|(?:macOS|v0\.0\.1|Cask)[\s\S]{0,120}(?:supported public|published)/i,
+      );
+      expect(contents, filePath).not.toMatch(
+        /(?:after|when)[^\n]{0,100}v0\.0\.1[^\n]{0,100}(?:release|Cask)[^\n]{0,100}(?:available|published)/i,
+      );
     }
   });
 
@@ -300,7 +383,8 @@ describe('v0.0.1 release documentation contract', () => {
 
     expect(hero).toContain(caskCommand);
     expect(main).toContain(caskCommand);
-    expect(hero).toMatch(/available after[^\n]{0,80}v0\.0\.1 release/i);
+    expect(hero).toMatch(/Public macOS v0\.0\.1 via the OpenCoven Homebrew tap/i);
+    expect(hero).not.toMatch(/available after[^\n]{0,80}v0\.0\.1 release/i);
     expect(hero).toContain('source CLI:');
     expect(hero).toContain('node /path/to/psyche-build/psyche');
     expect(hero).not.toMatch(/<span>\$<\/span>\s*<code>psyche<\/code>/);
