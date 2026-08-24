@@ -45,7 +45,7 @@ Psyche Build implements that model with these primitives:
 - **Cockpit** — the visible terminal control surface.
 - **Pane** — one terminal workspace and the concrete surface a lane runs in, often backed by a worktree and agent process.
 - **Worktree** — an isolated git checkout for a task or branch; the most common isolation mode.
-- **Agent** — Coven Code, Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, Crush CLI, or another configured coding launcher.
+- **Agent** — Coven CLI (stable config/internal ID `coven-code`), Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, Crush CLI, or another configured coding launcher.
 - **Capability provider** — registers a bounded optional execution or session integration with Psyche Build; an explicitly unavailable provider fails closed.
 - **Ritual** — a reusable project setup recipe for opening a known pane layout.
 - **Operator** — the person coordinating visible work and approving consequential actions.
