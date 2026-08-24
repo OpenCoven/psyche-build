@@ -1174,6 +1174,29 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
   });
 
+  it('preserves the primary apply error when release reports ownership already lost', async () => {
+    const fakeGh = createFakeGh({
+      failLeaseValidationAfterWrite: 'updateReadme',
+      failReleaseLock: Object.assign(
+        new Error('GitHub apply lock release ownership already lost to a successor'),
+        { kind: 'lease-lost', status: 409 },
+      ),
+    });
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/lease lost.*renewal transport failure/i);
+    expect(result.stderr).toMatch(/release warning.*ownership already lost/i);
+    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
+  });
+
   it('reports structured sanitized partial progress when reconciliation apply fails', async () => {
     const leakedRecord = {
       token,

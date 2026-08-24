@@ -102,11 +102,14 @@ preserves unattended scheduled runs and reviewer-gated manual runs). Scheduled
 sync must remain disabled until both environment secrets and their protection
 rules are set.
 
-Apply mode uses the ephemeral remote branch
-`psyche-beads-project-sync-lock`. It may be visible remotely while a sync owns
-the lease and is deleted after release. Renewal and stale takeover commits
-fast-forward from the current lock commit; the branch is excluded from Psyche's
-product-branch discovery and does not affect `git fetch origin main --tags`.
+Apply mode uses the persistent remote coordination branch
+`psyche-beads-project-sync-lock`. Release appends a `released` tombstone instead
+of deleting the branch, so its linear commit history remains an audit trail and
+the next apply can acquire immediately by appending a child active lease.
+Renewal, release, reacquisition, and stale takeover commits fast-forward from
+the exact current lock commit. Do not delete or rewrite this coordination ref.
+The branch is excluded from Psyche's product-branch discovery and does not
+affect `git fetch origin main --tags`.
 
 ### Immutable Project binding and visibility safety
 

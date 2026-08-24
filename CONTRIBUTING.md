@@ -161,14 +161,16 @@ re-read GitHub before deciding whether a retry is safe.
 Every local or Actions apply also acquires the same GitHub-backed apply lock.
 The lock is an atomic, expiring repository branch-ref lease, so a local
 `pnpm beads:project:sync` fails closed while an Actions apply owns the lease (and
-vice versa); dry-runs never acquire it. The ephemeral
-`psyche-beads-project-sync-lock` branch may appear on the remote during an
-apply and is deleted after release. Do not delete or rewrite it manually while
-an apply may own it. Unlike the former moving tag, it does not interfere with
-`git fetch origin main --tags`. Renewal and stale takeover commits are children
-of the current lock commit and update the branch with a non-forced
-fast-forward. The 30-minute lease is renewed by a bounded heartbeat. After
-acquisition, apply discards all cached Project discovery,
+vice versa); dry-runs never acquire it. The persistent
+`psyche-beads-project-sync-lock` coordination branch remains on the remote as a
+linear audit trail. Release appends a `released` tombstone, and the next apply
+acquires immediately by appending a child active lease. Do not delete or
+rewrite this coordination ref manually. Unlike the former moving tag, it does
+not interfere with `git fetch origin main --tags`. Renewal, release,
+reacquisition, and stale takeover commits are children of the exact current
+lock commit and update the branch with a non-forced fast-forward. The
+30-minute lease is renewed by a bounded heartbeat. After acquisition, apply
+discards all cached Project discovery,
 item, and field state and revalidates the pinned Project's identity, ownership,
 repository link, visibility, title, and README before repair. Lease ownership
 is then awaited immediately before every individual REST, GraphQL, or

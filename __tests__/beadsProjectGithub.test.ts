@@ -122,6 +122,8 @@ function createApplyLockBackend() {
   let nextCommit = 0;
   let nextCommitFailure: Error | null = null;
   let nextRefReadHook: (() => void) | null = null;
+  let nextRefWriteHook: (() => void) | null = null;
+  let nextRefUpdateFailureAfterApply: Error | null = null;
   let activeRefReads = 0;
   let maxConcurrentRefReads = 0;
 
@@ -174,18 +176,29 @@ function createApplyLockBackend() {
       endpoint === `repos/${owner}/${repo}/git/refs/${lockRefEndpoint}`
       && method === 'PATCH'
     ) {
+      const hook = nextRefWriteHook;
+      nextRefWriteHook = null;
+      hook?.();
       const nextSha = String(parseStdin(call).sha);
       const next = commits.get(nextSha);
       if (next?.parents == null || !Array.isArray(next.parents) || next.parents[0] !== lockSha) {
         throw httpError(422, 'Update is not a fast forward');
       }
       lockSha = nextSha;
+      if (nextRefUpdateFailureAfterApply) {
+        const failure = nextRefUpdateFailureAfterApply;
+        nextRefUpdateFailureAfterApply = null;
+        throw failure;
+      }
       return success({ object: { sha: lockSha } });
     }
     if (
       endpoint === `repos/${owner}/${repo}/git/refs/${lockRefEndpoint}`
       && method === 'DELETE'
     ) {
+      const hook = nextRefWriteHook;
+      nextRefWriteHook = null;
+      hook?.();
       if (lockSha == null) {
         throw httpError(404, 'not found');
       }
@@ -223,8 +236,24 @@ function createApplyLockBackend() {
     failNextCommit(error: Error) {
       nextCommitFailure = error;
     },
+    failNextRefUpdateAfterApply(error: Error) {
+      nextRefUpdateFailureAfterApply = error;
+    },
     onNextRefRead(callback: () => void) {
       nextRefReadHook = callback;
+    },
+    onNextRefWrite(callback: () => void) {
+      nextRefWriteHook = callback;
+    },
+    setLockCommit(message: string, parentSha: string) {
+      const sha = `CORRUPT-${++nextCommit}`;
+      commits.set(sha, {
+        sha,
+        tree: { sha: 'TREE' },
+        parents: [parentSha],
+        message,
+      });
+      lockSha = sha;
     },
     stealLock(state: {
       owner: string;
@@ -3158,7 +3187,8 @@ describe('createGhClient', () => {
       success({ sha: 'LOCK-new', tree: { sha: 'TREE' }, message: acquiredMessage }),
       success({ object: { sha: 'LOCK-new' } }),
       success({ sha: 'LOCK-new', tree: { sha: 'TREE' }, message: acquiredMessage }),
-      success(),
+      success({ sha: 'LOCK-released', tree: { sha: 'TREE' } }),
+      success({ object: { sha: 'LOCK-released' } }),
     ]);
     const client = createGhClient({
       run: runner.run,
@@ -3185,20 +3215,23 @@ describe('createGhClient', () => {
       call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
       && call.args.includes('PATCH')
     );
-    expect(updates).toHaveLength(1);
+    expect(updates).toHaveLength(2);
     for (const update of updates) {
       expect(parseStdin(update)).toMatchObject({ force: false });
     }
-    expect(parseStdin(
-      runner.calls.find((call) =>
+    const lockCommits = runner.calls.filter((call) =>
         call.args.includes(`repos/${owner}/${repo}/git/commits`)
         && call.args.includes('POST')
-      )!,
-    ).parents).toEqual(['LOCK-old']);
+    );
+    expect(parseStdin(lockCommits[0]!).parents).toEqual(['LOCK-old']);
+    expect(parseStdin(lockCommits[1]!)).toMatchObject({
+      parents: ['LOCK-new'],
+      message: expect.stringContaining('"state":"released"'),
+    });
     expect(runner.calls.filter((call) =>
       call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
       && call.args.includes('DELETE')
-    )).toHaveLength(1);
+    )).toHaveLength(0);
     expect(runner.calls.some((call) =>
       call.args.some((arg) => arg.includes('/git/ref/tags/') || arg.includes('/git/refs/tags/'))
     )).toBe(false);
@@ -3258,7 +3291,24 @@ describe('createGhClient', () => {
     )).toBe(false);
 
     await expect(contender.releaseApplyLock(takeover)).resolves.toBeUndefined();
-    expect(backend.currentSha()).toBeNull();
+    const releasedSha = backend.currentSha();
+    expect(backend.currentState()).toMatchObject({
+      state: 'released',
+      leaseId: 'lease-takeover',
+    });
+    expect(backend.parentOf(releasedSha!)).toBe(takeover.sha);
+
+    const next = await ownerClient.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'released-tombstone',
+      leaseId: 'lease-after-release',
+      ttlMs: 90,
+    });
+    expect(backend.parentOf(next.sha)).toBe(releasedSha);
+    expect(backend.currentState()).toMatchObject({
+      state: 'acquired',
+      leaseId: 'lease-after-release',
+    });
   });
 
   it('renews a long apply, blocks a contender, releases the renewed lease, and stops heartbeats', async () => {
@@ -3307,7 +3357,12 @@ describe('createGhClient', () => {
     })).rejects.toThrow(/lock is held/i);
 
     await expect(lease.release()).resolves.toBeUndefined();
-    expect(backend.currentSha()).toBeNull();
+    expect(backend.currentState()).toMatchObject({
+      state: 'released',
+      owner: 'local-cli',
+      runId: 'long-run',
+      leaseId: 'long-lease',
+    });
     expect(timers.timers.at(-1)?.cleared).toBe(true);
 
     const callCountAfterRelease = backend.calls.length;
@@ -3387,6 +3442,115 @@ describe('createGhClient', () => {
     expect(String(await lease.failure())).not.toContain(token);
 
     await expect(lease.release()).resolves.toBeUndefined();
+  });
+
+  it('does not delete or overwrite a successor that takes over between release read and write', async () => {
+    const backend = createApplyLockBackend();
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 3_000,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'release-race',
+      leaseId: 'release-race-lease',
+      ttlMs: 90,
+    });
+    backend.onNextRefWrite(() => {
+      backend.stealLock({
+        owner: 'github-actions',
+        runId: 'successor-run',
+        leaseId: 'successor-lease',
+        acquiredAt: 3_091,
+        expiresAt: 4_000,
+      });
+    });
+
+    await expect(client.releaseApplyLock(handle)).rejects.toThrow(
+      /ownership.*already lost|already lost.*ownership/i,
+    );
+    expect(backend.currentState()).toMatchObject({
+      state: 'acquired',
+      owner: 'github-actions',
+      runId: 'successor-run',
+      leaseId: 'successor-lease',
+    });
+    expect(backend.calls.some((call) =>
+      call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
+      && call.args.includes('DELETE')
+    )).toBe(false);
+  });
+
+  it('confirms an ambiguous release by rereading the released tombstone', async () => {
+    const backend = createApplyLockBackend();
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 5_000,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'release-transport',
+      leaseId: 'release-transport-lease',
+      ttlMs: 90,
+    });
+    backend.failNextRefUpdateAfterApply(
+      Object.assign(new Error('socket reset after release'), { code: 'ECONNRESET' }),
+    );
+
+    await expect(client.releaseApplyLock(handle)).resolves.toBeUndefined();
+    const releasedSha = backend.currentSha();
+    expect(backend.currentState()).toMatchObject({
+      state: 'released',
+      leaseId: 'release-transport-lease',
+    });
+    expect(backend.parentOf(releasedSha!)).toBe(handle.sha);
+  });
+
+  it('fails closed on a structurally corrupt released tombstone', async () => {
+    const backend = createApplyLockBackend();
+    const ownerClient = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 6_000,
+    });
+    const handle = await ownerClient.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'corrupt-release-owner',
+      leaseId: 'corrupt-release-lease',
+      ttlMs: 90,
+    });
+    backend.setLockCommit(
+      `psyche-beads-project-lock:v1 ${JSON.stringify({
+        version: 1,
+        state: 'released',
+        owner: 'local-cli',
+        runId: 'corrupt-release-owner',
+        leaseId: 'corrupt-release-lease',
+        acquiredAt: 6_000,
+        expiresAt: 5_999,
+      })}`,
+      handle.sha,
+    );
+    const callsBeforeAcquire = backend.calls.length;
+
+    await expect(ownerClient.acquireApplyLock({
+      owner: 'github-actions',
+      runId: 'corrupt-release-contender',
+      leaseId: 'corrupt-release-next',
+      ttlMs: 90,
+    })).rejects.toThrow(/invalid.*released|released.*invalid|corrupt/i);
+    expect(backend.calls.slice(callsBeforeAcquire).some((call) =>
+      call.args.includes(`repos/${owner}/${repo}/git/refs/heads/psyche-beads-project-sync-lock`)
+      && call.args.includes('PATCH')
+    )).toBe(false);
   });
 
   it('serializes ownership revalidation with a heartbeat that becomes due mid-read', async () => {

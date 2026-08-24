@@ -185,6 +185,21 @@ function errorMessage(error, secrets = []) {
 }
 
 /**
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isApplyLockOwnershipLost(error) {
+  return (
+    typeof error === 'object'
+    && error != null
+    && /** @type {{kind?: unknown}} */ (error).kind === 'lease-lost'
+    && /ownership was already lost|ownership already lost/iu.test(
+      error instanceof Error ? error.message : String(error),
+    )
+  );
+}
+
+/**
  * @param {import('./reconcile.mjs').ReconciliationOperation} operation
  * @returns {Record<string, string | number | readonly number[] | null>}
  */
@@ -496,6 +511,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     const applyLease = applyLock == null
       ? null
       : gh.startApplyLockLease(applyLock);
+    let primaryApplyFailed = false;
 
     try {
       if (options.mode !== 'dry-run') {
@@ -585,6 +601,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
           projectUrl: url,
           failure,
         }, stdout);
+        primaryApplyFailed = true;
         return 1;
       }
 
@@ -632,6 +649,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
           projectUrl: url,
           failure,
         }, stdout);
+        primaryApplyFailed = true;
         return 1;
       }
       await applyLease?.assertOwned();
@@ -645,9 +663,22 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         projectUrl: url,
       }, stdout);
       return 0;
+    } catch (error) {
+      primaryApplyFailed = true;
+      throw error;
     } finally {
       if (applyLease) {
-        await applyLease.release();
+        try {
+          await applyLease.release();
+        } catch (error) {
+          if (!primaryApplyFailed && !isApplyLockOwnershipLost(error)) {
+            throw error;
+          }
+          stderr.write(
+            `Beads Project sync apply lock release warning: `
+              + `${errorMessage(error, diagnosticSecrets)}\n`,
+          );
+        }
       }
     }
   } catch (error) {

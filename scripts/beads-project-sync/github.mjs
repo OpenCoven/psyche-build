@@ -504,6 +504,7 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   ref: string,
  *   sha: string,
  *   treeSha: string,
+ *   parentSha?: string,
  * }} ApplyLockHandle
  */
 
@@ -1849,6 +1850,20 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {ApplyLockState} expected
+   * @param {ApplyLockState} current
+   * @returns {boolean}
+   */
+  function isSameApplyLockLease(expected, current) {
+    return (
+      current.owner === expected.owner
+      && current.runId === expected.runId
+      && current.leaseId === expected.leaseId
+      && current.acquiredAt === expected.acquiredAt
+    );
+  }
+
+  /**
    * @param {ApplyLockState} state
    * @returns {string}
    */
@@ -1890,15 +1905,44 @@ export function createGhClient(options) {
     ) {
       throw new GhClientError('lock', 'GitHub apply lock contains an unsupported state');
     }
+    const acquiredAt = lockTimestamp(parsed.acquiredAt, 'acquiredAt');
+    const expiresAt = lockTimestamp(parsed.expiresAt, 'expiresAt');
+    if (
+      (parsed.state === 'acquired' && expiresAt <= acquiredAt)
+      || (parsed.state === 'released' && expiresAt < acquiredAt)
+    ) {
+      throw new GhClientError(
+        'lock',
+        `GitHub apply lock contains an invalid ${parsed.state} timestamp range`,
+      );
+    }
     return {
       version: 1,
       state: parsed.state,
       owner: lockIdentity(parsed.owner, 'apply lock owner'),
       runId: lockIdentity(parsed.runId, 'apply lock runId'),
       leaseId: lockIdentity(parsed.leaseId, 'apply lock leaseId'),
-      acquiredAt: lockTimestamp(parsed.acquiredAt, 'acquiredAt'),
-      expiresAt: lockTimestamp(parsed.expiresAt, 'expiresAt'),
+      acquiredAt,
+      expiresAt,
     };
+  }
+
+  /**
+   * @param {Record<string, unknown>} commit
+   * @returns {string}
+   */
+  function applyLockParentSha(commit) {
+    const parents = array(commit.parents);
+    if (parents.length !== 1) {
+      throw new GhClientError(
+        'lock',
+        'GitHub apply lock contains a corrupt released tombstone parent',
+      );
+    }
+    const parent = parents[0];
+    return typeof parent === 'string'
+      ? requiredString(parent, 'apply lock parent sha')
+      : requiredString(record(parent).sha, 'apply lock parent sha');
   }
 
   /**
@@ -1918,11 +1962,36 @@ export function createGhClient(options) {
       `repos/${owner}/${repo}/git/commits/${encodeURIComponent(sha)}`,
     ));
     const state = parseApplyLockMessage(commit.message);
+    const treeSha = requiredString(record(commit.tree).sha, 'apply lock tree sha');
+    let parentSha;
+    if (state.state === 'released') {
+      parentSha = applyLockParentSha(commit);
+      const parentCommit = record(await rest(
+        'GET',
+        `repos/${owner}/${repo}/git/commits/${encodeURIComponent(parentSha)}`,
+      ));
+      const parentState = parseApplyLockMessage(parentCommit.message);
+      const parentTreeSha = requiredString(
+        record(parentCommit.tree).sha,
+        'apply lock parent tree sha',
+      );
+      if (
+        parentState.state !== 'acquired'
+        || !isSameApplyLockLease(state, parentState)
+        || parentTreeSha !== treeSha
+      ) {
+        throw new GhClientError(
+          'lock',
+          'GitHub apply lock contains a corrupt released tombstone',
+        );
+      }
+    }
     return {
       ...state,
       ref: applyLockRef,
       sha,
-      treeSha: requiredString(record(commit.tree).sha, 'apply lock tree sha'),
+      treeSha,
+      ...(parentSha == null ? {} : { parentSha }),
     };
   }
 
@@ -1983,24 +2052,60 @@ export function createGhClient(options) {
   /**
    * @param {string} sha
    * @param {string} leaseId
+   * @param {string} expectedSha
+   * @param {'acquire' | 'renew' | 'release'} transition
    * @returns {Promise<void>}
    */
-  async function updateApplyLockRef(sha, leaseId) {
-    try {
-      await ambiguousMutation(
-        `GitHub apply lock update for "${leaseId}"`,
-        () => rest(
-          'PATCH',
-          `repos/${owner}/${repo}/git/refs/${APPLY_LOCK_REF_ENDPOINT}`,
-          { sha, force: false },
+  async function updateApplyLockRef(sha, leaseId, expectedSha, transition) {
+    /**
+     * @param {ApplyLockHandle | null} current
+     * @returns {GhClientError}
+     */
+    function ownershipLost(current) {
+      if (transition === 'acquire') {
+        return new GhClientError(
           'lock',
-        ),
+          `GitHub apply lock contention: lock is held by ${current?.owner ?? 'another contender'}`
+            + `${current?.runId ? ` (${current.runId})` : ''}`,
+          409,
+        );
+      }
+      return new GhClientError(
+        'lease-lost',
+        `GitHub apply lock ${transition} refused because ownership was already lost`
+          + `${current?.owner ? ` to ${current.owner}` : ''}`
+          + `${current?.runId ? ` (${current.runId})` : ''}`,
+        409,
+      );
+    }
+
+    try {
+      const outcome = await ambiguousMutation(
+        `GitHub apply lock update for "${leaseId}"`,
+        async () => {
+          await rest(
+            'PATCH',
+            `repos/${owner}/${repo}/git/refs/${APPLY_LOCK_REF_ENDPOINT}`,
+            { sha, force: false },
+            'lock',
+          );
+          return 'updated';
+        },
         async () => {
           const current = await readApplyLock();
-          return current?.sha === sha ? {} : null;
+          if (current?.sha === sha) {
+            return 'updated';
+          }
+          return current?.sha !== expectedSha ? 'changed' : null;
         },
       );
+      if (outcome === 'changed') {
+        throw ownershipLost(await readApplyLock());
+      }
     } catch (error) {
+      if (error instanceof GhClientError && error.kind === 'lease-lost') {
+        throw error;
+      }
       if (errorStatus(error) !== 422) {
         throw error;
       }
@@ -2008,12 +2113,10 @@ export function createGhClient(options) {
       if (current?.sha === sha) {
         return;
       }
-      throw new GhClientError(
-        'lock',
-        `GitHub apply lock contention: lock is held by ${current?.owner ?? 'another contender'}`
-          + `${current?.runId ? ` (${current.runId})` : ''}`,
-        409,
-      );
+      if (current?.sha !== expectedSha) {
+        throw ownershipLost(current);
+      }
+      throw error;
     }
   }
 
@@ -2068,7 +2171,7 @@ export function createGhClient(options) {
 
       const sha = await createApplyLockCommit(state, parentSha, treeSha);
       if (current) {
-        await updateApplyLockRef(sha, leaseId);
+        await updateApplyLockRef(sha, leaseId, current.sha, 'acquire');
       } else {
         await createApplyLockRef(sha, leaseId);
       }
@@ -2114,7 +2217,7 @@ export function createGhClient(options) {
       expiresAt: renewedAt + ttlMs,
     });
     const sha = await createApplyLockCommit(renewed, current.sha, current.treeSha);
-    await updateApplyLockRef(sha, current.leaseId);
+    await updateApplyLockRef(sha, current.leaseId, current.sha, 'renew');
     const renewedHandle = {
       ...renewed,
       ref: applyLockRef,
@@ -2334,6 +2437,15 @@ export function createGhClient(options) {
     const leaseId = lockIdentity(handle?.leaseId, 'apply lock leaseId');
     const current = await readApplyLock();
     if (
+      current?.state === 'released'
+      && current.parentSha === handle.sha
+      && current.owner === lockOwner
+      && current.runId === runId
+      && current.leaseId === leaseId
+    ) {
+      return;
+    }
+    if (
       current == null
       || current.state !== 'acquired'
       || current.sha !== handle.sha
@@ -2342,32 +2454,19 @@ export function createGhClient(options) {
       || current.leaseId !== leaseId
     ) {
       throw new GhClientError(
-        'lock',
-        'GitHub apply lock release refused because ownership could not be proven',
+        'lease-lost',
+        'GitHub apply lock release refused because ownership was already lost',
         409,
       );
     }
 
-    try {
-      await ambiguousMutation(
-        `GitHub apply lock release for "${leaseId}"`,
-        () => rest(
-          'DELETE',
-          `repos/${owner}/${repo}/git/refs/${APPLY_LOCK_REF_ENDPOINT}`,
-          undefined,
-          'lock',
-        ),
-        async () => {
-          const afterDelete = await readApplyLock();
-          return afterDelete == null || !isOwnedApplyLock(handle, afterDelete) ? {} : null;
-        },
-      );
-    } catch (error) {
-      if (errorStatus(error) === 404 && await readApplyLock() == null) {
-        return;
-      }
-      throw error;
-    }
+    const released = /** @type {ApplyLockState} */ ({
+      ...current,
+      state: 'released',
+      expiresAt: Math.max(now(), current.acquiredAt),
+    });
+    const sha = await createApplyLockCommit(released, current.sha, current.treeSha);
+    await updateApplyLockRef(sha, leaseId, current.sha, 'release');
   }
 
   /**
