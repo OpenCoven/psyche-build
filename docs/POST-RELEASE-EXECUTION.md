@@ -160,7 +160,7 @@ clean-checkout contributor acceptance remains under #198.
 
 Desktop decomposition begins only after the #196/#199 contracts it will extract
 are stable. The required order is lifecycle/registration, persistence/recovery,
-pane/PTTY/process lifecycle, browser/Git control, then desktop-web state and
+pane/PTY/process lifecycle, browser/Git control, then desktop-web state and
 events. Each PR preserves public commands, schemas, persisted formats, errors,
 security boundaries, generated outputs, and rollback.
 
