@@ -554,7 +554,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         assertPinnedPublicProject(project, config.projectNodeId);
       }
 
-      if (options.mode !== 'dry-run' && project) {
+      if (options.mode === 'provision' && project) {
         const repairedProject = await gh.ensureProject({
           title: config.projectTitle,
           readme: desiredProjectReadme,
@@ -612,7 +612,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       }
 
       const existingIssues = await gh.listManagedIssues();
-      const plan = planReconciliation({
+      let plan = planReconciliation({
         inventory,
         existingIssues,
         readme: project == null ? null : { body: project.readme, public: project.public },
@@ -663,6 +663,15 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         return 0;
       }
 
+      if (project) {
+        const repairedProject = await gh.ensureProject({
+          title: config.projectTitle,
+          readme: desiredProjectReadme,
+        });
+        assertPinnedPublicProject(repairedProject, config.projectNodeId);
+        project = repairedProject;
+      }
+
       if (!provisionedThisRun) {
         await applyLease?.assertOwned();
         await gh.ensureLabels();
@@ -671,6 +680,17 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         await applyLease?.assertOwned();
         await gh.ensureViews();
       }
+
+      if (project) {
+        plan = planReconciliation({
+          inventory,
+          existingIssues,
+          readme: { body: project.readme, public: project.public },
+          renderContext,
+        });
+        validatePlanSafety(plan, config.massClose, options.allowMassClose);
+      }
+
       let applied;
       try {
         applied = await applyReconciliation(plan, gh);

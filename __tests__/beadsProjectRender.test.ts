@@ -1043,6 +1043,51 @@ describe('Beads project renderers', () => {
     }
   });
 
+  it.each([
+    ['plain text', '//user:password@[2001:db8::1]:8443/releases'],
+    ['Markdown link', '[credentials](//user:password@host.example:8443/releases)'],
+    ['Markdown image', '![credentials](//user%3Apassword%40host.example/releases)'],
+    ['Markdown autolink', '<//user:password@host.example/releases>'],
+    ['raw HTML attribute', '<a href="//user:password@host.example/releases">private</a>'],
+  ])('rejects protocol-relative URL credentials in %s', (_context, unsafeDescription) => {
+    expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
+  });
+
+  it.each([
+    ['slashless HTTPS', 'https:user:password@host.example/releases'],
+    ['backslash HTTPS', String.raw`https:\\user:password@[2001:db8::1]:8443\releases`],
+    ['entity separators', 'https&colon;user&colon;password&commat;host.example/releases'],
+    ['percent separators', 'https%3Auser%3Apassword%40host.example/releases'],
+    [
+      'recursive mixed separators',
+      'https&amp;colon;&percnt;255C&percnt;255Cuser&percnt;253Apassword'
+        + '&amp;commat;host.example&amp;bsol;releases',
+    ],
+    [
+      'encoded protocol-relative IPv6 and port',
+      '%252F%252Fuser%253Apassword%2540%255B2001%253Adb8%253A%253A1%255D'
+        + '%253A8443%252Freleases',
+    ],
+  ])('rejects WHATWG and encoded URL credentials with %s', (_variant, unsafeDescription) => {
+    expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
+  });
+
+  it('preserves safe protocol-relative URLs and redacts ordinary email prose', () => {
+    const safeDescription = [
+      'Plain //cdn.example.com/assets/release.png.',
+      '[docs](//docs.example.com:8443/public/releases)',
+      '<img src="//cdn.example.com/public/release.png">',
+      'Contact user@example.com for public release details.',
+    ].join('\n');
+
+    expect(sanitizePublicText(safeDescription)).toBe([
+      'Plain //cdn.example.com/assets/release.png.',
+      '[docs](//docs.example.com:8443/public/releases)',
+      '<img src="//cdn.example.com/public/release.png">',
+      'Contact <redacted-email> for public release details.',
+    ].join('\n'));
+  });
+
   it('never promotes an HTTP backslash-path segment into a replacement host', () => {
     const safeSources = [
       String.raw`https://trusted.example\alice@evil.example\path`,

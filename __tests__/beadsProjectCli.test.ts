@@ -61,6 +61,7 @@ interface CapturedCli {
 
 interface FakeGhOptions {
   existingIssues?: readonly Record<string, unknown>[];
+  existingIssuesAfterLock?: readonly Record<string, unknown>[];
   failAcquireLock?: Error;
   failValidateAssignees?: Error;
   failLeaseValidationAfterWrite?: string;
@@ -124,6 +125,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
   const validatedAssignees: string[][] = [];
   const writes: string[] = [];
   let nextIssueNumber = 100;
+  let lockAcquired = false;
   let project = options.project === undefined
     ? {
       id: projectNodeId,
@@ -198,6 +200,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
       if (options.failAcquireLock) {
         throw options.failAcquireLock;
       }
+      lockAcquired = true;
       return {
         ref: APPLY_LOCK_REF,
         sha: 'LOCK',
@@ -228,7 +231,10 @@ function createFakeGh(options: FakeGhOptions = {}) {
     },
     async listManagedIssues() {
       calls.push('listManagedIssues');
-      return [...(options.existingIssues ?? [])];
+      const issues = lockAcquired && options.existingIssuesAfterLock != null
+        ? options.existingIssuesAfterLock
+        : options.existingIssues;
+      return [...(issues ?? [])];
     },
     async ensureLabels() {
       writes.push('ensureLabels');
@@ -1459,6 +1465,68 @@ describe('Beads project sync CLI', () => {
       'Mass-close safety threshold overridden for this run.',
     );
   });
+
+  it.each([
+    ['apply', ['--apply']],
+    ['apply plus provision', ['--apply', '--provision']],
+  ] as const)(
+    'refuses six fresh closures before every mutation in %s mode',
+    async (_mode, modeArgs) => {
+      const staleReadme =
+        '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n'
+        + '# Stale README';
+      const staleProject: ProjectContext = {
+        id: projectNodeId,
+        number: 11,
+        title: 'Stale Project title',
+        readme: staleReadme,
+        public: true,
+        url: 'https://github.com/orgs/OpenCoven/projects/11',
+      };
+      const freshClosures = Array.from({ length: 6 }, (_, index) =>
+        managedIssue(`fresh-closure-${index + 1}`, index + 1)
+      );
+      const fakeGh = createFakeGh({
+        existingIssues: [],
+        existingIssuesAfterLock: freshClosures,
+        project: staleProject,
+      });
+
+      const result = await runCli(
+        [...modeArgs, '--inventory-file', fixturePath],
+        {
+          env: { BEADS_PROJECT_TOKEN: token },
+          fakeGh,
+        },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toMatch(/Refusing to close 6 managed issues; limit is 5/i);
+      expect(fakeGh.calls).toEqual([
+        'verifyAccess',
+        'validateAssignees',
+        'discoverProject',
+        'refreshProject',
+        'listManagedIssues',
+      ]);
+      expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
+      expect(fakeGh.writes).toEqual([]);
+      expect(fakeGh.ensureProjectInputs).toEqual([]);
+      expect(staleProject.readme).toBe(staleReadme);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        mode: 'apply',
+        appliedOperationCount: 0,
+        operationCounts: {
+          closeIssue: 6,
+        },
+        failure: {
+          kind: 'mass-close-safety',
+          closeIssueCount: 6,
+          maxCloseCount: 5,
+        },
+      });
+    },
+  );
 
   it('returns nonzero with human diagnostics and no JSON on source failure', async () => {
     const missingPath = join(repositoryRoot, '__tests__/fixtures/beads-project-sync/missing.jsonl');
