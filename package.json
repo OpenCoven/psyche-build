@@ -71,6 +71,7 @@
     "typecheck:beads-project-sync": "tsc -p tsconfig.beads-project-sync.json",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "beads:project:check": "node scripts/sync-beads-project.mjs --dry-run",
+    "beads:project:e2e": "node scripts/verify-beads-graphql-e2e.mjs",
     "beads:project:sync": "node scripts/sync-beads-project.mjs --apply",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
     "ios:project:generate": "xcodegen generate --spec native/ios/project.yml --project native/ios",

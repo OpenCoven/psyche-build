@@ -99,10 +99,13 @@ Common local mirror commands are:
 
 ```bash
 pnpm beads:project:check
+BEADS_PROJECT_TOKEN="$(gh auth token)" pnpm beads:project:e2e
 pnpm beads:project:sync
 ```
 
-The check is read-only. Applying requires the maintainer-only
+The check and GraphQL E2E verifier are read-only. The E2E command runs the real
+dry-run path against GitHub, rejects mutations and duplicate payloads, and
+enforces the current two-query request ceiling. Applying requires the maintainer-only
 `BEADS_PROJECT_TOKEN`; load it from a password manager rather than storing it in
 the repository. Create two protected environments restricted to the main branch
 (`main`): the `beads-project-sync-automation` environment must have no required
