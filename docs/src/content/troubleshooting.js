@@ -22,12 +22,12 @@ node /path/to/psyche-build/psyche --version</code></pre>
         <tr><th>Symptom</th><th>Check</th><th>Fix</th></tr>
       </thead>
       <tbody>
-        <tr><td>The GUI does not launch</td><td>The Cask is not installed or the release is not yet available</td><td>Confirm the public GitHub release and tap Cask exist, then reinstall and open the app</td></tr>
-        <tr><td>Cask name not found</td><td>The tap is stale or the release is not yet available</td><td>Run <code>brew update</code> and confirm <code>opencoven/tap/psyche-build</code> exists</td></tr>
+        <tr><td>The GUI does not launch</td><td>The Cask is not installed, Gatekeeper rejected the app, or launch state is corrupt</td><td>Reinstall, verify the signed app identity, run <code>open -a "Psyche Build"</code>, and report any trust failure rather than bypassing it</td></tr>
+        <tr><td>Cask name not found</td><td>The local tap metadata is stale or the tap is not configured</td><td>Run <code>brew update</code>, then confirm <code>opencoven/tap/psyche-build</code> resolves</td></tr>
         <tr><td>Checksum mismatch</td><td>The Cask and release assets disagree</td><td>Stop and report the release integrity failure; do not bypass Homebrew verification</td></tr>
       </tbody>
     </table>
-    <p>After the v0.0.1 release and Cask are available:</p>
+    <p>The supported public <code>v0.0.1</code> install path is:</p>
     <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"</code></pre>
     <p>The Cask installs only <code>Psyche Build.app</code>. It does not provide a <code>psyche</code> command. The Node CLI is not an npm release in 0.0.1; source-development recovery uses <code>node /path/to/psyche-build/psyche</code> from the repository checkout.</p>
