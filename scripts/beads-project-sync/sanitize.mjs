@@ -44,7 +44,10 @@ const URL_USERINFO_PATTERN =
   /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s"'`()\[\]{}<>@]+@/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
-const PROTECTED_URL_PATTERN = /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`()\[\]{}<>]+/gu;
+const URL_CANDIDATE_START_PATTERN =
+  /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//giu;
+const URL_CANDIDATE_HARD_BOUNDARY_PATTERN = /[\s"`<>{}\\]/u;
+const URL_TRAILING_PROSE_PUNCTUATION = new Set(['.', ',', ';', '!']);
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
 const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
 const LOCAL_PATH_FILE_EXTENSION_PATTERN =
@@ -61,6 +64,8 @@ const LOCAL_PATH_CLOSING_DELIMITERS = new Set(
 const LOCAL_PATH_QUOTE_DELIMITERS = new Set(['"', "'", '`']);
 const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
 const PROTECTED_URL_PLACEHOLDER_SUFFIX = '\u0000';
+const MAX_URL_CANDIDATE_COUNT = 1_024;
+const MAX_URL_CANDIDATE_LENGTH = 16_384;
 const MAX_PERCENT_DECODE_ROUNDS = 3;
 const MAX_PERCENT_ENCODED_COMPONENT_LENGTH = 16_384;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
@@ -209,6 +214,133 @@ function buildHomeDirectoryMatchers(config) {
  */
 function stripGitPlusPrefix(value) {
   return value.replace(/^git\+/iu, '');
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   value: string,
+ * }} UrlCandidate
+ */
+
+/**
+ * @param {string} value
+ * @returns {number}
+ */
+function findFirstUnbalancedUrlClosingDelimiter(value) {
+  let parentheses = 0;
+  let brackets = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === '(') {
+      parentheses += 1;
+    } else if (character === ')') {
+      if (parentheses === 0) {
+        return index;
+      }
+      parentheses -= 1;
+    } else if (character === '[') {
+      brackets += 1;
+    } else if (character === ']') {
+      if (brackets === 0) {
+        return index;
+      }
+      brackets -= 1;
+    }
+  }
+
+  return value.length;
+}
+
+/**
+ * @param {string} value
+ * @returns {number}
+ */
+function urlCandidateContentEnd(value) {
+  let end = value.length;
+
+  while (end > 0) {
+    const character = value[end - 1];
+    if (URL_TRAILING_PROSE_PUNCTUATION.has(character)) {
+      end -= 1;
+      continue;
+    }
+    if (
+      character === "'"
+      && (value.slice(0, end).match(/'/gu)?.length ?? 0) % 2 === 1
+    ) {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+
+  return findFirstUnbalancedUrlClosingDelimiter(value.slice(0, end));
+}
+
+/**
+ * @param {string} value
+ * @returns {UrlCandidate[]}
+ */
+function scanUrlCandidates(value) {
+  const candidates = /** @type {UrlCandidate[]} */ ([]);
+  const pattern = new RegExp(URL_CANDIDATE_START_PATTERN.source, 'giu');
+
+  for (let match = pattern.exec(value); match != null; match = pattern.exec(value)) {
+    if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
+      fail('Public text exceeds the URL candidate inspection limit');
+    }
+
+    const start = match.index;
+    let scanEnd = start + match[0].length;
+    while (
+      scanEnd < value.length
+      && !URL_CANDIDATE_HARD_BOUNDARY_PATTERN.test(value[scanEnd])
+    ) {
+      if (scanEnd - start >= MAX_URL_CANDIDATE_LENGTH) {
+        fail('Public URL candidate exceeds the inspection limit');
+      }
+      scanEnd += 1;
+    }
+
+    const scannedValue = value.slice(start, scanEnd);
+    const contentEnd = Math.max(
+      match[0].length,
+      urlCandidateContentEnd(scannedValue),
+    );
+    candidates.push({
+      start,
+      end: start + contentEnd,
+      value: scannedValue.slice(0, contentEnd),
+    });
+    pattern.lastIndex = start + contentEnd;
+  }
+
+  return candidates;
+}
+
+/**
+ * @param {string} value
+ * @param {(candidate: string) => string} replace
+ * @returns {string}
+ */
+function replaceUrlCandidates(value, replace) {
+  const candidates = scanUrlCandidates(value);
+  if (candidates.length === 0) {
+    return value;
+  }
+
+  let replaced = '';
+  let cursor = 0;
+  for (const candidate of candidates) {
+    replaced += value.slice(cursor, candidate.start);
+    replaced += replace(candidate.value);
+    cursor = candidate.end;
+  }
+
+  return replaced + value.slice(cursor);
 }
 
 /**
@@ -416,18 +548,11 @@ function sanitizeUrlHash(value, matchers) {
 
 /**
  * @param {string} value
+ * @param {URL} url
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
-function sanitizeProtectedUrl(value, matchers) {
-  /** @type {URL} */
-  let url;
-  try {
-    url = new URL(stripGitPlusPrefix(value));
-  } catch {
-    return value;
-  }
-
+function sanitizeParsedUrl(value, url, matchers) {
   let changed = false;
   const protocol = url.protocol.toLowerCase();
 
@@ -506,6 +631,33 @@ function sanitizeProtectedUrl(value, matchers) {
 }
 
 /**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeProtectedUrl(value, matchers) {
+  for (const [index, variant] of percentDecodedVariants(value).entries()) {
+    /** @type {URL} */
+    let url;
+    try {
+      url = new URL(stripGitPlusPrefix(variant));
+    } catch {
+      continue;
+    }
+
+    const sanitized = sanitizeParsedUrl(variant, url, matchers);
+    if (index === 0) {
+      return sanitized;
+    }
+    if (sanitized !== variant) {
+      return '<redacted-local-path>';
+    }
+  }
+
+  return value;
+}
+
+/**
  * @typedef {{
  *   protectedValue: string,
  *   protectedUrls: string[],
@@ -519,7 +671,7 @@ function sanitizeProtectedUrl(value, matchers) {
  */
 function protectUrls(value, matchers) {
   const protectedUrls = /** @type {string[]} */ ([]);
-  const protectedValue = value.replace(PROTECTED_URL_PATTERN, (match) => {
+  const protectedValue = replaceUrlCandidates(value, (match) => {
     const placeholder = `${PROTECTED_URL_PLACEHOLDER_PREFIX}${protectedUrls.length}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`;
     protectedUrls.push(sanitizeProtectedUrl(match, matchers));
     return placeholder;
@@ -1236,30 +1388,71 @@ function assertNoDirectPublishableSecrets(value) {
 
 /**
  * @param {string} value
+ * @returns {string}
  */
-function assertNoEncodedUrlSecrets(value) {
-  for (const match of value.matchAll(PROTECTED_URL_PATTERN)) {
-    const rawUrl = match[0];
+function rawUrlAuthority(value) {
+  const authorityStart = value.indexOf('://');
+  if (authorityStart < 0) {
+    return '';
+  }
 
-    /** @type {URL} */
-    let url;
-    try {
-      url = new URL(stripGitPlusPrefix(rawUrl));
-    } catch {
-      percentDecodedVariants(rawUrl);
-      continue;
-    }
+  const contentStart = authorityStart + 3;
+  const authorityEndOffset = value.slice(contentStart).search(/[/?#]/u);
+  return authorityEndOffset === -1
+    ? value.slice(contentStart)
+    : value.slice(contentStart, contentStart + authorityEndOffset);
+}
 
-    const components = [
-      url.username,
-      url.password,
-      url.pathname,
-      url.search.startsWith('?') ? url.search.slice(1) : url.search,
-      url.hash.startsWith('#') ? url.hash.slice(1) : url.hash,
-    ];
-    for (const component of components) {
-      for (const variant of percentDecodedVariants(component)) {
+/**
+ * @param {string} value
+ */
+function assertNoSecretPercentDecodedVariants(value) {
+  if (!value) {
+    return;
+  }
+
+  for (const variant of percentDecodedVariants(value)) {
+    assertNoDirectPublishableSecrets(variant);
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {boolean} [rejectDirectUserinfo=false]
+ */
+function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
+  for (const candidate of scanUrlCandidates(value)) {
+    for (const [index, variant] of percentDecodedVariants(candidate.value).entries()) {
+      if (index > 0) {
         assertNoDirectPublishableSecrets(variant);
+      }
+
+      /** @type {URL} */
+      let url;
+      try {
+        url = new URL(stripGitPlusPrefix(variant));
+      } catch {
+        continue;
+      }
+
+      if (
+        (rejectDirectUserinfo || index > 0)
+        && (url.username || url.password)
+      ) {
+        fail('Publishable URL credentials detected');
+      }
+
+      for (const component of [
+        rawUrlAuthority(variant),
+        url.username,
+        url.password,
+        url.hostname,
+        url.host,
+        url.pathname,
+        url.search.startsWith('?') ? url.search.slice(1) : url.search,
+        url.hash.startsWith('#') ? url.hash.slice(1) : url.hash,
+      ]) {
+        assertNoSecretPercentDecodedVariants(component);
       }
     }
   }
@@ -1278,7 +1471,7 @@ export function assertNoPublishableSecrets(value) {
   }
 
   assertNoDirectPublishableSecrets(value);
-  assertNoEncodedUrlSecrets(value);
+  assertNoEncodedUrlSecrets(value, true);
 }
 
 /**
@@ -1296,7 +1489,7 @@ export function sanitizePublicText(value, config = {}) {
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
   assertNoEncodedUrlSecrets(sanitized);
-  sanitized = sanitized.replace(PROTECTED_URL_PATTERN, (url) => {
+  sanitized = replaceUrlCandidates(sanitized, (url) => {
     const authorityStart = url.indexOf('://') + 3;
     const authorityEndOffset = url.slice(authorityStart).search(/[/?#]/u);
     const authorityEnd = authorityEndOffset === -1

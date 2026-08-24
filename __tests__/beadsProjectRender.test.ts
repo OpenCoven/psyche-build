@@ -58,6 +58,21 @@ function countMatches(value: string, search: string): number {
   return value.split(search).length - 1;
 }
 
+function renderSourceDescription(description: string): string {
+  const source = parseBeadExport(issuesJsonl, {
+    assigneeMap: {
+      'feature-owner@example.com': 'BunsDev',
+    },
+  }).find((bead) => bead.id === 'pb-feature');
+
+  expect(source).toBeTruthy();
+  const publicBead = toPublicBead({
+    ...source!,
+    description,
+  });
+  return renderIssueBody(publicBead, buildContext([publicBead]));
+}
+
 describe('Beads project renderers', () => {
   it('redacts emails and local home paths but rejects publishable secrets', () => {
     expect(
@@ -293,6 +308,9 @@ describe('Beads project renderers', () => {
     expect(() =>
       sanitizePublicText(`Publish https://example.com/${'%41'.repeat(6_000)}`)
     ).toThrow(/inspection limit/i);
+    expect(() =>
+      sanitizePublicText(`Publish https://example.com/${'a'.repeat(17_000)}`)
+    ).toThrow(/URL candidate exceeds the inspection limit/i);
 
     for (const malformedUrl of [
       'https://example.com/%',
@@ -302,6 +320,85 @@ describe('Beads project renderers', () => {
     ]) {
       expect(() => sanitizePublicText(`Publish ${malformedUrl}`)).toThrow(
         /malformed percent encoding/i,
+      );
+    }
+  });
+
+  it('scans complete delimiter-bearing URLs while preserving balanced public URLs', () => {
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+
+    expect(() =>
+      sanitizePublicText(
+        `Publish https://example.com/(${token.replace('_', '%5F')})`,
+      )
+    ).toThrow(/Publishable GitHub token/i);
+
+    const redacted = sanitizePublicText(
+      'Open ssh://host/(%252Epsyche%252Fworktrees%252Frun) next.',
+    );
+    expect(redacted).toContain('<redacted-local-path>');
+    expect(redacted).not.toContain('%252Epsyche');
+    expect(redacted).not.toContain('.psyche/worktrees');
+
+    expect(
+      sanitizePublicText(
+        'See [https://example.com/[docs]/(v2)?redirect=%252Fpublic%252Fdocs].',
+      ),
+    ).toBe(
+      'See [https://example.com/[docs]/(v2)?redirect=%252Fpublic%252Fdocs].',
+    );
+  });
+
+  it('inspects decoded URL parses and encoded authority variants', () => {
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+
+    for (const encodedAt of ['%40', '%2540']) {
+      expect(() =>
+        sanitizePublicText(`Publish https://alice${encodedAt}example.com/releases`)
+      ).toThrow(/URL credentials/i);
+    }
+    expect(() =>
+      sanitizePublicText(
+        `Publish https://${token.replace('_', '%5F')}.example.com/releases`,
+      )
+    ).toThrow(/Publishable GitHub token/i);
+    expect(() =>
+      assertNoPublishableSecrets('https://alice:p(ass)@example.com/releases')
+    ).toThrow(/URL credentials/i);
+    expect(
+      sanitizePublicText(
+        'Open file://host%252F.psyche%252Fworktrees%252Frun next.',
+      ),
+    ).toBe('Open <redacted-local-path> next.');
+  });
+
+  it('sanitizes URL edge cases end to end without treating ordinary prose as a URL', () => {
+    const rendered = renderSourceDescription(
+      [
+        'The parser notation function(foo[bar]) remains ordinary prose.',
+        'See [https://example.com/[docs]/(v2)?redirect=%252Fpublic%252Fdocs].',
+        'Open ssh://host/(%252Epsyche%252Fworktrees%252Frun) next.',
+      ].join('\n'),
+    );
+
+    expect(rendered).toContain(
+      'The parser notation function(foo[bar]) remains ordinary prose.',
+    );
+    expect(rendered).toContain(
+      'See [https://example.com/[docs]/(v2)?redirect=%252Fpublic%252Fdocs].',
+    );
+    expect(rendered).toContain('<redacted-local-path>');
+    expect(rendered).not.toContain('%252Epsyche');
+
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+    for (const unsafeDescription of [
+      `Publish https://example.com/(${token.replace('_', '%5F')})`,
+      'Publish https://alice%40example.com/releases',
+      `Publish https://${token.replace('_', '%5F')}.example.com/releases`,
+      'Publish https://example.com/releases/%2',
+    ]) {
+      expect(() => renderSourceDescription(unsafeDescription)).toThrow(
+        /Publishable|malformed percent encoding/i,
       );
     }
   });
