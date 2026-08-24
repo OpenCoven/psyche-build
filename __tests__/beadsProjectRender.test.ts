@@ -372,6 +372,84 @@ describe('Beads project renderers', () => {
     ).toBe('Open <redacted-local-path> next.');
   });
 
+  it('inspects opaque and slashless absolute URI components recursively while preserving safe URIs', () => {
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+    const encodedToken = token.replace('_', '%5F');
+    const doubleEncodedToken = token.replace('_', '%255F');
+
+    expect(
+      sanitizePublicText([
+        'mailto:team@example.com?subject=Public%20roadmap',
+        'data:text/plain,hello%20world',
+        'urn:ietf:rfc:3986',
+        'file:/srv/public/releases',
+      ].join('\n')),
+    ).toBe([
+      'mailto:<redacted-email>?subject=Public%20roadmap',
+      'data:text/plain,hello%20world',
+      'urn:ietf:rfc:3986',
+      'file:/srv/public/releases',
+    ].join('\n'));
+
+    expect(
+      sanitizePublicText([
+        'file:/Users/buns/private/notes.md',
+        'urn:psyche:%252Epsyche%252Fworktrees%252Frun',
+        'data:text/plain,%252Fhome%252Falice%252Fprivate',
+        'mailto:team@example.com?workspace=%252Eworktrees%252Frun'
+          + '#preview=%252FUsers%252Fbuns%252Fprivate',
+      ].join('\n')),
+    ).toBe([
+      'file:/~/private/notes.md',
+      'urn:<redacted-local-path>',
+      'data:text/plain,~/private',
+      'mailto:<redacted-email>?workspace=<redacted-local-path>#preview=~/private',
+    ].join('\n'));
+
+    for (const unsafeUri of [
+      `mailto:team@example.com?subject=${encodedToken}`,
+      `data:text/plain,${doubleEncodedToken}`,
+      `urn:psyche:${encodedToken}`,
+      `file://${encodedToken}.example/srv/public`,
+    ]) {
+      expect(() => sanitizePublicText(`Publish ${unsafeUri}`)).toThrow(
+        /Publishable GitHub token/i,
+      );
+    }
+    expect(() => sanitizePublicText('Publish data:text/plain,%2')).toThrow(
+      /malformed percent encoding/i,
+    );
+  });
+
+  it.each([
+    ['closing bracket in userinfo', 'https://alice]@example.com/releases', /URL credentials/i],
+    ['double quote', 'https://example.com/docs"ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['single quote', "https://example.com/docs'ghp%5Fabcdefghijklmnopqrstuvwxyz123456", /GitHub token/i],
+    ['backtick', 'https://example.com/docs`ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['opening angle', 'https://example.com/docs<ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['closing angle', 'https://example.com/docs>ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['opening brace', 'https://example.com/docs{ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['closing brace', 'https://example.com/docs}ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['backslash', 'https://example.com/docs\\ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['balanced parentheses', 'https://example.com/(docs)/ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+    ['balanced brackets', 'https://example.com/[docs]/ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
+  ])('parses the complete URL candidate across %s', (_name, unsafeUrl, expected) => {
+    expect(() => sanitizePublicText(`Publish ${unsafeUrl} next.`)).toThrow(expected);
+  });
+
+  it.each([
+    ['parentheses', '(', ')', 'https://example.com/(docs)/v2'],
+    ['brackets', '[', ']', 'https://example.com/[docs]/v2'],
+    ['braces', '{', '}', 'https://example.com/{docs}/v2'],
+    ['angle brackets', '<', '>', 'https://example.com/docs'],
+    ['double quotes', '"', '"', 'https://example.com/docs"v2'],
+    ['single quotes', "'", "'", "https://example.com/docs'v2"],
+    ['backticks', '`', '`', 'https://example.com/docs`v2'],
+  ])('preserves safe URLs with %s and surrounding prose punctuation', (_name, open, close, url) => {
+    const text = `See ${open}${url}${close}, then continue.`;
+    expect(sanitizePublicText(text)).toBe(text);
+  });
+
   it('sanitizes URL edge cases end to end without treating ordinary prose as a URL', () => {
     const rendered = renderSourceDescription(
       [

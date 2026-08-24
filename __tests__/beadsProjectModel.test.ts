@@ -234,4 +234,21 @@ describe('Beads project model', () => {
       })).toThrow(new RegExp(type));
     },
   );
+
+  it.each(['epic', 'feature', 'task', 'bug', 'chore', 'decision'])(
+    'accepts configured public Project bead type %s',
+    (type) => {
+      expect(parseBeadExport(toJsonl(makeIssue({
+        id: `${type}-record`,
+        issue_type: type,
+      })), { assigneeMap: {} })[0]?.type).toBe(type);
+    },
+  );
+
+  it('rejects custom bead types that cannot be represented by the configured Project field', () => {
+    expect(() => parseBeadExport(toJsonl(makeIssue({
+      id: 'merge-request-record',
+      issue_type: 'merge-request',
+    })), { assigneeMap: {} })).toThrow(/unsupported.*merge-request/i);
+  });
 });

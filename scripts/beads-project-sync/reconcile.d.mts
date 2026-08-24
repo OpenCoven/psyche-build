@@ -47,6 +47,7 @@ export interface IssueSnapshotInput {
   issueDatabaseId?: number | null;
   issueNodeId?: string | null;
   repository?: string | null;
+  url?: string | null;
 }
 
 export interface IssueSnapshot {
@@ -65,6 +66,7 @@ export interface IssueSnapshot {
   issueDatabaseId: number | null;
   issueNodeId: string | null;
   repository: string | null;
+  url: string | null;
 }
 
 export interface ManagedIssueSnapshot extends IssueSnapshot {
@@ -121,7 +123,7 @@ export interface UpdateIssueOperation {
   type: 'updateIssue';
   phase: 'updateIssues';
   beadId: string;
-  issueNumber: number;
+  issueNumber?: number;
   title: string;
   body: string;
   renderHash: string;
@@ -269,6 +271,7 @@ export interface ReconciliationPlan {
   inventory: readonly PublicBead[];
   operations: readonly ReconciliationOperation[];
   managedIssuesByBeadId: ReadonlyMap<string, ManagedIssueSnapshot>;
+  renderContext: Omit<RenderContext, 'inventoryById' | 'mirroredIssueUrlsByBeadId'>;
   summary: ReconciliationSummary;
 }
 
@@ -288,7 +291,9 @@ export type Awaitable<T> = T | PromiseLike<T>;
 
 export interface ReconciliationAdapters {
   createIssue(operation: CreateIssueOperation): Awaitable<CreateIssueResult>;
-  updateIssue(operation: UpdateIssueOperation): Awaitable<unknown>;
+  updateIssue(
+    operation: UpdateIssueOperation & { issueNumber: number },
+  ): Awaitable<unknown>;
   labelIssue(operation: LabelIssueOperation): Awaitable<unknown>;
   closeIssue(operation: CloseIssueOperation): Awaitable<unknown>;
   ensureProjectItem(

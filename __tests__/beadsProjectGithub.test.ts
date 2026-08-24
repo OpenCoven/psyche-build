@@ -759,7 +759,7 @@ describe('createGhClient', () => {
     expect(payload.query).toMatch(/\bitems\(first:\s*1/u);
   });
 
-  it('binds the Project marker to this repository and adopts only a linked match', async () => {
+  it('uses repository binding when an unbound marked Project is linked elsewhere', async () => {
     const runner = createRunner([
       projectDiscovery([
         {
@@ -773,7 +773,7 @@ describe('createGhClient', () => {
           id: 'P-unlinked',
           number: 5,
           title: 'Unlinked marker',
-          readme: '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
+          readme: '<!-- psyche-beads-project-sync:v1 project-readme -->',
           public: true,
           repositories: {
             nodes: [{ id: 'OTHER_REPO' }],
@@ -874,6 +874,58 @@ describe('createGhClient', () => {
     )).toBe(true);
   });
 
+  it('adopts a uniquely repository-bound renamed Project, repairs its title, and relinks it', async () => {
+    const renamed = {
+      id: 'P-renamed',
+      number: 14,
+      title: 'Former public inventory title',
+      readme: `${boundProjectReadmeMarker}\n# Former title`,
+      public: true,
+      repositories: {
+        nodes: [],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+      items: { totalCount: 2 },
+    };
+    const title = 'Psyche Build: Goals & Implementation';
+    const readme = `${boundProjectReadmeMarker}\n# ${title}`;
+    const runner = createRunner([
+      projectDiscovery([renamed]),
+      success({
+        data: {
+          updateProjectV2: {
+            projectV2: { ...renamed, title, readme },
+          },
+        },
+      }),
+      success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.ensureProject({ title, readme })).resolves.toMatchObject({
+      id: 'P-renamed',
+      title,
+      readme,
+    });
+    expect(runner.calls.some((call) =>
+      String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
+    )).toBe(false);
+    expect(parseStdin(runner.calls[1]!)).toMatchObject({
+      variables: {
+        projectId: 'P-renamed',
+        title,
+        public: true,
+        readme,
+      },
+    });
+    expect(parseStdin(runner.calls[2]!)).toMatchObject({
+      variables: {
+        projectId: 'P-renamed',
+        repositoryId: 'REPO_node',
+      },
+    });
+  });
+
   it('rejects separate current and legacy marked Projects as ambiguous', async () => {
     const runner = createRunner([
       projectDiscovery([
@@ -934,7 +986,7 @@ describe('createGhClient', () => {
     });
     expect(parseStdin(runner.calls[1]!).query).toMatch(/mutation CreateManagedProject/u);
     expect(parseStdin(runner.calls[2]!)).toMatchObject({
-      variables: { projectId: 'P-new', public: true, readme },
+      variables: { projectId: 'P-new', title: 'Public Beads', public: true, readme },
     });
     expect(parseStdin(runner.calls[2]!).query).toMatch(/mutation UpdateManagedProject/u);
     expect(parseStdin(runner.calls[4]!)).toMatchObject({

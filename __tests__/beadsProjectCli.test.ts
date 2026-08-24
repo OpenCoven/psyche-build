@@ -35,6 +35,10 @@ import type {
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const fixturePath = join(repositoryRoot, '__tests__/fixtures/beads-project-sync/issues.jsonl');
+const unsupportedTypeFixturePath = join(
+  repositoryRoot,
+  '__tests__/fixtures/beads-project-sync/unsupported-type.jsonl',
+);
 const configPath = join(repositoryRoot, '.github/beads-project-sync.json');
 const token = 'github_pat_DO_NOT_LEAK';
 
@@ -621,7 +625,7 @@ describe('Beads project sync CLI', () => {
       appliedOperationCount: 0,
       operationCounts: {
         createIssue: 4,
-        updateIssue: 0,
+        updateIssue: 3,
         closeIssue: 0,
       },
       closureCandidates: [],
@@ -719,6 +723,24 @@ describe('Beads project sync CLI', () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe('');
     expect(result.stderr).toMatch(/BEADS_PROJECT_TOKEN/);
+  });
+
+  it('rejects unsupported bead types before GitHub discovery or any writes', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCli(
+      ['--apply', '--inventory-file', unsupportedTypeFixturePath],
+      {
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/unsupported.*merge-request/i);
+    expect(fakeGh.clientOptions).toEqual([]);
+    expect(fakeGh.calls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
   });
 
   it('provisions only when no marked Project exists', async () => {

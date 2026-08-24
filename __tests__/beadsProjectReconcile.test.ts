@@ -75,10 +75,20 @@ function inventoryById(inventory: readonly PublicBead[]): Map<string, PublicBead
   return new Map(inventory.map((bead) => [bead.id, bead]));
 }
 
-function canonicalIssueBody(bead: PublicBead, inventory: readonly PublicBead[]): string {
+function canonicalIssueBody(
+  bead: PublicBead,
+  inventory: readonly PublicBead[],
+  issueNumbers?: ReadonlyMap<string, number>,
+): string {
   return renderIssueBody(bead, {
     ...baseContext,
     inventoryById: inventoryById(inventory),
+    mirroredIssueUrlsByBeadId: issueNumbers == null
+      ? undefined
+      : new Map([...issueNumbers.entries()].map(([beadId, issueNumber]) => [
+          beadId,
+          `https://github.com/${baseContext.repositoryIdentity}/issues/${issueNumber}`,
+        ])),
   });
 }
 
@@ -196,7 +206,7 @@ function managedIssue(
   return {
     number: issueNumber,
     title: renderIssueTitle(bead),
-    body: canonicalIssueBody(bead, inventory),
+    body: canonicalIssueBody(bead, inventory, issueNumbers),
     state: bead.status === 'closed' ? 'closed' : 'open',
     assignee: bead.githubAssignee,
     labels: desiredLabels(bead),
@@ -375,7 +385,7 @@ describe('Beads project reconciliation', () => {
       }),
     ]);
     const issueNumbers = activeIssueNumbersByBeadId(inventory, 201);
-    const currentBody = canonicalIssueBody(inventory[0]!, inventory);
+    const currentBody = canonicalIssueBody(inventory[0]!, inventory, issueNumbers);
 
     const existingIssues = inventory
       .filter((bead) => bead.status !== 'closed')
@@ -762,17 +772,195 @@ describe('Beads project reconciliation', () => {
     });
 
     expect(plan.operations.map((operation) => operation.type)).toEqual([
-      'closeIssue',
       'setFields',
+      'closeIssue',
       'archiveItem',
     ]);
-    expect(plan.operations[0]).toMatchObject({ beadId: 'pb-01', issueNumber: 501, type: 'closeIssue' });
-    expect(plan.operations[1]).toMatchObject({
+    expect(plan.operations[0]).toMatchObject({
       beadId: 'pb-01',
       fields: desiredFields(currentBead),
       type: 'setFields',
     });
+    expect(plan.operations[1]).toMatchObject({ beadId: 'pb-01', issueNumber: 501, type: 'closeIssue' });
     expect(plan.operations[2]).toMatchObject({ beadId: 'pb-01', itemId: 'item-501', type: 'archiveItem' });
+  });
+
+  it('repairs a missing Project item after an interrupted close before archiving', async () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-interrupted-close', {
+        status: 'closed',
+        updatedAt: '2026-08-22T03:00:00Z',
+        closedAt: '2026-08-22T03:00:00Z',
+      }),
+    ]);
+    const bead = inventory[0]!;
+    const issueNumbers = new Map([[bead.id, 551]]);
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(bead, inventory, issueNumbers, {
+          projectItem: null,
+          state: 'closed',
+        }),
+      ],
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+
+    expect(plan.operations.map((operation) => operation.type)).toEqual([
+      'ensureProjectItem',
+      'setFields',
+      'archiveItem',
+    ]);
+
+    const calls: string[] = [];
+    await applyReconciliation(plan, {
+      createIssue() {
+        throw new Error('createIssue should not be called');
+      },
+      updateIssue() {
+        throw new Error('updateIssue should not be called');
+      },
+      labelIssue() {
+        throw new Error('labelIssue should not be called');
+      },
+      closeIssue() {
+        throw new Error('closeIssue should not be called');
+      },
+      ensureProjectItem(operation) {
+        calls.push(`${operation.type}:${operation.issueNumber}`);
+        return { id: 'item-recovered' };
+      },
+      restoreItem() {
+        throw new Error('restoreItem should not be called');
+      },
+      setFields(operation) {
+        calls.push(`${operation.type}:${operation.itemId}`);
+      },
+      syncParent() {
+        throw new Error('syncParent should not be called');
+      },
+      syncBlocker() {
+        throw new Error('syncBlocker should not be called');
+      },
+      archiveItem(operation) {
+        calls.push(`${operation.type}:${operation.itemId}`);
+      },
+      updateReadme() {
+        throw new Error('updateReadme should not be called');
+      },
+      setProjectVisibility() {
+        throw new Error('setProjectVisibility should not be called');
+      },
+    });
+
+    expect(calls).toEqual([
+      'ensureProjectItem:551',
+      'setFields:item-recovered',
+      'archiveItem:item-recovered',
+    ]);
+  });
+
+  it('rejects unsupported public bead types during plan preflight', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-custom-type', { type: 'merge-request' }),
+    ]);
+
+    expect(() => planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    })).toThrow(/unsupported.*merge-request/i);
+  });
+
+  it('links newly created active dependencies after issue identities become available and stays idempotent', async () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-parent', { type: 'feature' }),
+      makeBead('pb-blocker'),
+      makeBead('pb-child', {
+        parentId: 'pb-parent',
+        blockedByIds: ['pb-blocker'],
+      }),
+    ]);
+    const firstPlan = planReconciliation({
+      inventory,
+      existingIssues: [],
+      readme: null,
+      renderContext: baseContext,
+    });
+    const initialChildCreate = firstPlan.operations.find(
+      (operation) => operation.type === 'createIssue' && operation.beadId === 'pb-child',
+    );
+    const childLinkUpdate = firstPlan.operations.find(
+      (operation) => operation.type === 'updateIssue' && operation.beadId === 'pb-child',
+    );
+
+    expect(initialChildCreate?.type).toBe('createIssue');
+    if (initialChildCreate?.type !== 'createIssue') {
+      throw new Error('Expected a child create operation');
+    }
+    expect(initialChildCreate.body).toContain('- Parent: `pb-parent`');
+    expect(initialChildCreate.body).not.toContain('/issues/');
+    expect(childLinkUpdate).toMatchObject({
+      type: 'updateIssue',
+      beadId: 'pb-child',
+    });
+
+    const issueNumbers = new Map<string, number>();
+    const finalBodies = new Map<string, string>();
+    let nextIssueNumber = 800;
+    await applyReconciliation(firstPlan, {
+      createIssue(operation) {
+        nextIssueNumber += 1;
+        issueNumbers.set(operation.beadId, nextIssueNumber);
+        finalBodies.set(operation.beadId, operation.body);
+        return { number: nextIssueNumber };
+      },
+      updateIssue(operation) {
+        finalBodies.set(operation.beadId, operation.body);
+      },
+      labelIssue() {},
+      closeIssue() {
+        throw new Error('closeIssue should not be called');
+      },
+      ensureProjectItem(operation) {
+        return { id: `item-${operation.issueNumber}` };
+      },
+      restoreItem() {
+        throw new Error('restoreItem should not be called');
+      },
+      setFields() {},
+      syncParent() {},
+      syncBlocker() {},
+      archiveItem() {
+        throw new Error('archiveItem should not be called');
+      },
+      updateReadme() {},
+      setProjectVisibility() {
+        throw new Error('setProjectVisibility should not be called');
+      },
+    });
+
+    const childBody = finalBodies.get('pb-child');
+    expect(childBody).toContain(
+      `[#${issueNumbers.get('pb-parent')}](https://github.com/OpenCoven/psyche-build/issues/${issueNumbers.get('pb-parent')}) \`pb-parent\``,
+    );
+    expect(childBody).toContain(
+      `[#${issueNumbers.get('pb-blocker')}](https://github.com/OpenCoven/psyche-build/issues/${issueNumbers.get('pb-blocker')}) \`pb-blocker\``,
+    );
+
+    const secondPlan = planReconciliation({
+      inventory,
+      existingIssues: inventory.map((bead) =>
+        managedIssue(bead, inventory, issueNumbers, {
+          body: finalBodies.get(bead.id) ?? null,
+        })
+      ),
+      readme: { body: canonicalReadmeBody(inventory) },
+      renderContext: baseContext,
+    });
+    expect(secondPlan.operations).toEqual([]);
   });
 
   it('fails for duplicate managed markers and empty source inventories', () => {
@@ -921,8 +1109,8 @@ describe('Beads project reconciliation', () => {
         calls.push({ type: `${operation.type}:${operation.beadId}` });
         return { number: nextIssueNumber };
       },
-      updateIssue() {
-        throw new Error('updateIssue should not be called');
+      updateIssue(operation) {
+        calls.push({ issueNumber: operation.issueNumber, type: `${operation.type}:${operation.beadId}` });
       },
       closeIssue() {
         throw new Error('closeIssue should not be called');
@@ -969,6 +1157,7 @@ describe('Beads project reconciliation', () => {
       'createIssue:pb-01',
       'createIssue:pb-02',
       'createIssue:pb-03',
+      'updateIssue:pb-02',
       'ensureProjectItem:pb-01',
       'ensureProjectItem:pb-02',
       'ensureProjectItem:pb-03',

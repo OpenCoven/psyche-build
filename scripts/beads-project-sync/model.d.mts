@@ -1,6 +1,13 @@
 export type BeadStatus = 'open' | 'in_progress' | 'closed' | (string & {});
 
-export type BeadType = 'epic' | 'feature' | 'task' | (string & {});
+export type BeadType =
+  | 'epic'
+  | 'feature'
+  | 'task'
+  | 'bug'
+  | 'chore'
+  | 'decision'
+  | (string & {});
 
 export interface ParsedBead {
   id: string;
@@ -53,12 +60,18 @@ export interface InventorySummary<
 }
 
 export const BEAD_ID_PATTERN: RegExp;
+export const PUBLIC_BEAD_TYPES: readonly BeadType[];
 
 export function normalizeBeadId(
   value: unknown,
   fieldName: string,
   context: string,
 ): string;
+
+export function normalizePublicBeadType(
+  value: unknown,
+  context: string,
+): BeadType;
 
 export function parseBeadExport(
   jsonl: string,

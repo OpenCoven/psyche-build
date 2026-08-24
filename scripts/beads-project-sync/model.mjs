@@ -68,6 +68,15 @@
  */
 
 const unsupportedRecordTypes = new Set(['infrastructure', 'memory', 'template', 'gate', 'wisp']);
+export const PUBLIC_BEAD_TYPES = Object.freeze([
+  'epic',
+  'feature',
+  'task',
+  'bug',
+  'chore',
+  'decision',
+]);
+const supportedPublicBeadTypes = new Set(PUBLIC_BEAD_TYPES);
 const BEAD_ID_SOURCE = '[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?';
 
 export const BEAD_ID_PATTERN = new RegExp(`^${BEAD_ID_SOURCE}$`, 'u');
@@ -120,6 +129,19 @@ export function normalizeBeadId(value, fieldName, context) {
   const normalized = normalizeRequiredString(value, fieldName, context);
   if (!BEAD_ID_PATTERN.test(normalized)) {
     fail(`${context} field "${fieldName}" must be a valid Bead id using only letters, digits, dots, or hyphens`);
+  }
+  return normalized;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
+ * @returns {string}
+ */
+export function normalizePublicBeadType(value, context) {
+  const normalized = normalizeRequiredString(value, 'issue_type', context);
+  if (!supportedPublicBeadTypes.has(normalized)) {
+    fail(`${context} has unsupported public Bead type "${normalized}"`);
   }
   return normalized;
 }
@@ -348,14 +370,10 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
   }
 
   const id = normalizeBeadId(beadRecord.id, 'id', `Beads record on line ${lineNumber}`);
-  const issueType = normalizeRequiredString(
+  const issueType = normalizePublicBeadType(
     beadRecord.issue_type,
-    'issue_type',
     `Beads record "${id}" on line ${lineNumber}`,
   );
-  if (unsupportedRecordTypes.has(issueType)) {
-    fail(`Unsupported Beads record "${id}" on line ${lineNumber} with type "${issueType}"`);
-  }
 
   const { parentId, blockedByIds } = normalizeDependencies(beadRecord.dependencies, id, lineNumber);
   const rawAssignee = normalizeOptionalString(

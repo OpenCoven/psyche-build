@@ -2,13 +2,19 @@
 
 import { createHash } from 'node:crypto';
 
-import { activeBeads, buildBeadIndex, normalizeBeadId } from './model.mjs';
+import {
+  activeBeads,
+  buildBeadIndex,
+  normalizeBeadId,
+  normalizePublicBeadType,
+} from './model.mjs';
 import {
   DEFAULT_ISSUE_MARKER,
   DEFAULT_PROJECT_MARKER,
   LEGACY_ISSUE_MARKERS,
   markerPattern,
   normalizeMarker,
+  normalizeRepositoryIdentity,
   recognizedMarkers,
   recognizedProjectMarkers as resolveRecognizedProjectMarkers,
   renderHashMarker,
@@ -51,6 +57,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   issueNodeId?: unknown,
  *   parentIssue?: unknown,
  *   repository?: unknown,
+ *   url?: unknown,
  * }} RawIssueSnapshot
  */
 
@@ -106,6 +113,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   issueDatabaseId: number | null,
  *   issueNodeId: string | null,
  *   repository: string | null,
+ *   url: string | null,
  * }} IssueSnapshot
  */
 
@@ -153,7 +161,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   type: 'updateIssue',
  *   phase: 'updateIssues',
  *   beadId: string,
- *   issueNumber: number,
+ *   issueNumber?: number,
  *   title: string,
  *   body: string,
  *   renderHash: string,
@@ -319,6 +327,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
  *   inventory: readonly PublicBead[],
  *   operations: readonly ReconciliationOperation[],
  *   managedIssuesByBeadId: ReadonlyMap<string, ManagedIssueSnapshot>,
+ *   renderContext: Omit<RenderContext, 'inventoryById' | 'mirroredIssueUrlsByBeadId'>,
  *   summary: ReconciliationSummary,
  * }} ReconciliationPlan
  */
@@ -349,7 +358,7 @@ import { renderIssueBody, renderIssueTitle, renderProjectReadme } from './render
 /**
  * @typedef {{
  *   createIssue: (operation: CreateIssueOperation) => Awaitable<CreateIssueResult>,
- *   updateIssue: (operation: UpdateIssueOperation) => Awaitable<unknown>,
+ *   updateIssue: (operation: UpdateIssueOperation & { issueNumber: number }) => Awaitable<unknown>,
  *   labelIssue: (operation: LabelIssueOperation) => Awaitable<unknown>,
  *   closeIssue: (operation: CloseIssueOperation) => Awaitable<unknown>,
  *   ensureProjectItem: (operation: EnsureProjectItemOperation & { issueNumber: number }) => Awaitable<EnsureProjectItemResult>,
@@ -730,6 +739,7 @@ function normalizeIssueSnapshot(value, context) {
       : normalizePositiveInteger(issue.issueDatabaseId, 'issueDatabaseId', context),
     issueNodeId: normalizeOptionalTrimmedString(issue.issueNodeId, 'issueNodeId', context),
     repository: normalizeOptionalTrimmedString(issue.repository, 'repository', context),
+    url: normalizeOptionalTrimmedString(issue.url, 'url', context),
   };
 }
 
@@ -1127,15 +1137,85 @@ function indexManagedIssues(existingIssues, issueMarkers) {
 }
 
 /**
+ * @param {Omit<RenderContext, 'inventoryById' | 'mirroredIssueUrlsByBeadId'>} renderContext
+ * @returns {string}
+ */
+function resolveManagedIssueRepositoryIdentity(renderContext) {
+  if (renderContext.repositoryIdentity != null) {
+    return normalizeRepositoryIdentity(
+      renderContext.repositoryIdentity,
+      'planReconciliation repositoryIdentity',
+    );
+  }
+
+  if (typeof renderContext.sourceRepositoryUrl === 'string') {
+    try {
+      const url = new URL(renderContext.sourceRepositoryUrl);
+      const segments = url.pathname.split('/').filter(Boolean);
+      if (
+        (url.protocol === 'https:' || url.protocol === 'http:')
+        && url.hostname.toLowerCase() === 'github.com'
+        && segments.length >= 2
+      ) {
+        return normalizeRepositoryIdentity(
+          `${decodeURIComponent(segments[0] ?? '')}/${decodeURIComponent(segments[1] ?? '')}`,
+          'planReconciliation sourceRepositoryUrl',
+        );
+      }
+    } catch {
+      // renderProjectReadme reports the canonical render-context validation error.
+    }
+  }
+
+  fail('planReconciliation requires repositoryIdentity or a canonical GitHub sourceRepositoryUrl');
+}
+
+/**
+ * @param {ReadonlyMap<string, number>} issueNumbersByBeadId
+ * @param {Omit<RenderContext, 'inventoryById' | 'mirroredIssueUrlsByBeadId'>} renderContext
+ * @returns {Map<string, string>}
+ */
+function buildCanonicalManagedIssueUrls(issueNumbersByBeadId, renderContext) {
+  const repositoryIdentity = resolveManagedIssueRepositoryIdentity(renderContext);
+  return new Map(
+    [...issueNumbersByBeadId.entries()]
+      .sort(([left], [right]) => compareStrings(left, right))
+      .map(([beadId, issueNumber]) => [
+        beadId,
+        `https://github.com/${repositoryIdentity}/issues/${issueNumber}`,
+      ]),
+  );
+}
+
+/**
  * @param {readonly PublicBead[]} inventory
  * @param {Omit<RenderContext, 'inventoryById' | 'mirroredIssueUrlsByBeadId'>} renderContext
+ * @param {ReadonlyMap<string, string>} mirroredIssueUrlsByBeadId
  * @returns {RenderContext}
  */
-function buildIssueRenderContext(inventory, renderContext) {
+function buildIssueRenderContext(inventory, renderContext, mirroredIssueUrlsByBeadId) {
   return {
     ...renderContext,
     inventoryById: buildBeadIndex(inventory).byId,
+    mirroredIssueUrlsByBeadId,
   };
+}
+
+/**
+ * @param {PublicBead} bead
+ * @param {ReadonlyMap<string, PublicBead>} inventoryById
+ * @param {ReadonlyMap<string, string>} mirroredIssueUrlsByBeadId
+ * @returns {boolean}
+ */
+function hasUnresolvedActiveDependencyUrl(bead, inventoryById, mirroredIssueUrlsByBeadId) {
+  const dependencyIds = [
+    ...(bead.parentId == null ? [] : [bead.parentId]),
+    ...bead.blockedByIds,
+  ];
+  return dependencyIds.some((dependencyId) =>
+    shouldMirrorRelationshipTarget(inventoryById.get(dependencyId))
+    && !mirroredIssueUrlsByBeadId.has(dependencyId)
+  );
 }
 
 /**
@@ -1255,13 +1335,31 @@ export function planReconciliation(input) {
   if (inventory.length === 0) {
     fail('planReconciliation cannot reconcile an empty source inventory');
   }
+  for (const bead of inventory) {
+    normalizePublicBeadType(
+      bead?.type,
+      `planReconciliation inventory bead "${bead?.id ?? 'unknown'}"`,
+    );
+  }
 
   const inventoryIndex = buildBeadIndex(inventory);
   const managedIssuesByBeadId = indexManagedIssues(
     normalizedInput.existingIssues ?? [],
     markerContext.recognizedIssueMarkers,
   );
-  const issueRenderContext = buildIssueRenderContext(inventory, normalizedInput.renderContext ?? {});
+  const normalizedRenderContext = normalizedInput.renderContext ?? {};
+  const knownIssueNumbersByBeadId = new Map(
+    [...managedIssuesByBeadId.entries()].map(([beadId, issue]) => [beadId, issue.number]),
+  );
+  const mirroredIssueUrlsByBeadId = buildCanonicalManagedIssueUrls(
+    knownIssueNumbersByBeadId,
+    normalizedRenderContext,
+  );
+  const issueRenderContext = buildIssueRenderContext(
+    inventory,
+    normalizedRenderContext,
+    mirroredIssueUrlsByBeadId,
+  );
   const sortedActiveBeads = activeBeads(inventory).slice().sort((left, right) => compareStrings(left.id, right.id));
   const activeBeadIds = new Set(sortedActiveBeads.map((bead) => bead.id));
 
@@ -1292,6 +1390,11 @@ export function planReconciliation(input) {
 
   for (const bead of sortedActiveBeads) {
     const existingIssue = managedIssuesByBeadId.get(bead.id);
+    const hasDeferredDependencyLinks = hasUnresolvedActiveDependencyUrl(
+      bead,
+      inventoryIndex.byId,
+      mirroredIssueUrlsByBeadId,
+    );
     const renderedBody = renderIssueBody(bead, issueRenderContext);
     const renderHash = hashRenderedBody(renderedBody);
     const managedBody = attachRenderHash(renderedBody, renderHash, markerContext.issueMarker);
@@ -1309,6 +1412,18 @@ export function planReconciliation(input) {
         assignee,
         state: 'open',
       });
+      if (hasDeferredDependencyLinks) {
+        updateIssues.push({
+          type: 'updateIssue',
+          phase: 'updateIssues',
+          beadId: bead.id,
+          title,
+          body: managedBody,
+          renderHash,
+          assignee,
+          state: 'open',
+        });
+      }
     } else {
       const issueNeedsUpdate = (
         existingIssue.title !== title
@@ -1322,7 +1437,7 @@ export function planReconciliation(input) {
         )
       );
 
-      if (issueNeedsUpdate) {
+      if (issueNeedsUpdate || hasDeferredDependencyLinks) {
         updateIssues.push({
           type: 'updateIssue',
           phase: 'updateIssues',
@@ -1454,7 +1569,7 @@ export function planReconciliation(input) {
     }
 
     const desiredFields = buildDesiredFields(beadId, sourceBead);
-    if (existingIssue.projectItem == null && existingIssue.state !== 'closed') {
+    if (existingIssue.projectItem == null) {
       ensureProjectItems.push({
         type: 'ensureProjectItem',
         phase: 'ensureProjectItems',
@@ -1463,28 +1578,23 @@ export function planReconciliation(input) {
       });
     }
 
-    if (
-      existingIssue.projectItem != null
-      || existingIssue.state !== 'closed'
-    ) {
-      if (!hasDesiredFieldValues(existingIssue.projectItem?.fields ?? {}, desiredFields)) {
-        setFields.push({
-          type: 'setFields',
-          phase: 'setFields',
-          beadId,
-          itemId: existingIssue.projectItem?.id,
-          fields: desiredFields,
-        });
-      }
+    if (!hasDesiredFieldValues(existingIssue.projectItem?.fields ?? {}, desiredFields)) {
+      setFields.push({
+        type: 'setFields',
+        phase: 'setFields',
+        beadId,
+        itemId: existingIssue.projectItem?.id,
+        fields: desiredFields,
+      });
+    }
 
-      if (!existingIssue.projectItem?.archived) {
-        archiveItems.push({
-          type: 'archiveItem',
-          phase: 'archiveItems',
-          beadId,
-          itemId: existingIssue.projectItem?.id,
-        });
-      }
+    if (!existingIssue.projectItem?.archived) {
+      archiveItems.push({
+        type: 'archiveItem',
+        phase: 'archiveItems',
+        beadId,
+        itemId: existingIssue.projectItem?.id,
+      });
     }
   }
 
@@ -1516,12 +1626,12 @@ export function planReconciliation(input) {
     ...createIssues,
     ...updateIssues,
     ...labelIssues,
-    ...closeIssues,
     ...ensureProjectItems,
     ...restoreItems,
     ...setFields,
     ...syncParents,
     ...syncBlockers,
+    ...closeIssues,
     ...archiveItems,
     ...updateReadmeOperations,
     ...setProjectVisibilityOperations,
@@ -1531,6 +1641,7 @@ export function planReconciliation(input) {
     inventory,
     operations,
     managedIssuesByBeadId,
+    renderContext: normalizedRenderContext,
     summary: buildSummary(
       inventory,
       managedIssuesByBeadId,
@@ -1687,9 +1798,41 @@ export async function applyReconciliation(plan, adapters) {
         }
         case 'updateIssue': {
           const updateIssue = adapters.updateIssue ?? fail('applyReconciliation requires adapters.updateIssue');
-          const result = await updateIssue(operation);
-          issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
-          applied.push({ operation, result });
+          const issueNumber = operation.issueNumber
+            ?? requireResolvedIssueNumber(
+              issueNumbersByBeadId,
+              operation.beadId,
+              'updateIssue operation',
+            );
+          const bead = plan.inventory.find((candidate) => candidate.id === operation.beadId)
+            ?? fail(`updateIssue operation missing inventory bead "${operation.beadId}"`);
+          const mirroredIssueUrlsByBeadId = buildCanonicalManagedIssueUrls(
+            issueNumbersByBeadId,
+            plan.renderContext,
+          );
+          const renderedBody = renderIssueBody(
+            bead,
+            buildIssueRenderContext(
+              plan.inventory,
+              plan.renderContext,
+              mirroredIssueUrlsByBeadId,
+            ),
+          );
+          const renderHash = hashRenderedBody(renderedBody);
+          const markerContext = resolveMarkerContext(plan.renderContext);
+          const resolvedOperation = {
+            ...operation,
+            issueNumber,
+            title: renderIssueTitle(bead),
+            body: attachRenderHash(renderedBody, renderHash, markerContext.issueMarker),
+            renderHash,
+            assignee: bead.githubAssignee ?? null,
+            state: 'open',
+          };
+          failingOperation = resolvedOperation;
+          const result = await updateIssue(resolvedOperation);
+          issueNumbersByBeadId.set(operation.beadId, issueNumber);
+          applied.push({ operation: resolvedOperation, result });
           break;
         }
         case 'labelIssue': {

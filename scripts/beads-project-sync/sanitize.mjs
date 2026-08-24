@@ -44,10 +44,16 @@ const URL_USERINFO_PATTERN =
   /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s"'`()\[\]{}<>@]+@/iu;
 const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
 const TOKEN_PATTERN = /\S+/gu;
-const URL_CANDIDATE_START_PATTERN =
-  /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\//giu;
-const URL_CANDIDATE_HARD_BOUNDARY_PATTERN = /[\s"`<>{}\\]/u;
 const URL_TRAILING_PROSE_PUNCTUATION = new Set(['.', ',', ';', '!']);
+const URI_WRAPPER_DELIMITERS = new Map([
+  ['(', ')'],
+  ['[', ']'],
+  ['{', '}'],
+  ['<', '>'],
+  ['"', '"'],
+  ["'", "'"],
+  ['`', '`'],
+]);
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
 const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
 const LOCAL_PATH_FILE_EXTENSION_PATTERN =
@@ -217,6 +223,30 @@ function stripGitPlusPrefix(value) {
 }
 
 /**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isAsciiLetter(value) {
+  return value != null && /^[A-Za-z]$/u.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isUriSchemeCharacter(value) {
+  return value != null && /^[A-Za-z0-9+.-]$/u.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isUriCandidateBoundary(value) {
+  return value == null || /\s/u.test(value) || (value.codePointAt(0) ?? 0) <= 0x20;
+}
+
+/**
  * @typedef {{
  *   start: number,
  *   end: number,
@@ -226,58 +256,62 @@ function stripGitPlusPrefix(value) {
 
 /**
  * @param {string} value
- * @returns {number}
+ * @param {number} start
+ * @returns {number | null}
  */
-function findFirstUnbalancedUrlClosingDelimiter(value) {
-  let parentheses = 0;
-  let brackets = 0;
-
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (character === '(') {
-      parentheses += 1;
-    } else if (character === ')') {
-      if (parentheses === 0) {
-        return index;
-      }
-      parentheses -= 1;
-    } else if (character === '[') {
-      brackets += 1;
-    } else if (character === ']') {
-      if (brackets === 0) {
-        return index;
-      }
-      brackets -= 1;
-    }
+function findUriSchemeEnd(value, start) {
+  if (!isAsciiLetter(value[start])) {
+    return null;
+  }
+  if (start > 0 && isUriSchemeCharacter(value[start - 1])) {
+    return null;
   }
 
-  return value.length;
+  let cursor = start + 1;
+  while (isUriSchemeCharacter(value[cursor])) {
+    cursor += 1;
+  }
+  if (value[cursor] !== ':') {
+    return null;
+  }
+  if (
+    cursor === start + 1
+    && (value[cursor + 1] === '/' || value[cursor + 1] === '\\')
+  ) {
+    return null;
+  }
+  return cursor;
 }
 
 /**
  * @param {string} value
+ * @param {number} start
+ * @param {number} end
  * @returns {number}
  */
-function urlCandidateContentEnd(value) {
-  let end = value.length;
-
-  while (end > 0) {
-    const character = value[end - 1];
-    if (URL_TRAILING_PROSE_PUNCTUATION.has(character)) {
-      end -= 1;
-      continue;
-    }
-    if (
-      character === "'"
-      && (value.slice(0, end).match(/'/gu)?.length ?? 0) % 2 === 1
-    ) {
-      end -= 1;
-      continue;
-    }
-    break;
+function trimUriCandidateEnd(value, start, end) {
+  let contentEnd = end;
+  while (
+    contentEnd > start
+    && URL_TRAILING_PROSE_PUNCTUATION.has(value[contentEnd - 1])
+    && isUriCandidateBoundary(value[contentEnd])
+  ) {
+    contentEnd -= 1;
   }
 
-  return findFirstUnbalancedUrlClosingDelimiter(value.slice(0, end));
+  const wrapperStart = value[start - 1];
+  const wrapperEnd = URI_WRAPPER_DELIMITERS.get(wrapperStart);
+  if (wrapperEnd != null && value[contentEnd - 1] === wrapperEnd) {
+    contentEnd -= 1;
+    while (
+      contentEnd > start
+      && URL_TRAILING_PROSE_PUNCTUATION.has(value[contentEnd - 1])
+    ) {
+      contentEnd -= 1;
+    }
+  }
+
+  return contentEnd;
 }
 
 /**
@@ -286,36 +320,34 @@ function urlCandidateContentEnd(value) {
  */
 function scanUrlCandidates(value) {
   const candidates = /** @type {UrlCandidate[]} */ ([]);
-  const pattern = new RegExp(URL_CANDIDATE_START_PATTERN.source, 'giu');
+  let cursor = 0;
 
-  for (let match = pattern.exec(value); match != null; match = pattern.exec(value)) {
+  while (cursor < value.length) {
+    const schemeEnd = findUriSchemeEnd(value, cursor);
+    if (schemeEnd == null) {
+      cursor += 1;
+      continue;
+    }
     if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
       fail('Public text exceeds the URL candidate inspection limit');
     }
 
-    const start = match.index;
-    let scanEnd = start + match[0].length;
-    while (
-      scanEnd < value.length
-      && !URL_CANDIDATE_HARD_BOUNDARY_PATTERN.test(value[scanEnd])
-    ) {
+    const start = cursor;
+    let scanEnd = schemeEnd + 1;
+    while (scanEnd < value.length && !isUriCandidateBoundary(value[scanEnd])) {
       if (scanEnd - start >= MAX_URL_CANDIDATE_LENGTH) {
         fail('Public URL candidate exceeds the inspection limit');
       }
       scanEnd += 1;
     }
 
-    const scannedValue = value.slice(start, scanEnd);
-    const contentEnd = Math.max(
-      match[0].length,
-      urlCandidateContentEnd(scannedValue),
-    );
+    const contentEnd = Math.max(schemeEnd + 1, trimUriCandidateEnd(value, start, scanEnd));
     candidates.push({
       start,
-      end: start + contentEnd,
-      value: scannedValue.slice(0, contentEnd),
+      end: contentEnd,
+      value: value.slice(start, contentEnd),
     });
-    pattern.lastIndex = start + contentEnd;
+    cursor = Math.max(contentEnd, schemeEnd + 1);
   }
 
   return candidates;
@@ -459,15 +491,30 @@ function redactLocalOperationalPathsInUrlComponent(value) {
 
 /**
  * @param {string} value
+ * @returns {string}
+ */
+function redactEmailsInUrlComponent(value) {
+  return sanitizePercentDecodedUrlComponent(
+    value,
+    (variant) => variant.replace(EMAIL_PATTERN, '<redacted-email>'),
+  );
+}
+
+/**
+ * @param {string} value
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
 function sanitizeUrlComponent(value, matchers) {
   return redactLocalOperationalPathsInUrlComponent(
-    redactHomeDirectoriesInUrlComponent(value, matchers, {
-      allowGenericFileUriPatterns: true,
-      allowGenericPathPatterns: true,
-    }),
+    redactHomeDirectoriesInUrlComponent(
+      redactEmailsInUrlComponent(value),
+      matchers,
+      {
+        allowGenericFileUriPatterns: true,
+        allowGenericPathPatterns: true,
+      },
+    ),
   );
 }
 
@@ -547,87 +594,169 @@ function sanitizeUrlHash(value, matchers) {
 }
 
 /**
+ * @typedef {{
+ *   scheme: string,
+ *   authority: { start: number, end: number } | null,
+ *   path: { start: number, end: number },
+ *   query: { start: number, end: number } | null,
+ *   fragment: { start: number, end: number } | null,
+ * }} ParsedAbsoluteUri
+ */
+
+/**
  * @param {string} value
- * @param {URL} url
+ * @returns {ParsedAbsoluteUri | null}
+ */
+function parseAbsoluteUri(value) {
+  const schemeEnd = findUriSchemeEnd(value, 0);
+  if (schemeEnd == null) {
+    return null;
+  }
+
+  const fragmentDelimiter = value.indexOf('#', schemeEnd + 1);
+  const resourceEnd = fragmentDelimiter === -1 ? value.length : fragmentDelimiter;
+  const queryDelimiter = value.indexOf('?', schemeEnd + 1);
+  const hasQuery = queryDelimiter !== -1 && queryDelimiter < resourceEnd;
+  const hierarchyEnd = hasQuery ? queryDelimiter : resourceEnd;
+  const hierarchyStart = schemeEnd + 1;
+  let pathStart = hierarchyStart;
+  let authority = null;
+
+  if (value.startsWith('//', hierarchyStart)) {
+    const authorityStart = hierarchyStart + 2;
+    const slashIndex = value.indexOf('/', authorityStart);
+    const authorityEnd = slashIndex === -1 || slashIndex > hierarchyEnd
+      ? hierarchyEnd
+      : slashIndex;
+    authority = {
+      start: authorityStart,
+      end: authorityEnd,
+    };
+    pathStart = authorityEnd;
+  }
+
+  return {
+    scheme: stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase(),
+    authority,
+    path: {
+      start: pathStart,
+      end: hierarchyEnd,
+    },
+    query: hasQuery
+      ? { start: queryDelimiter + 1, end: resourceEnd }
+      : null,
+    fragment: fragmentDelimiter === -1
+      ? null
+      : { start: fragmentDelimiter + 1, end: value.length },
+  };
+}
+
+/**
+ * @param {string} value
+ * @param {ParsedAbsoluteUri} uri
+ * @returns {string}
+ */
+function stripUriUserinfo(value, uri) {
+  if (uri.authority == null) {
+    return value;
+  }
+  const authority = value.slice(uri.authority.start, uri.authority.end);
+  const atIndex = authority.lastIndexOf('@');
+  if (atIndex === -1) {
+    return value;
+  }
+  const absoluteAtIndex = uri.authority.start + atIndex;
+  return `${value.slice(0, uri.authority.start)}${value.slice(absoluteAtIndex + 1)}`;
+}
+
+/**
+ * @param {string} value
+ * @param {{ start: number, end: number } | null} range
+ * @param {(component: string) => string} sanitize
+ * @returns {{ start: number, end: number, value: string } | null}
+ */
+function sanitizeUriRange(value, range, sanitize) {
+  if (range == null || range.start === range.end) {
+    return null;
+  }
+  const component = value.slice(range.start, range.end);
+  const sanitized = sanitize(component);
+  return sanitized === component
+    ? null
+    : { ...range, value: sanitized };
+}
+
+/**
+ * @param {string} value
+ * @param {readonly { start: number, end: number, value: string }[]} replacements
+ * @returns {string}
+ */
+function replaceUriRanges(value, replacements) {
+  let replaced = value;
+  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
+    replaced = `${replaced.slice(0, replacement.start)}${replacement.value}${replaced.slice(replacement.end)}`;
+  }
+  return replaced;
+}
+
+/**
+ * @param {string} value
+ * @param {ParsedAbsoluteUri} uri
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
-function sanitizeParsedUrl(value, url, matchers) {
-  let changed = false;
-  const protocol = url.protocol.toLowerCase();
-
-  if (url.username || url.password) {
-    const authorityStart = value.indexOf('://') + 3;
-    const authorityEnd = value.slice(authorityStart).search(/[/?#]/u);
-    const absoluteAuthorityEnd = authorityEnd === -1
-      ? value.length
-      : authorityStart + authorityEnd;
-    const atIndex = value.lastIndexOf('@', absoluteAuthorityEnd);
-    if (atIndex >= authorityStart) {
-      value = `${value.slice(0, authorityStart)}${value.slice(atIndex + 1)}`;
-      changed = true;
-      try {
-        url = new URL(stripGitPlusPrefix(value));
-      } catch {
-        return value;
-      }
-    }
+function sanitizeParsedUri(value, uri, matchers) {
+  const replacements = [];
+  const authorityReplacement = sanitizeUriRange(
+    value,
+    uri.authority,
+    (component) => sanitizeUrlComponent(component, matchers),
+  );
+  if (authorityReplacement?.value.includes('<redacted-local-path>')) {
+    return '<redacted-local-path>';
+  }
+  if (authorityReplacement) {
+    replacements.push(authorityReplacement);
   }
 
-  if (protocol !== 'http:' && protocol !== 'https:') {
-    const authorityStart = value.indexOf('://') + 3;
-    const pathOffset = value.slice(authorityStart).search(/[/?#]/u);
-    if (pathOffset !== -1) {
-      const pathStart = authorityStart + pathOffset;
-      const suffixOffset = value.slice(pathStart).search(/[?#]/u);
-      const pathEnd = suffixOffset === -1 ? value.length : pathStart + suffixOffset;
-      const rawPath = value.slice(pathStart, pathEnd);
-      const sanitizedPath = sanitizeUrlComponent(rawPath, matchers);
-      if (sanitizedPath !== rawPath) {
-        const normalizedPath = rawPath.startsWith('/') && !sanitizedPath.startsWith('/')
-          ? `/${sanitizedPath}`
-          : sanitizedPath;
-        value = `${value.slice(0, pathStart)}${normalizedPath}${value.slice(pathEnd)}`;
-        changed = true;
-      }
-    }
+  const pathReplacement = sanitizeUriRange(
+    value,
+    uri.path,
+    (component) => {
+      const sanitized = uri.scheme === 'http' || uri.scheme === 'https'
+        ? redactEmailsInUrlComponent(component)
+        : sanitizeUrlComponent(component, matchers);
+      const structurallyNormalized = uri.authority == null
+        ? sanitized.replace(/%3A/giu, ':').replace(/%2C/giu, ',')
+        : sanitized;
+      return component.startsWith('/') && !structurallyNormalized.startsWith('/')
+        ? `/${structurallyNormalized}`
+        : structurallyNormalized;
+    },
+  );
+  if (pathReplacement) {
+    replacements.push(pathReplacement);
   }
 
-  if (url.search) {
-    const rawSearch = url.search.startsWith('?') ? url.search.slice(1) : url.search;
-    let sanitizedSearch = sanitizeUrlQuery(rawSearch, matchers);
-    if (protocol !== 'http:' && protocol !== 'https:') {
-      sanitizedSearch = redactLocalOperationalPathsInUrlComponent(
-        redactHomeDirectoriesInUrlComponent(sanitizedSearch, matchers, {
-          allowGenericFileUriPatterns: true,
-          allowGenericPathPatterns: true,
-        }),
-      );
-    }
-    if (sanitizedSearch !== rawSearch) {
-      value = value.replace(url.search, `?${sanitizedSearch}`);
-      changed = true;
-    }
+  const queryReplacement = sanitizeUriRange(
+    value,
+    uri.query,
+    (component) => sanitizeUrlQuery(component, matchers),
+  );
+  if (queryReplacement) {
+    replacements.push(queryReplacement);
   }
 
-  if (url.hash) {
-    const rawHash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
-    let sanitizedHash = sanitizeUrlHash(rawHash, matchers);
-    if (protocol !== 'http:' && protocol !== 'https:') {
-      sanitizedHash = redactLocalOperationalPathsInUrlComponent(
-        redactHomeDirectoriesInUrlComponent(sanitizedHash, matchers, {
-          allowGenericFileUriPatterns: true,
-          allowGenericPathPatterns: true,
-        }),
-      );
-    }
-    if (sanitizedHash !== rawHash) {
-      value = value.replace(url.hash, `#${sanitizedHash}`);
-      changed = true;
-    }
+  const fragmentReplacement = sanitizeUriRange(
+    value,
+    uri.fragment,
+    (component) => sanitizeUrlHash(component, matchers),
+  );
+  if (fragmentReplacement) {
+    replacements.push(fragmentReplacement);
   }
 
-  return value;
+  return replaceUriRanges(value, replacements);
 }
 
 /**
@@ -637,15 +766,17 @@ function sanitizeParsedUrl(value, url, matchers) {
  */
 function sanitizeProtectedUrl(value, matchers) {
   for (const [index, variant] of percentDecodedVariants(value).entries()) {
-    /** @type {URL} */
-    let url;
-    try {
-      url = new URL(stripGitPlusPrefix(variant));
-    } catch {
+    const uri = parseAbsoluteUri(variant);
+    if (uri == null) {
       continue;
     }
 
-    const sanitized = sanitizeParsedUrl(variant, url, matchers);
+    const withoutUserinfo = stripUriUserinfo(variant, uri);
+    const reparsed = parseAbsoluteUri(withoutUserinfo);
+    if (reparsed == null) {
+      return withoutUserinfo;
+    }
+    const sanitized = sanitizeParsedUri(withoutUserinfo, reparsed, matchers);
     if (index === 0) {
       return sanitized;
     }
@@ -1388,36 +1519,6 @@ function assertNoDirectPublishableSecrets(value) {
 
 /**
  * @param {string} value
- * @returns {string}
- */
-function rawUrlAuthority(value) {
-  const authorityStart = value.indexOf('://');
-  if (authorityStart < 0) {
-    return '';
-  }
-
-  const contentStart = authorityStart + 3;
-  const authorityEndOffset = value.slice(contentStart).search(/[/?#]/u);
-  return authorityEndOffset === -1
-    ? value.slice(contentStart)
-    : value.slice(contentStart, contentStart + authorityEndOffset);
-}
-
-/**
- * @param {string} value
- */
-function assertNoSecretPercentDecodedVariants(value) {
-  if (!value) {
-    return;
-  }
-
-  for (const variant of percentDecodedVariants(value)) {
-    assertNoDirectPublishableSecrets(variant);
-  }
-}
-
-/**
- * @param {string} value
  * @param {boolean} [rejectDirectUserinfo=false]
  */
 function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
@@ -1427,32 +1528,58 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
         assertNoDirectPublishableSecrets(variant);
       }
 
-      /** @type {URL} */
-      let url;
-      try {
-        url = new URL(stripGitPlusPrefix(variant));
-      } catch {
+      const uri = parseAbsoluteUri(variant);
+      if (uri == null) {
         continue;
       }
 
-      if (
-        (rejectDirectUserinfo || index > 0)
-        && (url.username || url.password)
-      ) {
-        fail('Publishable URL credentials detected');
-      }
+      const components = [
+        uri.authority == null
+          ? null
+          : {
+              kind: 'authority',
+              value: variant.slice(uri.authority.start, uri.authority.end),
+            },
+        {
+          kind: 'path',
+          value: variant.slice(uri.path.start, uri.path.end),
+        },
+        uri.query == null
+          ? null
+          : {
+              kind: 'query',
+              value: variant.slice(uri.query.start, uri.query.end),
+            },
+        uri.fragment == null
+          ? null
+          : {
+              kind: 'fragment',
+              value: variant.slice(uri.fragment.start, uri.fragment.end),
+            },
+      ].filter((component) => component != null);
 
-      for (const component of [
-        rawUrlAuthority(variant),
-        url.username,
-        url.password,
-        url.hostname,
-        url.host,
-        url.pathname,
-        url.search.startsWith('?') ? url.search.slice(1) : url.search,
-        url.hash.startsWith('#') ? url.hash.slice(1) : url.hash,
-      ]) {
-        assertNoSecretPercentDecodedVariants(component);
+      for (const component of components) {
+        for (const [componentIndex, componentVariant] of percentDecodedVariants(
+          component.value,
+        ).entries()) {
+          assertNoDirectPublishableSecrets(componentVariant);
+          if (component.kind !== 'authority') {
+            continue;
+          }
+          const atIndex = componentVariant.lastIndexOf('@');
+          if (atIndex === -1) {
+            continue;
+          }
+          const userinfo = componentVariant.slice(0, atIndex);
+          if (
+            rejectDirectUserinfo
+            || index > 0
+            || componentIndex > 0
+            || /[\[\]{}<>"'`\\]/u.test(userinfo)
+          ) {
+            fail('Publishable URL credentials detected');
+          }
+        }
       }
     }
   }
@@ -1490,15 +1617,8 @@ export function sanitizePublicText(value, config = {}) {
   let sanitized = value.replace(/\r\n?/gu, '\n');
   assertNoEncodedUrlSecrets(sanitized);
   sanitized = replaceUrlCandidates(sanitized, (url) => {
-    const authorityStart = url.indexOf('://') + 3;
-    const authorityEndOffset = url.slice(authorityStart).search(/[/?#]/u);
-    const authorityEnd = authorityEndOffset === -1
-      ? url.length
-      : authorityStart + authorityEndOffset;
-    const atIndex = url.lastIndexOf('@', authorityEnd);
-    return atIndex >= authorityStart
-      ? `${url.slice(0, authorityStart)}${url.slice(atIndex + 1)}`
-      : url;
+    const uri = parseAbsoluteUri(url);
+    return uri == null ? url : stripUriUserinfo(url, uri);
   });
   sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
   sanitized = redactLocalPaths(sanitized, config);

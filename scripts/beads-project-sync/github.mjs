@@ -141,8 +141,8 @@ mutation CreateManagedProject($ownerId: ID!, $title: String!) {
 `.trim();
 
 const UPDATE_PROJECT_MUTATION = `
-mutation UpdateManagedProject($projectId: ID!, $public: Boolean!, $readme: String!) {
-  updateProjectV2(input: {projectId: $projectId, public: $public, readme: $readme}) {
+mutation UpdateManagedProject($projectId: ID!, $title: String!, $public: Boolean!, $readme: String!) {
+  updateProjectV2(input: {projectId: $projectId, title: $title, public: $public, readme: $readme}) {
     projectV2 {
       id
       number
@@ -1264,7 +1264,6 @@ export function createGhClient(options) {
   /** @type {ProjectContext[]} */
   let lastDiscoveredProjects = [];
   /** @type {ProjectContext[]} */
-  let lastUnlinkedBoundProjects = [];
 
   /**
    * @param {Record<string, unknown>} issue
@@ -1856,7 +1855,6 @@ export function createGhClient(options) {
    */
   async function discoverProject() {
     const candidates = [];
-    lastUnlinkedBoundProjects = [];
     for (const project of await discoverProjects()) {
       const markers = extractProjectReadmeMarkers(
         project.readme,
@@ -1878,10 +1876,10 @@ export function createGhClient(options) {
       ) {
         continue;
       }
-      if (await isProjectLinkedToRepository(project)) {
+      if (discoveredMarker.repository != null) {
         candidates.push(project);
-      } else if (discoveredMarker.repository != null) {
-        lastUnlinkedBoundProjects.push(project);
+      } else if (await isProjectLinkedToRepository(project)) {
+        candidates.push(project);
       }
     }
     const matches = candidates;
@@ -1962,9 +1960,10 @@ export function createGhClient(options) {
 
     const existing = await discoverProject();
     if (existing) {
-      if (!existing.public || existing.readme !== readme) {
+      if (existing.title !== title || !existing.public || existing.readme !== readme) {
         const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
           projectId: existing.id,
+          title,
           public: true,
           readme,
         });
@@ -1998,7 +1997,6 @@ export function createGhClient(options) {
       && project.itemCount === 0
     );
     const recoveryCandidates = [
-      ...lastUnlinkedBoundProjects.filter((project) => project.title === title),
       ...pristineCandidates,
     ];
     const uniqueRecoveryCandidates = [
@@ -2043,9 +2041,10 @@ export function createGhClient(options) {
       created = normalizeProject(createdData.projectV2);
     }
 
-    if (!created.public || created.readme !== readme) {
+    if (created.title !== title || !created.public || created.readme !== readme) {
       const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
         projectId: created.id,
+        title,
         public: true,
         readme,
       });
@@ -2056,7 +2055,7 @@ export function createGhClient(options) {
         ...updatedRaw,
         id: created.id,
         number: created.number,
-        title: typeof updatedRaw.title === 'string' ? updatedRaw.title : created.title,
+        title,
         readme,
         public: true,
         linkedRepositoriesKnown: created.linkedRepositoriesKnown,
