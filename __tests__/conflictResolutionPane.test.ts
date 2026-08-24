@@ -253,8 +253,13 @@ describe('conflict resolution pane transaction', () => {
     );
   });
 
-  it('launches coven-code bare without prompt bootstrap files', async () => {
-    buildAgentCommandMock.mockReturnValue('coven');
+  it('launches coven-code bare without prompt bootstrap files when permission mode is plan', async () => {
+    const { buildAgentCommand: buildRealAgentCommand } = await vi.importActual<
+      typeof import('../src/utils/agentLaunch.js')
+    >('../src/utils/agentLaunch.js');
+    buildAgentCommandMock.mockImplementation((agent, permissionMode) => (
+      buildRealAgentCommand(agent, permissionMode)
+    ));
     getPromptTransportMock.mockReturnValue('launch-only');
 
     const { createConflictResolutionPane } = await import(
@@ -276,7 +281,8 @@ describe('conflict resolution pane transaction', () => {
     expect(writePromptFileMock).not.toHaveBeenCalled();
     expect(buildPromptReadAndDeleteSnippetMock).not.toHaveBeenCalled();
     expect(buildInitialPromptCommandMock).not.toHaveBeenCalled();
+    expect(buildAgentCommandMock).toHaveBeenCalledWith('coven-code', 'plan');
     expect(sendPromptViaTmuxMock).not.toHaveBeenCalled();
-    expect(tmuxService.sendShellCommand).toHaveBeenCalledWith(expect.any(String), 'coven');
+    expect(tmuxService.sendShellCommand.mock.calls.at(-1)?.[1]).toBe('coven');
   });
 });
