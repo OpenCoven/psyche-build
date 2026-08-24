@@ -25,6 +25,7 @@ import {
 } from '../scripts/beads-project-sync/source.mjs';
 import type {
   GhClient,
+  GhRun,
   ProjectContext,
 } from '../scripts/beads-project-sync/github.mjs';
 import type {
@@ -41,6 +42,7 @@ const unsupportedTypeFixturePath = join(
 );
 const configPath = join(repositoryRoot, '.github/beads-project-sync.json');
 const token = 'github_pat_DO_NOT_LEAK';
+const projectNodeId = 'PVT_kwDOECXnmc4BhMIA';
 
 interface CapturedCli {
   exitCode: number;
@@ -57,10 +59,11 @@ interface FakeGhOptions {
 }
 
 interface FakeClientOptions {
-  run: ExecFileRun;
+  run: GhRun;
   owner: string;
   repo: string;
   token: string;
+  projectNodeId?: string;
   projectMarker?: string;
   issueMarker?: string;
   legacyProjectMarkers?: readonly string[];
@@ -107,13 +110,13 @@ function createFakeGh(options: FakeGhOptions = {}) {
   let nextIssueNumber = 100;
   const project = options.project === undefined
     ? {
-      id: 'PVT_project',
-      number: 12,
+      id: projectNodeId,
+      number: 11,
       title: 'Psyche Build: Goals & Implementation',
       readme:
         '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
       public: true,
-      url: 'https://github.com/orgs/OpenCoven/projects/12',
+      url: 'https://github.com/orgs/OpenCoven/projects/11',
     }
     : options.project;
 
@@ -136,7 +139,6 @@ function createFakeGh(options: FakeGhOptions = {}) {
         ...project,
         title: input.title,
         readme: input.readme,
-        public: true,
       };
     },
     async acquireApplyLock() {
@@ -234,9 +236,6 @@ function createFakeGh(options: FakeGhOptions = {}) {
     async updateReadme() {
       writes.push('updateReadme');
     },
-    async setProjectVisibility() {
-      writes.push('setProjectVisibility');
-    },
   } as unknown as GhClient;
 
   return {
@@ -287,6 +286,7 @@ describe('Beads project sync configuration', () => {
     await expect(readSyncConfig(configPath)).resolves.toEqual({
       owner: 'OpenCoven',
       repository: 'psyche-build',
+      projectNodeId,
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
@@ -302,6 +302,7 @@ describe('Beads project sync configuration', () => {
     const base = {
       owner: 'OpenCoven',
       repository: 'psyche-build',
+      projectNodeId,
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
@@ -334,10 +335,43 @@ describe('Beads project sync configuration', () => {
     }).massClose).toEqual({ minimum: 0, fraction: 0 });
   });
 
+  it('requires a strict immutable GitHub Project node ID', () => {
+    const base = {
+      owner: 'OpenCoven',
+      repository: 'psyche-build',
+      projectTitle: 'Psyche Build: Goals & Implementation',
+      projectMarker: 'psyche-beads-project-sync:v1',
+      issueMarker: 'psyche-bead-sync:v1',
+      assigneeMap: {},
+      massClose: { minimum: 5, fraction: 0.25 },
+    };
+
+    expect(parseSyncConfig({
+      ...base,
+      projectNodeId,
+    }).projectNodeId).toBe(projectNodeId);
+
+    for (const invalid of [
+      undefined,
+      null,
+      '',
+      'PVT_',
+      'PVTI_not-a-project-v2-node',
+      'PVT_<unsafe>',
+      11,
+    ]) {
+      expect(() => parseSyncConfig({
+        ...base,
+        ...(invalid === undefined ? {} : { projectNodeId: invalid }),
+      })).toThrow(/projectNodeId/i);
+    }
+  });
+
   it('accepts safe configured markers and rejects comment-breaking markers', () => {
     expect(parseSyncConfig({
       owner: 'OpenCoven',
       repository: 'psyche-build',
+      projectNodeId,
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'custom-project-sync:v2',
       issueMarker: 'custom-issue-sync:v2',
@@ -353,6 +387,7 @@ describe('Beads project sync configuration', () => {
     expect(() => parseSyncConfig({
       owner: 'OpenCoven',
       repository: 'psyche-build',
+      projectNodeId,
       projectTitle: 'Psyche Build: Goals & Implementation',
       projectMarker: 'custom--project',
       issueMarker: 'custom-issue-sync:v2',
@@ -748,6 +783,7 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes).toEqual([]);
     expect(fakeGh.clientOptions).toEqual([
       expect.objectContaining({
+        projectNodeId,
         projectMarker: 'psyche-beads-project-sync:v1',
         issueMarker: 'psyche-bead-sync:v1',
         legacyProjectMarkers: ['psyche-bead-sync:v1'],
@@ -755,7 +791,7 @@ describe('Beads project sync CLI', () => {
       }),
     ]);
     expect(JSON.parse(result.stdout).projectUrl).toBe(
-      'https://github.com/orgs/OpenCoven/projects/12',
+      'https://github.com/orgs/OpenCoven/projects/11',
     );
   });
 
@@ -790,9 +826,9 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes).toEqual([]);
   });
 
-  it('provisions only when no marked Project exists', async () => {
+  it('fails closed instead of provisioning when the pinned Project is absent', async () => {
     const absentProject = createFakeGh({ project: null });
-    const created = await runCli(
+    const result = await runCli(
       ['--provision', '--inventory-file', fixturePath],
       {
         env: { BEADS_PROJECT_TOKEN: token },
@@ -800,22 +836,14 @@ describe('Beads project sync CLI', () => {
       },
     );
 
-    expect(created.exitCode).toBe(0);
+    expect(result.exitCode).toBe(1);
     expect(absentProject.calls).toEqual(['verifyAccess', 'discoverProject']);
-    expect(absentProject.lockCalls).toEqual(['acquire', 'release']);
-    expect(absentProject.writes).toEqual(['provisionProject']);
-    expect(absentProject.provisionReadmes[0]).toContain(
-      '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
-    );
-    expect(absentProject.provisionReadmes[0]).not.toContain(
-      '<!-- psyche-bead-sync:v1 project-readme -->',
-    );
-    expect(JSON.parse(created.stdout)).toMatchObject({
-      mode: 'provision',
-      appliedOperationCount: 0,
-      projectUrl: 'https://github.com/orgs/OpenCoven/projects/13',
-    });
+    expect(absentProject.lockCalls).toEqual([]);
+    expect(absentProject.writes).toEqual([]);
+    expect(result.stderr).toMatch(/pinned Project.*PVT_kwDOECXnmc4BhMIA.*not found/i);
+  });
 
+  it('repairs the existing pinned public Project in provision mode', async () => {
     const existingProject = createFakeGh();
     const unchanged = await runCli(
       ['--provision', '--inventory-file', fixturePath],
@@ -838,16 +866,16 @@ describe('Beads project sync CLI', () => {
     expect(unchanged.stderr).toMatch(/verified and repaired/i);
   });
 
-  it('repairs a renamed marked Project during apply without creating a duplicate', async () => {
+  it('repairs a renamed pinned public Project during apply without creating a duplicate', async () => {
     const fakeGh = createFakeGh({
       project: {
-        id: 'PVT_renamed',
-        number: 12,
+        id: projectNodeId,
+        number: 11,
         title: 'Former public inventory title',
         readme:
           '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n# Former title',
-        public: false,
-        url: 'https://github.com/orgs/OpenCoven/projects/12',
+        public: true,
+        url: 'https://github.com/orgs/OpenCoven/projects/11',
       },
     });
     const result = await runCli(
@@ -870,7 +898,7 @@ describe('Beads project sync CLI', () => {
     );
   });
 
-  it('can provision an absent Project and apply the full plan in one run', async () => {
+  it('does not bootstrap a replacement Project during pinned apply plus provision', async () => {
     const fakeGh = createFakeGh({ project: null });
     const result = await runCli(
       ['--apply', '--provision', '--inventory-file', fixturePath],
@@ -880,16 +908,42 @@ describe('Beads project sync CLI', () => {
       },
     );
 
-    const summary = JSON.parse(result.stdout);
-    expect(result.exitCode).toBe(0);
-    expect(fakeGh.lockCalls).toEqual(['acquire', 'release']);
-    expect(fakeGh.writes[0]).toBe('provisionProject');
-    expect(fakeGh.writes).toContain('createIssue');
-    expect(fakeGh.writes).not.toContain('updateReadme');
-    expect(summary.mode).toBe('apply');
-    expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
-    expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/13');
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/pinned Project.*not found/i);
+    expect(fakeGh.lockCalls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
   });
+
+  it.each(['--dry-run', '--apply'] as const)(
+    'fails %s closed on a private pinned Project without mutations',
+    async (mode) => {
+      const fakeGh = createFakeGh({
+        project: {
+          id: projectNodeId,
+          number: 11,
+          title: 'Psyche Build: Goals & Implementation',
+          readme:
+            '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
+          public: false,
+          url: 'https://github.com/orgs/OpenCoven/projects/11',
+        },
+      });
+      const result = await runCli(
+        [mode, '--inventory-file', fixturePath],
+        {
+          env: { BEADS_PROJECT_TOKEN: token },
+          fakeGh,
+        },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toMatch(/private.*manual.*visibility/i);
+      expect(fakeGh.lockCalls).toEqual([]);
+      expect(fakeGh.writes).toEqual([]);
+    },
+  );
 
   it('fully applies the reconciliation plan through the GitHub adapter', async () => {
     const fakeGh = createFakeGh();
@@ -915,7 +969,7 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes).toContain('setFields');
     expect(fakeGh.writes.at(-1)).toBe('updateReadme');
     expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
-    expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/12');
+    expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/11');
   });
 
   it('reports structured sanitized partial progress when reconciliation apply fails', async () => {
@@ -942,7 +996,7 @@ describe('Beads project sync CLI', () => {
       mode: 'apply',
       plannedOperationCount: expect.any(Number),
       appliedOperationCount: expect.any(Number),
-      projectUrl: 'https://github.com/orgs/OpenCoven/projects/12',
+      projectUrl: 'https://github.com/orgs/OpenCoven/projects/11',
       failure: {
         failingOperation: {
           type: 'setFields',

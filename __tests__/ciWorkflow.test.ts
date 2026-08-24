@@ -7,6 +7,7 @@ const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
 const beadsProjectSyncWorkflowPath = path.resolve(
   '.github/workflows/beads-project-sync.yml',
 );
+const beadsProjectSyncConfigPath = path.resolve('.github/beads-project-sync.json');
 const beadsConfigPath = path.resolve('.beads/config.yaml');
 const beadsReadmePath = path.resolve('.beads/README.md');
 const contributingPath = path.resolve('CONTRIBUTING.md');
@@ -368,18 +369,21 @@ describe('Beads Project sync workflow contract', () => {
     );
   });
 
-  it('requires the documented one-time provisioning bootstrap before merge or enablement', () => {
+  it('documents the immutable Project binding and manual private-visibility remediation', () => {
     const workflow = beadsWorkflowSource();
+    const config = JSON.parse(readFileSync(beadsProjectSyncConfigPath, 'utf8')) as {
+      projectNodeId?: unknown;
+    };
     const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
     const contributing = readFileSync(contributingPath, 'utf8');
 
     expect(workflow).not.toContain('--provision');
-    expect(beadsReadme).toContain(
-      'node scripts/sync-beads-project.mjs --apply --provision',
-    );
-    expect(beadsReadme).toMatch(/must not be merged or enabled until.*bootstrap.*succeeds/is);
+    expect(config.projectNodeId).toBe('PVT_kwDOECXnmc4BhMIA');
+    expect(beadsReadme).toMatch(/immutable.*Project.*node ID/is);
+    expect(beadsReadme).toContain('PVT_kwDOECXnmc4BhMIA');
+    expect(beadsReadme).toMatch(/private[\s\S]*maintainer must manually[\s\S]*visibility/is);
     expect(contributing).toMatch(
-      /merge and schedule\s+enablement are blocked until.*bootstrap.*succeeds/is,
+      /immutable.*Project.*node ID[\s\S]*private[\s\S]*manual.*visibility/is,
     );
   });
 

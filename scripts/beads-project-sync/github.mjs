@@ -34,6 +34,7 @@ const API_HEADERS = Object.freeze([
   '--include',
 ]);
 const SAFE_OWNER_REPO_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$/u;
+const PROJECT_NODE_ID_PATTERN = /^PVT_[A-Za-z0-9_-]{8,255}$/u;
 const SAFE_BEAD_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,199})$/u;
 const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/giu;
 const MAX_ERROR_DETAIL = 512;
@@ -147,8 +148,23 @@ mutation CreateManagedProject($ownerId: ID!, $title: String!) {
 `.trim();
 
 const UPDATE_PROJECT_MUTATION = `
-mutation UpdateManagedProject($projectId: ID!, $title: String!, $public: Boolean!, $readme: String!) {
-  updateProjectV2(input: {projectId: $projectId, title: $title, public: $public, readme: $readme}) {
+mutation UpdateManagedProject($projectId: ID!, $title: String!, $readme: String!) {
+  updateProjectV2(input: {projectId: $projectId, title: $title, readme: $readme}) {
+    projectV2 {
+      id
+      number
+      title
+      readme
+      public
+      url
+    }
+  }
+}
+`.trim();
+
+const INITIALIZE_FRESH_PROJECT_MUTATION = `
+mutation UpdateManagedProject($projectId: ID!, $title: String!, $readme: String!) {
+  updateProjectV2(input: {projectId: $projectId, title: $title, public: true, readme: $readme}) {
     projectV2 {
       id
       number
@@ -167,17 +183,6 @@ mutation UpdateManagedProjectReadme($projectId: ID!, $readme: String!) {
     projectV2 {
       id
       readme
-    }
-  }
-}
-`.trim();
-
-const UPDATE_PROJECT_VISIBILITY_MUTATION = `
-mutation UpdateManagedProjectVisibility($projectId: ID!, $public: Boolean!) {
-  updateProjectV2(input: {projectId: $projectId, public: $public}) {
-    projectV2 {
-      id
-      public
     }
   }
 }
@@ -1292,6 +1297,8 @@ function normalizeFieldMap(rawFields) {
  *   owner: string,
  *   repo: string,
  *   token: string,
+ *   projectNodeId?: string,
+ *   bootstrap?: boolean,
  *   projectMarker?: string,
  *   issueMarker?: string,
  *   legacyProjectMarkers?: readonly string[],
@@ -1316,6 +1323,19 @@ export function createGhClient(options) {
     'repository identity',
   );
   const token = requiredString(options.token, 'token');
+  const projectNodeId = options.projectNodeId == null
+    ? null
+    : requiredString(options.projectNodeId, 'projectNodeId');
+  if (projectNodeId != null && !PROJECT_NODE_ID_PATTERN.test(projectNodeId)) {
+    fail('projectNodeId must be a GitHub ProjectV2 node ID beginning with "PVT_"');
+  }
+  const bootstrap = options.bootstrap === true;
+  if (options.bootstrap != null && options.bootstrap !== true && options.bootstrap !== false) {
+    fail('bootstrap must be a boolean when present');
+  }
+  if (projectNodeId != null && bootstrap) {
+    fail('projectNodeId and bootstrap mode cannot be combined');
+  }
   /** @type {(milliseconds: number) => void | Promise<void>} */
   const sleep = typeof options.sleep === 'function'
     ? options.sleep
@@ -2176,7 +2196,11 @@ export function createGhClient(options) {
     }
 
     if (!projectContext) {
-      await discoverProject();
+      if (projectNodeId != null || bootstrap) {
+        await discoverProject();
+      } else {
+        await discoverProjects();
+      }
     }
 
     if (projectContext) {
@@ -2307,8 +2331,65 @@ export function createGhClient(options) {
    * @returns {Promise<ProjectContext | null>}
    */
   async function discoverProject() {
-    const candidates = [];
-    for (const project of await discoverProjects()) {
+    const projects = await discoverProjects();
+    if (projectNodeId != null) {
+      const project = projects.find((candidate) => candidate.id === projectNodeId) ?? null;
+      if (!project) {
+        rememberProject(null);
+        return null;
+      }
+      const markers = extractProjectReadmeMarkers(
+        project.readme,
+        recognizedProjectMarkerValues,
+      );
+      if (markers.length > 1) {
+        throw new GhClientError(
+          'ownership',
+          `Pinned GitHub Project ${projectNodeId} (#${project.number}) contains duplicate `
+            + 'managed README markers; refusing to adopt or repair it.',
+        );
+      }
+      const marker = markers[0];
+      if (
+        marker?.repository != null
+        && marker.repository.toLowerCase() !== repositoryIdentity.toLowerCase()
+      ) {
+        throw new GhClientError(
+          'ownership',
+          `Pinned GitHub Project ${projectNodeId} (#${project.number}) is marked for `
+            + `${marker.repository}, not ${repositoryIdentity}; refusing to adopt or repair it.`,
+        );
+      }
+      const hasRepositoryMarker =
+        marker?.repository?.toLowerCase() === repositoryIdentity.toLowerCase();
+      if (!hasRepositoryMarker && !await isProjectLinkedToRepository(project)) {
+        throw new GhClientError(
+          'ownership',
+          `Pinned GitHub Project ${projectNodeId} (#${project.number}) has neither the `
+            + `repository-bound managed README marker nor a link to ${repositoryIdentity}; `
+            + 'refusing to adopt or repair it.',
+        );
+      }
+      if (!project.public) {
+        throw new GhClientError(
+          'visibility',
+          `Pinned GitHub Project ${projectNodeId} (#${project.number}) is private; `
+            + 'manual maintainer review and a manual Project visibility change to public are '
+            + 'required before rerunning. Automatic visibility changes are disabled.',
+        );
+      }
+      rememberProject(project);
+      return projectContext;
+    }
+
+    if (!bootstrap) {
+      throw new GhClientError(
+        'validation',
+        'Project discovery requires an immutable projectNodeId or explicit bootstrap mode',
+      );
+    }
+
+    for (const project of projects) {
       const markers = extractProjectReadmeMarkers(
         project.readme,
         recognizedProjectMarkerValues,
@@ -2319,28 +2400,20 @@ export function createGhClient(options) {
           `GitHub Project #${project.number} contains duplicate managed README markers`,
         );
       }
-      const discoveredMarker = markers[0];
-      if (!discoveredMarker) {
-        continue;
-      }
+      const marker = markers[0];
       if (
-        discoveredMarker.repository != null
-        && discoveredMarker.repository.toLowerCase() !== repositoryIdentity.toLowerCase()
+        marker?.repository?.toLowerCase() === repositoryIdentity.toLowerCase()
+        || (marker?.repository == null && marker != null && await isProjectLinkedToRepository(project))
       ) {
-        continue;
-      }
-      if (discoveredMarker.repository != null) {
-        candidates.push(project);
-      } else if (await isProjectLinkedToRepository(project)) {
-        candidates.push(project);
+        throw new GhClientError(
+          'ownership',
+          `Existing marked Project #${project.number} (${project.id}) cannot be adopted in `
+            + 'bootstrap mode. A maintainer must review it and pin its immutable node ID.',
+        );
       }
     }
-    const matches = candidates;
-    if (matches.length > 1) {
-      throw new GhClientError('marker', 'Multiple GitHub Projects contain the managed README marker');
-    }
-    rememberProject(matches[0] ?? null);
-    return projectContext;
+    rememberProject(null);
+    return null;
   }
 
   /**
@@ -2413,11 +2486,10 @@ export function createGhClient(options) {
 
     const existing = await discoverProject();
     if (existing) {
-      if (existing.title !== title || !existing.public || existing.readme !== readme) {
+      if (existing.title !== title || existing.readme !== readme) {
         const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
           projectId: existing.id,
           title,
-          public: true,
           readme,
         });
         const updatedData = record(record(updatedPayload.data).updateProjectV2);
@@ -2433,6 +2505,20 @@ export function createGhClient(options) {
       }
       await ensureProjectLinked(requireProject());
       return requireProject();
+    }
+
+    if (projectNodeId != null) {
+      throw new GhClientError(
+        'ownership',
+        `Pinned GitHub Project ${projectNodeId} was not found in ${owner}; `
+          + 'review .github/beads-project-sync.json and the Project ownership before rerunning.',
+      );
+    }
+    if (!bootstrap) {
+      throw new GhClientError(
+        'validation',
+        'Fresh Project provisioning requires explicit bootstrap mode',
+      );
     }
 
     if (!organizationId || !repositoryId) {
@@ -2478,10 +2564,9 @@ export function createGhClient(options) {
     const created = normalizeProject(createdData.projectV2);
 
     if (created.title !== title || !created.public || created.readme !== readme) {
-      const updatedPayload = await graphql(UPDATE_PROJECT_MUTATION, {
+      const updatedPayload = await graphql(INITIALIZE_FRESH_PROJECT_MUTATION, {
         projectId: created.id,
         title,
-        public: true,
         readme,
       });
       const updatedData = record(record(updatedPayload.data).updateProjectV2);
@@ -3365,28 +3450,12 @@ ${selections.join('\n')}
   }
 
   /**
-   * @param {{public: true}} operation
-   * @returns {Promise<void>}
-   */
-  async function setProjectVisibility(operation) {
-    const project = requireProject();
-    if (operation?.public !== true) {
-      fail('Project visibility can only be reconciled to public');
-    }
-    await graphql(UPDATE_PROJECT_VISIBILITY_MUTATION, {
-      projectId: project.id,
-      public: true,
-    });
-    rememberProject({ ...project, public: true });
-  }
-
-  /**
    * @param {{title: string, readme: string}} input
    */
   async function provisionProject(input) {
     await verifyAccess();
-    await ensureLabels();
     const project = await ensureProject(input);
+    await ensureLabels();
     const fields = await ensureFields();
     const views = await ensureViews();
     return { project, fields, views };
@@ -3425,6 +3494,5 @@ ${selections.join('\n')}
     restoreItem,
     unarchiveItem: restoreItem,
     updateReadme,
-    setProjectVisibility,
   });
 }

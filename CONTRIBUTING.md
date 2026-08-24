@@ -121,11 +121,21 @@ database produces explicit `bd bootstrap --yes` guidance. Actions dry-run
 bootstraps an ephemeral runner database from the authoritative Beads remote
 without a GitHub token before invoking the same read-only CLI mode.
 
-The workflow intentionally does not provision the Project. Task 8 must first
-complete the one-time maintainer command
-`node scripts/sync-beads-project.mjs --apply --provision`; merge and schedule
-enablement are blocked until that bootstrap succeeds and the marked public
-Project is verified.
+The synchronizer is bound to the immutable GitHub Project node ID
+`PVT_kwDOECXnmc4BhMIA` for
+[OpenCoven Project 11](https://github.com/orgs/OpenCoven/projects/11). Existing
+Project adoption and repair require that exact identity plus the
+repository-bound managed marker or canonical repository link; a duplicate
+marker elsewhere is ignored and never authorizes publication. The pinned
+public Project's title, README, repository link, fields, and views remain
+repairable.
+
+An absent pinned Project fails closed instead of provisioning a replacement.
+If the pinned Project is private, dry-run and apply also fail before mutations.
+Automatic visibility changes are disabled: a maintainer must manually review
+the Project identity and contents, change visibility to public in GitHub, and
+rerun a dry-run. Never repoint `projectNodeId` merely because another Project
+has the managed marker.
 
 After that gate is satisfied, the daily
 `.github/workflows/beads-project-sync.yml` run applies automatically. Use

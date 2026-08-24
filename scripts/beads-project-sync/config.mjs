@@ -15,6 +15,7 @@ export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
  * @typedef {{
  *   owner: string,
  *   repository: string,
+ *   projectNodeId: string,
  *   projectTitle: string,
  *   projectMarker: string,
  *   issueMarker: string,
@@ -26,6 +27,8 @@ export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
  *   },
  * }} BeadsProjectSyncConfig
  */
+
+const PROJECT_NODE_ID_PATTERN = /^PVT_[A-Za-z0-9_-]{8,255}$/u;
 
 /**
  * @param {string} message
@@ -93,6 +96,18 @@ function requiredString(value, fieldName) {
 
 /**
  * @param {unknown} value
+ * @returns {string}
+ */
+function projectNodeId(value) {
+  const nodeId = requiredString(value, 'projectNodeId');
+  if (!PROJECT_NODE_ID_PATTERN.test(nodeId)) {
+    fail('"projectNodeId" must be a GitHub ProjectV2 node ID beginning with "PVT_"');
+  }
+  return nodeId;
+}
+
+/**
+ * @param {unknown} value
  * @param {string} fieldName
  * @returns {string}
  */
@@ -154,6 +169,7 @@ export function parseSyncConfig(value) {
   assertExactKeys(input, [
     'owner',
     'repository',
+    'projectNodeId',
     'projectTitle',
     'projectMarker',
     'issueMarker',
@@ -170,6 +186,7 @@ export function parseSyncConfig(value) {
   return Object.freeze({
     owner: requiredString(input.owner, 'owner'),
     repository: requiredString(input.repository, 'repository'),
+    projectNodeId: projectNodeId(input.projectNodeId),
     projectTitle: requiredString(input.projectTitle, 'projectTitle'),
     projectMarker,
     issueMarker,

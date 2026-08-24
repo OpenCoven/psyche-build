@@ -2,8 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   createGhClient,
-  LEGACY_PROJECT_README_MARKER,
-  PROJECT_README_MARKER,
   PROJECT_VIEWS,
 } from '../scripts/beads-project-sync/github.mjs';
 import type {
@@ -24,6 +22,7 @@ import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
 
 const owner = 'OpenCoven';
 const repo = 'psyche-build';
+const projectNodeId = 'PVT_kwDOECXnmc4BhMIA';
 const repositoryIdentity = `${owner}/${repo}`;
 const repositoryUrl = `https://api.github.com/repos/${repositoryIdentity}`;
 const boundProjectReadmeMarker =
@@ -425,10 +424,10 @@ describe('createGhClient', () => {
         html_url: issueUrl,
       })]),
       projectDiscovery([{
-        id: 'P-deferred',
+        id: projectNodeId,
         number: 23,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       projectItemsPage([{
@@ -448,7 +447,7 @@ describe('createGhClient', () => {
       httpError(404, 'parent not found'),
       success([]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     const existingIssues = await client.listManagedIssues();
 
     const secondRun = planReconciliation({
@@ -601,10 +600,10 @@ describe('createGhClient', () => {
     const secondUrl = `https://github.com/${owner}/${repo}/issues/2`;
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-state',
+        id: projectNodeId,
         number: 16,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       success([
@@ -670,7 +669,7 @@ describe('createGhClient', () => {
       }),
       success([]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     await expect(client.listManagedIssues()).resolves.toEqual([
@@ -728,8 +727,8 @@ describe('createGhClient', () => {
 
     const itemQueries = runner.calls.slice(2, 4).map(parseStdin);
     expect(itemQueries.map((payload) => payload.variables)).toEqual([
-      { projectId: 'P-state', cursor: null },
-      { projectId: 'P-state', cursor: 'ITEM-CURSOR' },
+      { projectId: projectNodeId, cursor: null },
+      { projectId: projectNodeId, cursor: 'ITEM-CURSOR' },
     ]);
     expect(itemQueries[0]?.query).toMatch(
       /items\(first:\s*100,\s*after:\s*\$cursor,\s*archivedStates:\s*\[ARCHIVED,\s*NOT_ARCHIVED\]\)/u,
@@ -827,20 +826,20 @@ describe('createGhClient', () => {
           url: 'https://github.com/orgs/OpenCoven/projects/3',
         },
         {
-          id: 'P-managed',
-          number: 7,
+          id: projectNodeId,
+          number: 11,
           title: 'Renamed inventory',
-          readme: `${PROJECT_README_MARKER}\n# Public Beads`,
+          readme: `${boundProjectReadmeMarker}\n# Public Beads`,
           public: true,
-          url: 'https://github.com/orgs/OpenCoven/projects/7',
+          url: 'https://github.com/orgs/OpenCoven/projects/11',
         },
       ]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     await expect(client.discoverProject()).resolves.toMatchObject({
-      id: 'P-managed',
-      number: 7,
+      id: projectNodeId,
+      number: 11,
       title: 'Renamed inventory',
     });
     const payload = parseStdin(runner.calls[0]!);
@@ -854,24 +853,24 @@ describe('createGhClient', () => {
 
   it('reuses one Project discovery snapshot throughout a sync run', async () => {
     const project = {
-      id: 'P-cached',
-      number: 7,
+      id: projectNodeId,
+      number: 11,
       title: 'Public Beads',
       readme: `${boundProjectReadmeMarker}\n# Public Beads`,
       public: true,
-      url: 'https://github.com/orgs/OpenCoven/projects/7',
+      url: 'https://github.com/orgs/OpenCoven/projects/11',
     };
     const runner = createRunner([
       projectDiscovery([project]),
       projectDiscovery([project]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
-    await expect(client.discoverProject()).resolves.toMatchObject({ id: 'P-cached' });
+    await expect(client.discoverProject()).resolves.toMatchObject({ id: projectNodeId });
     await expect(client.ensureProject({
       title: project.title,
       readme: project.readme,
-    })).resolves.toMatchObject({ id: 'P-cached' });
+    })).resolves.toMatchObject({ id: projectNodeId });
 
     expect(runner.calls).toHaveLength(1);
   });
@@ -898,31 +897,31 @@ describe('createGhClient', () => {
           },
         },
         {
-          id: 'P-managed',
-          number: 6,
+          id: projectNodeId,
+          number: 11,
           title: 'Linked marker',
           readme: '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->',
           public: true,
         },
       ]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     await expect(client.discoverProject()).resolves.toMatchObject({
-      id: 'P-managed',
-      number: 6,
+      id: projectNodeId,
+      number: 11,
     });
   });
 
   it('discovers the default-marked Project when a custom project marker is configured', async () => {
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-default',
-        number: 9,
+        id: projectNodeId,
+        number: 11,
         title: 'Existing Public Beads',
-        readme: `${PROJECT_README_MARKER}\n# Existing Public Beads`,
+        readme: `${boundProjectReadmeMarker}\n# Existing Public Beads`,
         public: true,
-        url: 'https://github.com/orgs/OpenCoven/projects/9',
+        url: 'https://github.com/orgs/OpenCoven/projects/11',
       }]),
     ]);
     const client = createGhClient({
@@ -930,22 +929,24 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      projectNodeId,
       projectMarker: 'custom-project-sync:v2',
       legacyProjectMarkers: ['prior-project-sync:v1'],
     });
 
     await expect(client.discoverProject()).resolves.toMatchObject({
-      id: 'P-default',
-      number: 9,
+      id: projectNodeId,
+      number: 11,
     });
   });
 
   it('migrates a legacy marked Project instead of creating a duplicate Project', async () => {
     const legacyProject = {
-      id: 'P-legacy',
+      id: projectNodeId,
       number: 11,
       title: 'Legacy Public Beads',
-      readme: `${LEGACY_PROJECT_README_MARKER}\n# Legacy Public Beads`,
+      readme:
+        '<!-- psyche-bead-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n# Legacy Public Beads',
       public: true,
       url: 'https://github.com/orgs/OpenCoven/projects/11',
     };
@@ -970,6 +971,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      projectNodeId,
       projectMarker: 'custom-project-sync:v2',
       issueMarker: 'custom-issue-sync:v2',
       legacyProjectMarkers: ['psyche-bead-sync:v1'],
@@ -980,7 +982,7 @@ describe('createGhClient', () => {
       title: 'Public Beads',
       readme: desiredReadme,
     })).resolves.toMatchObject({
-      id: 'P-legacy',
+      id: projectNodeId,
       readme: desiredReadme,
     });
     expect(runner.calls.some((call) =>
@@ -991,10 +993,10 @@ describe('createGhClient', () => {
     )).toBe(true);
   });
 
-  it('adopts a uniquely repository-bound renamed Project, repairs its title, and relinks it', async () => {
+  it('repairs the pinned repository-bound renamed Project and relinks it', async () => {
     const renamed = {
-      id: 'P-renamed',
-      number: 14,
+      id: projectNodeId,
+      number: 11,
       title: 'Former public inventory title',
       readme: `${boundProjectReadmeMarker}\n# Former title`,
       public: true,
@@ -1017,10 +1019,10 @@ describe('createGhClient', () => {
       }),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     await expect(client.ensureProject({ title, readme })).resolves.toMatchObject({
-      id: 'P-renamed',
+      id: projectNodeId,
       title,
       readme,
     });
@@ -1029,35 +1031,67 @@ describe('createGhClient', () => {
     )).toBe(false);
     expect(parseStdin(runner.calls[1]!)).toMatchObject({
       variables: {
-        projectId: 'P-renamed',
+        projectId: projectNodeId,
         title,
-        public: true,
         readme,
       },
     });
     expect(parseStdin(runner.calls[2]!)).toMatchObject({
       variables: {
-        projectId: 'P-renamed',
+        projectId: projectNodeId,
         repositoryId: 'REPO_node',
       },
     });
   });
 
-  it('rejects separate current and legacy marked Projects as ambiguous', async () => {
+  it('repairs a missing README marker when the pinned public Project remains repository-linked', async () => {
+    const title = 'Psyche Build: Goals & Implementation';
+    const readme = `${boundProjectReadmeMarker}\n# ${title}`;
+    const linked = {
+      id: projectNodeId,
+      number: 11,
+      title,
+      readme: '# README marker was removed',
+      public: true,
+    };
+    const runner = createRunner([
+      projectDiscovery([linked]),
+      success({
+        data: {
+          updateProjectV2: {
+            projectV2: { ...linked, readme },
+          },
+        },
+      }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
+
+    await expect(client.ensureProject({ title, readme })).resolves.toMatchObject({
+      id: projectNodeId,
+      readme,
+    });
+    expect(parseStdin(runner.calls[1]!)).toMatchObject({
+      variables: { projectId: projectNodeId, title, readme },
+    });
+  });
+
+  it('ignores a duplicate repository marker on another Project when the pinned Project matches', async () => {
     const runner = createRunner([
       projectDiscovery([
         {
-          id: 'P-current',
+          id: 'P-duplicate',
           number: 12,
-          title: 'Current',
-          readme: '<!-- custom-project-sync:v2 project-readme -->',
+          title: 'Duplicate',
+          readme:
+            '<!-- custom-project-sync:v2 project-readme repository=OpenCoven/psyche-build -->',
           public: true,
         },
         {
-          id: 'P-legacy',
-          number: 13,
-          title: 'Legacy',
-          readme: LEGACY_PROJECT_README_MARKER,
+          id: projectNodeId,
+          number: 11,
+          title: 'Pinned',
+          readme:
+            '<!-- custom-project-sync:v2 project-readme repository=OpenCoven/psyche-build -->',
           public: true,
         },
       ]),
@@ -1067,16 +1101,55 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      projectNodeId,
       projectMarker: 'custom-project-sync:v2',
       issueMarker: 'custom-issue-sync:v2',
       legacyProjectMarkers: ['psyche-bead-sync:v1'],
       legacyIssueMarkers: ['psyche-bead-sync:v1'],
     });
 
-    await expect(client.discoverProject()).rejects.toThrow(/multiple github projects/i);
+    await expect(client.discoverProject()).resolves.toMatchObject({
+      id: projectNodeId,
+      number: 11,
+    });
   });
 
-  it('creates an absent Project, sets it public, links the repository, and updates the README', async () => {
+  it('ignores a wrong-ID marked private Project without mutating it', async () => {
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'PVT_wrong',
+        number: 12,
+        title: 'Wrong private Project',
+        readme: boundProjectReadmeMarker,
+        public: false,
+      }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
+
+    await expect(client.discoverProject()).resolves.toBeNull();
+    expect(runner.calls).toHaveLength(1);
+    expect(parseStdin(runner.calls[0]!).query).toMatch(/query DiscoverManagedProject/u);
+  });
+
+  it('fails closed on the private pinned Project before any mutation', async () => {
+    const runner = createRunner([
+      projectDiscovery([{
+        id: projectNodeId,
+        number: 11,
+        title: 'Pinned private Project',
+        readme: boundProjectReadmeMarker,
+        public: false,
+      }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
+
+    await expect(client.discoverProject()).rejects.toThrow(
+      /private.*manual maintainer review.*visibility/i,
+    );
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  it('bootstraps an absent Project and returns its node ID for maintainers to pin', async () => {
     const readme = '<!-- psyche-beads-project-sync:v1 project-readme repository=OpenCoven/psyche-build -->\n# Public Beads';
     const runner = createRunner([
       projectDiscovery([]),
@@ -1092,7 +1165,7 @@ describe('createGhClient', () => {
       linkedRepositoriesPage([]),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, bootstrap: true });
 
     const project = await client.ensureProject({ title: 'Public Beads', readme });
 
@@ -1101,11 +1174,13 @@ describe('createGhClient', () => {
     expect(parseStdin(runner.calls[1]!)).toMatchObject({
       variables: { ownerId: 'ORG_node', title: 'Public Beads' },
     });
+
     expect(parseStdin(runner.calls[1]!).query).toMatch(/mutation CreateManagedProject/u);
     expect(parseStdin(runner.calls[2]!)).toMatchObject({
-      variables: { projectId: 'P-new', title: 'Public Beads', public: true, readme },
+      variables: { projectId: 'P-new', title: 'Public Beads', readme },
     });
     expect(parseStdin(runner.calls[2]!).query).toMatch(/mutation UpdateManagedProject/u);
+    expect(parseStdin(runner.calls[2]!).query).toMatch(/public:\s*true/u);
     expect(parseStdin(runner.calls[4]!)).toMatchObject({
       variables: { projectId: 'P-new', repositoryId: 'REPO_node' },
     });
@@ -1113,6 +1188,25 @@ describe('createGhClient', () => {
       expect(call.args).toEqual(['api', 'graphql', '--include', '--input', '-']);
       expect(call.args.join(' ')).not.toContain(readme);
     }
+  });
+
+  it('bootstrap mode refuses to adopt an existing marked private Project', async () => {
+    const runner = createRunner([
+      projectDiscovery([{
+        id: 'P-private-existing',
+        number: 20,
+        title: 'Public Beads',
+        readme: boundProjectReadmeMarker,
+        public: false,
+      }]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token, bootstrap: true });
+
+    await expect(client.ensureProject({
+      title: 'Public Beads',
+      readme: `${boundProjectReadmeMarker}\n# Public Beads`,
+    })).rejects.toThrow(/existing marked Project.*pin.*node ID/i);
+    expect(runner.calls).toHaveLength(1);
   });
 
   it('fails closed instead of adopting a preexisting pristine unmarked Project', async () => {
@@ -1141,7 +1235,7 @@ describe('createGhClient', () => {
       }),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, bootstrap: true });
 
     await expect(client.ensureProject({ title: 'Public Beads', readme })).rejects.toThrow(
       /unmarked Project.*manual recovery.*delete it and rerun/i,
@@ -1190,7 +1284,7 @@ describe('createGhClient', () => {
       linkedRepositoriesPage([]),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, bootstrap: true });
 
     await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
       id: 'P-new-safe',
@@ -1203,8 +1297,8 @@ describe('createGhClient', () => {
   it('verifies and repairs repository linking for an existing marked Project', async () => {
     const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
     const existing = {
-      id: 'P-existing',
-      number: 13,
+      id: projectNodeId,
+      number: 11,
       title: 'Public Beads',
       readme,
       public: true,
@@ -1217,25 +1311,25 @@ describe('createGhClient', () => {
       projectDiscovery([existing]),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
-      id: 'P-existing',
-      number: 13,
+      id: projectNodeId,
+      number: 11,
       title: 'Public Beads',
       readme,
       public: true,
     });
     expect(parseStdin(runner.calls[1]!)).toMatchObject({
-      variables: { projectId: 'P-existing', repositoryId: 'REPO_node' },
+      variables: { projectId: projectNodeId, repositoryId: 'REPO_node' },
     });
   });
 
   it('resumes a marker-written Project after repository linking failed without creating a duplicate', async () => {
     const readme = `${boundProjectReadmeMarker}\n# Public Beads`;
     const existing = {
-      id: 'P-marker-written',
-      number: 19,
+      id: projectNodeId,
+      number: 11,
       title: 'Public Beads',
       readme,
       public: true,
@@ -1249,7 +1343,13 @@ describe('createGhClient', () => {
       httpError(503, 'link response lost'),
       linkedRepositoriesPage([]),
     ]);
-    const firstClient = createGhClient({ run: firstRunner.run, owner, repo, token });
+    const firstClient = createGhClient({
+      run: firstRunner.run,
+      owner,
+      repo,
+      token,
+      projectNodeId,
+    });
 
     await expect(firstClient.ensureProject({ title: 'Public Beads', readme })).rejects.toMatchObject({
       kind: 'ambiguous',
@@ -1259,10 +1359,16 @@ describe('createGhClient', () => {
       projectDiscovery([existing]),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const restartedClient = createGhClient({ run: restartRunner.run, owner, repo, token });
+    const restartedClient = createGhClient({
+      run: restartRunner.run,
+      owner,
+      repo,
+      token,
+      projectNodeId,
+    });
 
     await expect(restartedClient.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
-      id: 'P-marker-written',
+      id: projectNodeId,
     });
     expect([...firstRunner.calls, ...restartRunner.calls].some((call) =>
       String(parseStdin(call).query ?? '').includes('mutation CreateManagedProject')
@@ -1291,7 +1397,7 @@ describe('createGhClient', () => {
       success({ data: { updateProjectV2: { projectV2: { ...created, readme, public: true } } } }),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, bootstrap: true });
 
     await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
       id: 'P-applied',
@@ -1325,7 +1431,7 @@ describe('createGhClient', () => {
       success({ data: { updateProjectV2: { projectV2: { ...created, readme, public: true } } } }),
       success({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_node' } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, bootstrap: true });
 
     await expect(client.ensureProject({ title: 'Public Beads', readme })).resolves.toMatchObject({
       id: 'P-transport-applied',
@@ -1363,6 +1469,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      bootstrap: true,
     });
 
     await expect(firstClient.ensureProject({ title: 'Public Beads', readme })).rejects.toMatchObject({
@@ -1388,6 +1495,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      bootstrap: true,
     });
 
     await expect(restartedClient.ensureProject({ title: 'Public Beads', readme })).rejects.toThrow(
@@ -1404,10 +1512,10 @@ describe('createGhClient', () => {
   it('discovers fields/options and provisions the required Status and custom field definitions', async () => {
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-fields',
+        id: projectNodeId,
         number: 8,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
         url: 'https://github.com/orgs/OpenCoven/projects/8',
       }]),
@@ -1462,7 +1570,7 @@ describe('createGhClient', () => {
         pageInfo: { hasNextPage: false, endCursor: null },
       } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     const fields = await client.ensureFields();
@@ -1530,10 +1638,10 @@ describe('createGhClient', () => {
     } } } });
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-option-ids',
+        id: projectNodeId,
         number: 18,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       fieldsPage([
@@ -1544,7 +1652,7 @@ describe('createGhClient', () => {
       fieldsPage(allFields),
       fieldsPage(allFields),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     await client.ensureFields();
@@ -1605,10 +1713,10 @@ describe('createGhClient', () => {
     } } } });
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-field-applied',
+        id: projectNodeId,
         number: 19,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       fieldsPage(fields.filter((field) => field.name !== 'Bead ID')),
@@ -1616,7 +1724,7 @@ describe('createGhClient', () => {
       fieldsPage(fields),
       fieldsPage(fields),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     await expect(client.ensureFields()).resolves.toEqual(expect.any(Map));
@@ -1628,10 +1736,10 @@ describe('createGhClient', () => {
   it('creates or updates the six managed views through GraphQL with exact layouts and filters', async () => {
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-views',
+        id: projectNodeId,
         number: 9,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       success({ data: { node: { views: {
@@ -1661,7 +1769,7 @@ describe('createGhClient', () => {
         pageInfo: { hasNextPage: false, endCursor: null },
       } } } }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     const views = await client.ensureViews();
@@ -1684,7 +1792,7 @@ describe('createGhClient', () => {
       expect(createPayload.query).toMatch(/mutation CreateManagedProjectView/u);
       expect(createPayload.variables).toEqual({
         input: {
-          projectId: 'P-views',
+          projectId: projectNodeId,
           name: view.name,
           layout: view.layout,
         },
@@ -1718,10 +1826,10 @@ describe('createGhClient', () => {
     } } } });
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-view-applied',
+        id: projectNodeId,
         number: 20,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       viewsPage(existingViews),
@@ -1733,7 +1841,7 @@ describe('createGhClient', () => {
       } } } }),
       viewsPage(PROJECT_VIEWS.map((view, index) => ({ id: `V-${index}`, ...view }))),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     await expect(client.ensureViews()).resolves.toHaveLength(6);
@@ -1823,10 +1931,10 @@ describe('createGhClient', () => {
 
   it('adds one project item and batches each requested field set into one GraphQL invocation', async () => {
     const project = {
-      id: 'P-items',
+      id: projectNodeId,
       number: 14,
       title: 'Public Beads',
-      readme: PROJECT_README_MARKER,
+      readme: boundProjectReadmeMarker,
       public: true,
       url: 'https://github.com/orgs/OpenCoven/projects/14',
     };
@@ -1843,7 +1951,7 @@ describe('createGhClient', () => {
       success({}),
       success({}),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
     client.setFieldContext(new Map([
       ['Status', { id: 'F-status', name: 'Status', dataType: 'SINGLE_SELECT', options: new Map([['Blocked', 'O-blocked']]) }],
@@ -1898,7 +2006,7 @@ describe('createGhClient', () => {
     }
     expect(parseStdin(fieldUpdates[0]!)).toMatchObject({
       variables: {
-        projectId: 'P-items',
+        projectId: projectNodeId,
         itemId: 'ITEM-42',
         fieldId0: 'F-id',
         value0: 'pb-42',
@@ -1916,7 +2024,7 @@ describe('createGhClient', () => {
     });
     expect(parseStdin(fieldUpdates[1]!)).toMatchObject({
       variables: {
-        projectId: 'P-items',
+        projectId: projectNodeId,
         itemId: 'ITEM-42',
         fieldId0: 'F-parent',
         fieldId1: 'F-updated',
@@ -1942,10 +2050,10 @@ describe('createGhClient', () => {
         const query = String(parseStdin(call).query ?? '');
         if (query.includes('query DiscoverManagedProject')) {
           return projectDiscovery([{
-            id: 'P-e2e',
+            id: projectNodeId,
             number: 25,
             title: 'Public Beads',
-            readme: PROJECT_README_MARKER,
+            readme: boundProjectReadmeMarker,
             public: true,
           }]);
         }
@@ -1958,7 +2066,7 @@ describe('createGhClient', () => {
       }
       throw new Error(`Unexpected runner call ${command} ${args.join(' ')}`);
     };
-    const client = createGhClient({ run, owner, repo, token });
+    const client = createGhClient({ run, owner, repo, token, projectNodeId });
     await client.discoverProject();
     client.setFieldContext(new Map([
       ['Status', { id: 'F-status', name: 'Status', dataType: 'SINGLE_SELECT', options: new Map([['Backlog', 'O-backlog']]) }],
@@ -1989,7 +2097,6 @@ describe('createGhClient', () => {
       syncBlocker: 0,
       archiveItem: 0,
       updateReadme: 0,
-      setProjectVisibility: 0,
     };
     const plan: ReconciliationPlan = {
       inventory: [],
@@ -2016,7 +2123,7 @@ describe('createGhClient', () => {
         syncBlockerCount: 0,
         archiveItemCount: 0,
         updateReadmeCount: 0,
-        setProjectVisibilityCount: 0,
+        visibilityDrift: false,
         operationCounts,
         closureCandidates: [],
       },
@@ -2068,10 +2175,10 @@ describe('createGhClient', () => {
     const issueUrl = `https://github.com/${owner}/${repo}/issues/42`;
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-item-applied',
+        id: projectNodeId,
         number: 21,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       projectItemsPage([]),
@@ -2083,7 +2190,7 @@ describe('createGhClient', () => {
         fieldValues: { nodes: [] },
       }]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     await expect(client.ensureProjectItem({ issueNumber: 42 })).resolves.toEqual({
@@ -2107,10 +2214,10 @@ describe('createGhClient', () => {
     const failed = Object.assign(new Error('HTTP 422 invalid field value'), { status: 422 });
     const runner = createRunner([
       projectDiscovery([{
-        id: 'P-sequential',
+        id: projectNodeId,
         number: 17,
         title: 'Public Beads',
-        readme: PROJECT_README_MARKER,
+        readme: boundProjectReadmeMarker,
         public: true,
       }]),
       async () => {
@@ -2122,7 +2229,7 @@ describe('createGhClient', () => {
         throw failed;
       },
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
     client.setFieldContext(new Map([
       ['Status', { id: 'F-status', name: 'Status', dataType: 'SINGLE_SELECT', options: new Map([['Backlog', 'O-backlog']]) }],
@@ -2292,10 +2399,10 @@ describe('createGhClient', () => {
 
   it('maps reconciliation parent/blocker operations and archive/restore names directly', async () => {
     const project = {
-      id: 'P-rel',
+      id: projectNodeId,
       number: 15,
       title: 'Public Beads',
-      readme: PROJECT_README_MARKER,
+      readme: boundProjectReadmeMarker,
       public: true,
     };
     const runner = createRunner([
@@ -2310,7 +2417,7 @@ describe('createGhClient', () => {
       success({}),
       success({}),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
     await client.discoverProject();
 
     await client.syncParent({
@@ -2394,34 +2501,6 @@ describe('createGhClient', () => {
     ]);
   });
 
-  it('updates Project visibility without coupling it to README content', async () => {
-    const runner = createRunner([
-      projectDiscovery([{
-        id: 'P-private',
-        number: 21,
-        title: 'Public Beads',
-        readme: boundProjectReadmeMarker,
-        public: false,
-      }]),
-      success({ data: { updateProjectV2: { projectV2: {
-        id: 'P-private',
-        public: true,
-      } } } }),
-    ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
-    await client.discoverProject();
-
-    await client.setProjectVisibility({ public: true });
-
-    const mutation = parseStdin(runner.calls[1]!);
-    expect(mutation.query).toMatch(/mutation UpdateManagedProjectVisibility/u);
-    expect(mutation.query).not.toMatch(/\$readme/u);
-    expect(mutation.variables).toEqual({
-      projectId: 'P-private',
-      public: true,
-    });
-  });
-
   it('retries only rate limits and transient server failures with bounded attempts', async () => {
     const transient = Object.assign(new Error('HTTP 503 service unavailable'), { status: 503 });
     const rateLimit = Object.assign(new Error('HTTP 403 API rate limit exceeded'), { status: 403 });
@@ -2480,6 +2559,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      bootstrap: true,
       now: () => 10_000,
       maxRetryWaitMs: 2_500,
       sleep(milliseconds) {
@@ -2551,6 +2631,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      bootstrap: true,
       now: () => 10_000,
       sleep(milliseconds) {
         waits.push(milliseconds);
@@ -2670,6 +2751,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      projectNodeId,
       now: () => 10_000,
     });
 
@@ -2701,7 +2783,7 @@ describe('createGhClient', () => {
       success({ sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }),
       Object.assign(new Error(`HTTP 422 invalid lock ${token}`), { status: 422 }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     let thrown: unknown;
     try {
@@ -2774,6 +2856,7 @@ describe('createGhClient', () => {
       owner,
       repo,
       token,
+      projectNodeId,
       now: () => 10_000,
       sleep(milliseconds) {
         waits.push(milliseconds);
@@ -2853,7 +2936,7 @@ describe('createGhClient', () => {
         html_url: `https://github.com/${owner}/${repo}/issues/77`,
       })]),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     await expect(client.createIssue({
       beadId: 'pb-applied',
@@ -2946,7 +3029,7 @@ describe('createGhClient', () => {
         }],
       }),
     ]);
-    const client = createGhClient({ run: runner.run, owner, repo, token });
+    const client = createGhClient({ run: runner.run, owner, repo, token, projectNodeId });
 
     let thrown: unknown;
     try {

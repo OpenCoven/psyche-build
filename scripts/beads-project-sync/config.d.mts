@@ -1,6 +1,7 @@
 export interface BeadsProjectSyncConfig {
   owner: string;
   repository: string;
+  projectNodeId: string;
   projectTitle: string;
   projectMarker: string;
   issueMarker: string;

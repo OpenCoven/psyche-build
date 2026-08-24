@@ -278,11 +278,6 @@ export interface GhClient {
     type?: 'updateReadme';
     phase?: 'updateReadme';
   }): Promise<void>;
-  setProjectVisibility(operation: {
-    public: true;
-    type?: 'setProjectVisibility';
-    phase?: 'setProjectVisibility';
-  }): Promise<void>;
 }
 
 export function createGhClient(options: {
@@ -290,6 +285,8 @@ export function createGhClient(options: {
   owner: string;
   repo: string;
   token: string;
+  projectNodeId?: string;
+  bootstrap?: boolean;
   projectMarker?: string;
   issueMarker?: string;
   legacyProjectMarkers?: readonly string[];

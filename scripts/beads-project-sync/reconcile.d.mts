@@ -105,8 +105,7 @@ export type ReconciliationPhase =
   | 'syncParents'
   | 'syncBlockers'
   | 'archiveItems'
-  | 'updateReadme'
-  | 'setProjectVisibility';
+  | 'updateReadme';
 
 export interface CreateIssueOperation {
   type: 'createIssue';
@@ -204,12 +203,6 @@ export interface UpdateReadmeOperation {
   renderHash: string;
 }
 
-export interface SetProjectVisibilityOperation {
-  type: 'setProjectVisibility';
-  phase: 'setProjectVisibility';
-  public: true;
-}
-
 export type ReconciliationOperation =
   | CreateIssueOperation
   | UpdateIssueOperation
@@ -221,8 +214,7 @@ export type ReconciliationOperation =
   | SyncParentOperation
   | SyncBlockerOperation
   | ArchiveItemOperation
-  | UpdateReadmeOperation
-  | SetProjectVisibilityOperation;
+  | UpdateReadmeOperation;
 
 export interface ReconciliationOperationCounts {
   createIssue: number;
@@ -236,7 +228,6 @@ export interface ReconciliationOperationCounts {
   syncBlocker: number;
   archiveItem: number;
   updateReadme: number;
-  setProjectVisibility: number;
 }
 
 export interface ReconciliationClosureCandidate {
@@ -263,7 +254,7 @@ export interface ReconciliationSummary {
   syncBlockerCount: number;
   archiveItemCount: number;
   updateReadmeCount: number;
-  setProjectVisibilityCount: number;
+  visibilityDrift: boolean;
   operationCounts: ReconciliationOperationCounts;
   closureCandidates: ReconciliationClosureCandidate[];
 }
@@ -316,7 +307,6 @@ export interface ReconciliationAdapters {
   ): Awaitable<unknown>;
   archiveItem(operation: ArchiveItemOperation & { itemId: string }): Awaitable<unknown>;
   updateReadme(operation: UpdateReadmeOperation): Awaitable<unknown>;
-  setProjectVisibility(operation: SetProjectVisibilityOperation): Awaitable<unknown>;
 }
 
 export interface AppliedReconciliationOperation {

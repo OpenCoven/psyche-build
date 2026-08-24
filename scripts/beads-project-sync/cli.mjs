@@ -57,6 +57,7 @@ import { createExecFileRun, loadBeadsSource } from './source.mjs';
  *   plannedOperationCount: number,
  *   appliedOperationCount: number,
  *   operationCounts: import('./reconcile.mjs').ReconciliationOperationCounts,
+ *   visibilityDrift: boolean,
  *   closureCandidates: import('./reconcile.mjs').ReconciliationClosureCandidate[],
  *   warnings: string[],
  *   projectUrl: string | null,
@@ -305,6 +306,7 @@ function summarizePlan(plan, secrets) {
   return {
     plannedOperationCount: plan.operations.length,
     operationCounts: { ...plan.summary.operationCounts },
+    visibilityDrift: plan.summary.visibilityDrift,
     closureCandidates: plan.summary.closureCandidates.map((candidate) => ({
       ...candidate,
       issueTitle: candidate.issueTitle == null
@@ -327,6 +329,33 @@ function plannedReadme(plan) {
     fail('Provisioning requires a generated Project README operation');
   }
   return operation.body;
+}
+
+/**
+ * @param {import('./github.mjs').ProjectContext | null} project
+ * @param {string} projectNodeId
+ * @returns {asserts project is import('./github.mjs').ProjectContext}
+ */
+function assertPinnedPublicProject(project, projectNodeId) {
+  if (!project) {
+    fail(
+      `Pinned Project ${projectNodeId} was not found; review the immutable GitHub Project `
+        + 'binding in .github/beads-project-sync.json before rerunning.',
+    );
+  }
+  if (project.id !== projectNodeId) {
+    fail(
+      `GitHub discovery returned Project ${project.id}, but configuration pins ${projectNodeId}; `
+        + 'refusing to mutate either Project.',
+    );
+  }
+  if (!project.public) {
+    fail(
+      `Pinned GitHub Project ${projectNodeId} is private; manual maintainer review and a manual `
+        + 'Project visibility change to public are required before rerunning. Automatic visibility '
+        + 'changes are disabled.',
+    );
+  }
 }
 
 /**
@@ -438,6 +467,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       owner: config.owner,
       repo: config.repository,
       token,
+      projectNodeId: config.projectNodeId,
       projectMarker: config.projectMarker,
       issueMarker: config.issueMarker,
       legacyProjectMarkers: [
@@ -448,6 +478,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     });
     await gh.verifyAccess();
     let project = await gh.discoverProject();
+    assertPinnedPublicProject(project, config.projectNodeId);
     let provisionedThisRun = false;
     const firstRunPlan = planReconciliation({
       inventory,

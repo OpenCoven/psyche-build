@@ -147,7 +147,7 @@ import {
  */
 
 /**
- * @typedef {'createIssues' | 'updateIssues' | 'labelIssues' | 'closeIssues' | 'ensureProjectItems' | 'restoreItems' | 'setFields' | 'syncParents' | 'syncBlockers' | 'archiveItems' | 'updateReadme' | 'setProjectVisibility'} ReconciliationPhase
+ * @typedef {'createIssues' | 'updateIssues' | 'labelIssues' | 'closeIssues' | 'ensureProjectItems' | 'restoreItems' | 'setFields' | 'syncParents' | 'syncBlockers' | 'archiveItems' | 'updateReadme'} ReconciliationPhase
  */
 
 /**
@@ -269,15 +269,7 @@ import {
  */
 
 /**
- * @typedef {{
- *   type: 'setProjectVisibility',
- *   phase: 'setProjectVisibility',
- *   public: true,
- * }} SetProjectVisibilityOperation
- */
-
-/**
- * @typedef {CreateIssueOperation | UpdateIssueOperation | LabelIssueOperation | CloseIssueOperation | EnsureProjectItemOperation | RestoreItemOperation | SetFieldsOperation | SyncParentOperation | SyncBlockerOperation | ArchiveItemOperation | UpdateReadmeOperation | SetProjectVisibilityOperation} ReconciliationOperation
+ * @typedef {CreateIssueOperation | UpdateIssueOperation | LabelIssueOperation | CloseIssueOperation | EnsureProjectItemOperation | RestoreItemOperation | SetFieldsOperation | SyncParentOperation | SyncBlockerOperation | ArchiveItemOperation | UpdateReadmeOperation} ReconciliationOperation
  */
 
 /**
@@ -293,7 +285,6 @@ import {
  *   syncBlocker: number,
  *   archiveItem: number,
  *   updateReadme: number,
- *   setProjectVisibility: number,
  * }} ReconciliationOperationCounts
  */
 
@@ -324,7 +315,7 @@ import {
  *   syncBlockerCount: number,
  *   archiveItemCount: number,
  *   updateReadmeCount: number,
- *   setProjectVisibilityCount: number,
+ *   visibilityDrift: boolean,
  *   operationCounts: ReconciliationOperationCounts,
  *   closureCandidates: ReconciliationClosureCandidate[],
  * }} ReconciliationSummary
@@ -376,7 +367,6 @@ import {
  *   syncBlocker: (operation: SyncBlockerOperation & { issueNumber: number, blockerIssueNumbers: number[] }) => Awaitable<unknown>,
  *   archiveItem: (operation: ArchiveItemOperation & { itemId: string }) => Awaitable<unknown>,
  *   updateReadme: (operation: UpdateReadmeOperation) => Awaitable<unknown>,
- *   setProjectVisibility: (operation: SetProjectVisibilityOperation) => Awaitable<unknown>,
  * }} ReconciliationAdapters
  */
 
@@ -1353,7 +1343,7 @@ function stringSetsEqual(left, right) {
  * @param {SyncBlockerOperation[]} syncBlockers
  * @param {ArchiveItemOperation[]} archiveItems
  * @param {UpdateReadmeOperation[]} updateReadmeOperations
- * @param {SetProjectVisibilityOperation[]} setProjectVisibilityOperations
+ * @param {boolean} visibilityDrift
  * @returns {ReconciliationSummary}
  */
 function buildSummary(
@@ -1370,7 +1360,7 @@ function buildSummary(
   syncBlockers,
   archiveItems,
   updateReadmeOperations,
-  setProjectVisibilityOperations,
+  visibilityDrift,
 ) {
   const sourceActive = activeBeads(inventory);
   const managedOpenCount = [...managedIssuesByBeadId.values()]
@@ -1388,7 +1378,6 @@ function buildSummary(
     syncBlocker: syncBlockers.length,
     archiveItem: archiveItems.length,
     updateReadme: updateReadmeOperations.length,
-    setProjectVisibility: setProjectVisibilityOperations.length,
   };
   const closureCandidates = closeIssues.map((operation) => ({
     beadId: operation.beadId,
@@ -1414,7 +1403,7 @@ function buildSummary(
     syncBlockerCount: syncBlockers.length,
     archiveItemCount: archiveItems.length,
     updateReadmeCount: updateReadmeOperations.length,
-    setProjectVisibilityCount: setProjectVisibilityOperations.length,
+    visibilityDrift,
     operationCounts,
     closureCandidates,
   };
@@ -1490,8 +1479,6 @@ export function planReconciliation(input) {
   const archiveItems = [];
   /** @type {UpdateReadmeOperation[]} */
   const updateReadmeOperations = [];
-  /** @type {SetProjectVisibilityOperation[]} */
-  const setProjectVisibilityOperations = [];
 
   for (const bead of sortedActiveBeads) {
     const existingIssue = managedIssuesByBeadId.get(bead.id);
@@ -1780,13 +1767,7 @@ export function planReconciliation(input) {
       renderHash: readmeRenderHash,
     });
   }
-  if (normalizedInput.readme?.public === false) {
-    setProjectVisibilityOperations.push({
-      type: 'setProjectVisibility',
-      phase: 'setProjectVisibility',
-      public: true,
-    });
-  }
+  const visibilityDrift = normalizedInput.readme?.public === false;
 
   const operations = /** @type {ReconciliationOperation[]} */ ([
     ...createIssues,
@@ -1800,7 +1781,6 @@ export function planReconciliation(input) {
     ...closeIssues,
     ...archiveItems,
     ...updateReadmeOperations,
-    ...setProjectVisibilityOperations,
   ]);
 
   return {
@@ -1822,7 +1802,7 @@ export function planReconciliation(input) {
       syncBlockers,
       archiveItems,
       updateReadmeOperations,
-      setProjectVisibilityOperations,
+      visibilityDrift,
     ),
   };
 }
@@ -2130,13 +2110,6 @@ export async function applyReconciliation(plan, adapters) {
         case 'updateReadme': {
           const updateReadme = adapters.updateReadme ?? fail('applyReconciliation requires adapters.updateReadme');
           const result = await updateReadme(operation);
-          applied.push({ operation, result });
-          break;
-        }
-        case 'setProjectVisibility': {
-          const setProjectVisibility = adapters.setProjectVisibility
-            ?? fail('applyReconciliation requires adapters.setProjectVisibility');
-          const result = await setProjectVisibility(operation);
           applied.push({ operation, result });
           break;
         }

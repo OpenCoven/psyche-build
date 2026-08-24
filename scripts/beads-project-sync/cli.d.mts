@@ -29,6 +29,8 @@ export interface CliDependencies {
     owner: string;
     repo: string;
     token: string;
+    projectNodeId?: string;
+    bootstrap?: boolean;
     projectMarker?: string;
     issueMarker?: string;
     legacyProjectMarkers?: readonly string[];
@@ -44,6 +46,7 @@ export interface CliSummary {
   plannedOperationCount: number;
   appliedOperationCount: number;
   operationCounts: ReconciliationOperationCounts;
+  visibilityDrift: boolean;
   closureCandidates: ReconciliationClosureCandidate[];
   warnings: string[];
   projectUrl: string | null;

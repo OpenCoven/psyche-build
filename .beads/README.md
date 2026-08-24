@@ -102,22 +102,34 @@ preserves unattended scheduled runs and reviewer-gated manual runs). Scheduled
 sync must remain disabled until both environment secrets and their protection
 rules are set.
 
-### Required one-time bootstrap gate
+### Immutable Project binding and visibility safety
 
-The sync workflow intentionally does not provision GitHub Project
-infrastructure. Task 8 must run the following maintainer bootstrap successfully:
+The mirror is bound to
+[OpenCoven Project 11](https://github.com/orgs/OpenCoven/projects/11) by its
+immutable Project node ID, `PVT_kwDOECXnmc4BhMIA`, in
+`.github/beads-project-sync.json`. The synchronizer requires that exact ID plus
+the repository-bound README marker or the canonical repository link. A
+matching marker on another Project never authorizes adoption, repair, or
+publication.
 
-```bash
-export BEADS_PROJECT_TOKEN="<load from your password manager>"
-node scripts/sync-beads-project.mjs --apply --provision
-```
+Do not change `projectNodeId` to recover from a missing or renamed Project.
+First verify the Project's identity and repository ownership. Title, README,
+repository link, fields, and views remain repairable on the pinned public
+Project, but an absent pinned Project fails closed instead of provisioning a
+replacement. This repository does not support unpinned CLI provisioning.
 
-`.github/workflows/beads-project-sync.yml` must not be merged or enabled until
-that one-time bootstrap succeeds and the marked public Project is verified.
-Keep its schedule disabled until then; a normal workflow apply fails safely
-when no marked Project exists.
+If the pinned Project is private, every dry-run, apply, and provision attempt
+fails before acquiring the apply lock or making a Project mutation. Automatic
+visibility changes are intentionally disabled. A maintainer must manually
+review the Project at the URL above, confirm its node ID and contents, change
+its visibility to public in GitHub, and then rerun a dry-run. Do not use a
+different marked Project as a substitute.
 
-After the bootstrap gate is satisfied,
+For a new repository with no pinned identity, any explicit bootstrap flow must
+create a fresh Project and return its node ID for a maintainer to review and
+commit before future synchronization. It must never adopt an existing marked
+private Project.
+
 `.github/workflows/beads-project-sync.yml` applies the mirror every day at
 03:17 UTC. Maintainers can also use **Actions → Beads Project Sync → Run
 workflow**:

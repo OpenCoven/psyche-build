@@ -176,9 +176,6 @@ function recordingAdapters(
     updateReadme() {
       record('updateReadme');
     },
-    setProjectVisibility() {
-      record('setProjectVisibility');
-    },
   };
 }
 
@@ -1131,7 +1128,7 @@ describe('Beads project reconciliation', () => {
     }));
   });
 
-  it('reconciles private Project visibility when its README is already current', () => {
+  it('reports private Project visibility drift without scheduling a mutation', () => {
     const inventory = finalizeInventory([makeBead('pb-private-project')]);
     const issueNumbers = activeIssueNumbersByBeadId(inventory, 440);
     const plan = planReconciliation({
@@ -1144,13 +1141,8 @@ describe('Beads project reconciliation', () => {
       renderContext: baseContext,
     });
 
-    expect(plan.operations).toEqual([
-      {
-        type: 'setProjectVisibility',
-        phase: 'setProjectVisibility',
-        public: true,
-      },
-    ]);
+    expect(plan.operations).toEqual([]);
+    expect(plan.summary.visibilityDrift).toBe(true);
   });
 
   it('reopens active beads by restoring archived project items before field updates', async () => {
@@ -1233,9 +1225,6 @@ describe('Beads project reconciliation', () => {
       },
       updateReadme() {
         throw new Error('updateReadme should not be called');
-      },
-      setProjectVisibility() {
-        throw new Error('setProjectVisibility should not be called');
       },
     });
 
@@ -1425,9 +1414,6 @@ describe('Beads project reconciliation', () => {
       updateReadme() {
         throw new Error('updateReadme should not be called');
       },
-      setProjectVisibility() {
-        throw new Error('setProjectVisibility should not be called');
-      },
     });
 
     expect(calls).toEqual([
@@ -1521,9 +1507,6 @@ describe('Beads project reconciliation', () => {
         throw new Error('archiveItem should not be called');
       },
       updateReadme() {},
-      setProjectVisibility() {
-        throw new Error('setProjectVisibility should not be called');
-      },
     });
 
     const childBody = finalBodies.get('pb-child');
@@ -1637,7 +1620,6 @@ describe('Beads project reconciliation', () => {
       syncBlocker: 0,
       archiveItem: 8,
       updateReadme: 0,
-      setProjectVisibility: 0,
     });
     expect(plan.summary.closureCandidates).toEqual(
       Array.from({ length: 8 }, (_, index) => {
@@ -1734,9 +1716,6 @@ describe('Beads project reconciliation', () => {
       updateReadme(operation) {
         calls.push({ path: operation.path, type: operation.type });
       },
-      setProjectVisibility() {
-        throw new Error('setProjectVisibility should not be called');
-      },
     });
 
     expect(calls.map((call) => call.type)).toEqual([
@@ -1810,9 +1789,6 @@ describe('Beads project reconciliation', () => {
         },
         updateReadme() {
           throw new Error('updateReadme should not be called');
-        },
-        setProjectVisibility() {
-          throw new Error('setProjectVisibility should not be called');
         },
       });
     } catch (error) {
