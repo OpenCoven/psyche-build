@@ -54,15 +54,19 @@ npm run preview
 
 ## `v0.0.1` distribution contract
 
-After the v0.0.1 macOS release is published and [#194](https://github.com/OpenCoven/psyche-build/issues/194) closes with retained acceptance evidence, the public macOS installation path is:
+The public Psyche Build `v0.0.1` macOS release is available through the native
+OpenCoven Homebrew Cask:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"
 ```
 
-Until that outcome closes, documentation must describe the public Cask as
-pending rather than already available.
+The Cask resolves the same immutable Apple Silicon and Intel release assets
+whose signing, notarization, checksums, provenance, and native install lifecycle
+were retained under
+[#194](https://github.com/OpenCoven/psyche-build/issues/194). The Cask installs
+only `Psyche Build.app`.
 
 An internal TestFlight companion is planned under
 [#200](https://github.com/OpenCoven/psyche-build/issues/200). This repository
@@ -71,8 +75,7 @@ physical-device acceptance evidence. The planned companion remains restricted
 to authorized OpenCoven testers; it is not an external TestFlight or public App
 Store release.
 
-The Cask installs only `Psyche Build.app`. Source CLI development uses the
-repository checkout and contributing guide:
+Source CLI development uses the repository checkout and contributing guide:
 
 ```sh
 node /path/to/psyche-build/psyche
@@ -80,8 +83,9 @@ node /path/to/psyche-build/psyche
 
 The Node CLI is present in source/package output but is not an npm release.
 Windows and Linux are compile-only targets for this release; Android, external
-TestFlight, and public App Store distribution are unavailable. See the
-[support matrix](SUPPORT-MATRIX.md) for the complete contract.
+TestFlight, public App Store distribution, and a browser-hosted application are
+unavailable. See the [support matrix](SUPPORT-MATRIX.md) for the complete
+contract.
 
 ## Structure
 
