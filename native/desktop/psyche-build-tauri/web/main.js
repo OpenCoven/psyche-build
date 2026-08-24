@@ -4551,8 +4551,23 @@
 
     PsychePanes.leafIds(scopedPaneRoot(layout)).forEach(function (leafId) {
       var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread) return;
+      var surface = leaf && canvasSurfaceById(leaf.threadId);
+      if (!surface) return;
+      if (surface.kind === "files") {
+        if (activeFile) return;
+        var file = findOpenFile(surface.activeFileId);
+        items.push({
+          kind: "file",
+          id: file ? file.id : surface.id,
+          label: file ? file.name : (surface.name || "Files"),
+          detail: file ? file.rel : (surface.workspaceRoot || "Workspace files"),
+          current: layout.maximizedLeafId === leafId,
+          thread: null,
+          surface: surface,
+        });
+        return;
+      }
+      var thread = surface;
       items.push({
         kind: "pane",
         id: thread.id,
@@ -4589,8 +4604,11 @@
         (item.kind === "file" ? " is-file" : "") +
         (item.current ? " is-current" : "");
       if (item.kind === "pane") entry.dataset.threadId = item.thread.id;
+      if (item.surface) entry.dataset.surfaceId = item.surface.id;
       entry.title = item.kind === "file"
-        ? item.detail + " · current file"
+        ? item.current
+          ? item.detail + " · current file"
+          : item.label + " — " + item.detail + " · click to focus Files"
         : item.label + " — " + item.detail + " · click to focus this pane";
       entry.setAttribute("aria-label", entry.title);
 
@@ -4618,6 +4636,10 @@
       entry.appendChild(name);
       if (item.kind === "file") {
         entry.addEventListener("click", function () {
+          if (item.surface) {
+            togglePaneMaximize(item.surface);
+            return;
+          }
           restoreFileEditorFocus();
         });
       } else {

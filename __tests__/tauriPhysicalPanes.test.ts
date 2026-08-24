@@ -2048,6 +2048,60 @@ describe('Tauri physical terminal panes', () => {
     },
   );
 
+  it('switches fullscreen to Files when its minimap preview is activated', async () => {
+    const filesPane = {
+      id: 'files-project-repo',
+      kind: 'files',
+      activeFileId: 'file-a',
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', 'thread-source'),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-files', filesPane.id),
+        'split-files',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const terminalArea = new FakeMinimapElement('section');
+    const toggled: unknown[] = [];
+    let restoredEditorFocus = 0;
+    const renderPaneMinimap = compileFunction<
+      (paneLayout: PaneFocusLayout, activeFile: unknown) => void
+    >(functionSource('renderPaneMinimap'), {
+      terminalArea,
+      document: {
+        createElement: (tagName: string) => new FakeMinimapElement(tagName),
+      },
+      paneMinimapItems: () => [{
+        kind: 'file',
+        id: 'file-a',
+        label: 'Button.tsx',
+        detail: 'src/Button.tsx',
+        current: false,
+        thread: null,
+        surface: filesPane,
+      }],
+      paneGlyphFor: () => 'F',
+      sessionStatusClass: () => '',
+      PsychePanes,
+      filesPaneHasCanvasFocus: () => false,
+      returnFromFileFocus: async () => false,
+      focusThread: async () => false,
+      togglePaneMaximize: (surface: unknown) => { toggled.push(surface); },
+      restoreFileEditorFocus: () => { restoredEditorFocus += 1; },
+    });
+
+    renderPaneMinimap(layout, null);
+    const entry = terminalArea.querySelector('.minimap-pane');
+    if (!entry) throw new Error('missing Files minimap pane');
+    await entry.emit('click');
+
+    expect(toggled).toEqual([filesPane]);
+    expect(restoredEditorFocus).toBe(0);
+  });
+
   it('does not mutate layout when maximizing an inactive tearing-down browser', () => {
     const source: PaneFocusThread = {
       id: 'thread-maximize-source',
@@ -4981,6 +5035,7 @@ describe('Tauri physical terminal panes', () => {
         scopedPaneRoot: (value: Layout) => value.root,
         PsychePanes,
         findThread: (id: string) => threads.get(id) || null,
+        canvasSurfaceById: (id: string) => threads.get(id) || null,
         PsycheSessions: { attentionLabel: () => 'Waiting for you' },
       });
 
@@ -5012,6 +5067,66 @@ describe('Tauri physical terminal panes', () => {
           detail: 'running · Waiting for you',
           current: false,
           thread: threads.get('thread-b'),
+        },
+      ]);
+    });
+
+    it('keeps the Files pane in the minimap while another pane is maximized', () => {
+      const thread = { id: 'thread-a', name: 'Agent', status: 'running' };
+      const filesPane = {
+        id: 'files-project-repo',
+        kind: 'files',
+        name: 'Files',
+        activeFileId: 'file-a',
+        workspaceRoot: '/repo',
+      };
+      const file = {
+        id: 'file-a',
+        name: 'Button.tsx',
+        rel: 'src/Button.tsx',
+      };
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-a', thread.id),
+          'leaf-a',
+          PsychePanes.createLeaf('leaf-files', filesPane.id),
+          'split-files',
+        ),
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a',
+      };
+      const paneMinimapItems = compileFunction<
+        (value: Layout, activeFile: typeof file | null) => Array<unknown>
+      >(functionSource('paneMinimapItems'), {
+        scopedPaneRoot: (value: Layout) => value.root,
+        PsychePanes,
+        findThread: (id: string) => id === thread.id ? thread : null,
+        canvasSurfaceById: (id: string) => {
+          if (id === thread.id) return thread;
+          if (id === filesPane.id) return filesPane;
+          return null;
+        },
+        findOpenFile: (id: string) => id === file.id ? file : null,
+        PsycheSessions: { attentionLabel: () => '' },
+      });
+
+      expect(paneMinimapItems(layout, null)).toEqual([
+        {
+          kind: 'pane',
+          id: thread.id,
+          label: 'Agent',
+          detail: 'running',
+          current: true,
+          thread,
+        },
+        {
+          kind: 'file',
+          id: file.id,
+          label: 'Button.tsx',
+          detail: 'src/Button.tsx',
+          current: false,
+          thread: null,
+          surface: filesPane,
         },
       ]);
     });
