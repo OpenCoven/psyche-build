@@ -1,6 +1,10 @@
 // @ts-check
 
 /**
+ * @typedef {0 | 1 | 2 | 3 | 4} BeadPriority
+ */
+
+/**
  * @typedef {{
  *   issue_id?: unknown,
  *   type?: unknown,
@@ -40,7 +44,7 @@
  *   acceptanceCriteria: string | null,
  *   notes: string | null,
  *   status: string,
- *   priority: number,
+ *   priority: BeadPriority,
  *   type: string,
  *   blocked: boolean,
  *   labels: string[],
@@ -166,17 +170,18 @@ function normalizeOptionalString(value, fieldName, context) {
 /**
  * @param {unknown} value
  * @param {string} context
- * @returns {number}
+ * @returns {BeadPriority}
  */
-function normalizePriority(value, context) {
-  if (value == null || value === '') {
-    return 0;
+export function normalizeBeadPriority(value, context) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 0
+    || value > 4
+  ) {
+    fail(`${context} must be an integer from 0 to 4`);
   }
-  const priority = Number(value);
-  if (!Number.isFinite(priority)) {
-    fail(`${context} has an invalid priority`);
-  }
-  return priority;
+  return /** @type {BeadPriority} */ (value);
 }
 
 /**
@@ -419,7 +424,10 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
       'status',
       `Beads record "${id}" on line ${lineNumber}`,
     ),
-    priority: normalizePriority(beadRecord.priority, `Beads record "${id}" on line ${lineNumber}`),
+    priority: normalizeBeadPriority(
+      beadRecord.priority,
+      `Beads record "${id}" on line ${lineNumber} field "priority"`,
+    ),
     type: issueType,
     blocked: false,
     labels: normalizeLabels(beadRecord.labels, `Beads record "${id}" on line ${lineNumber}`),

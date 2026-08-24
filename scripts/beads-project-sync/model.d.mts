@@ -1,4 +1,5 @@
 export type BeadStatus = 'open' | 'in_progress' | 'closed' | (string & {});
+export type BeadPriority = 0 | 1 | 2 | 3 | 4;
 
 export type BeadType =
   | 'epic'
@@ -18,7 +19,7 @@ export interface ParsedBead {
   acceptanceCriteria: string | null;
   notes: string | null;
   status: BeadStatus;
-  priority: number;
+  priority: BeadPriority;
   type: BeadType;
   blocked: boolean;
   labels: string[];
@@ -67,6 +68,11 @@ export function normalizeBeadId(
   fieldName: string,
   context: string,
 ): string;
+
+export function normalizeBeadPriority(
+  value: unknown,
+  context: string,
+): BeadPriority;
 
 export function normalizePublicBeadType(
   value: unknown,

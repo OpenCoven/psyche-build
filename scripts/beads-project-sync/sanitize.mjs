@@ -1,9 +1,12 @@
 // @ts-check
 
 import os from 'node:os';
+import { TextDecoder } from 'node:util';
 import { decodeHTMLStrict } from 'entities';
+import { normalizeBeadPriority } from './model.mjs';
 
 /** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
+/** @typedef {import('./model.mjs').BeadPriority} BeadPriority */
 
 /**
  * @typedef {{
@@ -21,7 +24,7 @@ import { decodeHTMLStrict } from 'entities';
  *   acceptanceCriteria: string | null,
  *   notes: string | null,
  *   status: string,
- *   priority: number,
+ *   priority: BeadPriority,
  *   type: string,
  *   blocked: boolean,
  *   labels: string[],
@@ -81,6 +84,13 @@ const MAX_HTML_ENTITY_REFERENCE_LENGTH = 64;
 const MAX_MARKDOWN_DESTINATION_COUNT = 1_024;
 const MAX_MARKDOWN_DESTINATION_LENGTH = 16_384;
 const MAX_MARKDOWN_PARENTHESIS_DEPTH = 32;
+const MAX_DATA_URI_ENCODED_LENGTH = 12_288;
+const MAX_DATA_URI_DECODED_BYTES = 8_192;
+const MAX_DATA_URI_METADATA_LENGTH = 1_024;
+const MAX_DATA_URI_RECURSION_DEPTH = 4;
+const MAX_RAW_HTML_START_TAG_COUNT = 1_024;
+const MAX_RAW_HTML_START_TAG_LENGTH = 16_384;
+const MAX_RAW_HTML_ATTRIBUTE_COUNT = 512;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
 const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
 const MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN =
@@ -95,6 +105,16 @@ const HOME_PATH_GENERIC_PATH_PATTERNS = [
   /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
   /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
 ];
+const RAW_HTML_URL_ATTRIBUTES = new Set([
+  'href',
+  'src',
+  'action',
+  'poster',
+  'cite',
+  'data',
+]);
+const STRICT_BASE64_PATTERN =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 /**
  * @param {string} message
@@ -971,6 +991,494 @@ function normalizeSpecialSchemeSeparatorsMapped(mapped) {
  */
 function inspectUrlCandidateMapped(mapped) {
   return normalizeSpecialSchemeSeparatorsMapped(decodeUrlInspectionMapped(mapped));
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   value: string,
+ * }} DataUriCandidate
+ */
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isDataUriBoundary(value) {
+  return value == null || /\s|["'`<>()\[\]{}]/u.test(value);
+}
+
+/**
+ * @param {string} value
+ * @returns {DataUriCandidate[]}
+ */
+function scanDataUriCandidates(value) {
+  const candidates = /** @type {DataUriCandidate[]} */ ([]);
+
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    const schemeEnd = findUriSchemeEnd(value, cursor);
+    if (
+      schemeEnd == null
+      || value.slice(cursor, schemeEnd).toLowerCase() !== 'data'
+    ) {
+      continue;
+    }
+
+    let end = schemeEnd + 1;
+    while (end < value.length && !isDataUriBoundary(value[end])) {
+      end += 1;
+    }
+    end = trimUriCandidateEnd(value, cursor, end);
+    candidates.push({
+      start: cursor,
+      end,
+      value: value.slice(cursor, end),
+    });
+    cursor = Math.max(cursor, end - 1);
+  }
+
+  return candidates;
+}
+
+/**
+ * @param {string} mediaType
+ * @param {string} metadata
+ * @returns {boolean}
+ */
+function isTextualDataMediaType(mediaType, metadata) {
+  return (
+    mediaType.startsWith('text/')
+    || /(?:^|\/|\+)(?:json|xml|javascript|svg\+xml)$/iu.test(mediaType)
+    || /(?:^|;)charset=/iu.test(metadata)
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function containsEmail(value) {
+  EMAIL_PATTERN.lastIndex = 0;
+  return EMAIL_PATTERN.test(value);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertDecodedDataTextSafe(value, config, depth) {
+  const variants = new Set([value]);
+  variants.add(inspectUrlCandidateMapped(createMappedInspectionText(value)).value);
+
+  for (const variant of variants) {
+    assertNoDirectPublishableSecrets(variant);
+    assertNoEncodedUrlSecrets(variant, true);
+    assertNoMarkdownReconstructedSecrets(variant);
+    if (
+      containsEmail(variant)
+      || redactLocalPaths(variant, config) !== variant
+    ) {
+      fail('Publishable data URI contains sensitive email or local path data');
+    }
+    assertSafeDataUrisInText(variant, config, depth + 1);
+  }
+}
+
+/**
+ * @param {string} candidate
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertSafeDataUriCandidate(candidate, config, depth) {
+  if (depth > MAX_DATA_URI_RECURSION_DEPTH) {
+    fail('Publishable data URI exceeds the nested inspection limit');
+  }
+  if (
+    candidate.length
+    > MAX_DATA_URI_ENCODED_LENGTH + MAX_DATA_URI_METADATA_LENGTH + 6
+  ) {
+    fail('Publishable data URI exceeds the encoded inspection limit');
+  }
+
+  const decodedCandidate = inspectUrlCandidateMapped(
+    createMappedInspectionText(candidate),
+  ).value;
+  if (!decodedCandidate.toLowerCase().startsWith('data:')) {
+    fail('Publishable data URI has an invalid scheme');
+  }
+  const commaIndex = decodedCandidate.indexOf(',', 5);
+  if (commaIndex === -1) {
+    fail('Publishable data URI is missing its data delimiter');
+  }
+
+  const metadata = decodedCandidate.slice(5, commaIndex);
+  if (metadata.length > MAX_DATA_URI_METADATA_LENGTH) {
+    fail('Publishable data URI metadata exceeds the inspection limit');
+  }
+  const metadataParts = metadata.split(';');
+  const base64Indexes = metadataParts
+    .map((part, index) => part.toLowerCase() === 'base64' ? index : -1)
+    .filter((index) => index >= 0);
+  if (
+    base64Indexes.length > 1
+    || (
+      base64Indexes.length === 1
+      && base64Indexes[0] !== metadataParts.length - 1
+    )
+  ) {
+    fail('Publishable data URI has an invalid base64 declaration');
+  }
+  const isBase64 = base64Indexes.length === 1;
+  const mediaType = (metadataParts[0] || 'text/plain').toLowerCase();
+  const payload = decodedCandidate.slice(commaIndex + 1);
+  if (payload.length > MAX_DATA_URI_ENCODED_LENGTH) {
+    fail('Publishable data URI exceeds the encoded inspection limit');
+  }
+
+  if (!isBase64) {
+    if (Buffer.byteLength(payload, 'utf8') > MAX_DATA_URI_DECODED_BYTES) {
+      fail('Publishable data URI exceeds the decoded inspection limit');
+    }
+    assertDecodedDataTextSafe(payload, config, depth);
+    return;
+  }
+
+  if (
+    payload.length % 4 !== 0
+    || !STRICT_BASE64_PATTERN.test(payload)
+  ) {
+    fail('Publishable data URI contains invalid base64 data');
+  }
+  const decoded = Buffer.from(payload, 'base64');
+  if (decoded.toString('base64') !== payload) {
+    fail('Publishable data URI contains invalid base64 data');
+  }
+  if (decoded.byteLength > MAX_DATA_URI_DECODED_BYTES) {
+    fail('Publishable data URI exceeds the decoded inspection limit');
+  }
+
+  let decodedText;
+  try {
+    decodedText = new TextDecoder('utf-8', { fatal: true }).decode(decoded);
+  } catch {
+    if (isTextualDataMediaType(mediaType, metadata)) {
+      fail('Publishable textual data URI contains invalid UTF-8');
+    }
+    return;
+  }
+  assertDecodedDataTextSafe(decodedText, config, depth);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertSafeDataUrisInText(value, config, depth) {
+  for (const candidate of scanDataUriCandidates(value)) {
+    assertSafeDataUriCandidate(candidate.value, config, depth);
+  }
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   tagNameEnd: number,
+ * }} RawHtmlStartTag
+ */
+
+/**
+ * @param {string} value
+ * @returns {RawHtmlStartTag[]}
+ */
+function scanRawHtmlStartTags(value) {
+  const tags = /** @type {RawHtmlStartTag[]} */ ([]);
+  const protectedMask = markdownCodeMask(value);
+
+  for (let start = 0; start < value.length; start += 1) {
+    if (
+      value[start] !== '<'
+      || protectedMask[start]
+      || !/[A-Za-z]/u.test(value[start + 1] ?? '')
+    ) {
+      continue;
+    }
+
+    let tagNameEnd = start + 2;
+    while (/[A-Za-z0-9:-]/u.test(value[tagNameEnd] ?? '')) {
+      tagNameEnd += 1;
+    }
+    if (!/[\s/>]/u.test(value[tagNameEnd] ?? '')) {
+      continue;
+    }
+    if (tags.length >= MAX_RAW_HTML_START_TAG_COUNT) {
+      fail('Public text exceeds the raw HTML start tag inspection limit');
+    }
+
+    let quote = '';
+    let end = tagNameEnd;
+    for (; end < value.length; end += 1) {
+      if (end - start > MAX_RAW_HTML_START_TAG_LENGTH) {
+        fail('Raw HTML start tag exceeds the inspection limit');
+      }
+      const character = value[end] ?? '';
+      if (quote) {
+        if (character === quote) {
+          quote = '';
+        }
+        continue;
+      }
+      if (character === '"' || character === "'") {
+        quote = character;
+        continue;
+      }
+      if (character === '>') {
+        break;
+      }
+    }
+    if (end >= value.length || quote) {
+      fail('Unterminated or malformed raw HTML start tag');
+    }
+    tags.push({
+      start,
+      end: end + 1,
+      tagNameEnd,
+    });
+    start = end;
+  }
+
+  return tags;
+}
+
+/**
+ * @param {string} value
+ * @param {string | null} quote
+ * @returns {string}
+ */
+function escapeRawHtmlAttributeValue(value, quote) {
+  let escaped = value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;');
+  if (quote === '"') {
+    return escaped.replace(/"/gu, '&quot;');
+  }
+  if (quote === "'") {
+    return escaped.replace(/'/gu, '&#39;');
+  }
+  return escaped.replace(/[\s"'`=]/gu, (character) =>
+    `&#${character.codePointAt(0)};`
+  );
+}
+
+/**
+ * @param {string} rawValue
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
+  const decoded = inspectUrlCandidateMapped(
+    createMappedInspectionText(rawValue),
+  ).value;
+  assertNoDirectPublishableSecrets(decoded);
+  assertNoEncodedUrlSecrets(decoded, true);
+  assertNoMarkdownReconstructedSecrets(decoded);
+  if (decoded.toLowerCase().startsWith('data:')) {
+    assertSafeDataUriCandidate(decoded, config, depth);
+  }
+
+  const matchers = buildHomeDirectoryMatchers(config);
+  const uri = parseAbsoluteUri(decoded);
+  let sanitized = uri == null
+    ? decoded
+    : sanitizeProtectedUrl(decoded, matchers);
+  sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
+  sanitized = redactHomeDirectoryToken(sanitized, matchers);
+  sanitized = redactLocalOperationalPaths(sanitized);
+
+  return sanitized === decoded
+    ? rawValue
+    : escapeRawHtmlAttributeValue(sanitized, quote);
+}
+
+/**
+ * @param {string} rawValue
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlSrcset(rawValue, quote, config, depth) {
+  const replacements = /** @type {{start: number, end: number, value: string}[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < rawValue.length) {
+    while (cursor < rawValue.length && /[\s,]/u.test(rawValue[cursor] ?? '')) {
+      cursor += 1;
+    }
+    if (cursor >= rawValue.length) {
+      break;
+    }
+
+    const start = cursor;
+    const isData = rawValue.slice(cursor, cursor + 5).toLowerCase() === 'data:';
+    if (isData) {
+      while (cursor < rawValue.length && !/\s/u.test(rawValue[cursor] ?? '')) {
+        cursor += 1;
+      }
+      const firstComma = rawValue.indexOf(',', start);
+      if (
+        firstComma === -1
+        || firstComma >= cursor
+        || rawValue.indexOf(',', firstComma + 1) < cursor
+      ) {
+        fail('Raw HTML srcset contains an ambiguous data URI candidate');
+      }
+    } else {
+      while (
+        cursor < rawValue.length
+        && !/[\s,]/u.test(rawValue[cursor] ?? '')
+      ) {
+        cursor += 1;
+      }
+    }
+    if (cursor === start) {
+      fail('Raw HTML srcset contains an empty URL candidate');
+    }
+
+    const sanitized = sanitizeRawHtmlDestination(
+      rawValue.slice(start, cursor),
+      quote,
+      config,
+      depth,
+    );
+    if (sanitized !== rawValue.slice(start, cursor)) {
+      replacements.push({ start, end: cursor, value: sanitized });
+    }
+
+    while (cursor < rawValue.length && rawValue[cursor] !== ',') {
+      cursor += 1;
+    }
+    if (rawValue[cursor] === ',') {
+      cursor += 1;
+    }
+  }
+
+  let sanitized = rawValue;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlUrlAttributes(value, config, depth) {
+  const replacements = /** @type {{start: number, end: number, value: string}[]} */ ([]);
+
+  for (const tag of scanRawHtmlStartTags(value)) {
+    let cursor = tag.tagNameEnd;
+    let attributeCount = 0;
+
+    while (cursor < tag.end - 1) {
+      while (cursor < tag.end - 1 && /\s/u.test(value[cursor] ?? '')) {
+        cursor += 1;
+      }
+      if (value[cursor] === '/') {
+        cursor += 1;
+        continue;
+      }
+      if (cursor >= tag.end - 1) {
+        break;
+      }
+      if (++attributeCount > MAX_RAW_HTML_ATTRIBUTE_COUNT) {
+        fail('Raw HTML start tag exceeds the attribute inspection limit');
+      }
+
+      const nameStart = cursor;
+      while (
+        cursor < tag.end - 1
+        && !/[\s=/>]/u.test(value[cursor] ?? '')
+      ) {
+        cursor += 1;
+      }
+      if (cursor === nameStart) {
+        fail('Malformed raw HTML start tag attribute');
+      }
+      const name = value.slice(nameStart, cursor).toLowerCase();
+      while (cursor < tag.end - 1 && /\s/u.test(value[cursor] ?? '')) {
+        cursor += 1;
+      }
+      if (value[cursor] !== '=') {
+        continue;
+      }
+      cursor += 1;
+      while (cursor < tag.end - 1 && /\s/u.test(value[cursor] ?? '')) {
+        cursor += 1;
+      }
+
+      const openingQuote = value[cursor] === '"' || value[cursor] === "'"
+        ? value[cursor] ?? null
+        : null;
+      if (openingQuote) {
+        cursor += 1;
+      }
+      const valueStart = cursor;
+      if (openingQuote) {
+        while (cursor < tag.end - 1 && value[cursor] !== openingQuote) {
+          cursor += 1;
+        }
+        if (cursor >= tag.end - 1) {
+          fail('Unterminated raw HTML attribute value');
+        }
+      } else {
+        while (
+          cursor < tag.end - 1
+          && !/[\s>]/u.test(value[cursor] ?? '')
+        ) {
+          cursor += 1;
+        }
+      }
+      const valueEnd = cursor;
+      if (openingQuote) {
+        cursor += 1;
+      }
+      if (!RAW_HTML_URL_ATTRIBUTES.has(name) && name !== 'srcset') {
+        continue;
+      }
+
+      const rawValue = value.slice(valueStart, valueEnd);
+      const sanitized = name === 'srcset'
+        ? sanitizeRawHtmlSrcset(rawValue, openingQuote, config, depth)
+        : sanitizeRawHtmlDestination(rawValue, openingQuote, config, depth);
+      if (sanitized !== rawValue) {
+        replacements.push({
+          start: valueStart,
+          end: valueEnd,
+          value: sanitized,
+        });
+      }
+    }
+  }
+
+  let sanitized = value;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
 }
 
 /**
@@ -2765,14 +3273,10 @@ function sanitizeStringList(value, fieldName, config) {
 
 /**
  * @param {unknown} value
- * @returns {number}
+ * @returns {BeadPriority}
  */
 function normalizePriority(value) {
-  const priority = Number(value);
-  if (!Number.isFinite(priority)) {
-    fail('Public bead field "priority" must be a finite number');
-  }
-  return priority;
+  return normalizeBeadPriority(value, 'Public bead field "priority"');
 }
 
 /**
@@ -2917,6 +3421,7 @@ export function assertNoPublishableSecrets(value) {
     return;
   }
 
+  assertSafeDataUrisInText(value, {}, 0);
   assertNoDirectPublishableSecrets(value);
   assertNoEncodedUrlSecrets(value, true);
   assertNoMarkdownReconstructedSecrets(value);
@@ -2936,6 +3441,8 @@ export function sanitizePublicText(value, config = {}) {
   }
 
   let sanitized = value.replace(/\r\n?/gu, '\n');
+  sanitized = sanitizeRawHtmlUrlAttributes(sanitized, config, 0);
+  assertSafeDataUrisInText(sanitized, config, 0);
   assertNoEncodedUrlSecrets(sanitized);
   assertNoMarkdownReconstructedSecrets(sanitized);
   sanitized = redactDecodedHtmlEntitySensitiveText(sanitized, config);

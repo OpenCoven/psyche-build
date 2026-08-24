@@ -16,7 +16,9 @@ const REQUIRED_OPERATIONS = Object.freeze([
   'DiscoverManagedProject',
   'DiscoverManagedProjectItems',
 ]);
-const MAX_GRAPHQL_REQUESTS = 2;
+const REQUIRED_OPERATION_NAMES = new Set(REQUIRED_OPERATIONS);
+const MAX_GRAPHQL_REQUESTS = 200;
+const MAX_PAGES_PER_OPERATION = 100;
 
 /**
  * @returns {{
@@ -45,6 +47,7 @@ function captureStream() {
  *   kind: 'query' | 'mutation',
  *   name: string,
  *   signature: string,
+ *   cursorKey: string,
  * }}
  */
 function parseGraphqlRequest(stdin) {
@@ -62,10 +65,28 @@ function parseGraphqlRequest(stdin) {
   if (!match) {
     throw new Error('GraphQL request is missing a named operation');
   }
+  const variables = payload?.variables;
+  if (
+    variables != null
+    && (typeof variables !== 'object' || Array.isArray(variables))
+  ) {
+    throw new Error('GraphQL request variables must be an object when present');
+  }
+  const cursor = variables == null
+    ? undefined
+    : /** @type {Record<string, unknown>} */ (variables).cursor;
+  if (cursor != null && typeof cursor !== 'string') {
+    throw new Error(`GraphQL pagination cursor for "${match[2]}" must be a string or null`);
+  }
   return {
     kind: match[1],
     name: match[2],
     signature: createHash('sha256').update(stdin).digest('hex'),
+    cursorKey: cursor === undefined
+      ? 'missing'
+      : cursor === null
+        ? 'null'
+        : `string:${cursor}`,
   };
 }
 
@@ -112,8 +133,12 @@ export async function runBeadsGraphqlE2e(options = {}) {
    *   kind: 'query',
    *   name: string,
    *   signature: string,
+   *   cursorKey: string,
    * }[]} */ ([]);
   const signatures = new Set();
+  const cursorsByOperation = new Map(
+    REQUIRED_OPERATIONS.map((name) => [name, new Set()]),
+  );
 
   /** @type {ExecFileRun} */
   const tracedRun = async (command, args, runOptions) => {
@@ -124,14 +149,40 @@ export async function runBeadsGraphqlE2e(options = {}) {
           `GraphQL mutation "${operation.name}" is forbidden during the read-only E2E`,
         );
       }
+      if (!REQUIRED_OPERATION_NAMES.has(operation.name)) {
+        throw new Error(`Unexpected GraphQL operation "${operation.name}" during read-only E2E`);
+      }
       if (signatures.has(operation.signature)) {
         throw new Error(`Duplicate GraphQL request detected for "${operation.name}"`);
       }
+      const cursors = cursorsByOperation.get(operation.name);
+      if (!cursors) {
+        throw new Error(`Unexpected GraphQL operation "${operation.name}" during read-only E2E`);
+      }
+      if (cursors.has(operation.cursorKey)) {
+        throw new Error(
+          `Duplicate GraphQL pagination cursor detected for "${operation.name}"`,
+        );
+      }
+      if (cursors.size >= MAX_PAGES_PER_OPERATION) {
+        throw new Error(
+          `GraphQL pagination page ceiling exceeded for "${operation.name}": `
+            + `${cursors.size + 1} > ${MAX_PAGES_PER_OPERATION}`,
+        );
+      }
+      if (operations.length >= MAX_GRAPHQL_REQUESTS) {
+        throw new Error(
+          `GraphQL request ceiling exceeded: ${operations.length + 1} > `
+            + `${MAX_GRAPHQL_REQUESTS}`,
+        );
+      }
       signatures.add(operation.signature);
+      cursors.add(operation.cursorKey);
       operations.push({
         kind: 'query',
         name: operation.name,
         signature: operation.signature,
+        cursorKey: operation.cursorKey,
       });
     }
     return delegateRun(command, args, runOptions);
@@ -172,10 +223,17 @@ export async function runBeadsGraphqlE2e(options = {}) {
   if (summary?.mode !== 'dry-run' || summary?.appliedOperationCount !== 0) {
     throw new Error('Beads GraphQL E2E did not remain read-only');
   }
+  const pageCounts = {
+    DiscoverManagedProject:
+      cursorsByOperation.get('DiscoverManagedProject')?.size ?? 0,
+    DiscoverManagedProjectItems:
+      cursorsByOperation.get('DiscoverManagedProjectItems')?.size ?? 0,
+  };
 
   return {
     graphqlRequestCount: operations.length,
     operations: operations.map(({ kind, name }) => ({ kind, name })),
+    pageCounts,
     summary,
     diagnostics: redact(stderr.read().trim(), token),
   };

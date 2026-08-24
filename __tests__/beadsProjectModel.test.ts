@@ -213,6 +213,26 @@ describe('Beads project model', () => {
     })), { assigneeMap: {} })).toThrow(/multiple parents/i);
   });
 
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['boolean', true],
+    ['string', '1'],
+    ['fractional', 1.5],
+    ['negative', -1],
+    ['above P4', 5],
+  ])('rejects %s priority values before reconciliation', (_name, priority) => {
+    expect(() => parseBeadExport(toJsonl(makeIssue({ priority })), {
+      assigneeMap: {},
+    })).toThrow(/priority.*integer.*0.*4|priority.*0.*4/i);
+  });
+
+  it.each([0, 1, 2, 3, 4])('accepts integer priority P%s', (priority) => {
+    expect(parseBeadExport(toJsonl(makeIssue({ priority })), {
+      assigneeMap: {},
+    })[0]?.priority).toBe(priority);
+  });
+
   it.each(['bad id', 'bad>id', 'bad]id'])(
     'rejects invalid Bead ids that are unsafe for markers/titles: %s',
     (id) => {

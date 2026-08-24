@@ -55,6 +55,7 @@ const APPLY_LOCK_PERMISSION_MESSAGE =
 const SAFE_LOCK_IDENTITY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const GITHUB_LOGIN_PATTERN =
   /^(?!-)(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
+const MAX_GIT_OBJECT_INDIRECTION = 8;
 
 const STATUS_OPTIONS = Object.freeze([
   Object.freeze({ name: 'Backlog', color: 'GRAY', description: '' }),
@@ -1432,7 +1433,12 @@ export function createGhClient(options) {
   let organizationId = null;
   /** @type {string | null} */
   let repositoryId = null;
-  let repositoryDefaultBranch = 'main';
+  /** @type {Record<string, unknown> | null} */
+  let repositoryMetadata = null;
+  /** @type {{sha: string, treeSha: string, branch: string} | null} */
+  let defaultBranchSeed = null;
+  /** @type {Promise<string> | null} */
+  let trustedActorLoginPromise = null;
   /** @type {Map<number, number>} */
   const issueDatabaseIds = new Map();
   /** @type {ProjectContext[]} */
@@ -1471,6 +1477,32 @@ export function createGhClient(options) {
     return trustedIssueAuthors.has(
       stringOrEmpty(record(issue.user).login).trim().toLowerCase(),
     );
+  }
+
+  /**
+   * @returns {Promise<string>}
+   */
+  async function trustedActorLogin() {
+    if (trustedActorLoginPromise == null) {
+      trustedActorLoginPromise = (async () => {
+        const authenticatedUser = record(await rest('GET', 'user'));
+        const login = requiredString(authenticatedUser.login, 'authenticated GitHub actor login');
+        if (!GITHUB_LOGIN_PATTERN.test(login)) {
+          throw new GhClientError(
+            'ownership',
+            'Authenticated GitHub token actor returned an invalid login',
+          );
+        }
+        if (!trustedIssueAuthors.has(login.toLowerCase())) {
+          throw new GhClientError(
+            'ownership',
+            `Authenticated GitHub token actor "${login}" is not in trustedIssueAuthors`,
+          );
+        }
+        return login;
+      })();
+    }
+    return trustedActorLoginPromise;
   }
 
   async function assertManagedMutationLease() {
@@ -1556,6 +1588,7 @@ export function createGhClient(options) {
    * @returns {Promise<GhRunResult>}
    */
   async function runManagedGhOnce(args, stdin) {
+    await trustedActorLogin();
     await assertManagedMutationLease();
     return runGhOnce(args, stdin);
   }
@@ -1586,6 +1619,9 @@ export function createGhClient(options) {
       ...(body === undefined ? [] : ['--input', '-']),
     ];
     const isMutation = method !== 'GET';
+    if (isMutation) {
+      await trustedActorLogin();
+    }
     const execute = !isMutation || mutationScope === 'lock'
       ? (method === 'POST' || method === 'DELETE' ? runGhOnce : runGh)
       : (method === 'POST' || method === 'DELETE' ? runManagedGhOnce : runManagedGh);
@@ -1748,6 +1784,7 @@ export function createGhClient(options) {
    * @returns {Promise<Record<string, unknown>>}
    */
   async function managedGraphqlOnce(query, variables) {
+    await trustedActorLogin();
     await assertManagedMutationLease();
     return graphqlOnce(query, variables);
   }
@@ -1772,18 +1809,173 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {boolean} [refresh=false]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function loadRepositoryMetadata(refresh = false) {
+    if (repositoryMetadata == null || refresh) {
+      repositoryMetadata = record(await rest('GET', `repos/${owner}/${repo}`));
+      if (refresh) {
+        defaultBranchSeed = null;
+      }
+    }
+    return repositoryMetadata;
+  }
+
+  /**
+   * @param {Record<string, unknown>} repository
+   * @returns {string}
+   */
+  function defaultBranchName(repository) {
+    const branch = requiredString(repository.default_branch, 'repository default branch');
+    if (
+      branch.length > 255
+      || branch.startsWith('/')
+      || branch.endsWith('/')
+      || branch.endsWith('.')
+      || branch.includes('..')
+      || branch.includes('@{')
+      || /[\u0000-\u0020\u007f~^:?*[\]\\]/u.test(branch)
+      || branch.split('/').some((component) =>
+        !component || component.startsWith('.') || component.endsWith('.lock')
+      )
+    ) {
+      throw new GhClientError(
+        'response',
+        `GitHub returned unsafe repository default branch "${branch}"`,
+      );
+    }
+    return branch;
+  }
+
+  /**
+   * @param {Record<string, unknown>} rawObject
+   * @param {string} branch
+   * @returns {Promise<string>}
+   */
+  async function peelDefaultBranchObject(rawObject, branch) {
+    let object = rawObject;
+    const seen = new Set();
+
+    for (let depth = 0; depth <= MAX_GIT_OBJECT_INDIRECTION; depth += 1) {
+      const type = requiredString(object.type, `default branch "${branch}" object type`);
+      const sha = requiredString(object.sha, `default branch "${branch}" object sha`);
+      if (type === 'commit') {
+        return sha;
+      }
+      if (type !== 'tag') {
+        throw new GhClientError(
+          'response',
+          `GitHub default branch "${branch}" resolved to unsupported ${type} object ${sha}`,
+        );
+      }
+      if (seen.has(sha) || depth === MAX_GIT_OBJECT_INDIRECTION) {
+        throw new GhClientError(
+          'response',
+          `GitHub default branch "${branch}" object indirection is cyclic or too deep`,
+        );
+      }
+      seen.add(sha);
+      try {
+        const tag = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/tags/${encodeURIComponent(sha)}`,
+        ));
+        object = record(tag.object);
+      } catch (error) {
+        if (errorStatus(error) === 404) {
+          throw new GhClientError(
+            'lock',
+            `GitHub default branch "${branch}" tag object ${sha} was not found`,
+            404,
+          );
+        }
+        throw error;
+      }
+    }
+
+    throw new GhClientError(
+      'response',
+      `GitHub default branch "${branch}" object indirection is too deep`,
+    );
+  }
+
+  /**
+   * @returns {Promise<{sha: string, treeSha: string, branch: string}>}
+   */
+  async function resolveDefaultBranchSeed() {
+    if (defaultBranchSeed != null) {
+      return defaultBranchSeed;
+    }
+
+    let repository = await loadRepositoryMetadata();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const branch = defaultBranchName(repository);
+      let rawRef;
+      try {
+        rawRef = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
+        ));
+      } catch (error) {
+        if (errorStatus(error) !== 404) {
+          throw error;
+        }
+        if (attempt === 0) {
+          repository = await loadRepositoryMetadata(true);
+          continue;
+        }
+        throw new GhClientError(
+          'lock',
+          `GitHub default branch "${branch}" ref was not found after refreshing repository metadata`,
+          404,
+        );
+      }
+
+      const sha = await peelDefaultBranchObject(record(rawRef.object), branch);
+      let commit;
+      try {
+        commit = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/commits/${encodeURIComponent(sha)}`,
+        ));
+      } catch (error) {
+        if (errorStatus(error) === 404) {
+          throw new GhClientError(
+            'lock',
+            `GitHub default branch "${branch}" commit object ${sha} was not found`,
+            404,
+          );
+        }
+        throw error;
+      }
+      const resolvedSha = requiredString(commit.sha, 'apply lock base commit sha');
+      if (resolvedSha !== sha) {
+        throw new GhClientError(
+          'response',
+          `GitHub default branch "${branch}" commit response changed SHA from ${sha} to `
+            + `${resolvedSha}`,
+        );
+      }
+      defaultBranchSeed = {
+        branch,
+        sha,
+        treeSha: requiredString(record(commit.tree).sha, 'apply lock base tree sha'),
+      };
+      return defaultBranchSeed;
+    }
+
+    throw new GhClientError('lock', 'GitHub default branch ref could not be resolved');
+  }
+
+  /**
    * @returns {Promise<{organization: Record<string, unknown>, repository: Record<string, unknown>}>}
    */
   async function verifyAccess() {
     await runGh(['auth', 'status', '--hostname', 'github.com', '--active']);
-    const repository = record(await rest('GET', `repos/${owner}/${repo}`));
+    await trustedActorLogin();
+    const repository = await loadRepositoryMetadata(true);
     const organization = record(await rest('GET', `orgs/${owner}`));
-    if (
-      typeof repository.default_branch === 'string'
-      && SAFE_BEAD_ID_PATTERN.test(repository.default_branch)
-    ) {
-      repositoryDefaultBranch = repository.default_branch;
-    }
     return { organization, repository };
   }
 
@@ -2131,6 +2323,7 @@ export function createGhClient(options) {
    */
   async function acquireApplyLock(input) {
     try {
+      await trustedActorLogin();
       const lockOwner = lockIdentity(input?.owner, 'apply lock owner');
       const runId = lockIdentity(input?.runId, 'apply lock runId');
       const leaseId = lockIdentity(input?.leaseId, 'apply lock leaseId');
@@ -2161,12 +2354,9 @@ export function createGhClient(options) {
         parentSha = current.sha;
         treeSha = current.treeSha;
       } else {
-        const base = record(await rest(
-          'GET',
-          `repos/${owner}/${repo}/git/commits/${encodeURIComponent(repositoryDefaultBranch)}`,
-        ));
-        parentSha = requiredString(base.sha, 'apply lock base commit sha');
-        treeSha = requiredString(record(base.tree).sha, 'apply lock base tree sha');
+        const base = await resolveDefaultBranchSeed();
+        parentSha = base.sha;
+        treeSha = base.treeSha;
       }
 
       const sha = await createApplyLockCommit(state, parentSha, treeSha);

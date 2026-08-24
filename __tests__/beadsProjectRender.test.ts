@@ -83,7 +83,7 @@ function makeClosedHistoryInventory(
     id: `pb-closed-${String(index + 1).padStart(4, '0')}`,
     title: titleForIndex(index),
     status: 'closed',
-    priority: index % 5,
+    priority: (index % 5) as PublicBead['priority'],
     type: 'task',
     blocked: false,
     parentId: null,
@@ -127,6 +127,20 @@ function renderSourceDescription(description: string): string {
 }
 
 describe('Beads project renderers', () => {
+  it.each([true, '1', 1.5, -1, 5])(
+    'rejects invalid public priority value %s',
+    (priority) => {
+      const source = parseBeadExport(issuesJsonl, {
+        assigneeMap: {},
+      })[0]!;
+
+      expect(() => toPublicBead({
+        ...source,
+        priority: priority as unknown as PublicBead['priority'],
+      })).toThrow(/priority.*integer.*0.*4|priority.*0.*4/i);
+    },
+  );
+
   it('keeps an ASCII issue title unchanged when it fits', () => {
     const bead = {
       ...buildPublicInventory()[0]!,
@@ -576,30 +590,134 @@ describe('Beads project renderers', () => {
       sanitizePublicText([
         'file:/Users/buns/private/notes.md',
         'urn:psyche:%252Epsyche%252Fworktrees%252Frun',
-        'data:text/plain,%252Fhome%252Falice%252Fprivate',
         'mailto:team@example.com?workspace=%252Eworktrees%252Frun'
           + '#preview=%252FUsers%252Fbuns%252Fprivate',
       ].join('\n')),
     ).toBe([
       'file:/~/private/notes.md',
       'urn:<redacted-local-path>',
-      'data:text/plain,~/private',
       'mailto:<redacted-email>?workspace=<redacted-local-path>#preview=~/private',
     ].join('\n'));
 
     for (const unsafeUri of [
       `mailto:team@example.com?subject=${encodedToken}`,
+      'data:text/plain,%252Fhome%252Falice%252Fprivate',
       `data:text/plain,${doubleEncodedToken}`,
       `urn:psyche:${encodedToken}`,
       `file://${encodedToken}.example/srv/public`,
     ]) {
       expect(() => sanitizePublicText(`Publish ${unsafeUri}`)).toThrow(
-        /Publishable GitHub token/i,
+        /Publishable GitHub token|data URI.*sensitive/i,
       );
     }
     expect(() => sanitizePublicText('Publish data:text/plain,%2')).toThrow(
       /malformed percent encoding/i,
     );
+  });
+
+  it('strictly validates bounded base64 data URIs and recursively inspects decoded text', () => {
+    const safe = 'data:text/plain;base64,aGVsbG8gd29ybGQ=';
+    const token = 'github_pat_abcdefghijklmnopqrstuvwxyz1234567890';
+    const sensitiveValues = [
+      token,
+      'team@example.com',
+      '/Users/alice/private/notes.md',
+      '.worktrees/run/private.log',
+      `data:text/plain,${
+        encodeURIComponent('api_key = "live-secret-value"')
+      }`,
+    ];
+
+    expect(sanitizePublicText(`Embedded ${safe}`)).toBe(`Embedded ${safe}`);
+    for (const sensitive of sensitiveValues) {
+      const encoded = Buffer.from(sensitive, 'utf8').toString('base64');
+      expect(() =>
+        sanitizePublicText(`Embedded data:text/plain;base64,${encoded}`)
+      ).toThrow(/data URI.*sensitive|Publishable|email|local path/i);
+    }
+    for (const invalid of [
+      'data:text/plain;base64,!!!!',
+      'data:text/plain;base64,aGVsbG8',
+      'data:text/plain;base64,aGVs%20bG8=',
+    ]) {
+      expect(() => sanitizePublicText(invalid)).toThrow(/invalid.*base64|base64.*invalid/i);
+    }
+
+    const decodedOversize = Buffer.alloc(8_193, 0x61).toString('base64');
+    expect(() =>
+      sanitizePublicText(`data:application/octet-stream;base64,${decodedOversize}`)
+    ).toThrow(/decoded.*limit|data URI.*large/i);
+    expect(() =>
+      sanitizePublicText(`data:text/plain;base64,${'A'.repeat(12_292)}`)
+    ).toThrow(/encoded.*limit|data URI.*large/i);
+  });
+
+  it('fails closed for sensitive non-base64 data payloads while preserving small safe data', () => {
+    expect(sanitizePublicText('data:text/plain,hello%20public')).toBe(
+      'data:text/plain,hello%20public',
+    );
+    for (const unsafe of [
+      'data:text/plain,team%40example.com',
+      'data:text/plain,%252Eworktrees%252Frun%252Fnotes.md',
+      'data:text/plain,%26%23x2F%3BUsers%26%23x2F%3Balice%26%23x2F%3Bprivate',
+      'data:text/plain,github%255Fpat%255Fabcdefghijklmnopqrstuvwxyz1234567890',
+    ]) {
+      expect(() => sanitizePublicText(unsafe)).toThrow(
+        /data URI.*sensitive|Publishable|email|local path/i,
+      );
+    }
+  });
+
+  it('structurally sanitizes raw HTML URL attributes and srcset candidates', () => {
+    const unsafe = [
+      '<a HREF="%2Eworktrees%2Frun%2Fnotes.md">worktree</a>',
+      '<img src="&#47;Users&#47;alice&#47;private.png">',
+      "<form action='mailto:team%40example.com'></form>",
+      '<video poster=/home/alice/private.jpg></video>',
+      '<blockquote cite="https://example.com/%2Epsyche%2Fworktrees%2Frun"></blockquote>',
+      '<object data="https://example.com/%2FUsers%2Falice%2Fprivate"></object>',
+      '<img srcset="/Users/alice/one.png 1x, %2Eworktrees%2Frun/two.png 2x,'
+        + ' https://example.com/public.png 3x">',
+    ].join('\n');
+
+    const sanitized = sanitizePublicText(unsafe);
+
+    expect(sanitized).toContain('HREF="&lt;redacted-local-path&gt;"');
+    expect(sanitized).toContain('src="~/private.png"');
+    expect(sanitized).toContain("action='mailto:&lt;redacted-email&gt;'");
+    expect(sanitized).toContain('poster=~/private.jpg');
+    expect(sanitized).toContain('cite="https://example.com/&lt;redacted-local-path&gt;"');
+    expect(sanitized).toContain('data="https://example.com/~/private"');
+    expect(sanitized).toContain(
+      'srcset="~/one.png 1x, &lt;redacted-local-path&gt; 2x,'
+        + ' https://example.com/public.png 3x"',
+    );
+    expect(sanitized).not.toMatch(/Users|home\/alice|\.worktrees|\.psyche\/worktrees/iu);
+  });
+
+  it('rejects credential-bearing, malformed, and overlong raw HTML URL attributes', () => {
+    expect(() =>
+      sanitizePublicText(
+        '<a href="https&colon;&sol;&sol;alice&commat;example.com/private">private</a>',
+      )
+    ).toThrow(/URL credentials/i);
+    expect(() =>
+      sanitizePublicText('<a href="https://example.com"')
+    ).toThrow(/malformed raw HTML|unterminated raw HTML/i);
+    expect(() =>
+      sanitizePublicText(`<img src="${'a'.repeat(17_000)}">`)
+    ).toThrow(/raw HTML.*inspection limit|tag.*inspection limit/i);
+  });
+
+  it('preserves safe raw HTML URL attributes and surrounding prose exactly', () => {
+    const safe = [
+      'Before <a href="https://example.com/docs?q=public">Docs</a> after.',
+      '<img SRC=images/public.png alt="Public image">',
+      '<form action="/public/search"><button>Search</button></form>',
+      '<img srcset="small.png 1x, large.png 2x">',
+    ].join('\n');
+
+    expect(sanitizePublicText(safe)).toBe(safe);
   });
 
   it.each([

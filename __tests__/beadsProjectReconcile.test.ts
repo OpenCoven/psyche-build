@@ -314,6 +314,20 @@ function managedIssue(
 }
 
 describe('Beads project reconciliation', () => {
+  it.each([true, '1', 1.5, -1, 5])(
+    'rejects invalid priority %s before planning operations',
+    (priority) => {
+      expect(() => planReconciliation({
+        inventory: [makeBead('pb-invalid-priority', {
+          priority: priority as unknown as PublicBead['priority'],
+        })],
+        existingIssues: [],
+        readme: null,
+        renderContext: baseContext,
+      })).toThrow(/priority.*integer.*0.*4|priority.*0.*4/i);
+    },
+  );
+
   it('accepts a complete ASCII managed issue body at exactly 65,536 code points', () => {
     const inventory = finalizeInventory([
       makeBeadWithManagedBodyLength(

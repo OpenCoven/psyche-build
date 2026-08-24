@@ -13,6 +13,10 @@ export interface GraphqlE2eOperation {
 export interface GraphqlE2eReport {
   graphqlRequestCount: number;
   operations: GraphqlE2eOperation[];
+  pageCounts: {
+    DiscoverManagedProject: number;
+    DiscoverManagedProjectItems: number;
+  };
   summary: CliSummary;
   diagnostics: string;
 }

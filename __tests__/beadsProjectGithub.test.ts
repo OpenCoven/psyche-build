@@ -79,6 +79,10 @@ function httpError(status: number, message: string): Error {
 
 function createRunner(
   responses: readonly (GhRunResult | Error | ((call: RunCall) => GhRunResult | Promise<GhRunResult>))[],
+  runnerOptions: {
+    authenticatedUser?: Record<string, unknown> | Error;
+    recordAuthenticatedUser?: boolean;
+  } = {},
 ): { calls: RunCall[]; run: GhRun } {
   const calls: RunCall[] = [];
   let index = 0;
@@ -87,6 +91,16 @@ function createRunner(
     calls,
     async run(command, args, options) {
       const call = { command, args: [...args], options: { ...options } };
+      if (command === 'gh' && args[0] === 'api' && args[1] === 'user') {
+        if (runnerOptions.recordAuthenticatedUser === true) {
+          calls.push(call);
+        }
+        const authenticatedUser = runnerOptions.authenticatedUser ?? { login: 'BunsDev' };
+        if (authenticatedUser instanceof Error) {
+          throw authenticatedUser;
+        }
+        return success(authenticatedUser);
+      }
       calls.push(call);
       const response = responses[index++];
       if (response == null) {
@@ -111,12 +125,18 @@ function parseStdinIfPresent(call: RunCall): Record<string, unknown> {
     : {};
 }
 
-function createApplyLockBackend() {
+function createApplyLockBackend(backendOptions: {
+  defaultBranch?: string;
+  defaultRefObject?: { type: string; sha: string };
+  tagObjects?: Readonly<Record<string, { type: string; sha: string }>>;
+} = {}) {
   const lockRef = 'refs/heads/psyche-beads-project-sync-lock';
   const lockRefEndpoint = 'heads/psyche-beads-project-sync-lock';
+  const defaultBranch = backendOptions.defaultBranch ?? 'main';
+  const defaultRefObject = backendOptions.defaultRefObject ?? { type: 'commit', sha: 'BASE' };
   const calls: RunCall[] = [];
   const commits = new Map<string, Record<string, unknown>>([
-    ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
+    ['BASE', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
   ]);
   let lockSha: string | null = null;
   let nextCommit = 0;
@@ -134,6 +154,23 @@ function createApplyLockBackend() {
     const methodIndex = args.indexOf('--method');
     const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
 
+    if (endpoint === 'user') {
+      return success({ login: 'BunsDev' });
+    }
+    if (endpoint === `repos/${owner}/${repo}`) {
+      return success({ id: 1, default_branch: defaultBranch });
+    }
+    if (endpoint === `repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(defaultBranch)}`) {
+      return success({ object: defaultRefObject });
+    }
+    if (endpoint?.startsWith(`repos/${owner}/${repo}/git/tags/`) && method === 'GET') {
+      const sha = endpoint.split('/').at(-1) ?? '';
+      const object = backendOptions.tagObjects?.[sha];
+      if (!object) {
+        throw httpError(404, `tag ${sha} not found`);
+      }
+      return success({ object });
+    }
     if (endpoint === `repos/${owner}/${repo}/git/ref/${lockRefEndpoint}`) {
       if (lockSha == null) {
         throw httpError(404, 'not found');
@@ -408,7 +445,10 @@ describe('createGhClient', () => {
   });
 
   it('verifies gh authentication plus repository and organization access with safe argument arrays', async () => {
-    const runner = createRunner([success(''), success({ id: 1 }), success({ id: 2 })]);
+    const runner = createRunner(
+      [success(''), success({ id: 1 }), success({ id: 2 })],
+      { recordAuthenticatedUser: true },
+    );
     const client = createGhClient({ run: runner.run, owner, repo, token });
     const adapters: ReconciliationAdapters = client;
 
@@ -426,6 +466,11 @@ describe('createGhClient', () => {
       },
       {
         command: 'gh',
+        args: ['api', 'user', '--method', 'GET', ...apiHeaders],
+        options: { env: { GH_TOKEN: token } },
+      },
+      {
+        command: 'gh',
         args: ['api', `repos/${owner}/${repo}`, '--method', 'GET', ...apiHeaders],
         options: { env: { GH_TOKEN: token } },
       },
@@ -436,6 +481,66 @@ describe('createGhClient', () => {
       },
     ]);
     expect(JSON.stringify(runner.calls.map((call) => call.args))).not.toContain(token);
+  });
+
+  it('preflights and caches the trusted token actor before any mutation', async () => {
+    const body = managedBody('pb-actor-preflight');
+    const runner = createRunner([
+      success(''),
+      success({ id: 1, default_branch: 'main' }),
+      success({ id: 2 }),
+      success({ number: 42 }),
+      success(trustedIssue({ number: 42, body })),
+    ], {
+      authenticatedUser: { login: 'bUnSdEv' },
+      recordAuthenticatedUser: true,
+    });
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      trustedIssueAuthors: ['BUNSDEV'],
+    });
+
+    await client.verifyAccess();
+    await client.createIssue({
+      beadId: 'pb-actor-preflight',
+      title: '[pb-actor-preflight] Verify publisher',
+      body,
+    });
+
+    expect(runner.calls.map((call) => call.args[1] ?? call.args[0])).toEqual([
+      'status',
+      'user',
+      `repos/${owner}/${repo}`,
+      `orgs/${owner}`,
+      `repos/${owner}/${repo}/issues`,
+      `repos/${owner}/${repo}/issues/42`,
+    ]);
+    expect(runner.calls.filter((call) => call.args[1] === 'user')).toHaveLength(1);
+  });
+
+  it('rejects an untrusted token actor before lock, issue, or Project mutations', async () => {
+    const runner = createRunner([success('')], {
+      authenticatedUser: { login: 'outside-publisher' },
+      recordAuthenticatedUser: true,
+    });
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.verifyAccess()).rejects.toThrow(
+      /token actor.*trustedIssueAuthors|trusted.*publisher/i,
+    );
+    expect(runner.calls.map((call) => call.args[1] ?? call.args[0])).toEqual([
+      'status',
+      'user',
+    ]);
+    expect(runner.calls.some((call) =>
+      call.args.includes('POST')
+      || call.args.includes('PATCH')
+      || call.args.includes('DELETE')
+      || String(call.options.stdin ?? '').includes('mutation ')
+    )).toBe(false);
   });
 
   it('paginates all repository issues including closed issues and parses managed markers', async () => {
@@ -2482,6 +2587,9 @@ describe('createGhClient', () => {
     const run: GhRun = async (command, args, options) => {
       const call = { command, args: [...args], options: { ...options } };
       calls.push(call);
+      if (args[0] === 'api' && args[1] === 'user') {
+        return success({ login: 'BunsDev' });
+      }
       if (args[0] === 'project' && args[1] === 'item-add') {
         addedItemCount += 1;
         return success({ id: `ITEM-${addedItemCount}` });
@@ -3097,7 +3205,7 @@ describe('createGhClient', () => {
   it('serializes two lock contenders with atomic ref creation', async () => {
     const calls: RunCall[] = [];
     const commits = new Map<string, Record<string, unknown>>([
-      ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
+      ['BASE', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
     ]);
     let lockSha: string | null = null;
     let nextCommit = 0;
@@ -3107,6 +3215,15 @@ describe('createGhClient', () => {
       const endpoint = args[1];
       const methodIndex = args.indexOf('--method');
       const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      if (endpoint === 'user') {
+        return success({ login: 'BunsDev' });
+      }
+      if (endpoint === `repos/${owner}/${repo}`) {
+        return success({ id: 1, default_branch: 'main' });
+      }
+      if (endpoint === `repos/${owner}/${repo}/git/ref/heads/main`) {
+        return success({ object: { type: 'commit', sha: 'BASE' } });
+      }
       if (endpoint === `repos/${owner}/${repo}/git/ref/heads/psyche-beads-project-sync-lock`) {
         if (lockSha == null) {
           throw httpError(404, 'not found');
@@ -3309,6 +3426,102 @@ describe('createGhClient', () => {
       state: 'acquired',
       leaseId: 'lease-after-release',
     });
+  });
+
+  it.each([
+    ['main', 'main'],
+    ['custom default branch', 'release/stable'],
+  ])('seeds an initial lock from the resolved %s commit SHA', async (_name, defaultBranch) => {
+    const backend = createApplyLockBackend({ defaultBranch });
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 10_000,
+    });
+
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'resolved-seed',
+      leaseId: `seed-${defaultBranch.replace('/', '-')}`,
+      ttlMs: 90,
+    });
+
+    expect(backend.parentOf(handle.sha)).toBe('BASE');
+    expect(backend.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/ref/heads/${
+        encodeURIComponent(defaultBranch)
+      }`
+    )).toBe(true);
+    expect(backend.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/commits/BASE`
+    )).toBe(true);
+    expect(backend.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/commits/${
+        encodeURIComponent(defaultBranch)
+      }`
+    )).toBe(false);
+  });
+
+  it('peels annotated default-branch ref objects before reading the seed commit', async () => {
+    const backend = createApplyLockBackend({
+      defaultRefObject: { type: 'tag', sha: 'TAG-1' },
+      tagObjects: {
+        'TAG-1': { type: 'tag', sha: 'TAG-2' },
+        'TAG-2': { type: 'commit', sha: 'BASE' },
+      },
+    });
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 10_000,
+    });
+
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'annotated-seed',
+      leaseId: 'annotated-seed-lease',
+      ttlMs: 90,
+    });
+
+    expect(backend.parentOf(handle.sha)).toBe('BASE');
+    expect(backend.calls.map((call) => call.args[1])).toContain(
+      `repos/${owner}/${repo}/git/tags/TAG-1`,
+    );
+    expect(backend.calls.map((call) => call.args[1])).toContain(
+      `repos/${owner}/${repo}/git/tags/TAG-2`,
+    );
+  });
+
+  it('refreshes repository metadata once and diagnoses a missing default-branch ref', async () => {
+    const runner = createRunner([
+      httpError(404, 'lock ref not found'),
+      success({ id: 1, default_branch: 'renamed/default' }),
+      httpError(404, 'default ref not found'),
+      success({ id: 1, default_branch: 'renamed/default' }),
+      httpError(404, 'default ref still not found'),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'missing-default-ref',
+      leaseId: 'missing-default-ref-lease',
+      ttlMs: 90,
+    })).rejects.toThrow(/default branch.*renamed\/default.*ref.*not found|missing.*default.*ref/i);
+
+    expect(runner.calls.filter((call) =>
+      call.args[1] === `repos/${owner}/${repo}`
+    )).toHaveLength(2);
+    expect(runner.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/commits/renamed%2Fdefault`
+    )).toBe(false);
+    expect(runner.calls.some((call) =>
+      call.args.includes('POST') || call.args.includes('PATCH') || call.args.includes('DELETE')
+    )).toBe(false);
   });
 
   it('renews a long apply, blocks a contender, releases the renewed lease, and stops heartbeats', async () => {
@@ -3686,6 +3899,8 @@ describe('createGhClient', () => {
   it('redacts tokens from lock API failures', async () => {
     const runner = createRunner([
       httpError(404, 'not found'),
+      success({ id: 1, default_branch: 'main' }),
+      success({ object: { type: 'commit', sha: 'BASE' } }),
       success({ sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }),
       Object.assign(new Error(`HTTP 422 invalid lock ${token}`), { status: 422 }),
     ]);

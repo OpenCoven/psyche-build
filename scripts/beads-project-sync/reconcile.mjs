@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import {
   activeBeads,
   buildBeadIndex,
+  normalizeBeadPriority,
   normalizeBeadId,
   normalizePublicBeadType,
 } from './model.mjs';
@@ -1078,7 +1079,7 @@ function buildDesiredFields(beadId, bead) {
     beadId: bead.id,
     status: bead.status,
     type: bead.type,
-    priority: Number(bead.priority),
+    priority: bead.priority,
     blocked: Boolean(bead.blocked),
     done: bead.status === 'closed',
     parentGoal: bead.parentId ?? null,
@@ -1422,6 +1423,10 @@ export function planReconciliation(input) {
     fail('planReconciliation cannot reconcile an empty source inventory');
   }
   for (const bead of inventory) {
+    normalizeBeadPriority(
+      bead?.priority,
+      `planReconciliation inventory bead "${bead?.id ?? 'unknown'}" priority`,
+    );
     normalizePublicBeadType(
       bead?.type,
       `planReconciliation inventory bead "${bead?.id ?? 'unknown'}"`,
