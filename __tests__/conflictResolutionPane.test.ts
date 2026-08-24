@@ -18,6 +18,14 @@ const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
 const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
 const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
+const buildAgentCommandMock = vi.hoisted(() => vi.fn(() => 'opencode'));
+const buildInitialPromptCommandMock = vi.hoisted(() => vi.fn(() => 'opencode --prompt'));
+const getPromptTransportMock = vi.hoisted(() => vi.fn(() => 'inline'));
+const buildPromptReadAndDeleteSnippetMock = vi.hoisted(() => vi.fn(() => 'read-prompt'));
+const writePromptFileMock = vi.hoisted(() => vi.fn(async () => {
+  throw new Error('use inline prompt');
+}));
+const sendPromptViaTmuxMock = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('../src/services/TmuxService.js', () => ({
   TmuxService: { getInstance: () => tmuxService },
@@ -38,26 +46,27 @@ vi.mock('../src/utils/settingsManager.js', () => ({
   }; }),
 }));
 vi.mock('../src/utils/agentLaunch.js', () => ({
-  buildAgentCommand: () => 'opencode',
-  buildInitialPromptCommand: () => 'opencode --prompt',
+  buildAgentCommand: buildAgentCommandMock,
+  buildInitialPromptCommand: buildInitialPromptCommandMock,
   getDefaultEnabledAgents: () => ['opencode'],
   getAgentDefinitions: () => [{
     id: 'opencode',
     name: 'OpenCode',
   }],
   getAgentProcessName: () => 'opencode',
-  getPromptTransport: () => 'inline',
+  getPromptTransport: getPromptTransportMock,
   getSendKeysPostPasteDelayMs: () => 0,
   getSendKeysPrePrompt: () => [],
   getSendKeysReadyDelayMs: () => 0,
   getSendKeysSubmit: () => [],
 }));
 vi.mock('../src/utils/promptStore.js', () => ({
-  buildPromptReadAndDeleteSnippet: () => 'read-prompt',
+  buildPromptReadAndDeleteSnippet: buildPromptReadAndDeleteSnippetMock,
   deletePromptFile: vi.fn(async () => {}),
-  writePromptFile: vi.fn(async () => {
-    throw new Error('use inline prompt');
-  }),
+  writePromptFile: writePromptFileMock,
+}));
+vi.mock('../src/utils/agentPromptDispatch.js', () => ({
+  sendPromptViaTmux: sendPromptViaTmuxMock,
 }));
 vi.mock('../src/utils/paneColors.js', () => ({
   resolveProjectColorTheme: () => 'blue',
@@ -91,6 +100,13 @@ vi.mock('../src/constants/timing.js', () => ({
 describe('conflict resolution pane transaction', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    buildAgentCommandMock.mockReturnValue('opencode');
+    buildInitialPromptCommandMock.mockReturnValue('opencode --prompt');
+    getPromptTransportMock.mockReturnValue('inline');
+    buildPromptReadAndDeleteSnippetMock.mockReturnValue('read-prompt');
+    writePromptFileMock.mockImplementation(async () => {
+      throw new Error('use inline prompt');
+    });
     const occupiedSlugs = new Set<string>();
     reserveCrashSafePaneSlugMock.mockImplementation(async (options) => {
       const candidate = await options.allocate({
@@ -235,5 +251,32 @@ describe('conflict resolution pane transaction', () => {
         operation: 'conflict-resolution-pane',
       }),
     );
+  });
+
+  it('launches coven-code bare without prompt bootstrap files', async () => {
+    buildAgentCommandMock.mockReturnValue('coven');
+    getPromptTransportMock.mockReturnValue('launch-only');
+
+    const { createConflictResolutionPane } = await import(
+      '../src/utils/conflictResolutionPane.js'
+    );
+
+    await createConflictResolutionPane({
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+      targetRepoPath: '/repo/.psyche/worktrees/feature',
+      sessionProjectRoot: '/repo',
+      targetProjectRoot: '/repo',
+      projectName: 'repo',
+      existingPanes: [] as PsychePane[],
+      agent: 'coven-code',
+      persistConflictPane: async () => {},
+    });
+
+    expect(writePromptFileMock).not.toHaveBeenCalled();
+    expect(buildPromptReadAndDeleteSnippetMock).not.toHaveBeenCalled();
+    expect(buildInitialPromptCommandMock).not.toHaveBeenCalled();
+    expect(sendPromptViaTmuxMock).not.toHaveBeenCalled();
+    expect(tmuxService.sendShellCommand).toHaveBeenCalledWith(expect.any(String), 'coven');
   });
 });
