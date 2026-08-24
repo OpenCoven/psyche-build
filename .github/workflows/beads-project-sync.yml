@@ -88,6 +88,14 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/bd" version | grep -E '^bd version v?1\.2\.2([[:space:]]|$)'
 
+      - name: Bootstrap Beads for manual dry-run
+        id: beads_bootstrap
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        shell: bash
+        run: |
+          set -euo pipefail
+          bd bootstrap --yes
+
       - name: Install locked dependencies
         id: dependencies
         run: pnpm install --frozen-lockfile
@@ -226,6 +234,7 @@ jobs:
           PNPM_SETUP_OUTCOME: ${{ steps.pnpm_setup.outcome }}
           NODE_SETUP_OUTCOME: ${{ steps.node_setup.outcome }}
           BEADS_OUTCOME: ${{ steps.beads.outcome }}
+          BEADS_BOOTSTRAP_OUTCOME: ${{ steps.beads_bootstrap.outcome }}
           DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
           SYNC_OUTCOME: ${{ steps.sync_beads.outcome }}
         shell: bash
@@ -248,6 +257,7 @@ jobs:
               ('pnpm-setup', os.environ.get('PNPM_SETUP_OUTCOME', 'unknown')),
               ('node-setup', os.environ.get('NODE_SETUP_OUTCOME', 'unknown')),
               ('beads-install', os.environ.get('BEADS_OUTCOME', 'unknown')),
+              ('beads-bootstrap', os.environ.get('BEADS_BOOTSTRAP_OUTCOME', 'unknown')),
               ('dependency-install', os.environ.get('DEPENDENCIES_OUTCOME', 'unknown')),
               ('sync', os.environ.get('SYNC_OUTCOME', 'unknown')),
           ]

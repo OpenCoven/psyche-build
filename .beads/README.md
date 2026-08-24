@@ -60,6 +60,10 @@ Check the live Beads database with no GitHub writes:
 pnpm beads:project:check
 ```
 
+Local dry-run source loading is read-only and never bootstraps or mutates
+Beads. If the local database is missing, the command stops with instructions
+to run `bd bootstrap --yes` explicitly.
+
 With `BEADS_PROJECT_TOKEN` exported, the check compares against the current
 Project. Without it, the command produces a first-run plan without contacting
 GitHub. A saved export can be checked explicitly:
@@ -118,7 +122,11 @@ After the bootstrap gate is satisfied,
 03:17 UTC. Maintainers can also use **Actions → Beads Project Sync → Run
 workflow**:
 
-- `dry_run: true` selects a read-only plan; the default applies.
+- `dry_run: true` makes Actions dry-run bootstrap an ephemeral runner database
+  from the authoritative Beads remote, without a GitHub token, before selecting
+  the read-only plan. The ephemeral database is discarded with the runner;
+  local dry-run remains read-only and never bootstraps Beads. The default
+  applies.
 - `allow_mass_close: true` overrides only the close-count guard.
 - Scheduled runs always apply and never enable the override.
 

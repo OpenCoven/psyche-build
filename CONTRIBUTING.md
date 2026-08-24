@@ -113,6 +113,11 @@ in both environments, or use a secure equivalent that preserves those
 properties. The token needs repository Issues read/write and organization
 Projects read/write permissions.
 
+Local dry-run is read-only and never bootstraps or mutates Beads; a missing
+database produces explicit `bd bootstrap --yes` guidance. Actions dry-run
+bootstraps an ephemeral runner database from the authoritative Beads remote
+without a GitHub token before invoking the same read-only CLI mode.
+
 The workflow intentionally does not provision the Project. Task 8 must first
 complete the one-time maintainer command
 `node scripts/sync-beads-project.mjs --apply --provision`; merge and schedule

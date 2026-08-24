@@ -7,6 +7,7 @@ const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
 const beadsProjectSyncWorkflowPath = path.resolve(
   '.github/workflows/beads-project-sync.yml',
 );
+const beadsConfigPath = path.resolve('.beads/config.yaml');
 const beadsReadmePath = path.resolve('.beads/README.md');
 const contributingPath = path.resolve('CONTRIBUTING.md');
 const packageJsonPath = path.resolve('package.json');
@@ -26,6 +27,15 @@ function workflowJobSource(source: string, name: string): string {
   const remainder = source.slice(start + marker.length);
   const nextJob = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
   return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
+}
+
+function workflowStepSource(source: string, name: string): string {
+  const marker = `      - name: ${name}\n`;
+  const start = source.indexOf(marker);
+  expect(start, `${name} step`).toBeGreaterThanOrEqual(0);
+  const remainder = source.slice(start + marker.length);
+  const nextStep = remainder.search(/^      - name: /m);
+  return nextStep === -1 ? remainder : remainder.slice(0, nextStep);
 }
 
 describe('pull request CI workflow contract', () => {
@@ -283,6 +293,36 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain('pnpm install --frozen-lockfile');
   });
 
+  it('bootstraps only manual Actions dry-runs from the authoritative Beads remote', () => {
+    const workflow = beadsWorkflowSource();
+    const beadsConfig = readFileSync(beadsConfigPath, 'utf8');
+    const bootstrap = workflowStepSource(
+      workflow,
+      'Bootstrap Beads for manual dry-run',
+    );
+
+    expect(bootstrap).toContain('id: beads_bootstrap');
+    expect(bootstrap).toContain(
+      "if: github.event_name == 'workflow_dispatch' && inputs.dry_run",
+    );
+    expect(bootstrap).toMatch(
+      /shell: bash\n\s+run: \|\n\s+set -euo pipefail\n\s+bd bootstrap --yes\s*$/u,
+    );
+    expect(bootstrap).not.toMatch(
+      /BEADS_PROJECT_TOKEN|GITHUB_TOKEN|GH_TOKEN|secrets\./u,
+    );
+    expect(workflow.match(/bd bootstrap --yes/g) ?? []).toHaveLength(1);
+    expect(workflow.indexOf('- name: Install Beads CLI 1.2.2')).toBeLessThan(
+      workflow.indexOf('- name: Bootstrap Beads for manual dry-run'),
+    );
+    expect(workflow.indexOf('- name: Bootstrap Beads for manual dry-run')).toBeLessThan(
+      workflow.indexOf('- name: Sync Beads to the public Project'),
+    );
+    expect(beadsConfig).toContain(
+      'sync.remote: "git+https://github.com/OpenCoven/psyche-build.git"',
+    );
+  });
+
   it('initializes failure artifacts before checkout and finalizes the failed phase', () => {
     const workflow = beadsWorkflowSource();
     const initializeArtifacts = workflow.indexOf('- name: Initialize sync artifacts');
@@ -294,11 +334,20 @@ describe('Beads Project sync workflow contract', () => {
     expect(workflow).toContain('"outcome":"pending"');
     expect(workflow).toContain('- name: Finalize sync artifacts');
     expect(workflow).toContain('CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}');
+    expect(workflow).toContain(
+      'BEADS_BOOTSTRAP_OUTCOME: ${{ steps.beads_bootstrap.outcome }}',
+    );
     expect(workflow).toContain('DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}');
     expect(workflow).toContain('SYNC_OUTCOME: ${{ steps.sync_beads.outcome }}');
+    expect(workflow).toContain(
+      "('beads-bootstrap', os.environ.get('BEADS_BOOTSTRAP_OUTCOME', 'unknown'))",
+    );
     expect(workflow).toContain("summary['phase'] = phase");
     expect(workflow).toContain("summary['outcome'] = outcome");
     expect(workflow).toContain("summary['stepOutcomes'] = step_outcomes");
+    const upload = workflowStepSource(workflow, 'Upload sync summary');
+    expect(upload).toContain('if: always()');
+    expect(upload).toContain('path: ${{ runner.temp }}/beads-project-sync');
   });
 
   it('normalizes cancellation during sync to cancelled status and outcome', () => {
@@ -356,5 +405,19 @@ describe('Beads Project sync workflow contract', () => {
       expect(document).toMatch(/BEADS_PROJECT_TOKEN.*both environments?/is);
     }
     expect(beadsReadme).not.toMatch(/repository Actions secret\s+named `BEADS_PROJECT_TOKEN`/i);
+  });
+
+  it('documents ephemeral Actions dry-run bootstrap without weakening local dry-run safety', () => {
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    for (const document of [beadsReadme, contributing]) {
+      expect(document).toMatch(
+        /Actions.*dry[- ]run.*bootstrap.*ephemeral.*runner.*database/is,
+      );
+      expect(document).toMatch(
+        /local.*dry[- ]run.*read-only.*(?:does not|never).*bootstrap/is,
+      );
+    }
   });
 });
