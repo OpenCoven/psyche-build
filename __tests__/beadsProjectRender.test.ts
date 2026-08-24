@@ -704,6 +704,77 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain('&period;psyche&sol;worktrees');
   });
 
+  it('sanitizes entity and percent reconstructed HTTP pathnames like raw URLs', () => {
+    const config = { homeDirectories: ['/srv/build-user'] };
+
+    expect(
+      sanitizePublicText(
+        [
+          'https://example.com/srv/build-user/private/client-plan.md?view=public#summary',
+          'https&colon;&sol;&sol;example.com&sol;srv&sol;build-user'
+            + '&sol;private&sol;client-plan.md&quest;view&equals;public&num;summary',
+          'https&#58;&#47;&#47;example.com&#47;srv&#47;build-user'
+            + '&#47;private&#47;client-plan.md',
+          'https&#x3a;&#x2f;&#x2f;example.com&#x2f;srv&#x2f;build-user'
+            + '&#x2f;private&#x2f;client-plan.md',
+          'https&colon;%2F%2Fexample.com&sol;srv%2Fbuild-user'
+            + '&sol;private%2Fclient-plan.md',
+        ].join('\n'),
+        config,
+      ),
+    ).toBe([
+      'https://example.com/<redacted-local-path>?view=public#summary',
+      'https&colon;&sol;&sol;example.com/<redacted-local-path>'
+        + '&quest;view&equals;public&num;summary',
+      'https&#58;&#47;&#47;example.com/<redacted-local-path>',
+      'https&#x3a;&#x2f;&#x2f;example.com/<redacted-local-path>',
+      'https&colon;%2F%2Fexample.com/<redacted-local-path>',
+    ].join('\n'));
+  });
+
+  it('sanitizes reconstructed HTTP Markdown destinations and preserves titles', () => {
+    const config = { homeDirectories: ['/srv/build-user'] };
+
+    expect(
+      sanitizePublicText(
+        [
+          '[artifact](https&colon;&sol;&sol;example.com&sol;srv&sol;build-user'
+            + '&sol;private&sol;client-plan.md)',
+          '![preview](https&#58;&#47;&#47;example.com&#47;srv&#47;build-user'
+            + '&#47;private&#47;preview.png "Private preview")',
+          '<https&#x3a;&#x2f;&#x2f;example.com&#x2f;srv&#x2f;build-user'
+            + '&#x2f;private&#x2f;client-plan.md>',
+          '[percent](https%3A%2F%2Fexample.com%2Fsrv%2Fbuild-user'
+            + '%2Fprivate%2Fclient-plan.md "Download")',
+          '[mixed](https&colon;%2F%2Fexample.com&sol;srv%2Fbuild-user'
+            + '&sol;private%2Fclient-plan.md?view=public#summary)',
+        ].join('\n'),
+        config,
+      ),
+    ).toBe([
+      '[artifact](https&colon;&sol;&sol;example.com/<redacted-local-path>)',
+      '![preview](https&#58;&#47;&#47;example.com/<redacted-local-path> "Private preview")',
+      '<https&#x3a;&#x2f;&#x2f;example.com/<redacted-local-path>>',
+      '[percent](https%3A%2F%2Fexample.com/<redacted-local-path> "Download")',
+      '[mixed](https&colon;%2F%2Fexample.com/<redacted-local-path>?view=public#summary)',
+    ].join('\n'));
+  });
+
+  it('preserves safe entity URLs without decoding embedded unsafe HTML', () => {
+    const safeDescription = [
+      '[public](https&colon;&sol;&sol;example.com&sol;srv&sol;public&sol;release.md "Public")',
+      'Keep &lt;img src=&quot;https&colon;&sol;&sol;example.com&sol;srv&sol;public.png&quot;'
+        + ' onerror=&quot;alert(1)&quot;&gt; encoded.',
+    ].join('\n');
+
+    const rendered = sanitizePublicText(safeDescription, {
+      homeDirectories: ['/srv/build-user'],
+    });
+
+    expect(rendered).toBe(safeDescription);
+    expect(rendered).not.toContain('<img');
+  });
+
   it('rejects secrets reconstructed through recursive entity and percent decoding', () => {
     const legacyToken = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
     const fineGrainedToken = 'github_pat_abcdefghijklmnopqrstuvwxyz1234567890';

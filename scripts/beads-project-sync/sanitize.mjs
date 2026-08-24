@@ -1224,13 +1224,26 @@ function containsExactHomeDirectory(value, matchers) {
  * @param {readonly HomeDirectoryMatcher[]} matchers
  * @returns {string}
  */
-function sanitizeHttpPathname(value, matchers) {
-  const inspected = decodeUrlInspectionMapped(createMappedInspectionText(value)).value;
+function sanitizeDecodedHttpPathname(value, matchers) {
   if (
-    containsExactHomeDirectory(inspected, matchers)
-    || containsLocalOperationalPath(inspected)
+    containsExactHomeDirectory(value, matchers)
+    || containsLocalOperationalPath(value)
   ) {
     return value.startsWith('/') ? '/<redacted-local-path>' : '<redacted-local-path>';
+  }
+  return value;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeHttpPathname(value, matchers) {
+  const inspected = decodeUrlInspectionMapped(createMappedInspectionText(value)).value;
+  const sanitized = sanitizeDecodedHttpPathname(inspected, matchers);
+  if (sanitized !== inspected) {
+    return sanitized;
   }
   return redactEmailsInUrlComponent(value);
 }
@@ -2328,6 +2341,35 @@ function collectMappedPathReplacements(mapped, original, matchers, replacements)
 
 /**
  * @param {MappedInspectionText} mapped
+ * @param {ParsedAbsoluteUri} uri
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMappedHttpPathnameReplacement(
+  mapped,
+  uri,
+  matchers,
+  replacements,
+) {
+  if (uri.scheme !== 'http' && uri.scheme !== 'https') {
+    return;
+  }
+
+  const pathname = mapped.value.slice(uri.path.start, uri.path.end);
+  const sanitized = sanitizeDecodedHttpPathname(pathname, matchers);
+  if (sanitized === pathname) {
+    return;
+  }
+
+  replacements.push({
+    ...mappedSourceRange(mapped, uri.path.start, uri.path.end),
+    value: sanitized,
+    priority: 4,
+  });
+}
+
+/**
+ * @param {MappedInspectionText} mapped
  * @param {string} original
  * @param {SourceReplacement[]} replacements
  */
@@ -2407,7 +2449,14 @@ function redactDecodedHtmlEntitySensitiveText(value, config) {
           }
         }
 
-        if (uri.scheme !== 'http' && uri.scheme !== 'https') {
+        if (uri.scheme === 'http' || uri.scheme === 'https') {
+          collectMappedHttpPathnameReplacement(
+            inspectedCandidate,
+            uri,
+            matchers,
+            replacements,
+          );
+        } else {
           const path = sliceMappedInspectionText(
             inspectedCandidate,
             uri.path.start,
@@ -2479,9 +2528,15 @@ function redactDecodedHtmlEntitySensitiveText(value, config) {
     );
     assertNoDirectPublishableSecrets(inspectedDestination.value);
     const uri = parseAbsoluteUri(inspectedDestination.value);
-    if (
-      uri == null
-      && (
+    if (uri != null) {
+      collectMappedHttpPathnameReplacement(
+        inspectedDestination,
+        uri,
+        matchers,
+        replacements,
+      );
+    } else if (
+      (
         containsLocalOperationalPath(inspectedDestination.value)
         || homeDirectoryDecodedRanges(inspectedDestination.value, matchers).length > 0
       )
