@@ -65,17 +65,12 @@ const URI_WRAPPER_DELIMITERS = new Map([
   ["'", "'"],
   ['`', '`'],
 ]);
-const CREDENTIAL_URL_PREFIX_PUNCTUATION = new Set([
-  ',', ';', ':', '(', ')', '[', ']', '{', '}', '"', "'", '`', '<', '>', '=',
-]);
-const CREDENTIAL_URL_NESTING_DELIMITERS = new Map([
-  ['(', ')'],
-  ['[', ']'],
-  ['{', '}'],
-]);
-const CREDENTIAL_URL_CLOSING_DELIMITERS = new Set(
-  CREDENTIAL_URL_NESTING_DELIMITERS.values(),
-);
+const CREDENTIAL_URL_PREFIXES = [
+  ...WHATWG_SPECIAL_CREDENTIAL_SCHEMES,
+  ...[...WHATWG_SPECIAL_CREDENTIAL_SCHEMES].map((scheme) => `git+${scheme}`),
+].sort((left, right) => right.length - left.length);
+const CREDENTIAL_URL_AMBIGUOUS_USERINFO_PATTERN =
+  /[\[\]{}<>"'`\\?#]/u;
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
 const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
 const LOCAL_PATH_FILE_EXTENSION_PATTERN =
@@ -423,6 +418,22 @@ function scanUrlCandidates(value) {
 }
 
 /**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isCredentialUrlTokenBoundary(value) {
+  return value == null || /\s|\p{Cc}/u.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isCredentialUrlTokenCharacter(value) {
+  return value != null && /[\p{L}\p{N}\p{M}._~%+@\/\\-]/u.test(value);
+}
+
+/**
  * @param {string} value
  * @param {number} start
  * @returns {boolean}
@@ -431,8 +442,7 @@ function hasCredentialUrlCandidatePrefixBoundary(value, start) {
   if (start === 0) {
     return true;
   }
-  const previous = value[start - 1];
-  if (previous === ':') {
+  if (value[start - 1] === ':') {
     let schemeStart = start - 1;
     while (schemeStart > 0 && isUriSchemeCharacter(value[schemeStart - 1])) {
       schemeStart -= 1;
@@ -441,20 +451,27 @@ function hasCredentialUrlCandidatePrefixBoundary(value, start) {
       return false;
     }
   }
-  return (
-    isUriCandidateBoundary(previous)
-    || CREDENTIAL_URL_PREFIX_PUNCTUATION.has(previous)
-  );
+  return !isCredentialUrlTokenCharacter(value[start - 1]);
 }
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   authorityStart: number,
+ *   conventionalAuthority: boolean,
+ *   protocolRelative: boolean,
+ *   lastAt: number | null,
+ * }} CredentialUrlScanState
+ */
 
 /**
  * @param {string} value
  * @param {number} start
- * @returns {boolean}
+ * @returns {CredentialUrlScanState | null}
  */
-function couldStartCredentialUrlCandidate(value, start) {
+function credentialUrlStartAt(value, start) {
   if (!hasCredentialUrlCandidatePrefixBoundary(value, start)) {
-    return false;
+    return null;
   }
 
   const first = value[start];
@@ -463,147 +480,163 @@ function couldStartCredentialUrlCandidate(value, start) {
     (first === '/' || first === '\\')
     && (second === '/' || second === '\\')
   ) {
-    return true;
-  }
-  if (first === '%' || first === '&') {
-    return true;
-  }
-  if (!isAsciiLetter(first)) {
-    return false;
+    let authorityStart = start + 2;
+    while (
+      value[authorityStart] === '/'
+      || value[authorityStart] === '\\'
+    ) {
+      authorityStart += 1;
+    }
+    return {
+      start,
+      authorityStart,
+      conventionalAuthority: true,
+      protocolRelative: true,
+      lastAt: null,
+    };
   }
 
-  for (const scheme of WHATWG_SPECIAL_CREDENTIAL_SCHEMES) {
-    if (value.slice(start, start + scheme.length).toLowerCase() !== scheme) {
+  for (const prefix of CREDENTIAL_URL_PREFIXES) {
+    if (
+      value.slice(start, start + prefix.length).toLowerCase() !== prefix
+      || value[start + prefix.length] !== ':'
+    ) {
       continue;
     }
-    const delimiterStart = start + scheme.length;
-    const delimiter = value[delimiterStart];
-    if (delimiter === ':' || delimiter === '%' || delimiter === '&') {
-      return true;
+    let authorityStart = start + prefix.length + 1;
+    let separatorCount = 0;
+    while (
+      value[authorityStart] === '/'
+      || value[authorityStart] === '\\'
+    ) {
+      separatorCount += 1;
+      authorityStart += 1;
     }
+    return {
+      start,
+      authorityStart,
+      conventionalAuthority: separatorCount >= 2,
+      protocolRelative: false,
+      lastAt: null,
+    };
   }
-  return false;
+
+  return null;
 }
 
 /**
  * @param {string} value
  * @param {number} start
- * @returns {{ end: number, exceeded: boolean }}
- */
-function findCredentialUrlCandidateEnd(value, start) {
-  const wrapperClose = URI_WRAPPER_DELIMITERS.get(value[start - 1]);
-  const nesting = /** @type {string[]} */ ([]);
-  let end = start;
-
-  while (end < value.length) {
-    if (end - start >= MAX_URL_CANDIDATE_LENGTH) {
-      return { end, exceeded: true };
-    }
-    const character = value[end];
-    if (isUriCandidateBoundary(character)) {
-      break;
-    }
-    if (
-      nesting.length === 0
-      && (
-        character === '<'
-        || character === '>'
-        || character === '"'
-        || character === "'"
-        || character === '`'
-        || character === wrapperClose
-      )
-    ) {
-      break;
-    }
-
-    const nestedClose = CREDENTIAL_URL_NESTING_DELIMITERS.get(character);
-    if (nestedClose != null) {
-      nesting.push(nestedClose);
-      end += 1;
-      continue;
-    }
-    if (CREDENTIAL_URL_CLOSING_DELIMITERS.has(character)) {
-      if (nesting.at(-1) !== character) {
-        break;
-      }
-      nesting.pop();
-    }
-    end += 1;
-  }
-
-  while (
-    end > start
-    && URL_TRAILING_PROSE_PUNCTUATION.has(value[end - 1])
-  ) {
-    end -= 1;
-  }
-  return { end, exceeded: false };
-}
-
-/**
- * @param {string} value
+ * @param {number} end
  * @returns {boolean}
  */
-function isCredentialUrlReference(value) {
-  const normalized = normalizeCredentialUrlCandidateMapped(
-    createMappedInspectionText(value),
-  ).value;
-  if (normalized.startsWith('//')) {
-    return true;
+function hasCredentialUrlHost(value, start, end) {
+  if (start >= end) {
+    return false;
   }
-  const schemeEnd = findUriSchemeEnd(normalized, 0);
-  return (
-    schemeEnd != null
-    && WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(
-      stripGitPlusPrefix(normalized.slice(0, schemeEnd)).toLowerCase(),
-    )
-  );
+  if (value[start] === '[') {
+    const closingBracket = value.indexOf(']', start + 1);
+    return (
+      closingBracket !== -1
+      && closingBracket < end
+      && closingBracket > start + 1
+    );
+  }
+
+  let cursor = start;
+  while (
+    cursor < end
+    && /[\p{L}\p{N}\p{M}._~%:-]/u.test(value[cursor] ?? '')
+  ) {
+    cursor += 1;
+  }
+  return cursor > start;
+}
+
+/**
+ * @param {CredentialUrlScanState} state
+ * @param {string} value
+ * @param {number} authorityEnd
+ * @param {boolean} decoded
+ */
+function assertCredentialUrlAuthoritySafe(
+  state,
+  value,
+  authorityEnd,
+  decoded,
+) {
+  if (
+    state.lastAt == null
+    || state.lastAt <= state.authorityStart
+    || !hasCredentialUrlHost(value, state.lastAt + 1, authorityEnd)
+  ) {
+    return;
+  }
+
+  const userinfo = value.slice(state.authorityStart, state.lastAt);
+  if (
+    decoded
+    || state.protocolRelative
+    || !state.conventionalAuthority
+    || containsEncodedCredentialUrlUserinfo(userinfo)
+    || CREDENTIAL_URL_AMBIGUOUS_USERINFO_PATTERN.test(userinfo)
+  ) {
+    fail(
+      'Publishable URL credentials detected; publishable credential URL detected',
+    );
+  }
 }
 
 /**
  * @param {string} value
- * @returns {UrlCandidate[]}
+ * @param {boolean} decoded
  */
-function scanCredentialUrlCandidates(value) {
-  const candidates = /** @type {UrlCandidate[]} */ ([]);
+function assertCredentialUrlVariantSafe(value, decoded) {
+  /** @type {CredentialUrlScanState | null} */
+  let state = null;
   let cursor = 0;
 
   while (cursor < value.length) {
-    if (!couldStartCredentialUrlCandidate(value, cursor)) {
-      cursor += 1;
+    const nextState = credentialUrlStartAt(value, cursor);
+    if (nextState != null) {
+      if (state != null) {
+        assertCredentialUrlAuthoritySafe(state, value, cursor, decoded);
+      }
+      state = nextState;
+      cursor = nextState.authorityStart;
       continue;
     }
 
-    const { end, exceeded } = findCredentialUrlCandidateEnd(value, cursor);
-    if (end <= cursor) {
+    if (state == null) {
       cursor += 1;
       continue;
     }
-    const candidateValue = value.slice(cursor, end);
-    if (
-      !credentialUrlStructuralVariants(candidateValue)
-        .some((variant) => isCredentialUrlReference(variant))
-    ) {
-      cursor = exceeded ? end : cursor + 1;
-      continue;
-    }
-    if (exceeded) {
+    if (cursor - state.start >= MAX_URL_CANDIDATE_LENGTH) {
       fail('Public credential URL candidate exceeds the inspection limit');
     }
-    if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
-      fail('Public text exceeds the credential URL candidate inspection limit');
-    }
 
-    candidates.push({
-      start: cursor,
-      end,
-      value: candidateValue,
-    });
-    cursor = end;
+    const character = value[cursor];
+    if (character === '@') {
+      state.lastAt = cursor;
+    } else if (character === '/' || character === '\\') {
+      assertCredentialUrlAuthoritySafe(state, value, cursor, decoded);
+      state = null;
+    }
+    cursor += 1;
   }
 
-  return candidates;
+  if (state != null) {
+    assertCredentialUrlAuthoritySafe(state, value, value.length, decoded);
+  }
+}
+
+/**
+ * @param {string} value
+ */
+function assertCredentialUrlSpanSafe(value) {
+  for (const [index, variant] of credentialUrlStructuralVariants(value).entries()) {
+    assertCredentialUrlVariantSafe(variant, index > 0);
+  }
 }
 
 /**
@@ -1376,33 +1409,6 @@ function credentialUrlStructuralVariants(value) {
 }
 
 /**
- * @param {string} value
- * @returns {string[]}
- */
-function credentialUrlInspectionVariants(value) {
-  const variants = new Set(credentialUrlStructuralVariants(value));
-  let current = createMappedInspectionText(value);
-
-  for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
-    const percentDecoded = decodePercentMappedOnce(current, round > 0);
-    variants.add(percentDecoded.value);
-    const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
-    variants.add(entityDecoded.value);
-    if (entityDecoded.value === current.value) {
-      return [...variants];
-    }
-    current = entityDecoded;
-  }
-
-  const percentDecoded = decodePercentMappedOnce(current, true);
-  const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
-  if (entityDecoded.value !== current.value) {
-    fail('Encoded credential URL exceeds the decoding limit');
-  }
-  return [...variants];
-}
-
-/**
  * @param {MappedInspectionText} mapped
  * @returns {MappedInspectionText}
  */
@@ -1468,106 +1474,6 @@ function inspectUrlCandidateMapped(mapped) {
 }
 
 /**
- * @param {MappedInspectionText} mapped
- * @returns {MappedInspectionText}
- */
-function normalizeCredentialUrlCandidateMapped(mapped) {
-  const inspected = normalizeSpecialSchemeSeparatorsMapped(mapped);
-  if (
-    !(
-      (inspected.value[0] === '/' || inspected.value[0] === '\\')
-      && (inspected.value[1] === '/' || inspected.value[1] === '\\')
-    )
-  ) {
-    return inspected;
-  }
-
-  const output = /** @type {string[]} */ ([]);
-  const sourceRanges = /** @type {SourceRange[]} */ ([]);
-  let separatorEnd = 0;
-  while (
-    inspected.value[separatorEnd] === '/'
-    || inspected.value[separatorEnd] === '\\'
-  ) {
-    separatorEnd += 1;
-  }
-  const separatorRange = mappedSourceRange(inspected, 0, separatorEnd);
-  appendMappedInspectionValue(output, sourceRanges, '/', separatorRange);
-  appendMappedInspectionValue(output, sourceRanges, '/', separatorRange);
-  for (let index = separatorEnd; index < inspected.value.length; index += 1) {
-    appendMappedInspectionValue(
-      output,
-      sourceRanges,
-      inspected.value[index] === '\\' ? '/' : inspected.value[index] ?? '',
-      inspected.sourceRanges[index] ?? { start: index, end: index + 1 },
-    );
-  }
-  return {
-    value: output.join(''),
-    sourceRanges,
-  };
-}
-
-/**
- * @param {string} value
- * @returns {{userinfo: string, conventionalAuthority: boolean} | null}
- */
-function credentialUrlUserinfo(value) {
-  const protocolRelative = value.startsWith('//');
-  const schemeEnd = protocolRelative ? null : findUriSchemeEnd(value, 0);
-  if (!protocolRelative && schemeEnd == null) {
-    return null;
-  }
-
-  const scheme = schemeEnd == null
-    ? null
-    : stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase();
-  const conventionalAuthority = protocolRelative
-    || value.startsWith('//', (schemeEnd ?? -1) + 1);
-  if (
-    !protocolRelative
-    && !conventionalAuthority
-    && !WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(scheme ?? '')
-  ) {
-    return null;
-  }
-
-  let parsed;
-  try {
-    parsed = protocolRelative
-      ? new URL(value, 'https://credential-inspection.invalid/')
-      : new URL(value);
-  } catch {
-    return null;
-  }
-  if (!parsed.username && !parsed.password) {
-    return null;
-  }
-
-  let authorityStart;
-  if (protocolRelative) {
-    authorityStart = 2;
-  } else if (conventionalAuthority) {
-    authorityStart = (schemeEnd ?? 0) + 3;
-  } else {
-    authorityStart = (schemeEnd ?? 0) + 1;
-  }
-  let authorityEnd = value.length;
-  for (const delimiter of ['/', '?', '#']) {
-    const index = value.indexOf(delimiter, authorityStart);
-    if (index !== -1 && index < authorityEnd) {
-      authorityEnd = index;
-    }
-  }
-  const authority = value.slice(authorityStart, authorityEnd);
-  const atIndex = authority.lastIndexOf('@');
-  return {
-    userinfo: atIndex === -1 ? '' : authority.slice(0, atIndex),
-    conventionalAuthority,
-  };
-}
-
-/**
  * @param {string} value
  * @returns {boolean}
  */
@@ -1590,29 +1496,31 @@ function containsEncodedCredentialUrlUserinfo(value) {
 
 /**
  * @param {string} value
+ * @param {boolean} [exactSpan=false]
  */
-function assertNoCredentialUrlReferences(value) {
-  for (const candidate of scanCredentialUrlCandidates(value)) {
-    for (const variant of credentialUrlInspectionVariants(candidate.value)) {
-      const normalized = normalizeCredentialUrlCandidateMapped(
-        createMappedInspectionText(variant),
-      ).value;
-      const parsed = credentialUrlUserinfo(normalized);
-      if (parsed == null) {
-        continue;
-      }
-      const candidateWasDecoded = normalized !== candidate.value;
-      const protocolRelative = normalized.startsWith('//');
-      if (
-        candidateWasDecoded
-        || protocolRelative
-        || !parsed.conventionalAuthority
-        || containsEncodedCredentialUrlUserinfo(parsed.userinfo)
-      ) {
-        fail(
-          'Publishable URL credentials detected; publishable credential URL detected',
-        );
-      }
+function assertNoCredentialUrlReferences(value, exactSpan = false) {
+  if (exactSpan) {
+    assertCredentialUrlSpanSafe(value);
+    return;
+  }
+
+  let cursor = 0;
+  while (cursor < value.length) {
+    while (
+      cursor < value.length
+      && isCredentialUrlTokenBoundary(value[cursor])
+    ) {
+      cursor += 1;
+    }
+    const start = cursor;
+    while (
+      cursor < value.length
+      && !isCredentialUrlTokenBoundary(value[cursor])
+    ) {
+      cursor += 1;
+    }
+    if (cursor > start) {
+      assertCredentialUrlSpanSafe(value.slice(start, cursor));
     }
   }
 }
@@ -1975,7 +1883,7 @@ function escapeRawHtmlAttributeValue(value, quote) {
  * @returns {string}
  */
 function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
-  assertNoCredentialUrlReferences(rawValue);
+  assertNoCredentialUrlReferences(rawValue, true);
   const decoded = inspectUrlCandidateMapped(
     createMappedInspectionText(rawValue),
   ).value;
@@ -4110,13 +4018,13 @@ function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
  */
 function assertNoMarkdownDestinationSecrets(markdownDecoded, config = {}, depth = 0) {
   for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
-    const inspectedDestination = inspectUrlCandidateMapped(
-      sliceMappedInspectionText(
-        markdownDecoded,
-        destination.start,
-        destination.end,
-      ),
+    const rawDestination = sliceMappedInspectionText(
+      markdownDecoded,
+      destination.start,
+      destination.end,
     );
+    assertNoCredentialUrlReferences(rawDestination.value, true);
+    const inspectedDestination = inspectUrlCandidateMapped(rawDestination);
     assertNoDirectPublishableSecrets(inspectedDestination.value);
     if (inspectedDestination.value.toLowerCase().startsWith('data:')) {
       assertSafeDataUriCandidate(inspectedDestination.value, config, depth);

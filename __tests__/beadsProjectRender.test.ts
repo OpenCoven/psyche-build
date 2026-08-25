@@ -1091,6 +1091,76 @@ describe('Beads project renderers', () => {
   );
 
   it.each([
+    ['exclamation mark', '!'],
+    ['question mark', '?'],
+    ['hash', '#'],
+    ['em dash', '—'],
+    ['ideographic comma', '、'],
+    ['Arabic comma', '،'],
+  ])(
+    'rejects a credential URL candidate after a %s boundary',
+    (_name, prefix) => {
+      expect(() =>
+        sanitizePublicText(
+          `Publish${prefix}//user:password@host.example/releases next.`,
+        )
+      ).toThrow(/URL credentials/i);
+    },
+  );
+
+  it.each([
+    ['closing parenthesis', ')'],
+    ['closing bracket', ']'],
+    ['closing brace', '}'],
+    ['single quote', "'"],
+    ['backtick', '`'],
+    ['exclamation mark', '!'],
+    ['question mark', '?'],
+    ['hash', '#'],
+  ])('inspects a %s anywhere in URL userinfo', (_name, punctuation) => {
+    const unsafeUrl =
+      `//alice${punctuation}:password@host.example/releases`;
+    const markdownUrl = punctuation === ')'
+      ? `[credentials](<${unsafeUrl}>)`
+      : `[credentials](${unsafeUrl})`;
+
+    for (const unsafeDescription of [
+      `Publish ${unsafeUrl} next.`,
+      markdownUrl,
+      `<a href="${unsafeUrl}">private</a>`,
+    ]) {
+      expect(() => sanitizePublicText(unsafeDescription)).toThrow(
+        /URL credentials/i,
+      );
+    }
+  });
+
+  it.each([
+    ['closing parenthesis', '29'],
+    ['closing bracket', '5D'],
+    ['closing brace', '7D'],
+    ['single quote', '27'],
+    ['backtick', '60'],
+    ['exclamation mark', '21'],
+    ['question mark', '3F'],
+    ['hash', '23'],
+  ])('inspects encoded %s in URL userinfo', (_name, encodedPunctuation) => {
+    const unsafeUrl =
+      `https%3A%2F%2Falice%${encodedPunctuation}%3Apassword`
+      + '%40host.example%2Freleases';
+
+    for (const unsafeDescription of [
+      `Publish ${unsafeUrl} next.`,
+      `[credentials](<${unsafeUrl}>)`,
+      `<a href="${unsafeUrl}">private</a>`,
+    ]) {
+      expect(() => sanitizePublicText(unsafeDescription)).toThrow(
+        /URL credentials/i,
+      );
+    }
+  });
+
+  it.each([
     ['percent whitespace in username', '//user%20name:password@host.example/releases'],
     ['percent slash in username', '//user%2Fname:password@host.example/releases'],
     ['percent whitespace before encoded at', '//user%20name%40host.example/releases'],
@@ -1148,6 +1218,39 @@ describe('Beads project renderers', () => {
     ['ordinary email', 'Contact user@example.com.', 'Contact <redacted-email>.'],
   ])('keeps %s safe during structural URL discovery', (_name, source, expected) => {
     expect(sanitizePublicText(source)).toBe(expected);
+  });
+
+  it('preserves safe URL punctuation without promoting path or query text to userinfo', () => {
+    const source = [
+      "Keep https://example.com/a)b]c}d'e`f!g?topic=public#section.",
+      'Keep https://example.com/?contact=user@example.net for support.',
+      'Keep [docs](https://example.com/(guide)/[v2]?view=public#summary).',
+      'Keep <a href="https://example.com/docs?topic=public#section">docs</a>.',
+    ].join('\n');
+
+    expect(sanitizePublicText(source)).toBe(
+      source.replace('user@example.net', '<redacted-email>'),
+    );
+  });
+
+  it('does not promote division or JavaScript comments to protocol-relative URLs', () => {
+    const source = [
+      'const quotient = a//b;',
+      'const spaced = left / / right;',
+      '// comment about the public release',
+      '/* // comment about the public release */',
+      'const text = "// still a comment";',
+    ].join('\n');
+
+    expect(sanitizePublicText(source)).toBe(source);
+  });
+
+  it('scans dense rejected URL prefixes in bounded linear time', () => {
+    const source = `${',%'.repeat(5_000)} ${',&'.repeat(5_000)}`;
+    const startedAt = performance.now();
+
+    expect(sanitizePublicText(source)).toBe(source);
+    expect(performance.now() - startedAt).toBeLessThan(2_500);
   });
 
   it('preserves safe protocol-relative URLs and redacts ordinary email prose', () => {
