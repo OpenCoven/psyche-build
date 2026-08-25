@@ -25,6 +25,7 @@ import { normalizeBeadPriority } from './model.mjs';
  *     end: {offset?: number},
  *   },
  *   value?: string,
+ *   alt?: string,
  *   children?: MdastNode[],
  * }} MdastNode
  */
@@ -143,6 +144,10 @@ const MAX_RAW_HTML_ATTRIBUTE_COUNT = 512;
 const MAX_PARSED_HTML_NODE_COUNT = 4_096;
 const MAX_PARSED_HTML_DEPTH = 128;
 const MAX_PARSED_HTML_TOTAL_ATTRIBUTE_COUNT = 4_096;
+const MAX_RENDERED_MARKDOWN_NODE_COUNT = 4_096;
+const MAX_RENDERED_MARKDOWN_DEPTH = 128;
+const MAX_RENDERED_MARKDOWN_HTML_NODE_COUNT = 16_384;
+const MAX_RENDERED_TEXT_PROJECTION_LENGTH = 262_144;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
 const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
 const MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN =
@@ -253,6 +258,30 @@ const RAW_HTML_RAW_TEXT_ELEMENTS = new Set([
   'script',
   'style',
   'xmp',
+]);
+const RAW_HTML_HIDDEN_TEXT_ELEMENTS = new Set([
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'script',
+  'style',
+  'template',
+  'xmp',
+]);
+const MARKDOWN_BLOCK_NODES = new Set([
+  'blockquote',
+  'code',
+  'definition',
+  'footnoteDefinition',
+  'heading',
+  'list',
+  'listItem',
+  'paragraph',
+  'table',
+  'tableCell',
+  'tableRow',
+  'thematicBreak',
 ]);
 const STRICT_BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
@@ -2989,7 +3018,10 @@ function assertParsedHtmlTextSafe(text, config) {
     fail(`Public HTML sanitization rejected rendered text: ${message}`);
   }
   if (containsEmail(text)) {
-    fail('Public HTML sanitization could not safely rewrite parser-derived email text');
+    fail(
+      'Public HTML sanitization could not safely rewrite parser-derived email text: '
+        + 'sensitive content spans Markdown nodes (email)',
+    );
   }
   const matchers = buildHomeDirectoryMatchers(config);
   if (
@@ -2997,7 +3029,8 @@ function assertParsedHtmlTextSafe(text, config) {
     || homeDirectoryDecodedRanges(text, matchers).length > 0
   ) {
     fail(
-      'Public HTML sanitization could not safely rewrite parser-derived local path text',
+      'Public HTML sanitization could not safely rewrite parser-derived local path text: '
+        + 'sensitive content spans Markdown nodes (local path)',
     );
   }
 }
@@ -4431,7 +4464,7 @@ function markdownCodeSensitivePathEnd(value, pathStart, markerEnd) {
     if (
       character == null
       || /\s/u.test(character)
-      || /["'`()\[\]{}<>,;!?]/u.test(character)
+      || /["'`()\[\]{}<>,;!?\uFFFC]/u.test(character)
     ) {
       break;
     }
@@ -4991,6 +5024,287 @@ function normalizePriority(value) {
 }
 
 /**
+ * @typedef {{
+ *   value: string,
+ *   sourceNodeIds: number[],
+ * }} RenderedMarkdownProjection
+ */
+
+/**
+ * @param {string} value
+ * @returns {RenderedMarkdownProjection}
+ */
+function buildRenderedMarkdownProjection(value) {
+  const tree = /** @type {MdastNode} */ (fromMarkdown(value, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  }));
+  const parts = /** @type {string[]} */ ([]);
+  const sourceNodeIds = /** @type {number[]} */ ([]);
+  let projectionLength = 0;
+  let lastCharacter = '';
+  let markdownNodeCount = 0;
+  let htmlNodeCount = 0;
+
+  /**
+   * @param {string} visibleText
+   * @param {number} sourceNodeId
+   */
+  function appendVisibleText(visibleText, sourceNodeId) {
+    if (!visibleText) {
+      return;
+    }
+    projectionLength += visibleText.length;
+    if (projectionLength > MAX_RENDERED_TEXT_PROJECTION_LENGTH) {
+      fail('Rendered Markdown text exceeds the projection length limit');
+    }
+    parts.push(visibleText);
+    for (let index = 0; index < visibleText.length; index += 1) {
+      sourceNodeIds.push(sourceNodeId);
+    }
+    lastCharacter = visibleText.at(-1) ?? lastCharacter;
+  }
+
+  function appendBoundary() {
+    if (lastCharacter && lastCharacter !== '\uFFFC') {
+      appendVisibleText('\uFFFC', 0);
+    }
+  }
+
+  /**
+   * @param {string} html
+   * @param {number} sourceNodeId
+   */
+  function appendRenderedHtml(html, sourceNodeId) {
+    const fragment = parsePublicHtmlFragment(html);
+    /** @type {{node: ParsedHtmlNode, depth: number, exit: boolean}[]} */
+    const pending = [];
+    for (let index = fragment.childNodes.length - 1; index >= 0; index -= 1) {
+      const child = fragment.childNodes[index];
+      if (child != null) {
+        pending.push({ node: child, depth: 1, exit: false });
+      }
+    }
+
+    while (pending.length > 0) {
+      const entry = pending.pop();
+      if (entry == null) {
+        continue;
+      }
+      const { node, depth, exit } = entry;
+      if (exit) {
+        if (
+          isParsedHtmlElement(node)
+          && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(node.tagName.toLowerCase())
+        ) {
+          appendBoundary();
+        }
+        continue;
+      }
+
+      htmlNodeCount += 1;
+      if (htmlNodeCount > MAX_RENDERED_MARKDOWN_HTML_NODE_COUNT) {
+        fail('Rendered Markdown HTML exceeds the parsed node limit');
+      }
+      if (depth > MAX_PARSED_HTML_DEPTH) {
+        fail('Rendered Markdown HTML exceeds the parsed depth limit');
+      }
+      if (node.nodeName === '#text' && 'value' in node) {
+        appendVisibleText(node.value, sourceNodeId);
+        continue;
+      }
+      if (!isParsedHtmlElement(node)) {
+        continue;
+      }
+
+      const tagName = node.tagName.toLowerCase();
+      const isBoundary = RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(tagName);
+      if (isBoundary) {
+        appendBoundary();
+      }
+      if (tagName === 'img') {
+        const alt = node.attrs.find((attribute) =>
+          attribute.name.toLowerCase() === 'alt'
+        )?.value;
+        if (alt) {
+          appendVisibleText(alt, sourceNodeId);
+        }
+      }
+      if (RAW_HTML_HIDDEN_TEXT_ELEMENTS.has(tagName)) {
+        if (isBoundary) {
+          appendBoundary();
+        }
+        continue;
+      }
+
+      pending.push({ node, depth, exit: true });
+      const children = parsedHtmlChildren(node);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child != null) {
+          pending.push({ node: child, depth: depth + 1, exit: false });
+        }
+      }
+    }
+  }
+
+  /**
+   * @typedef {{
+   *   node: MdastNode,
+   *   depth: number,
+   *   parentType: string | null,
+   *   exit: boolean,
+   * }} MarkdownProjectionEntry
+   */
+  /** @type {MarkdownProjectionEntry[]} */
+  const pending = [{
+    node: tree,
+    depth: 0,
+    parentType: null,
+    exit: false,
+  }];
+
+  while (pending.length > 0) {
+    const entry = pending.pop();
+    if (entry == null) {
+      continue;
+    }
+    const { node, depth, parentType, exit } = entry;
+    const isBlock = MARKDOWN_BLOCK_NODES.has(node.type)
+      || (node.type === 'html' && parentType === 'root');
+    if (exit) {
+      if (isBlock) {
+        appendBoundary();
+      }
+      continue;
+    }
+
+    markdownNodeCount += 1;
+    if (markdownNodeCount > MAX_RENDERED_MARKDOWN_NODE_COUNT) {
+      fail('Rendered Markdown exceeds the AST node limit');
+    }
+    if (depth > MAX_RENDERED_MARKDOWN_DEPTH) {
+      fail('Rendered Markdown exceeds the AST depth limit');
+    }
+    const nodeId = markdownNodeCount;
+    if (isBlock) {
+      appendBoundary();
+    }
+
+    if (
+      (node.type === 'text' || node.type === 'inlineCode' || node.type === 'code')
+      && typeof node.value === 'string'
+    ) {
+      appendVisibleText(node.value, nodeId);
+    } else if (
+      (node.type === 'image' || node.type === 'imageReference')
+      && typeof node.alt === 'string'
+    ) {
+      appendVisibleText(node.alt, nodeId);
+    } else if (node.type === 'html' && typeof node.value === 'string') {
+      appendRenderedHtml(node.value, nodeId);
+    } else if (node.type === 'break') {
+      appendBoundary();
+    }
+
+    const children = Array.isArray(node.children) ? node.children : [];
+    if (children.length > 0 || isBlock) {
+      pending.push({
+        node,
+        depth,
+        parentType,
+        exit: true,
+      });
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child != null) {
+          pending.push({
+            node: child,
+            depth: depth + 1,
+            parentType: node.type,
+            exit: false,
+          });
+        }
+      }
+    }
+  }
+
+  let projectedValue = parts.join('');
+  if (projectedValue.endsWith('\uFFFC')) {
+    projectedValue = projectedValue.slice(0, -1);
+    sourceNodeIds.pop();
+  }
+  return { value: projectedValue, sourceNodeIds };
+}
+
+/**
+ * @param {RenderedMarkdownProjection} projection
+ * @param {number} start
+ * @param {number} end
+ * @param {'email' | 'local path'} kind
+ */
+function assertSensitiveProjectionRangeSafe(projection, start, end, kind) {
+  let sourceNodeId = 0;
+  for (let index = start; index < end; index += 1) {
+    const candidate = projection.sourceNodeIds[index] ?? 0;
+    if (candidate === 0) {
+      continue;
+    }
+    if (sourceNodeId === 0) {
+      sourceNodeId = candidate;
+      continue;
+    }
+    if (candidate !== sourceNodeId) {
+      fail(`Publishable sensitive content spans Markdown nodes: ${kind}`);
+    }
+  }
+  fail(`Public Markdown sanitization invariant failed: ${kind} remains within one node`);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {boolean} [validateRedactableContent=true]
+ */
+function assertRenderedMarkdownSensitiveTextSafe(
+  value,
+  config,
+  validateRedactableContent = true,
+) {
+  const projection = buildRenderedMarkdownProjection(value);
+  assertNoDirectPublishableSecrets(projection.value);
+  assertNoEncodedUrlSecrets(projection.value, true);
+  assertSafeDataUrisInText(projection.value, config, 0);
+
+  if (!validateRedactableContent) {
+    return;
+  }
+
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of projection.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start >= 0) {
+      assertSensitiveProjectionRangeSafe(
+        projection,
+        start,
+        start + match[0].length,
+        'email',
+      );
+    }
+  }
+
+  const matchers = buildHomeDirectoryMatchers(config);
+  for (const range of markdownCodeSensitivePathRanges(projection.value, matchers)) {
+    assertSensitiveProjectionRangeSafe(
+      projection,
+      range.start,
+      range.end,
+      'local path',
+    );
+  }
+}
+
+/**
  * @param {string} value
  */
 function assertNoDirectPublishableSecrets(value) {
@@ -5006,6 +5320,17 @@ function assertNoDirectPublishableSecrets(value) {
   if (CREDENTIAL_ASSIGNMENT_PATTERN.test(value)) {
     fail('Publishable credential assignment detected');
   }
+}
+
+/**
+ * Keeps direct source inspection from joining separate Markdown blocks. The
+ * final rendered-text projection remains authoritative for visible adjacency.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function maskMarkdownBlankLineBoundaries(value) {
+  return value.replace(/\n(?=[\t ]*\r?\n)/gu, '\uFFFC');
 }
 
 /**
@@ -5189,9 +5514,26 @@ export function assertNoPublishableSecrets(value) {
     {},
     0,
   );
-  assertNoDirectPublishableSecrets(protectedValue);
-  assertNoEncodedUrlSecrets(protectedValue, true, entityProtectedMask);
-  assertNoMarkdownReconstructedSecrets(protectedValue, {}, 0, entityProtectedMask);
+  const sourceInspection = maskMarkdownBlankLineBoundaries(protectedValue);
+  assertNoDirectPublishableSecrets(sourceInspection);
+  assertNoEncodedUrlSecrets(sourceInspection, true, entityProtectedMask);
+  assertNoMarkdownReconstructedSecrets(sourceInspection, {}, 0, entityProtectedMask);
+  assertRenderedMarkdownSensitiveTextSafe(value, {}, false);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig} [config={}]
+ */
+export function assertNoSensitiveMarkdownReconstruction(value, config = {}) {
+  if (typeof value !== 'string') {
+    fail('assertNoSensitiveMarkdownReconstruction expected a string');
+  }
+  if (!value) {
+    return;
+  }
+  assertPublicTextInspectionLength(value);
+  assertRenderedMarkdownSensitiveTextSafe(value, config);
 }
 
 /**
@@ -5242,7 +5584,12 @@ export function sanitizePublicText(value, config = {}) {
   assertNoPublishableSecrets(sanitized);
   sanitized = escapeGeneratedMarkers(sanitized);
   const normalized = normalizeMultilineText(sanitized);
-  return normalized == null ? null : protectedSource.restore(normalized);
+  if (normalized == null) {
+    return null;
+  }
+  const restored = protectedSource.restore(normalized);
+  assertRenderedMarkdownSensitiveTextSafe(restored, config);
+  return restored;
 }
 
 /**

@@ -1249,6 +1249,134 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain(runtimeHomeDirectory);
   });
 
+  it('fails closed when an email is reconstructed across Markdown text and inline code', () => {
+    const source = 'alice`@`example.com';
+
+    expect(() => sanitizePublicText(source)).toThrow(
+      /sensitive content spans Markdown nodes.*email/i,
+    );
+
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    expect(feature).toBeTruthy();
+    expect(() =>
+      renderIssueBody(
+        { ...feature!, description: source },
+        buildContext([feature!]),
+      )
+    ).toThrow(/sensitive content spans Markdown nodes.*email/i);
+    expect(() =>
+      renderIssueBody(
+        {
+          ...feature!,
+          description: 'alice<img alt="&commat;">example.com',
+        },
+        buildContext([feature!]),
+      )
+    ).toThrow(/sensitive content spans Markdown nodes.*email/i);
+    expect(() =>
+      renderIssueBody(
+        {
+          ...feature!,
+          description: '<div>alice&#64;example.com</div>',
+        },
+        buildContext([feature!]),
+      )
+    ).toThrow(/sanitization invariant failed.*email/i);
+  });
+
+  it.each([
+    [
+      'GitHub token split by inline code',
+      'ghp`_`abcdefghijklmnopqrstuvwxyz123456',
+      /Publishable GitHub token/i,
+    ],
+    [
+      'API key assignment split by emphasis',
+      'api*_key* = "example-only-secret"',
+      /Publishable API key assignment/i,
+    ],
+    [
+      'credential assignment split by a link',
+      'to[ken](https://example.com) = example-only-secret',
+      /Publishable credential assignment/i,
+    ],
+    [
+      'API key assignment split by inline HTML',
+      'api<span>_key</span> = example-only-secret',
+      /Publishable API key assignment/i,
+    ],
+    [
+      'entity-decoded API key split by a link',
+      'api&#95;[key](https://example.com) = example-only-secret',
+      /Publishable API key assignment/i,
+    ],
+  ])('rejects a %s in rendered Markdown text', (_name, source, error) => {
+    expect(() => sanitizePublicText(source)).toThrow(error);
+  });
+
+  it.each([
+    [
+      'entity-decoded email split by link text',
+      'ali&#99;e[@](https://example.com)example.com',
+      'email',
+    ],
+    [
+      'email split by image alt text',
+      'alice![@](safe.png)example.com',
+      'email',
+    ],
+    [
+      'home path split by code, emphasis, and link text',
+      '/Users`/alice`*/private*[/plan.md](https://example.com)',
+      'local path',
+    ],
+    [
+      'operational path split by inline HTML',
+      '.work<span>trees</span>/run/private.md',
+      'local path',
+    ],
+  ])('fails closed for a %s', (_name, source, kind) => {
+    expect(() => sanitizePublicText(source)).toThrow(
+      new RegExp(`sensitive content spans Markdown nodes.*${kind}`, 'i'),
+    );
+  });
+
+  it('preserves safe block separation, punctuation, and code examples', () => {
+    const source = [
+      'alice',
+      '',
+      '`@`',
+      '',
+      'example.com',
+      '',
+      'token',
+      '',
+      ':public-value',
+      '',
+      '/Users',
+      '',
+      '/alice/private.md',
+      '',
+      'Punctuation keeps alice:`@`example.com separated.',
+      '',
+      'Example: `const release = "public-value";`.',
+    ].join('\n');
+
+    expect(sanitizePublicText(source)).toBe(source);
+  });
+
+  it('bounds rendered Markdown projection node count and depth', () => {
+    const manyNodes = Array.from({ length: 2_500 }, () => '*x*').join(' ');
+    expect(() => sanitizePublicText(manyNodes)).toThrow(
+      /rendered Markdown.*node limit/i,
+    );
+
+    const deeplyNested = `${'> '.repeat(140)}public`;
+    expect(() => sanitizePublicText(deeplyNested)).toThrow(
+      /rendered Markdown.*depth limit/i,
+    );
+  });
+
   it('keeps backticks inside custom and namespaced raw HTML attributes active', () => {
     for (const unsafe of [
       '<x-y href="`&#x67;hp_ABC123`">unsafe</x-y>',

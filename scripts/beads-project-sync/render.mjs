@@ -16,6 +16,7 @@ import {
 } from './markers.mjs';
 import {
   assertNoPublishableSecrets,
+  assertNoSensitiveMarkdownReconstruction,
   containsLocalOperationalPath,
   sanitizePublicText,
 } from './sanitize.mjs';
@@ -1330,6 +1331,7 @@ export function renderIssueBody(bead, context = {}) {
 
   const rendered = sections.filter(Boolean).join('\n\n');
   assertGeneratedIssueHeadings(rendered);
+  assertNoSensitiveMarkdownReconstruction(rendered);
   return rendered;
 }
 
@@ -1389,5 +1391,6 @@ export function renderProjectReadme(inventory, context = {}) {
     projectMarker,
   );
   assertProjectReadmeWithinLimit(rendered);
+  assertNoSensitiveMarkdownReconstruction(rendered);
   return rendered;
 }
