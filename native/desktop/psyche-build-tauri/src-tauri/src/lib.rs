@@ -110,7 +110,6 @@ const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
 const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
-const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
 #[cfg(test)]
 std::thread_local! {
@@ -1570,11 +1569,6 @@ fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedP
     Ok((pending_start, resolved_cwd))
 }
 
-fn has_exact_psyche_source(env: Option<&HashMap<String, String>>) -> bool {
-    matches!(env, Some(values) if values.len() == 1
-        && values.get(COVEN_SESSION_SOURCE).map(String::as_str) == Some(PSYCHE_SESSION_SOURCE))
-}
-
 fn has_no_launch_env(env: Option<&HashMap<String, String>>) -> bool {
     env.map_or(true, HashMap::is_empty)
 }
@@ -1597,28 +1591,15 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-code" => {
-            if !has_exact_psyche_source(options.env.as_ref()) {
-                return Err(
-                    "coven-code requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string(),
-                );
+            if !has_no_launch_env(options.env.as_ref()) {
+                return Err("coven-code does not accept launch environment entries".to_string());
             }
-            let session_id = options
-                .coven_session_id
-                .as_deref()
-                .ok_or_else(|| "coven-code requires a session id".to_string())?;
-            if !is_safe_session_id(session_id) {
-                return Err("coven-code session id is unsafe".to_string());
+            if options.coven_session_id.is_some() {
+                return Err("coven-code does not accept a session id".to_string());
             }
             match options.args.as_deref() {
-                Some([verb, flag, argument])
-                    if verb == "code" && flag == "--session-id" && argument == session_id =>
-                {
-                    Ok(())
-                }
-                _ => Err(
-                    "coven-code requires exactly 'code --session-id' and the validated session id"
-                        .to_string(),
-                ),
+                None | Some([]) => Ok(()),
+                _ => Err("coven-code does not accept launch arguments".to_string()),
             }
         }
         "coven-attach" => {
@@ -1665,7 +1646,7 @@ fn apply_launch_env(
             }
         }
     }
-    if launch_kind == Some("coven-attach") {
+    if matches!(launch_kind, Some("coven-code" | "coven-attach")) {
         cmd.env_remove(COVEN_SESSION_SOURCE);
     }
 }
@@ -5221,19 +5202,12 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
                     .psyche_entry
                     .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
             ),
-            NativeLaunchKind::CovenCode => {
-                let id = request
-                    .coven_session_id
-                    .clone()
-                    .filter(|id| is_safe_session_id(id))
-                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
-                (
-                    environment
-                        .coven_path
-                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
-                    vec!["code".to_string(), "--session-id".to_string(), id],
-                )
-            }
+            NativeLaunchKind::CovenCode => (
+                environment
+                    .coven_path
+                    .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                Vec::new(),
+            ),
             NativeLaunchKind::CovenAttach => {
                 let id = request
                     .coven_session_id
@@ -5263,8 +5237,12 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
             "PSYCHE_TAURI=1".to_string(),
             "PSYCHE_NATIVE_CONTAINER=1".to_string(),
         ];
-        if matches!(request.launch_kind, NativeLaunchKind::CovenCode) {
-            args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
+        if matches!(
+            request.launch_kind,
+            NativeLaunchKind::CovenCode | NativeLaunchKind::CovenAttach
+        ) {
+            args.push("-u".to_string());
+            args.push(COVEN_SESSION_SOURCE.to_string());
         }
         if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
             let home = environment
@@ -6593,6 +6571,18 @@ fn git_dir_for_worktree(root: &Path) -> Result<(PathBuf, PathBuf), String> {
     Err("not a Git worktree".to_string())
 }
 
+fn git_repository_paths(root: &Path) -> Result<(Option<PathBuf>, PathBuf), String> {
+    if root.join(".git").is_dir() || root.join(".git").is_file() {
+        return git_dir_for_worktree(root).map(|(work_tree, git_dir)| (Some(work_tree), git_dir));
+    }
+    if root.join("HEAD").is_file()
+        && (root.join("objects").is_dir() || root.join("commondir").is_file())
+    {
+        return Ok((None, root.to_path_buf()));
+    }
+    git_dir_for_worktree(root).map(|(work_tree, git_dir)| (Some(work_tree), git_dir))
+}
+
 fn git_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
     let commondir = git_dir.join("commondir");
     if !commondir.is_file() {
@@ -7894,8 +7884,8 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
 
 struct GitInspectionRepository {
     git_dir: tempfile::TempDir,
-    work_tree: PathBuf,
-    index: PathBuf,
+    work_tree: Option<PathBuf>,
+    index: Option<PathBuf>,
     attribute_source: Option<String>,
     config: Vec<(String, String)>,
 }
@@ -7906,9 +7896,9 @@ impl GitInspectionRepository {
         head_override: Option<&str>,
         config: Vec<(String, String)>,
     ) -> Result<Self, String> {
-        let (work_tree, actual_git_dir) = git_dir_for_worktree(Path::new(root))?;
+        let (work_tree, actual_git_dir) = git_repository_paths(Path::new(root))?;
         let common_dir = git_common_dir(&actual_git_dir)?;
-        let index = actual_git_dir.join("index");
+        let index = work_tree.as_ref().map(|_| actual_git_dir.join("index"));
         let alternate_objects = common_dir.join("objects");
         let ref_storage = config
             .iter()
@@ -7978,7 +7968,8 @@ impl GitInspectionRepository {
             return Err("unsupported Git repository format version".to_string());
         }
         let mut isolated_config = format!(
-            "[core]\n\trepositoryformatversion = {repository_format_version}\n\tbare = false\n\tfsmonitor = false\n"
+            "[core]\n\trepositoryformatversion = {repository_format_version}\n\tbare = {}\n\tfsmonitor = false\n",
+            if work_tree.is_some() { "false" } else { "true" }
         );
         if let Some(object_format) = object_format {
             isolated_config.push_str(&format!("[extensions]\n\tobjectformat = {object_format}\n"));
@@ -8122,12 +8113,8 @@ impl<'a> GitInspection<'a> {
 
     fn git_command_with_config(&self, extra_config: &[(String, String)]) -> std::process::Command {
         let mut command = git_command(self.root);
-        let work_tree = git_subprocess_root(&self.repository.work_tree);
-        let index = git_subprocess_root(&self.repository.index);
         command
             .env("GIT_DIR", self.repository.git_dir.path())
-            .env("GIT_WORK_TREE", work_tree.as_ref())
-            .env("GIT_INDEX_FILE", index.as_ref())
             .env(
                 "GIT_OBJECT_DIRECTORY",
                 self.repository.git_dir.path().join("objects"),
@@ -8145,6 +8132,16 @@ impl<'a> GitInspection<'a> {
                 self.repository.git_dir.path().join("empty-config"),
             )
             .env_remove("GIT_CONFIG_NOSYSTEM");
+        if let Some(work_tree) = &self.repository.work_tree {
+            command.env("GIT_WORK_TREE", git_subprocess_root(work_tree).as_ref());
+        } else {
+            command.env_remove("GIT_WORK_TREE");
+        }
+        if let Some(index) = &self.repository.index {
+            command.env("GIT_INDEX_FILE", git_subprocess_root(index).as_ref());
+        } else {
+            command.env_remove("GIT_INDEX_FILE");
+        }
         // Preserve gitlink commit/index reporting without launching Git inside
         // populated submodules, whose repository config is not isolated here.
         command.arg("-c").arg("diff.ignoreSubmodules=dirty");
@@ -8595,7 +8592,7 @@ pub struct GitCommit {
 fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let n = limit.unwrap_or(30).clamp(1, 200).to_string();
-    let raw = run_git_metadata(
+    let raw = run_git(
         &root,
         &[
             "--no-pager",
@@ -11723,24 +11720,14 @@ mod workspace_panel_tests {
         command: Option<&str>,
         args: Option<&[&str]>,
     ) -> StartOptions {
-        launch_options_with_env(
-            Some("coven-code"),
-            session_id,
-            command,
-            args,
-            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
-        )
+        launch_options_with_env(Some("coven-code"), session_id, command, args, None)
     }
 
     #[test]
     fn accepts_exact_native_coven_code_and_attach_launches() {
         let coven = "/canonical/bin/coven";
         let session_id = "12345678-1234-4abc-8def-1234567890ab";
-        let code = native_code_options(
-            Some(session_id),
-            Some(coven),
-            Some(&["code", "--session-id", session_id]),
-        );
+        let code = native_code_options(None, Some(coven), Some(&[]));
         let attach = launch_options(
             Some("coven-attach"),
             Some(session_id),
@@ -11756,14 +11743,10 @@ mod workspace_panel_tests {
     fn rejects_legacy_native_coven_chat_launch_kind_after_workspace_migration() {
         let legacy = launch_options_with_env(
             Some("coven-chat"),
-            Some("12345678-1234-4abc-8def-1234567890ab"),
+            None,
             Some("/canonical/bin/coven"),
-            Some(&[
-                "code",
-                "--session-id",
-                "12345678-1234-4abc-8def-1234567890ab",
-            ]),
-            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
+            None,
+            Some(&[]),
         );
 
         assert_eq!(
@@ -11776,25 +11759,32 @@ mod workspace_panel_tests {
     fn rejects_invalid_native_coven_launch_environments() {
         let coven = "/canonical/bin/coven";
         let code_envs = [
-            None,
-            Some(&[][..]),
-            Some(&[("COVEN_SESSION_SOURCE", "other")][..]),
-            Some(&[("OTHER", "psyche-build")][..]),
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
+            Some(&[("OTHER", "value")][..]),
             Some(&[("COVEN_SESSION_SOURCE", "psyche-build"), ("OTHER", "value")][..]),
         ];
         for env in code_envs {
-            let code = launch_options_with_env(
-                Some("coven-code"),
-                None,
-                Some(coven),
-                Some(&["code"]),
-                env,
-            );
+            let code =
+                launch_options_with_env(Some("coven-code"), None, Some(coven), Some(&[]), env);
             assert_eq!(
                 validate_coven_launch_with(&code, Some(coven)),
-                Err("coven-code requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string())
+                Err("coven-code does not accept launch environment entries".to_string())
             );
         }
+
+        let no_env_code =
+            launch_options_with_env(Some("coven-code"), None, Some(coven), None, None);
+        assert_eq!(
+            validate_coven_launch_with(&no_env_code, Some(coven)),
+            Ok(())
+        );
+
+        let empty_env_code =
+            launch_options_with_env(Some("coven-code"), None, Some(coven), Some(&[]), Some(&[]));
+        assert_eq!(
+            validate_coven_launch_with(&empty_env_code, Some(coven)),
+            Ok(())
+        );
 
         for env in [
             Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
@@ -11827,15 +11817,29 @@ mod workspace_panel_tests {
     }
 
     #[test]
-    fn applies_effective_launch_environment_without_relabeling_attachments() {
+    fn scrubs_inherited_coven_source_from_native_coven_launches() {
+        let mut code_without_env = CommandBuilder::new("/bin/coven");
+        code_without_env.env(COVEN_SESSION_SOURCE, "psyche-build");
+        apply_launch_env(&mut code_without_env, None, Some("coven-code"));
+        assert_eq!(code_without_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let empty_env = HashMap::new();
+        let mut code_with_empty_env = CommandBuilder::new("/bin/coven");
+        code_with_empty_env.env(COVEN_SESSION_SOURCE, "psyche-build");
+        apply_launch_env(
+            &mut code_with_empty_env,
+            Some(&empty_env),
+            Some("coven-code"),
+        );
+        assert_eq!(code_with_empty_env.get_env(COVEN_SESSION_SOURCE), None);
+
         let mut attach_without_env = CommandBuilder::new("/bin/coven");
-        attach_without_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        attach_without_env.env(COVEN_SESSION_SOURCE, "psyche-build");
         apply_launch_env(&mut attach_without_env, None, Some("coven-attach"));
         assert_eq!(attach_without_env.get_env(COVEN_SESSION_SOURCE), None);
 
-        let empty_env = HashMap::new();
         let mut attach_with_empty_env = CommandBuilder::new("/bin/coven");
-        attach_with_empty_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        attach_with_empty_env.env(COVEN_SESSION_SOURCE, "psyche-build");
         apply_launch_env(
             &mut attach_with_empty_env,
             Some(&empty_env),
@@ -11849,18 +11853,6 @@ mod workspace_panel_tests {
         assert_eq!(
             legacy.get_env(COVEN_SESSION_SOURCE),
             Some(std::ffi::OsStr::new("inherited"))
-        );
-
-        let code_env = HashMap::from([(
-            COVEN_SESSION_SOURCE.to_string(),
-            PSYCHE_SESSION_SOURCE.to_string(),
-        )]);
-        let mut code = CommandBuilder::new("/bin/coven");
-        code.env(COVEN_SESSION_SOURCE, "inherited");
-        apply_launch_env(&mut code, Some(&code_env), Some("coven-code"));
-        assert_eq!(
-            code.get_env(COVEN_SESSION_SOURCE),
-            Some(std::ffi::OsStr::new(PSYCHE_SESSION_SOURCE))
         );
     }
 
@@ -11894,7 +11886,7 @@ mod workspace_panel_tests {
         let invalid = [
             (
                 native_code_options(Some(session_id), Some(coven), None),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept a session id",
             ),
             (
                 native_code_options(
@@ -11902,7 +11894,7 @@ mod workspace_panel_tests {
                     Some(coven),
                     Some(&["code", "--session-id", session_id]),
                 ),
-                "coven-code requires a session id",
+                "coven-code does not accept launch arguments",
             ),
             (
                 native_code_options(
@@ -11914,35 +11906,27 @@ mod workspace_panel_tests {
                         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                     ]),
                 ),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept a session id",
             ),
             (
-                native_code_options(
-                    Some("../unsafe"),
-                    Some(coven),
-                    Some(&["code", "--session-id", "../unsafe"]),
-                ),
-                "coven-code session id is unsafe",
+                native_code_options(Some("../unsafe"), Some(coven), None),
+                "coven-code does not accept a session id",
             ),
             (
-                native_code_options(
-                    Some(session_id),
-                    Some("/wrong/coven"),
-                    Some(&["code", "--session-id", session_id]),
-                ),
+                native_code_options(None, Some("/wrong/coven"), Some(&[])),
                 "Coven launch command does not match the resolved executable",
             ),
             (
-                native_code_options(Some(session_id), Some(coven), Some(&["code", session_id])),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                native_code_options(None, Some(coven), Some(&["code", session_id])),
+                "coven-code does not accept launch arguments",
             ),
             (
                 native_code_options(
-                    Some(session_id),
+                    None,
                     Some(coven),
                     Some(&["code", "--session-id", session_id, "extra"]),
                 ),
-                "coven-code requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept launch arguments",
             ),
             (
                 launch_options(
@@ -11992,11 +11976,7 @@ mod workspace_panel_tests {
                 Err(expected.to_string())
             );
         }
-        let code = native_code_options(
-            Some(session_id),
-            Some(coven),
-            Some(&["code", "--session-id", session_id]),
-        );
+        let code = native_code_options(None, Some(coven), Some(&[]));
         assert_eq!(
             validate_coven_launch_with(&code, None),
             Err("Coven executable not found".to_string())
@@ -13911,6 +13891,122 @@ mod workspace_panel_tests {
 
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "baseline");
+    }
+
+    #[test]
+    fn git_log_does_not_misclassify_worktree_files_as_a_bare_repository() {
+        let tree = TempTree::new("git-log-worktree-bare-markers");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("HEAD"), "tracked worktree file\n").unwrap();
+        std::fs::create_dir_all(tree.root.join("objects")).unwrap();
+        std::fs::write(
+            tree.root.join("objects/tracked.txt"),
+            "tracked worktree file\n",
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["add", "HEAD", "objects/tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+
+        let log = git_log(path_text(&tree.root).to_string(), Some(1)).unwrap();
+
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "baseline");
+    }
+
+    #[test]
+    fn git_log_does_not_execute_repository_signature_verifier_from_local_include() {
+        let tree = TempTree::new("git-log-signature-verifier");
+        let helper = tree.root.join("signature-verifier.sh");
+        let marker = tree.root.join("signature-verifier-ran");
+        let include = tree.root.join("signature-verifier.cfg");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ntouch {}\n",
+                shell_single_quote(&shell_path(&marker))
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&tree.root, &["config", "commit.gpgSign", "false"]);
+        run_test_git(&tree.root, &["commit", "--allow-empty", "-qm", "baseline"]);
+
+        let unsigned =
+            run_test_git_stdout_with_env(&tree.root, &["cat-file", "commit", "HEAD"], &[]);
+        let (headers, message) = unsigned
+            .split_once("\n\n")
+            .expect("commit object must contain headers and a message");
+        let signed = format!(
+            "{headers}\ngpgsig -----BEGIN PGP SIGNATURE-----\n fake\n -----END PGP SIGNATURE-----\n\n{message}"
+        );
+        let mut hash = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git hash-object must run in tests");
+        hash.stdin
+            .take()
+            .expect("git hash-object stdin must be piped")
+            .write_all(signed.as_bytes())
+            .unwrap();
+        let hash = hash.wait_with_output().unwrap();
+        assert!(
+            hash.status.success(),
+            "git hash-object failed: {}",
+            String::from_utf8_lossy(&hash.stderr)
+        );
+        let signed_oid = String::from_utf8(hash.stdout).unwrap();
+        run_test_git(&tree.root, &["update-ref", "HEAD", signed_oid.trim()]);
+
+        std::fs::write(
+            &include,
+            format!(
+                "[log]\n\tshowSignature = true\n[gpg]\n\tformat = openpgp\n\tprogram = {}\n",
+                shell_path(&helper)
+            ),
+        )
+        .unwrap();
+        run_test_git(&tree.root, &["config", "include.path", path_text(&include)]);
+
+        let raw = std::process::Command::new("git")
+            .current_dir(&tree.root)
+            .args(["--no-pager", "log", "-n", "1", "--pretty=format:%s"])
+            .output()
+            .expect("git log must run in tests");
+        assert!(
+            raw.status.success(),
+            "raw git log positive control must succeed: {}",
+            String::from_utf8_lossy(&raw.stderr)
+        );
+        assert!(
+            marker.exists(),
+            "raw git log must execute the repository-selected signature verifier"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let log = git_log(path_text(&tree.root).to_string(), Some(1)).unwrap();
+
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "baseline");
+        assert!(
+            !marker.exists(),
+            "hardened git_log must ignore repository signature-verification config"
+        );
     }
 
     #[test]

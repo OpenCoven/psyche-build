@@ -1,8 +1,11 @@
 # Psyche Build roadmap
 
-**Status:** Active  
-**Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-08-22  
+**Status:** Active
+
+**Accountable owner:** [@BunsDev](https://github.com/BunsDev)
+
+**Last reconciled:** 2026-08-24
+
 **Execution control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)
 
 This is the canonical public roadmap for Psyche Build. It translates the
@@ -22,11 +25,11 @@ recoverable familiar work. The current product proves that foundation through
 projects, terminal panes, isolated worktrees, explicit integrations, bounded
 control, and companion surfaces.
 
-The immediate objective is narrower: publish the first credible macOS release
-without making iOS completion, broad architecture cleanup, cloud
-infrastructure, or future Threads/AgentFS convergence product prerequisites.
-Accidental workflow coupling is treated as a release-infrastructure defect,
-not as a reason to expand the supported surface.
+The first credible macOS release shipped on 2026-08-23. The immediate objective
+is now to stabilize that supported surface, harden operations and recovery,
+reduce desktop architectural concentration, complete open-source readiness,
+and advance the independently gated iOS companion without turning future
+architecture or cloud work into release prerequisites.
 
 ## Tracker and identity contract
 
@@ -45,10 +48,10 @@ identity and Threads convergence is tracked in
 
 ## Priority definitions
 
-- **P0 — release critical:** required before the public macOS installation path
-  is verified.
+- **P0 — supported-surface critical:** required to preserve the integrity,
+  governance, or recovery of the current public macOS installation path.
 - **P1 — next operational capability:** begins independently when it does not
-  overlap a P0 seam; it does not move the release candidate.
+  overlap a P0 seam.
 - **P2 — future architecture:** design and dependency discovery may proceed,
   but implementation cannot become an implicit release prerequisite.
 
@@ -57,7 +60,7 @@ identity and Threads convergence is tracked in
 The detailed contract lives in [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md).
 For `v0.0.1`:
 
-- the signed macOS application is the only planned public binary
+- the signed macOS application is the current public binary
   distribution;
 - the TUI/Node CLI remains a supported source-development interface and is not
   a separate npm release;
@@ -74,30 +77,18 @@ For `v0.0.1`:
 
 ```text
 #195 Authoritative roadmap
-    ├─ reconcile Beads, plans, and pull requests
-    ├─ freeze the supported-surface contract
-    └─ keep active ownership and evidence links current
+    ├─ completed: #203 desktop-only release independence
+    ├─ completed: #194 publish macOS v0.0.1
+    └─ active control and evidence reconciliation
                     │
+        ┌───────────┼───────────┬────────────┐
+        ▼           ▼           ▼            ▼
+ #196 Stabilize  #199 Ops    #197 Desktop  #198 Open-source
+ v0.0.1          recovery    decomposition readiness
+        └───────────┬───────────┘
                     ▼
-#196 Release reliability baseline ─────────────┐
-                                              │
-#31 Credentials and protections ──────────────┤
-                                              │
-#203 Desktop-only workflow independence ──────┤
-                                              ▼
-                                  freeze exact main SHA
-                                              │
-                                              ▼
-                                  #194 Publish v0.0.1
-                                     │              │
-                                     ▼              ▼
-                         #199 Operations       #197 Architecture
-                           and recovery          decomposition
-                                     │              │
-                                     └──────┬───────┘
-                                            ▼
-                                 #201 OpenCoven identity
-                                 and Threads convergence
+         #201 OpenCoven identity
+         and Threads convergence
 
 Planned independent companion train:
 #200 iOS connection correctness
@@ -116,33 +107,36 @@ Community train:
 
 | Outcome | Priority | Train | Dependency and close condition |
 |---|---:|---|---|
-| [#195 — authoritative roadmap](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Roadmap | All active work has one owner, one delivery target, explicit dependencies, and an evidence location |
-| [#196 — release reliability baseline](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Reliability | Every supported release-path capability is executable and proven, absent, or explicitly deferred |
-| [#31 — protected release credentials](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Release | Required desktop secrets and protections are verified without exposing values |
-| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | P0 | Release infrastructure | Offline contract tests pass and a live protected desktop-only dry run proves both macOS builds and publication without iOS gates |
-| [#194 — ship macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | P0 | Release | Signed/notarized dual-architecture artifacts and Homebrew installation are independently verified |
-| [#200 — iOS companion delivery](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | iOS | Physical distributed build connects, restores authoritative state, and executes only wired scoped actions |
-| [#199 — operations and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and representative failures recover deterministically with retained evidence |
-| [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Entry points compose capability modules while public commands, schemas, persistence, and behavior remain compatible |
+| [#195 — roadmap and post-release control state](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Roadmap | All active work has one owner, one delivery target, explicit dependencies, and an evidence location |
+| [#196 — runtime acceptance and `v0.0.1` stabilization](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Reliability | Every supported release-path capability is executable and proven, absent, or explicitly deferred, with post-release regressions reconciled |
+| [#31 — post-release governance and publication controls](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Release | Required branch, tag, environment, credential, and publication controls are verified without exposing values |
+| [#200 — iOS internal beta and continuity](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | iOS | Physical distributed build connects, restores authoritative state, and executes only wired scoped actions |
+| [#199 — operations, diagnostics, and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and representative failures recover deterministically with retained evidence |
+| [#197 — reduce desktop architectural concentration](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Entry points compose capability modules while public commands, schemas, persistence, and behavior remain compatible |
 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Community | Security, ownership, support, contribution, conduct, issue, and PR surfaces are complete and usable from a clean checkout |
-| [#201 — identity and Threads convergence](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | OpenCoven | Protocol ownership, compatibility, migration, and an end-to-end cross-device reference flow are approved and executable |
+| [#201 — protocol-owned identity and Threads execution](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | OpenCoven | Protocol ownership, compatibility, migration, and an end-to-end cross-device reference flow are approved and executable |
 
 ## Active pull-request disposition
 
-This table is a reconciliation snapshot as of 2026-08-22. The pull request and
+This table is a reconciliation snapshot as of 2026-08-24. The pull request and
 its owning outcome remain the live status sources.
 
 | Pull request | Train | Disposition | Required next gate |
 |---|---|---|---|
-| [#202 — canonical release-first roadmap](https://github.com/OpenCoven/psyche-build/pull/202) | Roadmap/control | Current implementation | Resolve every current review finding, pass required CI on the final head, and merge; afterward this row remains the delivery record for the canonical roadmap |
-| [#191 — siderail project closing](https://github.com/OpenCoven/psyche-build/pull/191) | macOS release | Candidate | Rebase on the selected release base, rerun required checks, verify no unresolved current review findings, then merge before candidate freeze |
 | [#190 — graphics acceleration reporting](https://github.com/OpenCoven/psyche-build/pull/190) | Post-release diagnostics | Defer from `v0.0.1` unless acceptance proves it is required | Resolve startup callback-safety and unavailable-invoke retry findings; integrate through #199's bounded diagnostic contract |
 | [#192 — mobile ritual controls](https://github.com/OpenCoven/psyche-build/pull/192) | iOS | Blocked | Wire the real mobile executor and publish rituals through the production workspace provider; prove the live host path before merge |
 | [#193 — Bonjour connection flow](https://github.com/OpenCoven/psyche-build/pull/193) | iOS | Blocked | Make workspace readiness atomic, complete required CI, and pass physical same-LAN acceptance before merge |
 
-After #191 and any proven P0 fix land, freeze the release candidate. A later
-change may enter the candidate only when it names the failed acceptance case it
-repairs and the full candidate gate is rerun.
+## Completed release milestones
+
+| Outcome | Completed | Evidence |
+|---|---|---|
+| [#202 — canonical release-first roadmap](https://github.com/OpenCoven/psyche-build/pull/202) | 2026-08-23 | Merged roadmap and support-control baseline |
+| [#191 — siderail project closing](https://github.com/OpenCoven/psyche-build/pull/191) | 2026-08-23 | Merged project close/hide behavior before release |
+| [#205 — final `v0.0.1` release notes](https://github.com/OpenCoven/psyche-build/pull/205) | 2026-08-23 | Merged truthful support, distribution, and limitation copy |
+| [#203 — desktop-only workflow independence](https://github.com/OpenCoven/psyche-build/issues/203) | 2026-08-23 | Successful protected [desktop-only release workflow](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508) with iOS skipped |
+| [#235 — desktop-only Homebrew notification](https://github.com/OpenCoven/psyche-build/pull/235) | 2026-08-23 | Merged release-notification correction and published tap Cask |
+| [#194 — macOS `v0.0.1`](https://github.com/OpenCoven/psyche-build/issues/194) | 2026-08-23 | [GitHub Release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1), dual-architecture DMGs, checksums, and Homebrew Cask |
 
 ## Stage 0 — reconcile control state
 
@@ -157,14 +151,14 @@ unreconciled pull request, or blocked write in the authoritative task tracker.
   reference without rewriting its history;
 - keep owners, priorities, dependencies, and evidence links current;
 - keep the support matrix aligned with actual distribution and runtime proof;
-- remove legacy ecosystem product metadata and obsolete keywords before
-  candidate freeze.
+- remove legacy ecosystem product metadata and obsolete keywords when found.
 
-## Stage 1 — establish the macOS release baseline
+## Stage 1 — close the `v0.0.1` stabilization baseline
 
 **Owner:** #196  
-**Exit gate:** one clean candidate commit passes repository validation and the
-clean-machine matrix in [RELEASE-ACCEPTANCE.md](./RELEASE-ACCEPTANCE.md).
+**Exit gate:** the released macOS surface and current post-release `main` have
+reconciled runtime acceptance, known deferrals, recovery ownership, and
+regression evidence in [RELEASE-ACCEPTANCE.md](./RELEASE-ACCEPTANCE.md).
 
 - implement the smallest correct behavior for visible incomplete controls or
   remove them from the supported release surface;
@@ -174,23 +168,18 @@ clean-machine matrix in [RELEASE-ACCEPTANCE.md](./RELEASE-ACCEPTANCE.md).
 - retain evidence against the exact candidate SHA;
 - classify every documented capability as proven, unsupported, or deferred.
 
-## Stage 2 — publish macOS `v0.0.1`
+## Stage 2 — macOS `v0.0.1` published
 
 **Owners:** #31, #203, and #194  
-**Exit gate:** the documented Homebrew command installs and launches the exact
-signed application represented by the public GitHub Release.
+**Completed:** 2026-08-23
 
-- close #203 only after the implemented desktop-only contract has live
-  protected-release evidence;
-- provision protected signing, notarization, GitHub, and Homebrew credentials;
-- enforce release branch, environment, reviewer, and immutable-tag rules;
-- create a verified signed annotated tag from the accepted `main` SHA;
-- build notarized Apple Silicon and Intel DMGs plus `SHA256SUMS`;
-- verify versions, signatures, Gatekeeper, provenance, asset names, checksums,
-  release notes, and downloadability;
-- publish the native Homebrew Cask from those exact immutable assets;
-- independently test clean install, launch, upgrade when applicable, uninstall,
-  and reinstall.
+- `v0.0.1` points to `57c6c71bd5264fde960b062e95de278c8438c94f`;
+- the public release contains notarized Apple Silicon and Intel DMGs plus
+  `SHA256SUMS`;
+- the OpenCoven tap publishes the native Cask;
+- the desktop-only release workflow completed successfully with iOS
+  distribution skipped;
+- #203 and #194 are closed; #31 retains post-release governance work.
 
 ## Stage 3 — complete the iOS companion train
 
@@ -198,15 +187,11 @@ signed application represented by the public GitHub Release.
 **Intended release relationship:** independent of Stage 2 unless a shared
 macOS contract is proven defective.
 
-The offline workflow contract is implemented: explicitly selected desktop-only
-releases skip iOS-only verification and distribution while shared validation
-remains mandatory, and coordinated releases retain every iOS gate. #203 remains
-open pending live desktop-only dry-run evidence: both `build-macos` matrix jobs
-must succeed, `upload-ios` is `skipped`, `publish` succeeds after `release`
-environment approval, and the Homebrew notification succeeds. Until that
-evidence is retained, the macOS-only path is not live-ready—not because iOS is
-part of the macOS supported surface, but because protected release behavior has
-not yet been observed.
+The desktop-only workflow contract is verified: explicitly selected
+desktop-only releases skip iOS-only verification and distribution while shared
+validation remains mandatory, and coordinated releases retain every iOS gate.
+This keeps the iOS train independent without weakening the supported macOS
+path.
 
 - finish atomic host readiness and physical same-LAN acceptance in #193;
 - finish production ritual publication/execution and full live-path proof in
@@ -248,8 +233,8 @@ error behavior, and user-visible behavior unless a separate approved design
 changes them. It must be independently testable, regenerate canonical bundles,
 and retain a rollback path.
 
-The minimum security and ownership floor in #198 may proceed before release.
-Broader contributor-surface work follows stabilization and must document a
+The minimum security and ownership floor in #198 is active. Broader
+contributor-surface work follows stabilization and must document a
 clean-checkout contributor loop without maintainer-only knowledge.
 
 ## Stage 6 — converge on OpenCoven-native identity and execution

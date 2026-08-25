@@ -38,6 +38,16 @@ function isPaddedLegacyKind(value) {
   return typeof value === 'string' && safeString(value) === LEGACY_COVEN_KIND && value !== LEGACY_COVEN_KIND;
 }
 
+function migrateCovenCodeName(name, kind, launchKind) {
+  if (
+    name === 'Coven Code' &&
+    (kind === CANONICAL_COVEN_KIND || launchKind === CANONICAL_COVEN_KIND)
+  ) {
+    return 'Coven CLI';
+  }
+  return name;
+}
+
 function normalizeRatio(value) {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0.5;
 }
@@ -194,10 +204,14 @@ export function sanitizeSessionDescriptor(saved) {
     kind,
   };
 
-  const name = safeString(saved.name, 256);
+  const name = migrateCovenCodeName(
+    safeString(saved.name, 256),
+    kind,
+    launchKind
+  );
   if (name) descriptor.name = name;
 
-  if (launchKind === 'coven-attach' || launchKind === CANONICAL_COVEN_KIND) {
+  if (launchKind === 'coven-attach') {
     const covenSessionId = safeCovenAttachmentId(saved.covenSessionId);
     if (!covenSessionId) return null;
     descriptor.covenSessionId = covenSessionId;

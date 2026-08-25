@@ -4074,22 +4074,21 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    <html data-theme="...">, persisted as settings.theme.
    ========================================================================== */
 
-/* Coven Purple mirrors the canonical OpenCoven violet and ink primitives. Its
-   explicit block intentionally replaces the prior saturated violet surface
-   ramp with deep grey-violet ink surfaces while :root remains the neutral
-   fallback for unknown themes. */
+/* Coven uses the canonical OpenCoven UI graphite surfaces and restrained
+   violet presence token. The persisted theme slug stays coven-purple for
+   compatibility, but color is now reserved for focus rather than surfaces. */
 :root[data-theme="coven-purple"] {
-  --rgb-accent: 154, 113, 255;
-  --accent: #9a71ff;
-  --accent-strong: #8254eb;
-  --rgb-deep: 18, 13, 24;
-  --rgb-s1: 27, 21, 36;
-  --rgb-s2: 42, 34, 56;
-  --rgb-s3: 63, 53, 80;
-  --rgb-term: 18, 13, 24;
-  --text: #f3eff7;
-  --text-soft: #bdb3cd;
-  --muted: #9c8fb3;
+  --rgb-accent: 147, 134, 208;
+  --accent: #9386d0;
+  --accent-strong: #6b5bbf;
+  --rgb-deep: 11, 11, 13;
+  --rgb-s1: 19, 19, 21;
+  --rgb-s2: 26, 26, 30;
+  --rgb-s3: 32, 32, 36;
+  --rgb-term: 11, 11, 13;
+  --text: #f1eff4;
+  --text-soft: #b8b4c0;
+  --muted: #7d7883;
 }
 
 :root[data-theme="claude-orange"] {

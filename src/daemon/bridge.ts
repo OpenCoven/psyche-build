@@ -2660,11 +2660,17 @@ async function buildLaunchCommand(
   prompt: string | undefined,
   permissionMode: PsycheConfig['settings']['permissionMode'],
 ): Promise<string> {
+  const promptTransport = getPromptTransport(agent);
   // send-keys agents take no prompt on the command line — it is typed into
   // their TUI after launch. Writing a prompt file here would read it into a
   // variable, delete the file, and then run a bare command, destroying the
-  // prompt with no trace.
-  if (!prompt || !prompt.trim() || getPromptTransport(agent) === 'send-keys') {
+  // prompt with no trace. launch-only agents likewise must launch bare.
+  if (
+    !prompt
+    || !prompt.trim()
+    || promptTransport === 'send-keys'
+    || promptTransport === 'launch-only'
+  ) {
     return buildAgentCommand(agent, permissionMode);
   }
 

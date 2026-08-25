@@ -1078,8 +1078,6 @@ function renderPerformance(body, doc, sample, trends) {
   let cellCount = 0;
   const hasBasicFrameSample = Number.isFinite(sample.frame?.fps)
     && Number.isFinite(sample.frame?.renderLatencyMs);
-  const hasCalibratedFrameSample = hasBasicFrameSample
-    && Number.isFinite(sample.frame?.droppedFrames);
 
   if (sample.nativeSnapshot) {
     const workspace = sample.nativeSnapshot.workspace ?? {};
@@ -1123,16 +1121,15 @@ function renderPerformance(body, doc, sample, trends) {
       trends.fps.values,
     ));
     cellCount += 1;
-    if (hasCalibratedFrameSample) {
-      grid.appendChild(performanceCell(
-        doc,
-        'Dropped',
-        String(Math.round(sample.frame.droppedFrames)),
-        `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
-        trends.droppedFrames.values,
-      ));
-      cellCount += 1;
-    }
+    const droppedFrames = finiteNumber(sample.frame.droppedFrames) ?? 0;
+    grid.appendChild(performanceCell(
+      doc,
+      'Dropped',
+      String(Math.round(droppedFrames)),
+      `Peak ${Math.round(peakValue(trends.droppedFrames) ?? droppedFrames)} / sample`,
+      trends.droppedFrames.values,
+    ));
+    cellCount += 1;
   }
 
   if (!cellCount) {

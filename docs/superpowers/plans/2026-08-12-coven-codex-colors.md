@@ -1,5 +1,11 @@
 # Coven Purple and Codex Blackish Colors Implementation Plan
 
+> **Superseded for Coven on 2026-08-24:** The saturated Coven values in this
+> historical plan no longer describe the active theme. `coven-purple` now uses
+> the canonical graphite and restrained-violet tokens from
+> `OpenCoven/ui/index.html`. The Codex Blackish steps remain historical evidence
+> of that implementation.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve the historical saturated Coven Purple palette and replace Codex Blackish's stark grayscale tokens with the approved cool-charcoal and cool-silver palette.

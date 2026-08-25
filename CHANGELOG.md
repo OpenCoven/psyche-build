@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- The Coven launcher now opens the bare Coven CLI (`coven`) across the TUI,
+  daemon, conflict-resolution, and native desktop paths instead of entering
+  `coven code`. The stable internal configuration ID remains `coven-code`.
+- The native Coven theme now uses graphite surfaces with restrained violet
+  focus accents, and performance diagnostics consistently show a dropped-frame
+  value when frame timing is available.
+
+### Fixed
+
+- Files-pane toolbar controls no longer transfer focus to the pane canvas
+  before their button action runs.
+
 ## [0.0.1] - 2026-08-23
 
 ### Performance

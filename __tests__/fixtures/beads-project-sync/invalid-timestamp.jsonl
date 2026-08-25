@@ -1,0 +1,1 @@
+{"_type":"issue","id":"invalid-timestamp","title":"Invalid timestamp","description":"Must fail before planning.","acceptance_criteria":"- Reject invalid timestamps.","status":"open","priority":0,"issue_type":"task","created_at":"2026-02-30T00:00:00Z","updated_at":"not-a-date","closed_at":null,"dependencies":[]}

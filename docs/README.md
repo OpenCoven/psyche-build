@@ -54,15 +54,19 @@ npm run preview
 
 ## `v0.0.1` distribution contract
 
-After the v0.0.1 macOS release is published and [#194](https://github.com/OpenCoven/psyche-build/issues/194) closes with retained acceptance evidence, the public macOS installation path is:
+The `v0.0.1` macOS release was published on 2026-08-23. The supported public
+installation path is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"
 ```
 
-Until that outcome closes, documentation must describe the public Cask as
-pending rather than already available.
+The immutable
+[GitHub Release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1)
+contains signed and notarized Apple Silicon and Intel DMGs plus checksums, and
+the public Cask is maintained in
+[`OpenCoven/homebrew-tap`](https://github.com/OpenCoven/homebrew-tap/blob/main/Casks/psyche-build.rb).
 
 An internal TestFlight companion is planned under
 [#200](https://github.com/OpenCoven/psyche-build/issues/200). This repository

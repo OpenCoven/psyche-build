@@ -1184,7 +1184,7 @@
         ["shell", "psyche", "coven-code", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
       return null;
     }
-    return {
+    var persisted = {
       id: thread.id,
       projectId: thread.projectId,
       worktreePath: thread.worktreePath,
@@ -1192,8 +1192,11 @@
       kind: thread.kind,
       launchKind: thread.launch.launchKind,
       hidden: thread.hidden === true,
-      covenSessionId: thread.launch.covenSessionId || null,
     };
+    if (thread.launch.launchKind === "coven-attach") {
+      persisted.covenSessionId = thread.launch.covenSessionId || null;
+    }
+    return persisted;
   }
   function persistableFilesPanes() {
     var records = [];
@@ -2244,30 +2247,6 @@
     threadCounter += 1;
     return "t" + Date.now().toString(36) + "-" + threadCounter;
   }
-  function makeCovenSessionId() {
-    var cryptoApi = window.crypto;
-    if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
-      try {
-        return cryptoApi.randomUUID();
-      } catch (_) {}
-    }
-    if (cryptoApi && typeof cryptoApi.getRandomValues === "function") {
-      try {
-        var bytes = new Uint8Array(16);
-        cryptoApi.getRandomValues(bytes);
-        bytes[6] = (bytes[6] & 0x0f) | 0x40;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        var hex = "";
-        for (var i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, "0");
-        }
-        return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
-          hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
-      } catch (_) {}
-    }
-    setStatus("Secure session ID generation is unavailable", "error");
-    return null;
-  }
   function isLiveThread(thread) {
     return !!thread && !thread.closing && state.threads.indexOf(thread) !== -1;
   }
@@ -2282,13 +2261,16 @@
   }
 
   function nativeSessionRequest(thread) {
-    return {
+    var request = {
       id: thread.id,
       projectRoot: thread.launch.projectRoot,
       cwd: thread.launch.cwd,
       launchKind: thread.launch.launchKind,
-      covenSessionId: thread.launch.covenSessionId || null,
     };
+    if (thread.launch.launchKind === "coven-attach") {
+      request.covenSessionId = thread.launch.covenSessionId || null;
+    }
+    return request;
   }
 
   // An exited pane is not an attachment you can focus, so it must not make a
@@ -2318,6 +2300,9 @@
       covenSessionId: opts.covenSessionId || null,
       metricsProvider: opts.metricsProvider || null,
     };
+    var sourceLaunchKind = sourceLaunch.launchKind || null;
+    var isCovenCodeLaunch = sourceLaunchKind === "coven-code";
+    var isCovenAttachLaunch = sourceLaunchKind === "coven-attach";
     var launch = {
       command: sourceLaunch.command,
       args: Array.isArray(sourceLaunch.args) ? sourceLaunch.args.slice() : [],
@@ -2325,9 +2310,11 @@
       projectRoot: sourceLaunch.projectRoot || (project && project.root) || null,
       cwd: sourceLaunch.cwd || opts.worktreePath || sourceLaunch.projectRoot ||
         (project && activeWorkspaceRoot(project)) || null,
-      launchKind: sourceLaunch.launchKind || null,
-      covenSessionId: sourceLaunch.covenSessionId || null,
-      metricsProvider: sourceLaunch.metricsProvider || opts.metricsProvider || null,
+      launchKind: sourceLaunchKind,
+      covenSessionId: isCovenAttachLaunch ? sourceLaunch.covenSessionId || null : null,
+      metricsProvider: isCovenCodeLaunch
+        ? null
+        : sourceLaunch.metricsProvider || opts.metricsProvider || null,
     };
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
@@ -2565,7 +2552,6 @@
       if (state.activeThreadId === thread.id) {
         setProjectStatus(findProject(thread.projectId), "ok");
       }
-      if (launch.launchKind === "coven-code") refreshCovenSessions();
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
@@ -2624,7 +2610,6 @@
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
-        if (launch.launchKind === "coven-code") refreshCovenSessions();
       } else {
         if (terminalController &&
             typeof terminalController.restoreAfterFailedPtyStart === "function") {
@@ -3151,11 +3136,13 @@
     body.appendChild(fileViewEl);
     pane.appendChild(header);
     pane.appendChild(body);
-    pane.addEventListener("pointerdown", function () {
-      focusCanvasSurface(filesPane);
+    pane.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      if (!filesPaneHasCanvasFocus(filesPane)) focusCanvasSurface(filesPane);
     }, true);
-    pane.addEventListener("focusin", function () {
-      focusCanvasSurface(filesPane);
+    pane.addEventListener("focusin", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      if (!filesPaneHasCanvasFocus(filesPane)) focusCanvasSurface(filesPane);
     });
 
     filesPane.pane = pane;
@@ -4549,8 +4536,23 @@
 
     PsychePanes.leafIds(scopedPaneRoot(layout)).forEach(function (leafId) {
       var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread) return;
+      var surface = leaf && canvasSurfaceById(leaf.threadId);
+      if (!surface) return;
+      if (surface.kind === "files") {
+        if (activeFile) return;
+        var file = findOpenFile(surface.activeFileId);
+        items.push({
+          kind: "file",
+          id: file ? file.id : surface.id,
+          label: file ? file.name : (surface.name || "Files"),
+          detail: file ? file.rel : (surface.workspaceRoot || "Workspace files"),
+          current: layout.maximizedLeafId === leafId,
+          thread: null,
+          surface: surface,
+        });
+        return;
+      }
+      var thread = surface;
       items.push({
         kind: "pane",
         id: thread.id,
@@ -4587,8 +4589,11 @@
         (item.kind === "file" ? " is-file" : "") +
         (item.current ? " is-current" : "");
       if (item.kind === "pane") entry.dataset.threadId = item.thread.id;
+      if (item.surface) entry.dataset.surfaceId = item.surface.id;
       entry.title = item.kind === "file"
-        ? item.detail + " · current file"
+        ? item.current
+          ? item.detail + " · current file"
+          : item.label + " — " + item.detail + " · click to focus Files"
         : item.label + " — " + item.detail + " · click to focus this pane";
       entry.setAttribute("aria-label", entry.title);
 
@@ -4616,6 +4621,10 @@
       entry.appendChild(name);
       if (item.kind === "file") {
         entry.addEventListener("click", function () {
+          if (item.surface) {
+            togglePaneMaximize(item.surface);
+            return;
+          }
           restoreFileEditorFocus();
         });
       } else {
@@ -5407,7 +5416,7 @@
     var project = findProject(thread.projectId);
     var launch = thread.launch;
     if (launch && launch.launchKind === "coven-code") {
-      launch = covenCodeLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
+      launch = covenCliLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
       if (!launch) return null;
     }
     return createThread({
@@ -7748,7 +7757,7 @@
         if (!worktree.virtual && !worktree.missing) {
           branchParts.head.addEventListener("contextmenu", function (event) {
             var actions = [{
-              label: "Open Coven Terminal",
+              label: "Open Coven CLI",
               run: async function () {
                 if (!(await activateProjectWorktree(project, worktree.path))) return;
                 await ensureProjectCoven(project);
@@ -9409,7 +9418,7 @@
   var commands = [
     {
       cmd: "/new-thread",
-      desc: "Spawn a new Coven Code thread",
+      desc: "Spawn a new Coven CLI thread",
       run: runNewThreadCommand,
     },
     {
@@ -12565,7 +12574,7 @@
   });
   onMenuClick("new-pane-agent", async function () {
     var thread = await runNewThreadCommand();
-    if (thread) toast("Coven Code opened");
+    if (thread) toast("Coven CLI opened");
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -12677,7 +12686,7 @@
     ["Resize a pane split", "drag the divider"],
     ["New shell pane", "⌃T"],
     ["New terminal pane", "⌘T"],
-    ["New agent pane (Coven Code)", "⌃A"],
+    ["New agent pane (Coven CLI)", "⌃A"],
     ["Choose an agent", "⌘D"],
     ["New browser tab", "Web pane +"],
     ["Open or focus Git", "⌘G"],
@@ -13659,18 +13668,21 @@
 
   function restoredSessionLaunch(descriptor, project) {
     var launchKind = descriptor.launchKind;
-    return {
+    var launch = {
       command: null,
       args: [],
       env: {},
       projectRoot: project.root,
       cwd: descriptor.worktreePath,
       launchKind: launchKind,
-      covenSessionId: descriptor.covenSessionId || null,
-      metricsProvider: launchKind === "coven-code" || launchKind === "coven-attach"
-        ? "coven"
-        : null,
     };
+    if (launchKind === "coven-attach") {
+      launch.covenSessionId = descriptor.covenSessionId || null;
+      launch.metricsProvider = launch.covenSessionId ? "coven" : null;
+    } else {
+      launch.metricsProvider = null;
+    }
+    return launch;
   }
 
   function restoredSessionThread(descriptor, project) {
@@ -13852,7 +13864,7 @@
 
   function agentLaunchOptions() {
     return [
-      { id: "coven-code", label: "Coven Code", command: null, args: ["code"], kind: "coven-code" },
+      { id: "coven-code", label: "Coven CLI", command: "coven", args: [], kind: "coven-code" },
       { id: "copilot", label: "Copilot CLI", command: "copilot", args: [], kind: "agent-copilot" },
       { id: "codex", label: "Codex CLI", command: "codex", args: [], kind: "agent-codex" },
       { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
@@ -13886,7 +13898,7 @@
       option.innerHTML =
         '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
         '<span class="agent-picker-option-command">' +
-          escapeHtml(entry.id === "coven-code" ? "coven code" : (entry.command || "")) +
+          escapeHtml(entry.command || "") +
         "</span>";
       option.addEventListener("pointermove", function () {
         if (agentPickerIndex === index) return;
@@ -13983,20 +13995,16 @@
     });
   }
 
-  function covenCodeLaunch(project, worktreePath) {
+  function covenCliLaunch(project, worktreePath) {
     var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
-    var sessionId = makeCovenSessionId();
-    if (!sessionId) return null;
     return {
       command: state.env.coven_path,
-      args: ["code", "--session-id", sessionId],
-      env: { COVEN_SESSION_SOURCE: "psyche-build" },
+      args: [],
+      env: {},
       projectRoot: project.root,
       cwd: worktree.path,
       kind: "coven-code",
       launchKind: "coven-code",
-      covenSessionId: sessionId,
-      metricsProvider: "coven",
     };
   }
 
@@ -14018,12 +14026,12 @@
     var currentWorktree = selectedWorktree(currentProject);
     if (!currentProject || currentProject.id !== intendedProjectId ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
-    var launch = covenCodeLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
+    var launch = covenCliLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
     if (!launch) return null;
     return createThread({
       project: currentProject,
       worktreePath: launch.cwd,
-      name: "Coven Code",
+      name: "Coven CLI",
       kind: "coven-code",
       launch: launch,
     });

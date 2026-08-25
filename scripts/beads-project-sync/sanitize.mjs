@@ -1,0 +1,5897 @@
+// @ts-check
+
+import os from 'node:os';
+import { TextDecoder } from 'node:util';
+import {
+  DecodingMode,
+  EntityDecoder,
+  htmlDecodeTree,
+} from 'entities/decode';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
+import { parseFragment } from 'parse5';
+import { normalizeBeadPriority } from './model.mjs';
+
+/** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
+/** @typedef {import('./model.mjs').BeadPriority} BeadPriority */
+/** @typedef {import('parse5').DefaultTreeAdapterTypes.Node} ParsedHtmlNode */
+/** @typedef {import('parse5').DefaultTreeAdapterTypes.Element} ParsedHtmlElement */
+/**
+ * @typedef {{
+ *   type: string,
+ *   position?: {
+ *     start: {offset?: number},
+ *     end: {offset?: number},
+ *   },
+ *   value?: string,
+ *   alt?: string,
+ *   children?: MdastNode[],
+ * }} MdastNode
+ */
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   semanticValue: string,
+ * }} MarkdownCodeRange
+ */
+/**
+ * @typedef {{
+ *   value: string,
+ *   restore: (value: string) => string,
+ * }} ProtectedMarkdownSource
+ */
+
+/**
+ * @typedef {{
+ *   homeDirectories?: readonly string[] | ReadonlySet<string>,
+ * }} SanitizePublicTextConfig
+ */
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   title: string,
+ *   description: string | null,
+ *   design: string | null,
+ *   specId: string | null,
+ *   acceptanceCriteria: string | null,
+ *   notes: string | null,
+ *   status: string,
+ *   priority: BeadPriority,
+ *   type: string,
+ *   blocked: boolean,
+ *   labels: string[],
+ *   parentId: string | null,
+ *   blockedByIds: string[],
+ *   githubAssignee: string | null,
+ *   createdAt: string,
+ *   updatedAt: string,
+ *   closedAt: string | null,
+ * }} PublicBead
+ */
+
+const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
+const REDACTED_EMAIL = '[redacted-email]';
+const REDACTED_LOCAL_PATH = '[redacted-local-path]';
+const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/iu;
+const PRIVATE_KEY_PATTERN = /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/iu;
+const API_KEY_ASSIGNMENT_PATTERN =
+  /\b(?:api[_-]?key|apikey|client[_-]?secret|access[_-]?token|auth[_-]?token)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
+const CREDENTIAL_ASSIGNMENT_PATTERN =
+  /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
+const WHATWG_SPECIAL_CREDENTIAL_SCHEMES = new Set([
+  'ftp',
+  'http',
+  'https',
+  'ws',
+  'wss',
+]);
+const GENERATED_MARKER_PATTERN = /<!--\s*psyche-bead-sync:v1/giu;
+const TOKEN_PATTERN = /\S+/gu;
+const URL_TRAILING_PROSE_PUNCTUATION = new Set(['.', ',', ';', '!']);
+const URI_WRAPPER_DELIMITERS = new Map([
+  ['(', ')'],
+  ['[', ']'],
+  ['{', '}'],
+  ['<', '>'],
+  ['"', '"'],
+  ["'", "'"],
+  ['`', '`'],
+]);
+const CREDENTIAL_URL_PREFIXES = [
+  ...WHATWG_SPECIAL_CREDENTIAL_SCHEMES,
+  ...[...WHATWG_SPECIAL_CREDENTIAL_SCHEMES].map((scheme) => `git+${scheme}`),
+].sort((left, right) => right.length - left.length);
+const CREDENTIAL_URL_AMBIGUOUS_USERINFO_PATTERN =
+  /[\[\]{}<>"'`]/u;
+const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
+const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
+const LOCAL_PATH_FILE_EXTENSION_PATTERN =
+  /(?:^|[^.\s])\.[\p{L}\p{N}][\p{L}\p{N}_-]{0,15}$/u;
+const LOCAL_PATH_OPENING_DELIMITERS = new Map([
+  ['(', ')'],
+  ['[', ']'],
+  ['{', '}'],
+  ['<', '>'],
+]);
+const LOCAL_PATH_CLOSING_DELIMITERS = new Set(
+  [...LOCAL_PATH_OPENING_DELIMITERS.values()],
+);
+const LOCAL_PATH_QUOTE_DELIMITERS = new Set(['"', "'", '`']);
+const PROTECTED_URL_PLACEHOLDER_PREFIX = '\u0000psyche-bead-url-';
+const PROTECTED_URL_PLACEHOLDER_SUFFIX = '\u0000';
+const MAX_URL_CANDIDATE_COUNT = 1_024;
+const MAX_URL_CANDIDATE_LENGTH = 16_384;
+const MAX_PERCENT_DECODE_ROUNDS = 3;
+const MAX_PERCENT_ENCODED_COMPONENT_LENGTH = 16_384;
+const MAX_HTML_ENTITY_DECODE_ROUNDS = 3;
+const MAX_HTML_ENTITY_INSPECTION_LENGTH = 131_072;
+const MAX_HTML_ENTITY_REFERENCE_LENGTH = 64;
+const MAX_MARKDOWN_DESTINATION_COUNT = 1_024;
+const MAX_MARKDOWN_DESTINATION_LENGTH = 16_384;
+const MAX_MARKDOWN_PARENTHESIS_DEPTH = 32;
+const MAX_MARKDOWN_CODE_RANGE_COUNT = 1_024;
+const MAX_DATA_URI_ENCODED_LENGTH = 12_288;
+const MAX_DATA_URI_DECODED_BYTES = 8_192;
+const MAX_DATA_URI_METADATA_LENGTH = 1_024;
+const MAX_DATA_URI_RECURSION_DEPTH = 4;
+const MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS =
+  MAX_PERCENT_DECODE_ROUNDS + MAX_HTML_ENTITY_DECODE_ROUNDS;
+const MAX_RAW_HTML_START_TAG_LENGTH = 16_384;
+const MAX_RAW_HTML_ATTRIBUTE_COUNT = 512;
+const MAX_PARSED_HTML_NODE_COUNT = 4_096;
+const MAX_PARSED_HTML_DEPTH = 128;
+const MAX_PARSED_HTML_TOTAL_ATTRIBUTE_COUNT = 4_096;
+const MAX_RENDERED_MARKDOWN_NODE_COUNT = 4_096;
+const MAX_RENDERED_MARKDOWN_DEPTH = 128;
+const MAX_RENDERED_MARKDOWN_HTML_NODE_COUNT = 16_384;
+const MAX_RENDERED_TEXT_PROJECTION_LENGTH = 262_144;
+const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
+const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
+const MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN =
+  /^[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]$/u;
+const HTML_ENTITY_REFERENCE_START_PATTERN = /[#A-Za-z]/u;
+const HTML_ENTITY_REFERENCE_BODY_PATTERN = /[#A-Za-z0-9]/u;
+const HOME_PATH_GENERIC_FILE_URI_PATTERNS = [
+  /file:\/\/\/(?:Users|home)\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+  /file:\/\/\/[A-Za-z]:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+];
+const HOME_PATH_GENERIC_PATH_PATTERNS = [
+  /[A-Za-z]:(?:\/|\\)Users(?:\/|\\)[^/\\\s"'`()\[\]{}<>;,:]+/gu,
+  /(?:\/Users\/[^/\\\s"'`()\[\]{}<>;,:]+|\/home\/[^/\\\s"'`()\[\]{}<>;,:]+)/gu,
+];
+// URL-bearing HTML attributes are mode-classified so URL lists are sanitized
+// candidate-by-candidate instead of being treated as one destination.
+/** @type {Map<string, 'single' | 'list' | 'srcset'>} */
+const RAW_HTML_URL_ATTRIBUTE_MODES = new Map([
+  ['href', 'single'],
+  ['xlink:href', 'single'],
+  ['src', 'single'],
+  ['action', 'single'],
+  ['formaction', 'single'],
+  ['poster', 'single'],
+  ['cite', 'single'],
+  ['data', 'single'],
+  ['background', 'single'],
+  ['longdesc', 'single'],
+  ['manifest', 'single'],
+  ['profile', 'single'],
+  ['usemap', 'single'],
+  ['codebase', 'single'],
+  ['classid', 'single'],
+  ['itemid', 'single'],
+  ['ping', 'list'],
+  ['archive', 'list'],
+  ['attributionsrc', 'list'],
+  ['itemtype', 'list'],
+  ['srcset', 'srcset'],
+  ['imagesrcset', 'srcset'],
+]);
+const RAW_HTML_TEXT_BOUNDARY_ELEMENTS = new Set([
+  'address',
+  'article',
+  'aside',
+  'blockquote',
+  'br',
+  'caption',
+  'center',
+  'dd',
+  'details',
+  'dialog',
+  'dir',
+  'div',
+  'dl',
+  'dt',
+  'fieldset',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'hr',
+  'hgroup',
+  'li',
+  'main',
+  'menu',
+  'nav',
+  'ol',
+  'p',
+  'pre',
+  'section',
+  'summary',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+]);
+const RAW_HTML_ISOLATED_TEXT_ELEMENTS = new Set([
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'plaintext',
+  'script',
+  'style',
+  'template',
+  'textarea',
+  'title',
+  'xmp',
+]);
+const RAW_HTML_RAW_TEXT_ELEMENTS = new Set([
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'plaintext',
+  'script',
+  'style',
+  'xmp',
+]);
+const RAW_HTML_HIDDEN_TEXT_ELEMENTS = new Set([
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'script',
+  'style',
+  'template',
+  'xmp',
+]);
+const RAW_HTML_INPUT_VISIBLE_VALUE_TYPES = new Set([
+  'button',
+  'email',
+  'number',
+  'reset',
+  'search',
+  'submit',
+  'tel',
+  'text',
+  'url',
+]);
+const RAW_HTML_INPUT_VISIBLE_PLACEHOLDER_TYPES = new Set([
+  'email',
+  'number',
+  'password',
+  'search',
+  'tel',
+  'text',
+  'url',
+]);
+const RAW_HTML_OPTION_LABEL_IMPLICIT_CLOSE_TAGS = new Set([
+  'option',
+  'optgroup',
+]);
+const RAW_HTML_OPTION_LABEL_EXPLICIT_CLOSE_TAGS = new Set([
+  'option',
+  'optgroup',
+  'select',
+  'datalist',
+]);
+const MARKDOWN_BLOCK_NODES = new Set([
+  'blockquote',
+  'code',
+  'definition',
+  'footnoteDefinition',
+  'heading',
+  'list',
+  'listItem',
+  'paragraph',
+  'table',
+  'tableCell',
+  'tableRow',
+  'thematicBreak',
+]);
+const STRICT_BASE64_PATTERN =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+
+/**
+ * @param {string} message
+ * @returns {never}
+ */
+function fail(message) {
+  throw new Error(message);
+}
+
+/**
+ * @param {string} text
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {string} sourceKind
+ */
+function assertDecodedRawHtmlSourceTextSafe(text, config, sourceKind) {
+  const decoded = decodeHtmlEntitiesMapped(
+    createMappedInspectionText(text),
+  ).value;
+  try {
+    assertNoDirectPublishableSecrets(decoded);
+    assertNoCredentialUrlReferences(decoded, false, true);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Public HTML sanitization rejected ${sourceKind}: ${message}`);
+  }
+  if (containsEmail(decoded)) {
+    fail(`Public HTML sanitization rejected ${sourceKind}: publishable email detected`);
+  }
+  const matchers = buildHomeDirectoryMatchers(config);
+  if (
+    containsLocalOperationalPath(decoded)
+    || homeDirectoryDecodedRanges(decoded, matchers).length > 0
+  ) {
+    fail(`Public HTML sanitization rejected ${sourceKind}: publishable local path detected`);
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ */
+function assertParsedRawHtmlSourceSafe(value, config) {
+  const fragment = parsePublicHtmlFragment(value);
+  traverseParsedHtml(fragment, (node, _depth, parentTag) => {
+    const location = node.sourceCodeLocation;
+    if (
+      location != null
+      && (
+        node.nodeName === '#comment'
+        || node.nodeName === '#documentType'
+        || (
+          node.nodeName === '#text'
+          && parentTag != null
+          && (
+            RAW_HTML_RAW_TEXT_ELEMENTS.has(parentTag)
+            || parentTag === 'textarea'
+            || parentTag === 'title'
+          )
+        )
+      )
+    ) {
+      assertDecodedRawHtmlSourceTextSafe(
+        value.slice(location.startOffset, location.endOffset),
+        config,
+        'non-rendered source text',
+      );
+      return;
+    }
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+    for (const attribute of node.attrs) {
+      const qualifiedName = parsedHtmlAttributeName(node, attribute);
+      if (RAW_HTML_URL_ATTRIBUTE_MODES.has(qualifiedName)) {
+        continue;
+      }
+      assertDecodedRawHtmlSourceTextSafe(
+        attribute.value,
+        config,
+        `attribute "${qualifiedName}"`,
+      );
+    }
+  });
+}
+
+/**
+ * @param {string} value
+ */
+function assertPublicTextInspectionLength(value) {
+  if (value.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Public text exceeds the HTML character reference inspection limit');
+  }
+}
+
+/**
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string[]}
+ */
+function normalizeHomeDirectories(config) {
+  if (config == null) {
+    return [os.homedir()].filter(Boolean);
+  }
+
+  const { homeDirectories } = config;
+  if (homeDirectories == null) {
+    return [os.homedir()].filter(Boolean);
+  }
+
+  const entries = homeDirectories instanceof Set
+    ? [...homeDirectories]
+    : Array.isArray(homeDirectories)
+      ? homeDirectories
+      : fail('sanitizePublicText config.homeDirectories must be an array or Set');
+
+  const normalized = new Set([os.homedir()]);
+  for (const entry of entries) {
+    if (typeof entry !== 'string') {
+      fail('sanitizePublicText config.homeDirectories entries must be strings');
+    }
+
+    const homeDirectory = entry.trim().replace(/[\\/]+$/gu, '');
+    if (homeDirectory) {
+      normalized.add(homeDirectory);
+    }
+  }
+
+  return [...normalized].filter(Boolean).sort((left, right) => right.length - left.length);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isHomePathSegmentCharacter(value) {
+  return value != null && HOME_PATH_SEGMENT_CHARACTER_PATTERN.test(value);
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasHomePathBoundary(value, index) {
+  if (index <= 0) {
+    return true;
+  }
+
+  return !isHomePathSegmentCharacter(value[index - 1]);
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasHomePathFollower(value, index) {
+  const character = value[index];
+  return (
+    character == null
+    || character === '/'
+    || character === '\\'
+    || !isHomePathSegmentCharacter(character)
+  );
+}
+
+/**
+ * @param {string} homeDirectory
+ * @returns {string | null}
+ */
+function toFileUriHomeDirectory(homeDirectory) {
+  if (/^[A-Za-z]:[\\/]/u.test(homeDirectory)) {
+    return `file:///${homeDirectory.replace(/\\/gu, '/')}`;
+  }
+  if (homeDirectory.startsWith('/')) {
+    return `file://${homeDirectory}`;
+  }
+  return null;
+}
+
+/**
+ * @typedef {{
+ *   prefix: string,
+ *   replacement: string,
+ * }} HomeDirectoryMatcher
+ */
+
+/**
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {HomeDirectoryMatcher[]}
+ */
+function buildHomeDirectoryMatchers(config) {
+  const matchers = /** @type {HomeDirectoryMatcher[]} */ ([]);
+  for (const homeDirectory of normalizeHomeDirectories(config)) {
+    const slashNormalizedHomeDirectory = homeDirectory.replace(/\\/gu, '/');
+    const fileUriHomeDirectory = toFileUriHomeDirectory(homeDirectory);
+    if (fileUriHomeDirectory) {
+      matchers.push({
+        prefix: fileUriHomeDirectory,
+        replacement: 'file:///~',
+      });
+    }
+    matchers.push({
+      prefix: homeDirectory,
+      replacement: '~',
+    });
+    if (slashNormalizedHomeDirectory !== homeDirectory) {
+      matchers.push({
+        prefix: slashNormalizedHomeDirectory,
+        replacement: '~',
+      });
+    }
+  }
+  return matchers;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function stripGitPlusPrefix(value) {
+  return value.replace(/^git\+/iu, '');
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isAsciiLetter(value) {
+  return value != null && /^[A-Za-z]$/u.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isUriSchemeCharacter(value) {
+  return value != null && /^[A-Za-z0-9+.-]$/u.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isUriCandidateBoundary(value) {
+  return value == null || /\s/u.test(value) || (value.codePointAt(0) ?? 0) <= 0x20;
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   value: string,
+ * }} UrlCandidate
+ */
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {number | null}
+ */
+function findUriSchemeEnd(value, start) {
+  if (!isAsciiLetter(value[start])) {
+    return null;
+  }
+  if (start > 0 && isUriSchemeCharacter(value[start - 1])) {
+    return null;
+  }
+
+  let cursor = start + 1;
+  while (isUriSchemeCharacter(value[cursor])) {
+    cursor += 1;
+  }
+  if (value[cursor] !== ':') {
+    return null;
+  }
+  if (
+    cursor === start + 1
+    && (value[cursor + 1] === '/' || value[cursor + 1] === '\\')
+  ) {
+    return null;
+  }
+  return cursor;
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @param {number} end
+ * @returns {number}
+ */
+function trimUriCandidateEnd(value, start, end) {
+  let contentEnd = end;
+  while (
+    contentEnd > start
+    && URL_TRAILING_PROSE_PUNCTUATION.has(value[contentEnd - 1])
+    && isUriCandidateBoundary(value[contentEnd])
+  ) {
+    contentEnd -= 1;
+  }
+
+  const wrapperStart = value[start - 1];
+  const wrapperEnd = URI_WRAPPER_DELIMITERS.get(wrapperStart);
+  if (wrapperEnd != null && value[contentEnd - 1] === wrapperEnd) {
+    contentEnd -= 1;
+    while (
+      contentEnd > start
+      && URL_TRAILING_PROSE_PUNCTUATION.has(value[contentEnd - 1])
+    ) {
+      contentEnd -= 1;
+    }
+  }
+
+  return contentEnd;
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {string | null}
+ */
+function urlCandidateStructuralBoundary(value, start) {
+  const previous = value[start - 1];
+  if (previous === '<') {
+    return '>';
+  }
+  if (previous === '=') {
+    return '>';
+  }
+  if (previous !== '"' && previous !== "'") {
+    return null;
+  }
+
+  let cursor = start - 2;
+  while (cursor >= 0 && /\s/u.test(value[cursor] ?? '')) {
+    cursor -= 1;
+  }
+  return value[cursor] === '=' ? previous : null;
+}
+
+/**
+ * @param {string} value
+ * @returns {UrlCandidate[]}
+ */
+function scanUrlCandidates(value) {
+  const candidates = /** @type {UrlCandidate[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const schemeEnd = findUriSchemeEnd(value, cursor);
+    if (schemeEnd == null) {
+      cursor += 1;
+      continue;
+    }
+    if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
+      fail('Public text exceeds the URL candidate inspection limit');
+    }
+
+    const start = cursor;
+    const structuralBoundary = urlCandidateStructuralBoundary(value, start);
+    let scanEnd = schemeEnd + 1;
+    while (
+      scanEnd < value.length
+      && !isUriCandidateBoundary(value[scanEnd])
+      && value[scanEnd] !== structuralBoundary
+    ) {
+      if (scanEnd - start >= MAX_URL_CANDIDATE_LENGTH) {
+        fail('Public URL candidate exceeds the inspection limit');
+      }
+      scanEnd += 1;
+    }
+
+    const contentEnd = Math.max(schemeEnd + 1, trimUriCandidateEnd(value, start, scanEnd));
+    candidates.push({
+      start,
+      end: contentEnd,
+      value: value.slice(start, contentEnd),
+    });
+    cursor = Math.max(contentEnd, schemeEnd + 1);
+  }
+
+  return candidates;
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isCredentialUrlTokenBoundary(value) {
+  return value == null || /\s|\p{Cc}/u.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isCredentialUrlTokenCharacter(value) {
+  return value != null && /[\p{L}\p{N}\p{M}._~%+@\/\\-]/u.test(value);
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {boolean}
+ */
+function hasCredentialUrlCandidatePrefixBoundary(value, start) {
+  if (start === 0) {
+    return true;
+  }
+  if (value[start - 1] === ':') {
+    let schemeStart = start - 1;
+    while (schemeStart > 0 && isUriSchemeCharacter(value[schemeStart - 1])) {
+      schemeStart -= 1;
+    }
+    if (findUriSchemeEnd(value, schemeStart) === start - 1) {
+      return false;
+    }
+  }
+  return !isCredentialUrlTokenCharacter(value[start - 1]);
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   authorityStart: number,
+ *   conventionalAuthority: boolean,
+ *   protocolRelative: boolean,
+ *   lastAt: number | null,
+ *   structuralBoundary: string | null,
+ * }} CredentialUrlScanState
+ */
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {CredentialUrlScanState | null}
+ */
+function credentialUrlStartAt(value, start) {
+  if (!hasCredentialUrlCandidatePrefixBoundary(value, start)) {
+    return null;
+  }
+
+  const first = value[start];
+  const second = value[start + 1];
+  if (
+    (first === '/' || first === '\\')
+    && (second === '/' || second === '\\')
+  ) {
+    let authorityStart = start + 2;
+    while (
+      value[authorityStart] === '/'
+      || value[authorityStart] === '\\'
+    ) {
+      authorityStart += 1;
+    }
+    return {
+      start,
+      authorityStart,
+      conventionalAuthority: true,
+      protocolRelative: true,
+      lastAt: null,
+      structuralBoundary: urlCandidateStructuralBoundary(value, start),
+    };
+  }
+
+  for (const prefix of CREDENTIAL_URL_PREFIXES) {
+    if (
+      value.slice(start, start + prefix.length).toLowerCase() !== prefix
+      || value[start + prefix.length] !== ':'
+    ) {
+      continue;
+    }
+    let authorityStart = start + prefix.length + 1;
+    let separatorCount = 0;
+    while (
+      value[authorityStart] === '/'
+      || value[authorityStart] === '\\'
+    ) {
+      separatorCount += 1;
+      authorityStart += 1;
+    }
+    return {
+      start,
+      authorityStart,
+      conventionalAuthority: separatorCount >= 2,
+      protocolRelative: false,
+      lastAt: null,
+      structuralBoundary: urlCandidateStructuralBoundary(value, start),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * @param {CredentialUrlScanState} state
+ * @param {string} value
+ * @param {number} authorityEnd
+ * @param {boolean} decoded
+ * @param {boolean} rejectDirectUserinfo
+ */
+function assertCredentialUrlAuthoritySafe(
+  state,
+  value,
+  authorityEnd,
+  decoded,
+  rejectDirectUserinfo,
+) {
+  if (
+    state.lastAt == null
+    || state.lastAt <= state.authorityStart
+    || state.lastAt + 1 >= authorityEnd
+  ) {
+    return;
+  }
+
+  const userinfo = value.slice(state.authorityStart, state.lastAt);
+  if (
+    rejectDirectUserinfo
+    || decoded
+    || state.protocolRelative
+    || !state.conventionalAuthority
+    || containsEncodedCredentialUrlUserinfo(userinfo)
+    || CREDENTIAL_URL_AMBIGUOUS_USERINFO_PATTERN.test(userinfo)
+  ) {
+    fail(
+      'Publishable URL credentials detected; publishable credential URL detected',
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {boolean} decoded
+ * @param {boolean} rejectDirectUserinfo
+ */
+function assertCredentialUrlVariantSafe(value, decoded, rejectDirectUserinfo) {
+  /** @type {CredentialUrlScanState | null} */
+  let state = null;
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    if (state == null) {
+      const nextState = credentialUrlStartAt(value, cursor);
+      if (nextState != null) {
+        state = nextState;
+        cursor = nextState.authorityStart;
+        continue;
+      }
+      cursor += 1;
+      continue;
+    }
+    if (cursor - state.start >= MAX_URL_CANDIDATE_LENGTH) {
+      fail('Public credential URL candidate exceeds the inspection limit');
+    }
+
+    const character = value[cursor];
+    if (
+      character === '/'
+      || character === '\\'
+      || character === '?'
+      || character === '#'
+      || isCredentialUrlTokenBoundary(character)
+      || character === state.structuralBoundary
+    ) {
+      assertCredentialUrlAuthoritySafe(
+        state,
+        value,
+        cursor,
+        decoded,
+        rejectDirectUserinfo,
+      );
+      state = null;
+    } else if (character === '@') {
+      state.lastAt = cursor;
+    }
+    cursor += 1;
+  }
+
+  if (state != null) {
+    assertCredentialUrlAuthoritySafe(
+      state,
+      value,
+      value.length,
+      decoded,
+      rejectDirectUserinfo,
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {boolean} rejectDirectUserinfo
+ */
+function assertCredentialUrlSpanSafe(value, rejectDirectUserinfo) {
+  for (const [index, variant] of credentialUrlStructuralVariants(value).entries()) {
+    assertCredentialUrlVariantSafe(variant, index > 0, rejectDirectUserinfo);
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {(candidate: string) => string} replace
+ * @returns {string}
+ */
+function replaceUrlCandidates(value, replace) {
+  const candidates = scanUrlCandidates(value);
+  if (candidates.length === 0) {
+    return value;
+  }
+
+  let replaced = '';
+  let cursor = 0;
+  for (const candidate of candidates) {
+    replaced += value.slice(cursor, candidate.start);
+    replaced += replace(candidate.value);
+    cursor = candidate.end;
+  }
+
+  return replaced + value.slice(cursor);
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ * }} SourceRange
+ */
+
+/**
+ * @typedef {{
+ *   value: string,
+ *   sourceRanges: SourceRange[],
+ * }} MappedInspectionText
+ */
+
+/**
+ * @param {string} value
+ * @returns {MappedInspectionText}
+ */
+function createMappedInspectionText(value) {
+  if (value.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Public text exceeds the HTML character reference inspection limit');
+  }
+
+  return {
+    value,
+    sourceRanges: Array.from(
+      { length: value.length },
+      (_, index) => ({ start: index, end: index + 1 }),
+    ),
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @returns {MappedInspectionText}
+ */
+function sliceMappedInspectionText(mapped, start, end) {
+  return {
+    value: mapped.value.slice(start, end),
+    sourceRanges: mapped.sourceRanges.slice(start, end),
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @returns {SourceRange}
+ */
+function mappedSourceRange(mapped, start, end) {
+  const first = mapped.sourceRanges[start];
+  const last = mapped.sourceRanges[end - 1];
+  if (first == null || last == null) {
+    fail('Invalid public text inspection range');
+  }
+  return {
+    start: first.start,
+    end: last.end,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {Uint8Array} sourceMask
+ * @returns {Uint8Array}
+ */
+function mappedSourceProtectionMask(mapped, sourceMask) {
+  const mask = new Uint8Array(mapped.value.length);
+  for (let index = 0; index < mapped.sourceRanges.length; index += 1) {
+    const range = mapped.sourceRanges[index];
+    if (range == null) {
+      continue;
+    }
+    for (let sourceIndex = range.start; sourceIndex < range.end; sourceIndex += 1) {
+      if (sourceMask[sourceIndex]) {
+        mask[index] = 1;
+        break;
+      }
+    }
+  }
+  return mask;
+}
+
+/**
+ * @param {string[]} output
+ * @param {SourceRange[]} sourceRanges
+ * @param {string} value
+ * @param {SourceRange} sourceRange
+ */
+function appendMappedInspectionValue(output, sourceRanges, value, sourceRange) {
+  output.push(value);
+  for (let index = 0; index < value.length; index += 1) {
+    sourceRanges.push(sourceRange);
+  }
+  if (sourceRanges.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Decoded public text exceeds the HTML character reference inspection limit');
+  }
+}
+
+/**
+ * @param {string} value
+ * @returns {MarkdownCodeRange[]}
+ */
+function markdownCodeRanges(value) {
+  const tree = fromMarkdown(value, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  const candidateRanges = /** @type {MarkdownCodeRange[]} */ ([]);
+  const pending = /** @type {MdastNode[]} */ ([tree]);
+
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node == null) {
+      continue;
+    }
+    if (node.type === 'code' || node.type === 'inlineCode') {
+      if (candidateRanges.length >= MAX_MARKDOWN_CODE_RANGE_COUNT) {
+        fail('Markdown code exceeds the code range inspection limit');
+      }
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (
+        typeof start !== 'number'
+        || typeof end !== 'number'
+        || typeof node.value !== 'string'
+        || start < 0
+        || end < start
+        || end > value.length
+      ) {
+        fail('Markdown parser returned an invalid code source range');
+      }
+      candidateRanges.push({
+        start,
+        end,
+        semanticValue: node.value,
+      });
+      continue;
+    }
+    if ('children' in node && Array.isArray(node.children)) {
+      pending.push(...node.children);
+    }
+  }
+
+  candidateRanges.sort((left, right) => left.start - right.start);
+  const parseInput = value.split('');
+  for (const range of candidateRanges) {
+    for (let index = range.start; index < range.end; index += 1) {
+      if (parseInput[index] !== '\n' && parseInput[index] !== '\r') {
+        parseInput[index] = ' ';
+      }
+    }
+  }
+
+  const htmlAttributeRanges = /** @type {SourceRange[]} */ ([]);
+  const htmlFragment = parsePublicHtmlFragment(parseInput.join(''));
+  traverseParsedHtml(htmlFragment, (node) => {
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+    for (const [qualifiedName, location] of Object.entries(
+      node.sourceCodeLocation?.attrs ?? {},
+    )) {
+      const range = rawHtmlAttributeValueRange(value, location, qualifiedName);
+      if (range != null) {
+        htmlAttributeRanges.push(range);
+      }
+    }
+  });
+
+  return candidateRanges.filter((candidate) =>
+    !htmlAttributeRanges.some((attribute) =>
+      attribute.start <= candidate.start && attribute.end >= candidate.end
+    )
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} [config]
+ * @param {boolean} [redact=false]
+ * @returns {ProtectedMarkdownSource}
+ */
+function protectOriginalMarkdownCode(value, config = {}, redact = false) {
+  const ranges = markdownCodeRanges(value);
+  if (ranges.length === 0) {
+    return {
+      value,
+      restore: (restored) => restored,
+    };
+  }
+
+  let nonce = 0;
+  let placeholderPrefix = '';
+  do {
+    placeholderPrefix = `\uE000psyche-bead-code-${nonce}-`;
+    nonce += 1;
+  } while (value.includes(placeholderPrefix));
+
+  const protectedCode = ranges.map((range, index) => {
+    const source = value.slice(range.start, range.end);
+    assertMarkdownCodeTextSafe(range.semanticValue, config);
+    assertMarkdownCodeTextSafe(source, config);
+    return {
+      placeholder: `${placeholderPrefix}${index}\uE001`,
+      source: redact ? sanitizeMarkdownCodeSource(source, config) : source,
+    };
+  });
+
+  let protectedValue = value;
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const range = ranges[index];
+    const entry = protectedCode[index];
+    if (range == null || entry == null) {
+      fail('Markdown code protection range is missing');
+    }
+    protectedValue = `${protectedValue.slice(0, range.start)}${entry.placeholder}${
+      protectedValue.slice(range.end)
+    }`;
+  }
+
+  return {
+    value: protectedValue,
+    restore: (restored) => {
+      let result = restored;
+      for (const entry of protectedCode) {
+        const placeholderIndex = result.indexOf(entry.placeholder);
+        if (
+          placeholderIndex === -1
+          || result.indexOf(entry.placeholder, placeholderIndex + entry.placeholder.length) !== -1
+        ) {
+          fail('Markdown code placeholder was not preserved during public text processing');
+        }
+        result = `${result.slice(0, placeholderIndex)}${entry.source}${
+          result.slice(placeholderIndex + entry.placeholder.length)
+        }`;
+      }
+      return result;
+    },
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeMarkdownEscapesMapped(mapped) {
+  if (!mapped.value.includes('\\')) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < mapped.value.length) {
+    const next = mapped.value[cursor + 1];
+    if (
+      mapped.value[cursor] === '\\'
+      && next != null
+      && MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN.test(next)
+    ) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        next,
+        mappedSourceRange(mapped, cursor, cursor + 2),
+      );
+      cursor += 2;
+      continue;
+    }
+
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[cursor] ?? '',
+      mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+    );
+    cursor += 1;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {void}
+ */
+function assertHtmlEntityReferenceWithinLimit(value, start) {
+  if (
+    value[start] !== '&'
+    || !HTML_ENTITY_REFERENCE_START_PATTERN.test(value[start + 1] ?? '')
+  ) {
+    return;
+  }
+
+  const boundedEnd = Math.min(
+    value.length,
+    start + MAX_HTML_ENTITY_REFERENCE_LENGTH,
+  );
+  for (let index = start + 1; index < boundedEnd; index += 1) {
+    const character = value[index] ?? '';
+    if (
+      character === ';'
+      || !HTML_ENTITY_REFERENCE_BODY_PATTERN.test(character)
+    ) {
+      return;
+    }
+  }
+  if (boundedEnd === start + MAX_HTML_ENTITY_REFERENCE_LENGTH) {
+    fail('HTML character reference exceeds the inspection limit');
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @param {DecodingMode} mode
+ * @returns {{ end: number, value: string } | null}
+ */
+function decodeHtmlEntityReferenceAt(value, start, mode) {
+  if (
+    value[start] !== '&'
+    || !HTML_ENTITY_REFERENCE_START_PATTERN.test(value[start + 1] ?? '')
+  ) {
+    return null;
+  }
+  assertHtmlEntityReferenceWithinLimit(value, start);
+
+  let decoded = '';
+  const decoder = new EntityDecoder(
+    htmlDecodeTree,
+    (codePoint) => {
+      decoded += String.fromCodePoint(codePoint);
+    },
+  );
+  decoder.startEntity(mode);
+  let consumed = decoder.write(value, start + 1);
+  if (consumed < 0) {
+    consumed = decoder.end();
+  }
+  return consumed > 0
+    ? { end: start + consumed, value: decoded }
+    : null;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {Uint8Array | undefined} [protectedMask]
+ * @param {DecodingMode} [mode]
+ * @returns {MappedInspectionText}
+ */
+function decodeHtmlEntitiesMappedOnce(
+  mapped,
+  protectedMask,
+  mode = DecodingMode.Strict,
+) {
+  if (!mapped.value.includes('&')) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < mapped.value.length) {
+    if (protectedMask?.[cursor]) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+    const reference = decodeHtmlEntityReferenceAt(mapped.value, cursor, mode);
+    if (reference == null) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      reference.value,
+      mappedSourceRange(mapped, cursor, reference.end),
+    );
+    cursor = reference.end;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {Uint8Array | undefined} [sourceProtectedMask]
+ * @returns {MappedInspectionText}
+ */
+function decodeHtmlEntitiesMapped(mapped, sourceProtectedMask) {
+  let current = mapped;
+
+  for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
+    const protectedMask = sourceProtectedMask == null
+      ? undefined
+      : mappedSourceProtectionMask(current, sourceProtectedMask);
+    const decoded = decodeHtmlEntitiesMappedOnce(current, protectedMask);
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  const protectedMask = sourceProtectedMask == null
+    ? undefined
+    : mappedSourceProtectionMask(current, sourceProtectedMask);
+  if (
+    decodeHtmlEntitiesMappedOnce(current, protectedMask).value
+    !== current.value
+  ) {
+    fail('HTML character reference exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {Uint8Array | undefined} [sourceProtectedMask]
+ * @returns {MappedInspectionText}
+ */
+function decodeMarkdownHtmlEntitiesMapped(mapped, sourceProtectedMask) {
+  let current = mapped;
+
+  for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
+    const protectedMask = sourceProtectedMask == null
+      ? undefined
+      : mappedSourceProtectionMask(current, sourceProtectedMask);
+    const decoded = decodeHtmlEntitiesMappedOnce(
+      current,
+      protectedMask,
+    );
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  const protectedMask = sourceProtectedMask == null
+    ? undefined
+    : mappedSourceProtectionMask(current, sourceProtectedMask);
+  if (decodeHtmlEntitiesMappedOnce(current, protectedMask).value !== current.value) {
+    fail('HTML character reference exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
+ * @param {number} byte
+ * @returns {number}
+ */
+function percentEncodedCodePointByteLength(byte) {
+  if (byte <= 0x7f) {
+    return 1;
+  }
+  if (byte >= 0xc2 && byte <= 0xdf) {
+    return 2;
+  }
+  if (byte >= 0xe0 && byte <= 0xef) {
+    return 3;
+  }
+  if (byte >= 0xf0 && byte <= 0xf4) {
+    return 4;
+  }
+  return 0;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {boolean} [allowDecodedLiteralPercent=false]
+ * @returns {MappedInspectionText}
+ */
+function decodePercentMappedOnce(mapped, allowDecodedLiteralPercent = false) {
+  if (!mapped.value.includes('%')) {
+    return mapped;
+  }
+  if (mapped.value.length > MAX_PERCENT_ENCODED_COMPONENT_LENGTH) {
+    fail('Percent-encoded public URL component exceeds the inspection limit');
+  }
+  if (INVALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)) {
+    if (
+      allowDecodedLiteralPercent
+      && !VALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)
+    ) {
+      return mapped;
+    }
+    fail('Malformed percent encoding in public URL component');
+  }
+  if (!VALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < mapped.value.length) {
+    if (mapped.value[cursor] !== '%') {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+
+    const firstByte = Number.parseInt(mapped.value.slice(cursor + 1, cursor + 3), 16);
+    const byteLength = percentEncodedCodePointByteLength(firstByte);
+    if (byteLength === 0) {
+      fail('Malformed percent encoding in public URL component');
+    }
+
+    const encodedEnd = cursor + (byteLength * 3);
+    if (encodedEnd > mapped.value.length) {
+      fail('Malformed percent encoding in public URL component');
+    }
+    for (let index = cursor; index < encodedEnd; index += 3) {
+      if (
+        mapped.value[index] !== '%'
+        || !/^[A-F0-9]{2}$/iu.test(mapped.value.slice(index + 1, index + 3))
+      ) {
+        fail('Malformed percent encoding in public URL component');
+      }
+    }
+
+    const encoded = mapped.value.slice(cursor, encodedEnd);
+    /** @type {string} */
+    let decoded;
+    try {
+      decoded = decodeURIComponent(encoded);
+    } catch {
+      fail('Malformed percent encoding in public URL component');
+    }
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      decoded,
+      mappedSourceRange(mapped, cursor, encodedEnd),
+    );
+    cursor = encodedEnd;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeUrlInspectionMapped(mapped, mode = DecodingMode.Strict) {
+  let current = mapped;
+
+  for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
+    const percentDecoded = decodePercentMappedOnce(current, round > 0);
+    const entityDecoded = decodeHtmlEntitiesMappedOnce(
+      percentDecoded,
+      undefined,
+      mode,
+    );
+    if (entityDecoded.value === current.value) {
+      return current;
+    }
+    current = entityDecoded;
+  }
+
+  const percentDecoded = decodePercentMappedOnce(current, true);
+  const entityDecoded = decodeHtmlEntitiesMappedOnce(
+    percentDecoded,
+    undefined,
+    mode,
+  );
+  if (entityDecoded.value !== current.value) {
+    fail('Encoded public URL component exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
+ * Decodes valid percent escapes while leaving unrelated literal or malformed
+ * percent text unchanged.
+ *
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeCodePercentMappedOnce(mapped) {
+  if (!VALID_PERCENT_ESCAPE_PATTERN.test(mapped.value)) {
+    return mapped;
+  }
+  if (mapped.value.length > MAX_PERCENT_ENCODED_COMPONENT_LENGTH) {
+    fail('Percent-encoded Markdown code exceeds the inspection limit');
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+  while (cursor < mapped.value.length) {
+    const escape = mapped.value.slice(cursor, cursor + 3);
+    if (!/^%[A-F0-9]{2}$/iu.test(escape)) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+
+    const firstByte = Number.parseInt(escape.slice(1), 16);
+    const byteLength = firstByte <= 0x7f
+      ? 1
+      : percentEncodedCodePointByteLength(firstByte);
+    const encodedEnd = cursor + (byteLength * 3);
+    if (
+      byteLength === 0
+      || encodedEnd > mapped.value.length
+      || Array.from({ length: byteLength }, (_, index) =>
+        mapped.value.slice(cursor + (index * 3), cursor + (index * 3) + 3)
+      ).some((part) => !/^%[A-F0-9]{2}$/iu.test(part))
+    ) {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+
+    const encoded = mapped.value.slice(cursor, encodedEnd);
+    let decoded;
+    try {
+      decoded = decodeURIComponent(encoded);
+    } catch {
+      appendMappedInspectionValue(
+        output,
+        sourceRanges,
+        mapped.value[cursor] ?? '',
+        mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+      );
+      cursor += 1;
+      continue;
+    }
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      decoded,
+      mappedSourceRange(mapped, cursor, encodedEnd),
+    );
+    cursor = encodedEnd;
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {string} value
+ * @returns {MappedInspectionText}
+ */
+function decodeMarkdownCodeInspectionMapped(value) {
+  let current = createMappedInspectionText(value);
+  for (let round = 0; round < MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS; round += 1) {
+    const decoded = decodeHtmlEntitiesMappedOnce(
+      decodeCodePercentMappedOnce(current),
+      undefined,
+      DecodingMode.Legacy,
+    );
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  const decoded = decodeHtmlEntitiesMappedOnce(
+    decodeCodePercentMappedOnce(current),
+    undefined,
+    DecodingMode.Legacy,
+  );
+  if (decoded.value !== current.value) {
+    fail('Encoded Markdown code exceeds the decoding limit');
+  }
+  return current;
+}
+
+/**
+ * Decodes only bounded ASCII percent escapes for scheme discovery. Invalid
+ * escapes remain literal and are validated strictly once a data URI is found.
+ *
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function decodeAsciiPercentMappedOnce(mapped) {
+  if (!mapped.value.includes('%')) {
+    return mapped;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  let cursor = 0;
+  while (cursor < mapped.value.length) {
+    const escape = mapped.value.slice(cursor, cursor + 3);
+    if (/^%[A-F0-9]{2}$/iu.test(escape)) {
+      const byte = Number.parseInt(escape.slice(1), 16);
+      if (byte <= 0x7f) {
+        appendMappedInspectionValue(
+          output,
+          sourceRanges,
+          String.fromCharCode(byte),
+          mappedSourceRange(mapped, cursor, cursor + 3),
+        );
+        cursor += 3;
+        continue;
+      }
+    }
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[cursor] ?? '',
+      mapped.sourceRanges[cursor] ?? { start: cursor, end: cursor + 1 },
+    );
+    cursor += 1;
+  }
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {string} value
+ * @param {string} description
+ * @returns {MappedInspectionText}
+ */
+function decodeAsciiEntityDiscoveryMapped(
+  value,
+  description,
+  mode = DecodingMode.Strict,
+) {
+  let current = createMappedInspectionText(value);
+  for (let round = 0; round < MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS; round += 1) {
+    const decoded = decodeHtmlEntitiesMappedOnce(
+      decodeAsciiPercentMappedOnce(current),
+      undefined,
+      mode,
+    );
+    if (decoded.value === current.value) {
+      return current;
+    }
+    current = decoded;
+  }
+
+  const decoded = decodeHtmlEntitiesMappedOnce(
+    decodeAsciiPercentMappedOnce(current),
+    undefined,
+    mode,
+  );
+  if (decoded.value !== current.value) {
+    fail(`Encoded ${description} discovery exceeds the decoding limit`);
+  }
+  return current;
+}
+
+/**
+ * @param {string} value
+ * @returns {MappedInspectionText}
+ */
+function decodeDataUriDiscoveryMapped(value, mode = DecodingMode.Strict) {
+  return decodeAsciiEntityDiscoveryMapped(value, 'data URI', mode);
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isCredentialUrlStructuralCharacter(value) {
+  const codePoint = value.codePointAt(0) ?? 0;
+  return (
+    value.length === 1
+    && codePoint >= 0x21
+    && codePoint <= 0x7e
+    && value !== '/'
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {{ end: number, value: string } | null}
+ */
+function credentialUrlSeparatorAt(value, start) {
+  const character = value[start];
+  if (character === '/' || character === '\\') {
+    return { end: start + 1, value: character };
+  }
+
+  const escape = value.slice(start, start + 3);
+  if (/^%[A-F0-9]{2}$/iu.test(escape)) {
+    const decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 16));
+    if (decoded === '/' || decoded === '\\') {
+      return { end: start + 3, value: decoded };
+    }
+  }
+
+  const reference = decodeHtmlEntityReferenceAt(
+    value,
+    start,
+    DecodingMode.Attribute,
+  );
+  if (reference == null) {
+    return null;
+  }
+  return reference.value === '/' || reference.value === '\\'
+    ? { end: reference.end, value: reference.value }
+    : null;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeCredentialUrlPrefixSeparators(value) {
+  let separatorStart = 0;
+  let minimumSeparatorCount = 2;
+  const schemeEnd = findUriSchemeEnd(value, 0);
+  if (schemeEnd != null) {
+    const scheme = stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase();
+    if (!WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(scheme)) {
+      return value;
+    }
+    separatorStart = schemeEnd + 1;
+    minimumSeparatorCount = 1;
+  }
+
+  const separators = /** @type {string[]} */ ([]);
+  let separatorEnd = separatorStart;
+  while (separatorEnd < value.length) {
+    const separator = credentialUrlSeparatorAt(value, separatorEnd);
+    if (separator == null) {
+      break;
+    }
+    separators.push(separator.value);
+    separatorEnd = separator.end;
+  }
+  if (separators.length < minimumSeparatorCount) {
+    return value;
+  }
+  return `${value.slice(0, separatorStart)}${separators.join('')}${
+    value.slice(separatorEnd)
+  }`;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeCredentialUrlStructureOnce(value) {
+  const output = /** @type {string[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const escape = value.slice(cursor, cursor + 3);
+    if (/^%[A-F0-9]{2}$/iu.test(escape)) {
+      const decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 16));
+      if (isCredentialUrlStructuralCharacter(decoded)) {
+        output.push(decoded);
+        cursor += 3;
+        continue;
+      }
+    }
+
+    const reference = decodeHtmlEntityReferenceAt(
+      value,
+      cursor,
+      DecodingMode.Attribute,
+    );
+    if (reference != null) {
+      if (
+        [...reference.value].every((character) =>
+          isCredentialUrlStructuralCharacter(character)
+        )
+      ) {
+        output.push(reference.value);
+        cursor = reference.end;
+        continue;
+      }
+    }
+
+    output.push(value[cursor] ?? '');
+    cursor += 1;
+  }
+
+  return decodeCredentialUrlPrefixSeparators(output.join(''));
+}
+
+/**
+ * @param {string} value
+ * @returns {string[]}
+ */
+function credentialUrlStructuralVariants(value) {
+  const variants = [value];
+  let current = value;
+
+  for (
+    let round = 0;
+    round < MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS;
+    round += 1
+  ) {
+    const decoded = decodeCredentialUrlStructureOnce(current);
+    if (decoded === current) {
+      return variants;
+    }
+    variants.push(decoded);
+    current = decoded;
+  }
+
+  if (decodeCredentialUrlStructureOnce(current) !== current) {
+    fail('Encoded credential URL discovery exceeds the decoding limit');
+  }
+  return variants;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function normalizeSpecialSchemeSeparatorsMapped(mapped) {
+  const schemeEnd = findUriSchemeEnd(mapped.value, 0);
+  if (schemeEnd == null) {
+    return mapped;
+  }
+  const scheme = stripGitPlusPrefix(mapped.value.slice(0, schemeEnd)).toLowerCase();
+  const hierarchyStart = schemeEnd + 1;
+  if (
+    !WHATWG_SPECIAL_CREDENTIAL_SCHEMES.has(scheme)
+    || !mapped.value.includes('\\', hierarchyStart)
+  ) {
+    return mapped;
+  }
+
+  let separatorEnd = hierarchyStart;
+  while (mapped.value[separatorEnd] === '/' || mapped.value[separatorEnd] === '\\') {
+    separatorEnd += 1;
+  }
+
+  const output = /** @type {string[]} */ ([]);
+  const sourceRanges = /** @type {SourceRange[]} */ ([]);
+  for (let index = 0; index <= schemeEnd; index += 1) {
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[index] ?? '',
+      mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
+    );
+  }
+
+  const separatorSourceRange = separatorEnd > hierarchyStart
+    ? mappedSourceRange(mapped, hierarchyStart, separatorEnd)
+    : mapped.sourceRanges[hierarchyStart]
+      ?? mapped.sourceRanges[schemeEnd]
+      ?? { start: hierarchyStart, end: hierarchyStart };
+  appendMappedInspectionValue(output, sourceRanges, '/', separatorSourceRange);
+  appendMappedInspectionValue(output, sourceRanges, '/', separatorSourceRange);
+
+  for (let index = separatorEnd; index < mapped.value.length; index += 1) {
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      mapped.value[index] === '\\' ? '/' : mapped.value[index] ?? '',
+      mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
+    );
+  }
+
+  return {
+    value: output.join(''),
+    sourceRanges,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @returns {MappedInspectionText}
+ */
+function inspectUrlCandidateMapped(mapped, mode = DecodingMode.Strict) {
+  return normalizeSpecialSchemeSeparatorsMapped(
+    decodeUrlInspectionMapped(mapped, mode),
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function containsEncodedCredentialUrlUserinfo(value) {
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    if (/^%[A-F0-9]{2}$/iu.test(value.slice(cursor, cursor + 3))) {
+      return true;
+    }
+    if (
+      decodeHtmlEntityReferenceAt(
+        value,
+        cursor,
+        DecodingMode.Attribute,
+      ) != null
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @param {string} value
+ * @param {boolean} [exactSpan=false]
+ * @param {boolean} [rejectDirectUserinfo=false]
+ */
+function assertNoCredentialUrlReferences(
+  value,
+  exactSpan = false,
+  rejectDirectUserinfo = false,
+) {
+  if (exactSpan) {
+    assertCredentialUrlSpanSafe(value, rejectDirectUserinfo);
+    return;
+  }
+
+  let cursor = 0;
+  while (cursor < value.length) {
+    while (
+      cursor < value.length
+      && isCredentialUrlTokenBoundary(value[cursor])
+    ) {
+      cursor += 1;
+    }
+    const start = cursor;
+    while (
+      cursor < value.length
+      && !isCredentialUrlTokenBoundary(value[cursor])
+    ) {
+      cursor += 1;
+    }
+    if (cursor > start) {
+      assertCredentialUrlSpanSafe(
+        value.slice(start, cursor),
+        rejectDirectUserinfo,
+      );
+    }
+  }
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   value: string,
+ * }} DataUriCandidate
+ */
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isDataUriBoundary(value) {
+  return value == null || /\s|["'`<>()\[\]{}]/u.test(value);
+}
+
+/**
+ * @param {string} value
+ * @returns {DataUriCandidate[]}
+ */
+function scanDataUriCandidates(value) {
+  const candidates = /** @type {DataUriCandidate[]} */ ([]);
+
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    const schemeEnd = findUriSchemeEnd(value, cursor);
+    if (
+      schemeEnd == null
+      || value.slice(cursor, schemeEnd).toLowerCase() !== 'data'
+    ) {
+      continue;
+    }
+
+    let end = schemeEnd + 1;
+    while (end < value.length && !isDataUriBoundary(value[end])) {
+      end += 1;
+    }
+    end = trimUriCandidateEnd(value, cursor, end);
+    candidates.push({
+      start: cursor,
+      end,
+      value: value.slice(cursor, end),
+    });
+    cursor = Math.max(cursor, end - 1);
+  }
+
+  return candidates;
+}
+
+/**
+ * @param {string} value
+ * @returns {DataUriCandidate[]}
+ */
+function scanMappedDataUriCandidates(value) {
+  const decoded = decodeDataUriDiscoveryMapped(value);
+  const candidates = /** @type {DataUriCandidate[]} */ ([]);
+  const seen = new Set();
+
+  for (const discovered of scanDataUriCandidates(decoded.value)) {
+    const schemeEnd = findUriSchemeEnd(decoded.value, discovered.start);
+    if (schemeEnd == null) {
+      continue;
+    }
+    const sourceScheme = mappedSourceRange(
+      decoded,
+      discovered.start,
+      schemeEnd + 1,
+    );
+    const start = sourceScheme.start;
+    let end = Math.max(sourceScheme.end, start + 1);
+    while (end < value.length && !isDataUriBoundary(value[end])) {
+      end += 1;
+    }
+    end = trimUriCandidateEnd(value, start, end);
+    const key = `${start}:${end}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    if (candidates.length >= MAX_URL_CANDIDATE_COUNT) {
+      fail('Public text exceeds the data URI candidate inspection limit');
+    }
+    seen.add(key);
+    candidates.push({
+      start,
+      end,
+      value: value.slice(start, end),
+    });
+  }
+  return candidates;
+}
+
+/**
+ * @param {string} mediaType
+ * @param {string} metadata
+ * @returns {boolean}
+ */
+function isTextualDataMediaType(mediaType, metadata) {
+  return (
+    mediaType.startsWith('text/')
+    || /(?:^|\/|\+)(?:json|xml|javascript|svg\+xml)$/iu.test(mediaType)
+    || /(?:^|;)charset=/iu.test(metadata)
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function containsEmail(value) {
+  EMAIL_PATTERN.lastIndex = 0;
+  return EMAIL_PATTERN.test(value);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertDecodedDataTextSafe(value, config, depth) {
+  const variants = new Set([value]);
+  variants.add(inspectUrlCandidateMapped(createMappedInspectionText(value)).value);
+
+  for (const variant of variants) {
+    assertNoDirectPublishableSecrets(variant);
+    assertNoEncodedUrlSecrets(variant, true);
+    assertNoMarkdownReconstructedSecrets(variant, config, depth);
+    if (
+      containsEmail(variant)
+      || redactLocalPaths(variant, config) !== variant
+    ) {
+      fail('Publishable data URI contains sensitive email or local path data');
+    }
+    assertSafeDataUrisInText(variant, config, depth + 1);
+  }
+}
+
+/**
+ * @param {Buffer} decoded
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertDecodedDataBytesSafe(decoded, config, depth) {
+  const latin1 = decoded.toString('latin1');
+  const printable = Array.from(decoded, (byte) => {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d) {
+      return String.fromCharCode(byte);
+    }
+    return byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ' ';
+  }).join('');
+
+  for (const variant of new Set([latin1, printable])) {
+    assertNoDirectPublishableSecrets(variant);
+    if (
+      containsEmail(variant)
+      || redactLocalPaths(variant, config) !== variant
+    ) {
+      fail('Publishable data URI contains sensitive binary data');
+    }
+  }
+  assertSafeDataUrisInText(printable, config, depth + 1);
+}
+
+/**
+ * @param {string} candidate
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertSafeDataUriCandidate(candidate, config, depth) {
+  if (depth > MAX_DATA_URI_RECURSION_DEPTH) {
+    fail('Publishable data URI exceeds the nested inspection limit');
+  }
+  if (
+    candidate.length
+    > MAX_DATA_URI_ENCODED_LENGTH + MAX_DATA_URI_METADATA_LENGTH + 6
+  ) {
+    fail('Publishable data URI exceeds the encoded inspection limit');
+  }
+
+  const decodedCandidate = inspectUrlCandidateMapped(
+    createMappedInspectionText(candidate),
+  ).value;
+  if (!decodedCandidate.toLowerCase().startsWith('data:')) {
+    fail('Publishable data URI has an invalid scheme');
+  }
+  const commaIndex = decodedCandidate.indexOf(',', 5);
+  if (commaIndex === -1) {
+    fail('Publishable data URI is missing its data delimiter');
+  }
+
+  const metadata = decodedCandidate.slice(5, commaIndex);
+  if (metadata.length > MAX_DATA_URI_METADATA_LENGTH) {
+    fail('Publishable data URI metadata exceeds the inspection limit');
+  }
+  const metadataParts = metadata.split(';');
+  const base64Indexes = metadataParts
+    .map((part, index) => part.toLowerCase() === 'base64' ? index : -1)
+    .filter((index) => index >= 0);
+  if (
+    base64Indexes.length > 1
+    || (
+      base64Indexes.length === 1
+      && base64Indexes[0] !== metadataParts.length - 1
+    )
+  ) {
+    fail('Publishable data URI has an invalid base64 declaration');
+  }
+  const isBase64 = base64Indexes.length === 1;
+  const mediaType = (metadataParts[0] || 'text/plain').toLowerCase();
+  const payload = decodedCandidate.slice(commaIndex + 1);
+  if (payload.length > MAX_DATA_URI_ENCODED_LENGTH) {
+    fail('Publishable data URI exceeds the encoded inspection limit');
+  }
+
+  if (!isBase64) {
+    if (Buffer.byteLength(payload, 'utf8') > MAX_DATA_URI_DECODED_BYTES) {
+      fail('Publishable data URI exceeds the decoded inspection limit');
+    }
+    assertDecodedDataTextSafe(payload, config, depth);
+    return;
+  }
+
+  if (
+    payload.length % 4 !== 0
+    || !STRICT_BASE64_PATTERN.test(payload)
+  ) {
+    fail('Publishable data URI contains invalid base64 data');
+  }
+  const decoded = Buffer.from(payload, 'base64');
+  if (decoded.toString('base64') !== payload) {
+    fail('Publishable data URI contains invalid base64 data');
+  }
+  if (decoded.byteLength > MAX_DATA_URI_DECODED_BYTES) {
+    fail('Publishable data URI exceeds the decoded inspection limit');
+  }
+  assertDecodedDataBytesSafe(decoded, config, depth);
+
+  let decodedText;
+  try {
+    decodedText = new TextDecoder('utf-8', { fatal: true }).decode(decoded);
+  } catch {
+    if (isTextualDataMediaType(mediaType, metadata)) {
+      fail('Publishable textual data URI contains invalid UTF-8');
+    }
+    return;
+  }
+  assertDecodedDataTextSafe(decodedText, config, depth);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertSafeDataUrisInText(value, config, depth) {
+  for (const candidate of scanMappedDataUriCandidates(value)) {
+    assertSafeDataUriCandidate(candidate.value, config, depth);
+  }
+}
+
+/**
+ * @param {string} value
+ */
+function parsePublicHtmlFragment(value) {
+  try {
+    return parseFragment(
+      value,
+      { sourceCodeLocationInfo: true },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/invalid code point|character reference/iu.test(message)) {
+      fail('HTML character reference exceeds the inspection limit');
+    }
+    fail(`Public HTML sanitization could not parse the fragment: ${message}`);
+  }
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @returns {node is ParsedHtmlElement}
+ */
+function isParsedHtmlElement(node) {
+  return 'tagName' in node;
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @returns {ParsedHtmlNode[]}
+ */
+function parsedHtmlChildren(node) {
+  const children = 'childNodes' in node
+    ? /** @type {ParsedHtmlNode[]} */ (node.childNodes)
+    : [];
+  if (node.nodeName === 'template' && 'content' in node) {
+    return [
+      ...children,
+      .../** @type {ParsedHtmlNode[]} */ (node.content.childNodes),
+    ];
+  }
+  return children;
+}
+
+/**
+ * @param {ParsedHtmlNode} root
+ * @param {(node: ParsedHtmlNode, depth: number, parentTag: string | null) => void} visit
+ */
+function traverseParsedHtml(root, visit) {
+  let nodeCount = 0;
+  let attributeCount = 0;
+
+  /**
+   * @param {ParsedHtmlNode} node
+   * @param {number} depth
+   * @param {string | null} parentTag
+   */
+  function walk(node, depth, parentTag) {
+    nodeCount += 1;
+    if (nodeCount > MAX_PARSED_HTML_NODE_COUNT) {
+      fail('Public HTML sanitization exceeded the parsed node limit');
+    }
+    if (depth > MAX_PARSED_HTML_DEPTH) {
+      fail('Public HTML sanitization exceeded the parsed depth limit');
+    }
+    if (isParsedHtmlElement(node)) {
+      if (node.attrs.length > MAX_RAW_HTML_ATTRIBUTE_COUNT) {
+        fail('Public HTML sanitization exceeded the per-element attribute limit');
+      }
+      attributeCount += node.attrs.length;
+      if (attributeCount > MAX_PARSED_HTML_TOTAL_ATTRIBUTE_COUNT) {
+        fail('Public HTML sanitization exceeded the total attribute limit');
+      }
+    }
+
+    visit(node, depth, parentTag);
+    const nextParentTag = isParsedHtmlElement(node)
+      ? node.tagName.toLowerCase()
+      : parentTag;
+    for (const child of parsedHtmlChildren(node)) {
+      walk(child, depth + 1, nextParentTag);
+    }
+  }
+
+  for (const child of parsedHtmlChildren(root)) {
+    walk(child, 1, null);
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {number} offset
+ * @returns {MappedInspectionText}
+ */
+function createOffsetMappedInspectionText(value, offset) {
+  return {
+    value,
+    sourceRanges: Array.from({ length: value.length }, (_, index) => ({
+      start: offset + index,
+      end: offset + index + 1,
+    })),
+  };
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @param {string} source
+ * @param {string | null} parentTag
+ * @returns {MappedInspectionText | null}
+ */
+function parsedHtmlTextMapping(node, source, parentTag) {
+  if (
+    node.nodeName !== '#text'
+    || !('value' in node)
+    || node.sourceCodeLocation == null
+  ) {
+    return null;
+  }
+  const { startOffset, endOffset } = node.sourceCodeLocation;
+  const raw = source.slice(startOffset, endOffset);
+  const mapped = createOffsetMappedInspectionText(raw, startOffset);
+  const decoded = parentTag != null && RAW_HTML_RAW_TEXT_ELEMENTS.has(parentTag)
+    ? mapped
+    : decodeHtmlEntitiesMappedOnce(mapped, undefined, DecodingMode.Legacy);
+  return decoded.value === node.value ? decoded : null;
+}
+
+/**
+ * @param {SourceReplacement[]} replacements
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @param {string} replacement
+ * @param {number} priority
+ */
+function addParsedTextReplacement(
+  replacements,
+  mapped,
+  start,
+  end,
+  replacement,
+  priority,
+) {
+  replacements.push({
+    ...mappedSourceRange(mapped, start, end),
+    value: replacement,
+    priority,
+  });
+}
+
+/**
+ * @param {SourceReplacement[]} replacements
+ * @param {MappedInspectionText} mapped
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ */
+function collectParsedTextReplacements(replacements, mapped, matchers) {
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of mapped.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start >= 0) {
+      addParsedTextReplacement(
+        replacements,
+        mapped,
+        start,
+        start + match[0].length,
+        REDACTED_EMAIL,
+        1,
+      );
+    }
+  }
+  for (const range of homeDirectoryDecodedRanges(mapped.value, matchers)) {
+    addParsedTextReplacement(
+      replacements,
+      mapped,
+      range.start,
+      range.end,
+      range.value,
+      1,
+    );
+  }
+  for (const range of localOperationalPathRanges(mapped.value)) {
+    addParsedTextReplacement(
+      replacements,
+      mapped,
+      range.start,
+      range.end,
+      REDACTED_LOCAL_PATH,
+      2,
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SourceReplacement[]} replacements
+ * @returns {string}
+ */
+function applySourceReplacements(value, replacements) {
+  if (replacements.length === 0) {
+    return value;
+  }
+
+  const selected = /** @type {SourceReplacement[]} */ ([]);
+  for (const replacement of [...replacements].sort((left, right) =>
+    right.priority - left.priority
+    || (right.end - right.start) - (left.end - left.start)
+    || left.start - right.start
+  )) {
+    if (selected.some((existing) =>
+      replacement.start < existing.end && replacement.end > existing.start
+    )) {
+      continue;
+    }
+    selected.push(replacement);
+  }
+
+  let sanitized = value;
+  for (const replacement of selected.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMarkdownCodeSensitiveReplacements(mapped, config, replacements) {
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of mapped.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+    replacements.push({
+      ...mappedSourceRange(mapped, start, start + match[0].length),
+      value: REDACTED_EMAIL,
+      priority: 1,
+    });
+  }
+
+  const matchers = buildHomeDirectoryMatchers(config);
+  for (const range of markdownCodeSensitivePathRanges(mapped.value, matchers)) {
+    replacements.push({
+      ...mappedSourceRange(mapped, range.start, range.end),
+      value: REDACTED_LOCAL_PATH,
+      priority: 2,
+    });
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string}
+ */
+function sanitizeMarkdownCodeSource(value, config) {
+  const decoded = decodeMarkdownCodeInspectionMapped(value);
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+  collectMarkdownCodeSensitiveReplacements(decoded, config, replacements);
+  return applySourceReplacements(value, replacements);
+}
+
+/**
+ * @param {string} value
+ * @param {string | null} quote
+ * @returns {string}
+ */
+function escapeRawHtmlAttributeValue(value, quote) {
+  let escaped = value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;');
+  if (quote === '"') {
+    return escaped.replace(/"/gu, '&quot;');
+  }
+  if (quote === "'") {
+    return escaped.replace(/'/gu, '&#39;');
+  }
+  return escaped.replace(/[\s"'`=]/gu, (character) =>
+    `&#${character.codePointAt(0)};`
+  );
+}
+
+/**
+ * @param {string} rawValue
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
+  assertNoCredentialUrlReferences(rawValue, true);
+  const decoded = inspectUrlCandidateMapped(
+    createMappedInspectionText(rawValue),
+    DecodingMode.Attribute,
+  ).value;
+  assertNoDirectPublishableSecrets(decoded);
+  assertNoEncodedUrlSecrets(decoded, true);
+  assertNoMarkdownReconstructedSecrets(decoded, config, depth);
+  if (decoded.toLowerCase().startsWith('data:')) {
+    assertSafeDataUriCandidate(decoded, config, depth);
+  }
+
+  const matchers = buildHomeDirectoryMatchers(config);
+  const uri = parseAbsoluteUri(decoded);
+  let sanitized = uri == null
+    ? decoded
+    : sanitizeProtectedUrl(decoded, matchers);
+  sanitized = sanitized.replace(EMAIL_PATTERN, REDACTED_EMAIL);
+  sanitized = redactHomeDirectoryToken(sanitized, matchers);
+  sanitized = redactLocalOperationalPaths(sanitized);
+
+  return sanitized === decoded
+    ? rawValue
+    : escapeRawHtmlAttributeValue(sanitized, quote);
+}
+
+/**
+ * @param {string} rawValue
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlSrcset(rawValue, quote, config, depth) {
+  const replacements = /** @type {{start: number, end: number, value: string}[]} */ ([]);
+  let cursor = 0;
+
+  while (cursor < rawValue.length) {
+    while (cursor < rawValue.length && /[\s,]/u.test(rawValue[cursor] ?? '')) {
+      cursor += 1;
+    }
+    if (cursor >= rawValue.length) {
+      break;
+    }
+
+    const start = cursor;
+    const isData = decodeDataUriDiscoveryMapped(
+      rawValue.slice(cursor),
+      DecodingMode.Attribute,
+    ).value.toLowerCase().startsWith('data:');
+    let urlEnd;
+    let trailingSeparator = false;
+    if (isData) {
+      while (cursor < rawValue.length && !/\s/u.test(rawValue[cursor] ?? '')) {
+        cursor += 1;
+      }
+      urlEnd = cursor;
+      const firstComma = rawValue.indexOf(',', start);
+      if (rawValue[urlEnd - 1] === ',' && firstComma < urlEnd - 1) {
+        urlEnd -= 1;
+        trailingSeparator = true;
+      }
+      if (
+        firstComma === -1
+        || firstComma >= urlEnd
+      ) {
+        fail('Raw HTML srcset contains an ambiguous data URI candidate');
+      }
+    } else {
+      while (
+        cursor < rawValue.length
+        && !/[\s,]/u.test(rawValue[cursor] ?? '')
+      ) {
+        cursor += 1;
+      }
+      urlEnd = cursor;
+    }
+    if (urlEnd === start) {
+      fail('Raw HTML srcset contains an empty URL candidate');
+    }
+
+    const sanitized = sanitizeRawHtmlDestination(
+      rawValue.slice(start, urlEnd),
+      quote,
+      config,
+      depth,
+    );
+    if (sanitized !== rawValue.slice(start, urlEnd)) {
+      replacements.push({ start, end: urlEnd, value: sanitized });
+    }
+    if (trailingSeparator) {
+      continue;
+    }
+
+    while (cursor < rawValue.length && rawValue[cursor] !== ',') {
+      cursor += 1;
+    }
+    if (rawValue[cursor] === ',') {
+      cursor += 1;
+    }
+  }
+
+  let sanitized = rawValue;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
+}
+
+/**
+ * @param {string} rawValue
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlUrlList(rawValue, quote, config, depth) {
+  return rawValue.replace(/[^\s]+/gu, (candidate) =>
+    sanitizeRawHtmlDestination(candidate, quote, config, depth)
+  );
+}
+
+/**
+ * @param {string} rawValue
+ * @param {'single' | 'list' | 'srcset'} mode
+ * @param {string | null} quote
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function sanitizeRawHtmlAttributeValue(rawValue, mode, quote, config, depth) {
+  return mode === 'srcset'
+    ? sanitizeRawHtmlSrcset(rawValue, quote, config, depth)
+    : mode === 'list'
+      ? sanitizeRawHtmlUrlList(rawValue, quote, config, depth)
+      : sanitizeRawHtmlDestination(rawValue, quote, config, depth);
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   quote: string | null,
+ * }} RawHtmlAttributeValueRange
+ */
+
+/**
+ * This scanner only maps a parse5-validated attribute back to its source
+ * spelling for deterministic rewriting; parse5 remains the security authority.
+ *
+ * @param {string} value
+ * @param {{startOffset: number, endOffset: number}} location
+ * @param {string} qualifiedName
+ * @returns {RawHtmlAttributeValueRange | null}
+ */
+function rawHtmlAttributeValueRange(value, location, qualifiedName) {
+  const { startOffset, endOffset } = location;
+  if (
+    endOffset <= startOffset
+    || endOffset - startOffset > MAX_RAW_HTML_START_TAG_LENGTH
+  ) {
+    return null;
+  }
+  let cursor = startOffset;
+  while (
+    cursor < endOffset
+    && !/[\s=/>]/u.test(value[cursor] ?? '')
+  ) {
+    cursor += 1;
+  }
+  if (value.slice(startOffset, cursor).toLowerCase() !== qualifiedName) {
+    return null;
+  }
+  while (cursor < endOffset && /\s/u.test(value[cursor] ?? '')) {
+    cursor += 1;
+  }
+  if (value[cursor] !== '=') {
+    return null;
+  }
+  cursor += 1;
+  while (cursor < endOffset && /\s/u.test(value[cursor] ?? '')) {
+    cursor += 1;
+  }
+
+  const quote = value[cursor] === '"' || value[cursor] === "'"
+    ? value[cursor] ?? null
+    : null;
+  if (quote != null) {
+    cursor += 1;
+    const end = value.indexOf(quote, cursor);
+    if (end === -1 || end >= endOffset) {
+      return null;
+    }
+    return { start: cursor, end, quote };
+  }
+
+  let end = cursor;
+  while (end < endOffset && !/\s/u.test(value[end] ?? '')) {
+    end += 1;
+  }
+  return { start: cursor, end, quote: null };
+}
+
+/**
+ * @param {string} value
+ * @param {ReturnType<typeof parsePublicHtmlFragment>} fragment
+ * @returns {Uint8Array}
+ */
+function rawHtmlRewriteMask(value, fragment) {
+  const mask = new Uint8Array(value.length);
+  traverseParsedHtml(fragment, (node, _depth, parentTag) => {
+    const location = node.sourceCodeLocation;
+    if (
+      location == null
+      || (
+        node.nodeName !== '#comment'
+        && node.nodeName !== '#documentType'
+        && !(
+          node.nodeName === '#text'
+          && parentTag != null
+          && (
+            RAW_HTML_RAW_TEXT_ELEMENTS.has(parentTag)
+            || parentTag === 'textarea'
+            || parentTag === 'title'
+          )
+        )
+      )
+    ) {
+      return;
+    }
+    mask.fill(1, location.startOffset, location.endOffset);
+  });
+  return mask;
+}
+
+/**
+ * @param {string} value
+ * @param {Uint8Array} protectedMask
+ * @returns {string}
+ */
+function maskProtectedHtmlEntityStarts(value, protectedMask) {
+  return Array.from({ length: value.length }, (_, index) =>
+    protectedMask[index] && value[index] === '&' ? ' ' : value[index] ?? ''
+  ).join('');
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {number | null}
+ */
+function rawHtmlStartTagEnd(value, start) {
+  let quote = '';
+  const limit = Math.min(value.length, start + MAX_RAW_HTML_START_TAG_LENGTH);
+  for (let cursor = start; cursor < limit; cursor += 1) {
+    const character = value[cursor] ?? '';
+    if (quote) {
+      if (character === quote) {
+        quote = '';
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '>') {
+      return cursor + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort source rewriting preserves the existing output format. Any
+ * missed or ambiguous case is rejected later from parse5's normalized DOM.
+ *
+ * @param {string} value
+ * @param {ReturnType<typeof parsePublicHtmlFragment>} fragment
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function rewriteRawHtmlAttributesFromSource(value, fragment, config, depth) {
+  const mask = rawHtmlRewriteMask(value, fragment);
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+
+  for (let tagStart = 0; tagStart < value.length; tagStart += 1) {
+    if (
+      mask[tagStart]
+      || value[tagStart] !== '<'
+      || !/[A-Za-z]/u.test(value[tagStart + 1] ?? '')
+    ) {
+      continue;
+    }
+    const tagEnd = rawHtmlStartTagEnd(value, tagStart + 1);
+    if (tagEnd == null) {
+      continue;
+    }
+    let cursor = tagStart + 2;
+    while (/[A-Za-z0-9:-]/u.test(value[cursor] ?? '')) {
+      cursor += 1;
+    }
+    if (!/[\s/>]/u.test(value[cursor] ?? '')) {
+      continue;
+    }
+
+    while (cursor < tagEnd - 1) {
+      while (cursor < tagEnd - 1 && /\s/u.test(value[cursor] ?? '')) {
+        cursor += 1;
+      }
+      if (value[cursor] === '/') {
+        cursor += 1;
+        continue;
+      }
+      const nameStart = cursor;
+      while (
+        cursor < tagEnd - 1
+        && !/[\s=/>]/u.test(value[cursor] ?? '')
+      ) {
+        cursor += 1;
+      }
+      if (cursor === nameStart) {
+        break;
+      }
+      const name = value.slice(nameStart, cursor).toLowerCase();
+      while (cursor < tagEnd - 1 && /\s/u.test(value[cursor] ?? '')) {
+        cursor += 1;
+      }
+      if (value[cursor] !== '=') {
+        continue;
+      }
+      cursor += 1;
+      while (cursor < tagEnd - 1 && /\s/u.test(value[cursor] ?? '')) {
+        cursor += 1;
+      }
+      const quote = value[cursor] === '"' || value[cursor] === "'"
+        ? value[cursor] ?? null
+        : null;
+      if (quote != null) {
+        cursor += 1;
+      }
+      const valueStart = cursor;
+      if (quote != null) {
+        while (cursor < tagEnd - 1 && value[cursor] !== quote) {
+          cursor += 1;
+        }
+        if (value[cursor] !== quote) {
+          break;
+        }
+      } else {
+        while (
+          cursor < tagEnd - 1
+          && !/[\s>]/u.test(value[cursor] ?? '')
+        ) {
+          cursor += 1;
+        }
+      }
+      const valueEnd = cursor;
+      if (quote != null) {
+        cursor += 1;
+      }
+      const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(name);
+      if (mode == null) {
+        continue;
+      }
+      const rawValue = value.slice(valueStart, valueEnd);
+      try {
+        const sanitized = sanitizeRawHtmlAttributeValue(
+          rawValue,
+          mode,
+          quote,
+          config,
+          depth,
+        );
+        if (sanitized !== rawValue) {
+          replacements.push({
+            start: valueStart,
+            end: valueEnd,
+            value: sanitized,
+            priority: 3,
+          });
+        }
+      } catch {
+        // parse5 validation below owns all fail-closed security decisions.
+      }
+    }
+    tagStart = tagEnd - 1;
+  }
+
+  return applySourceReplacements(value, replacements);
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @param {{name: string, value: string, prefix?: string}} attribute
+ * @returns {string}
+ */
+function parsedHtmlAttributeName(element, attribute) {
+  if (attribute.prefix) {
+    return `${attribute.prefix}:${attribute.name}`.toLowerCase();
+  }
+  if (
+    element.namespaceURI === 'http://www.w3.org/2000/svg'
+    && attribute.name === 'href'
+    && attribute.prefix === 'xlink'
+  ) {
+    return 'xlink:href';
+  }
+  return attribute.name.toLowerCase();
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @param {string} qualifiedName
+ */
+function parsedHtmlAttributeLocation(element, qualifiedName) {
+  return element.sourceCodeLocation?.attrs?.[qualifiedName] ?? null;
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @param {string} qualifiedName
+ * @returns {string | null}
+ */
+function parsedHtmlAttributeValue(element, qualifiedName) {
+  for (const attribute of element.attrs) {
+    if (parsedHtmlAttributeName(element, attribute) === qualifiedName) {
+      return attribute.value;
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {ParsedHtmlNode} root
+ * @returns {boolean}
+ */
+function parsedHtmlHasTextContent(root) {
+  const pending = [...parsedHtmlChildren(root)];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node == null) {
+      continue;
+    }
+    if (node.nodeName === '#text' && 'value' in node && node.value.length > 0) {
+      return true;
+    }
+    pending.push(...parsedHtmlChildren(node));
+  }
+  return false;
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @returns {boolean}
+ */
+function parsedHtmlOptionLabelSuppressesDescendants(element) {
+  return element.tagName.toLowerCase() === 'option'
+    && (parsedHtmlAttributeValue(element, 'label')?.length ?? 0) > 0;
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @returns {string | null}
+ */
+function parsedHtmlVisibleControlText(element) {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === 'input') {
+    const type = parsedHtmlAttributeValue(element, 'type')?.trim().toLowerCase() || 'text';
+    const alt = parsedHtmlAttributeValue(element, 'alt');
+    if (type === 'image' && alt) {
+      return alt;
+    }
+    const value = parsedHtmlAttributeValue(element, 'value');
+    if (value && RAW_HTML_INPUT_VISIBLE_VALUE_TYPES.has(type)) {
+      return value;
+    }
+    const placeholder = parsedHtmlAttributeValue(element, 'placeholder');
+    if (
+      placeholder
+      && (!value || value.length === 0)
+      && RAW_HTML_INPUT_VISIBLE_PLACEHOLDER_TYPES.has(type)
+    ) {
+      return placeholder;
+    }
+    return null;
+  }
+  if (tagName === 'textarea') {
+    const placeholder = parsedHtmlAttributeValue(element, 'placeholder');
+    return placeholder && !parsedHtmlHasTextContent(element)
+      ? placeholder
+      : null;
+  }
+  if (tagName === 'option') {
+    const label = parsedHtmlAttributeValue(element, 'label');
+    return label && label.length > 0 ? label : null;
+  }
+  if (tagName === 'optgroup') {
+    const label = parsedHtmlAttributeValue(element, 'label');
+    return label && label.length > 0 ? label : null;
+  }
+  return null;
+}
+
+/**
+ * @param {string} value
+ * @returns {ParsedHtmlElement | null}
+ */
+function standaloneRawHtmlOpeningElement(value) {
+  const fragment = parsePublicHtmlFragment(value);
+  if (fragment.childNodes.length !== 1) {
+    return null;
+  }
+  const [child] = fragment.childNodes;
+  if (
+    child == null
+    || !isParsedHtmlElement(child)
+    || child.sourceCodeLocation == null
+    || child.sourceCodeLocation.startOffset !== 0
+    || child.sourceCodeLocation.endOffset !== value.length
+    || child.sourceCodeLocation.endTag != null
+  ) {
+    return null;
+  }
+  return child;
+}
+
+/**
+ * @param {string} value
+ * @returns {string | null}
+ */
+function standaloneRawHtmlClosingTagName(value) {
+  const match = /^\s*<\/\s*([A-Za-z][A-Za-z0-9:-]*)\s*>\s*$/u.exec(value);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function rewriteRawHtmlFromParsedSource(value, config, depth) {
+  const fragment = parsePublicHtmlFragment(value);
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+  const matchers = buildHomeDirectoryMatchers(config);
+
+  traverseParsedHtml(fragment, (node, _nodeDepth, parentTag) => {
+    if (node.nodeName === '#text') {
+      const mapped = parsedHtmlTextMapping(node, value, parentTag);
+      if (mapped != null && parentTag != null) {
+        collectParsedTextReplacements(replacements, mapped, matchers);
+      }
+      return;
+    }
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+
+    for (const attribute of node.attrs) {
+      const qualifiedName = parsedHtmlAttributeName(node, attribute);
+      const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(qualifiedName);
+      if (mode == null) {
+        continue;
+      }
+      const location = parsedHtmlAttributeLocation(node, qualifiedName);
+      const valueRange = location == null
+        ? null
+        : rawHtmlAttributeValueRange(value, location, qualifiedName);
+      if (valueRange == null) {
+        continue;
+      }
+      const rawValue = value.slice(valueRange.start, valueRange.end);
+      const parsedValue = decodeHtmlEntitiesMappedOnce(
+        createMappedInspectionText(rawValue),
+        undefined,
+        DecodingMode.Attribute,
+      ).value;
+      if (parsedValue !== attribute.value) {
+        continue;
+      }
+
+      let sanitized;
+      try {
+        sanitized = sanitizeRawHtmlAttributeValue(
+          rawValue,
+          mode,
+          valueRange.quote,
+          config,
+          depth,
+        );
+      } catch {
+        continue;
+      }
+      if (sanitized !== rawValue) {
+        replacements.push({
+          start: valueRange.start,
+          end: valueRange.end,
+          value: sanitized,
+          priority: 3,
+        });
+      }
+    }
+  });
+
+  const rewritten = applySourceReplacements(value, replacements);
+  return rewriteRawHtmlAttributesFromSource(
+    rewritten,
+    parsePublicHtmlFragment(rewritten),
+    config,
+    depth,
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {'single' | 'list' | 'srcset'} mode
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertParsedHtmlUrlAttributeSafe(value, mode, config, depth) {
+  if (value.length > MAX_RAW_HTML_START_TAG_LENGTH) {
+    fail('Raw HTML attribute exceeds the inspection limit');
+  }
+  let sanitized;
+  try {
+    sanitized = sanitizeRawHtmlAttributeValue(value, mode, '"', config, depth);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Public HTML sanitization rejected a parsed URL attribute: ${message}`);
+  }
+  if (sanitized !== value) {
+    const kind = containsEmail(value)
+      ? /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\//u.test(value)
+        ? 'URL credentials or email'
+        : 'email'
+      : (
+          containsLocalOperationalPath(value)
+          || homeDirectoryDecodedRanges(value, buildHomeDirectoryMatchers(config)).length > 0
+        )
+        ? 'local path'
+        : 'sensitive destination';
+    fail(
+      `Public HTML sanitization could not safely rewrite a parser-derived ${kind}`,
+    );
+  }
+}
+
+/**
+ * @param {string} text
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ */
+function assertParsedHtmlTextSafe(text, config) {
+  try {
+    assertNoDirectPublishableSecrets(text);
+    for (const candidate of scanDataUriCandidates(text)) {
+      assertSafeDataUriCandidate(candidate.value, config, 0);
+    }
+    for (const candidate of scanUrlCandidates(text)) {
+      const uri = parseAbsoluteUri(candidate.value);
+      if (
+        uri?.authority != null
+        && candidate.value.slice(uri.authority.start, uri.authority.end).includes('@')
+      ) {
+        fail('Publishable URL credentials detected');
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Public HTML sanitization rejected rendered text: ${message}`);
+  }
+  if (containsEmail(text)) {
+    fail(
+      'Public HTML sanitization could not safely rewrite parser-derived email text: '
+        + 'sensitive content spans Markdown nodes (email)',
+    );
+  }
+  const matchers = buildHomeDirectoryMatchers(config);
+  if (
+    containsLocalOperationalPath(text)
+    || homeDirectoryDecodedRanges(text, matchers).length > 0
+  ) {
+    fail(
+      'Public HTML sanitization could not safely rewrite parser-derived local path text: '
+        + 'sensitive content spans Markdown nodes (local path)',
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertParsedRawHtmlUrlAttributesSafe(value, config, depth) {
+  const fragment = parsePublicHtmlFragment(value);
+  traverseParsedHtml(fragment, (node) => {
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+    for (const attribute of node.attrs) {
+      const qualifiedName = parsedHtmlAttributeName(node, attribute);
+      const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(qualifiedName);
+      if (mode != null) {
+        assertParsedHtmlUrlAttributeSafe(attribute.value, mode, config, depth);
+      }
+    }
+  });
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertParsedRawHtmlSafe(value, config, depth) {
+  const fragment = parsePublicHtmlFragment(value);
+  /** @type {{parts: string[], hasElement: boolean}} */
+  let current = { parts: [], hasElement: false };
+
+  function finishTextGroup() {
+    if (current.hasElement && current.parts.length > 0) {
+      assertParsedHtmlTextSafe(current.parts.join(''), config);
+    }
+    current = { parts: [], hasElement: false };
+  }
+
+  /**
+   * @param {string} text
+   * @param {boolean} insideElement
+   */
+  function appendText(text, insideElement) {
+    const parts = text.split(/(\n+)/u);
+    for (const part of parts) {
+      if (/^\n+$/u.test(part)) {
+        finishTextGroup();
+        continue;
+      }
+      if (part) {
+        current.parts.push(part);
+        current.hasElement ||= insideElement;
+      }
+    }
+  }
+
+  /**
+   * @param {ParsedHtmlNode} node
+   * @param {number} nodeDepth
+   * @param {boolean} insideElement
+   */
+  function collectRenderedText(node, nodeDepth, insideElement) {
+    if (nodeDepth > MAX_PARSED_HTML_DEPTH) {
+      fail('Public HTML sanitization exceeded the parsed depth limit');
+    }
+    if (node.nodeName === '#text' && 'value' in node) {
+      appendText(node.value, insideElement);
+      return;
+    }
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+
+    const tagName = node.tagName.toLowerCase();
+    const isBoundary = RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(tagName)
+      || RAW_HTML_ISOLATED_TEXT_ELEMENTS.has(tagName);
+    if (isBoundary) {
+      finishTextGroup();
+    } else {
+      current.hasElement = true;
+    }
+
+    if (tagName !== 'template') {
+      for (const child of /** @type {ParsedHtmlNode[]} */ (node.childNodes)) {
+        collectRenderedText(child, nodeDepth + 1, true);
+      }
+    }
+    if (isBoundary) {
+      finishTextGroup();
+    }
+  }
+
+  assertParsedRawHtmlUrlAttributesSafe(value, config, depth);
+
+  for (const child of /** @type {ParsedHtmlNode[]} */ (fragment.childNodes)) {
+    collectRenderedText(child, 1, false);
+  }
+  finishTextGroup();
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ * }} MarkdownDestination
+ */
+
+/**
+ * @param {MarkdownDestination[]} destinations
+ * @param {number} start
+ * @param {number} end
+ */
+function addMarkdownDestination(destinations, start, end) {
+  if (end <= start) {
+    return;
+  }
+  if (end - start > MAX_MARKDOWN_DESTINATION_LENGTH) {
+    fail('Markdown destination exceeds the inspection limit');
+  }
+  if (destinations.length >= MAX_MARKDOWN_DESTINATION_COUNT) {
+    fail('Public text exceeds the Markdown destination inspection limit');
+  }
+  if (destinations.some((destination) =>
+    destination.start === start && destination.end === end
+  )) {
+    return;
+  }
+  destinations.push({ start, end });
+}
+
+/**
+ * @param {string} value
+ * @param {Uint8Array} protectedMask
+ * @param {number} start
+ * @returns {MarkdownDestination | null}
+ */
+function parseMarkdownDestinationAt(value, protectedMask, start) {
+  let cursor = start;
+  while (value[cursor] === ' ' || value[cursor] === '\t' || value[cursor] === '\n') {
+    cursor += 1;
+  }
+  if (cursor >= value.length || protectedMask[cursor]) {
+    return null;
+  }
+
+  if (value[cursor] === '<') {
+    const contentStart = cursor + 1;
+    let end = contentStart;
+    while (
+      end < value.length
+      && !protectedMask[end]
+      && value[end] !== '>'
+      && value[end] !== '\n'
+    ) {
+      end += 1;
+    }
+    return value[end] === '>' ? { start: contentStart, end } : null;
+  }
+
+  const contentStart = cursor;
+  let depth = 0;
+  while (cursor < value.length && !protectedMask[cursor]) {
+    const character = value[cursor];
+    if (character === '(') {
+      depth += 1;
+      if (depth > MAX_MARKDOWN_PARENTHESIS_DEPTH) {
+        fail('Markdown destination exceeds the parenthesis nesting limit');
+      }
+    } else if (character === ')') {
+      if (depth === 0) {
+        break;
+      }
+      depth -= 1;
+    } else if (/\s/u.test(character ?? '')) {
+      break;
+    }
+    if (cursor - contentStart >= MAX_MARKDOWN_DESTINATION_LENGTH) {
+      fail('Markdown destination exceeds the inspection limit');
+    }
+    cursor += 1;
+  }
+  return cursor === contentStart ? null : { start: contentStart, end: cursor };
+}
+
+/**
+ * @param {string} value
+ * @returns {MarkdownDestination[]}
+ */
+function scanMarkdownDestinations(value) {
+  const destinations = /** @type {MarkdownDestination[]} */ ([]);
+  const protectedMask = new Uint8Array(value.length);
+
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    if (protectedMask[cursor]) {
+      continue;
+    }
+    if (value[cursor] === ']' && value[cursor + 1] === '(') {
+      const destination = parseMarkdownDestinationAt(
+        value,
+        protectedMask,
+        cursor + 2,
+      );
+      if (destination) {
+        addMarkdownDestination(destinations, destination.start, destination.end);
+      }
+      continue;
+    }
+
+    if (value[cursor] === '<') {
+      const end = value.indexOf('>', cursor + 1);
+      if (
+        end !== -1
+        && end - cursor - 1 <= MAX_MARKDOWN_DESTINATION_LENGTH
+        && !value.slice(cursor + 1, end).includes('\n')
+        && !protectedMask.slice(cursor, end + 1).some(Boolean)
+      ) {
+        const content = value.slice(cursor + 1, end);
+        if (!/\s/u.test(content) && /[:@%&/\\~.]/u.test(content)) {
+          addMarkdownDestination(destinations, cursor + 1, end);
+        }
+        cursor = end;
+      }
+    }
+  }
+
+  let lineStart = 0;
+  while (lineStart <= value.length) {
+    const newlineIndex = value.indexOf('\n', lineStart);
+    const lineEnd = newlineIndex === -1 ? value.length : newlineIndex;
+    if (!protectedMask[lineStart]) {
+      const line = value.slice(lineStart, lineEnd);
+      const definition = line.match(/^ {0,3}\[[^\]\n]+\]:[ \t]*/u);
+      if (definition) {
+        const destination = parseMarkdownDestinationAt(
+          value,
+          protectedMask,
+          lineStart + definition[0].length,
+        );
+        if (destination && destination.end <= lineEnd) {
+          addMarkdownDestination(destinations, destination.start, destination.end);
+        }
+      }
+    }
+    if (newlineIndex === -1) {
+      break;
+    }
+    lineStart = newlineIndex + 1;
+  }
+
+  return destinations.sort((left, right) => left.start - right.start);
+}
+
+/**
+ * @param {string} value
+ * @returns {string[]}
+ */
+function percentDecodedVariants(value) {
+  const variants = [value];
+  if (!value.includes('%')) {
+    return variants;
+  }
+  if (value.length > MAX_PERCENT_ENCODED_COMPONENT_LENGTH) {
+    fail('Percent-encoded public URL component exceeds the inspection limit');
+  }
+
+  let current = value;
+  for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
+    if (INVALID_PERCENT_ESCAPE_PATTERN.test(current)) {
+      if (round === 0 || VALID_PERCENT_ESCAPE_PATTERN.test(current)) {
+        fail('Malformed percent encoding in public URL component');
+      }
+      break;
+    }
+    if (!VALID_PERCENT_ESCAPE_PATTERN.test(current)) {
+      break;
+    }
+
+    /** @type {string} */
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      fail('Malformed percent encoding in public URL component');
+    }
+    if (decoded === current) {
+      break;
+    }
+    variants.push(decoded);
+    current = decoded;
+  }
+
+  if (
+    VALID_PERCENT_ESCAPE_PATTERN.test(current)
+    && !INVALID_PERCENT_ESCAPE_PATTERN.test(current)
+  ) {
+    fail('Percent-encoded public URL component exceeds the decoding limit');
+  }
+
+  return variants;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function encodeSanitizedDecodedUrlComponent(value) {
+  if (value.includes(REDACTED_LOCAL_PATH)) {
+    return REDACTED_LOCAL_PATH;
+  }
+
+  return encodeURIComponent(value)
+    .replace(/[!'()*]/gu, (character) =>
+      `%${character.codePointAt(0)?.toString(16).toUpperCase()}`
+    )
+    .replace(/%2F/giu, '/');
+}
+
+/**
+ * @param {string} value
+ * @param {(variant: string) => string} sanitize
+ * @returns {string}
+ */
+function sanitizePercentDecodedUrlComponent(value, sanitize) {
+  const variants = percentDecodedVariants(value);
+
+  for (const [index, variant] of variants.entries()) {
+    const sanitized = sanitize(variant);
+    if (sanitized === variant) {
+      continue;
+    }
+    return index === 0
+      ? sanitized
+      : encodeSanitizedDecodedUrlComponent(sanitized);
+  }
+
+  return value;
+}
+
+/**
+ * @typedef {{
+ *   allowGenericFileUriPatterns?: boolean,
+ *   allowGenericPathPatterns?: boolean,
+ * }} HomeDirectoryRedactionOptions
+ */
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {HomeDirectoryRedactionOptions} [options={}]
+ * @returns {string}
+ */
+function redactHomeDirectoriesInUrlComponent(value, matchers, options = {}) {
+  return sanitizePercentDecodedUrlComponent(
+    value,
+    (variant) => redactHomeDirectoryToken(variant, matchers, options),
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function redactLocalOperationalPathsInUrlComponent(value) {
+  return sanitizePercentDecodedUrlComponent(value, redactLocalOperationalPaths);
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function redactEmailsInUrlComponent(value) {
+  return sanitizePercentDecodedUrlComponent(
+    value,
+    (variant) => variant.replace(EMAIL_PATTERN, REDACTED_EMAIL),
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {boolean}
+ */
+function containsExactHomeDirectory(value, matchers) {
+  const slashNormalized = value.replace(/\\/gu, '/');
+  for (const matcher of matchers) {
+    if (matcher.replacement !== '~') {
+      continue;
+    }
+    const prefix = matcher.prefix.replace(/\\/gu, '/');
+    const caseInsensitive = /^[A-Za-z]:\//u.test(prefix);
+    const inspectedValue = caseInsensitive ? slashNormalized.toLowerCase() : slashNormalized;
+    const inspectedPrefix = caseInsensitive ? prefix.toLowerCase() : prefix;
+    let cursor = 0;
+    while (cursor < inspectedValue.length) {
+      const start = inspectedValue.indexOf(inspectedPrefix, cursor);
+      if (start === -1) {
+        break;
+      }
+      const end = start + inspectedPrefix.length;
+      if (
+        hasHomePathBoundary(slashNormalized, start)
+        && hasHomePathFollower(slashNormalized, end)
+      ) {
+        return true;
+      }
+      cursor = start + 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeDecodedHttpPathname(value, matchers) {
+  if (
+    containsExactHomeDirectory(value, matchers)
+    || containsLocalOperationalPath(value)
+  ) {
+    return value.startsWith('/') ? `/${REDACTED_LOCAL_PATH}` : REDACTED_LOCAL_PATH;
+  }
+  return value;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeHttpPathname(value, matchers) {
+  const inspected = decodeUrlInspectionMapped(createMappedInspectionText(value)).value;
+  const sanitized = sanitizeDecodedHttpPathname(inspected, matchers);
+  if (sanitized !== inspected) {
+    return sanitized;
+  }
+  return redactEmailsInUrlComponent(value);
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeUrlComponent(value, matchers) {
+  return redactLocalOperationalPathsInUrlComponent(
+    redactHomeDirectoriesInUrlComponent(
+      redactEmailsInUrlComponent(value),
+      matchers,
+      {
+        allowGenericFileUriPatterns: true,
+        allowGenericPathPatterns: true,
+      },
+    ),
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeUrlQuery(value, matchers) {
+  if (!value) {
+    return value;
+  }
+
+  let changed = false;
+  const sanitized = value.split('&').map((segment) => {
+    if (!segment) {
+      return segment;
+    }
+
+    const separatorIndex = segment.indexOf('=');
+    if (separatorIndex === -1) {
+      const sanitizedSegment = sanitizeUrlComponent(segment, matchers);
+      if (sanitizedSegment !== segment) {
+        changed = true;
+      }
+      return sanitizedSegment;
+    }
+
+    const key = segment.slice(0, separatorIndex);
+    const rawValue = segment.slice(separatorIndex + 1);
+    const sanitizedKey = sanitizeUrlComponent(key, matchers);
+    const sanitizedValue = sanitizeUrlComponent(rawValue, matchers);
+    if (sanitizedKey !== key || sanitizedValue !== rawValue) {
+      changed = true;
+      return `${sanitizedKey}=${sanitizedValue}`;
+    }
+    return segment;
+  }).join('&');
+
+  return changed ? sanitized : value;
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function looksLikeUrlParameterList(value) {
+  return value.includes('=') && !value.startsWith('/');
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeUrlHash(value, matchers) {
+  if (!value) {
+    return value;
+  }
+
+  const queryIndex = value.indexOf('?');
+  if (queryIndex === -1) {
+    if (looksLikeUrlParameterList(value)) {
+      return sanitizeUrlQuery(value, matchers);
+    }
+    return sanitizeUrlComponent(value, matchers);
+  }
+
+  const rawRoute = value.slice(0, queryIndex);
+  const rawQuery = value.slice(queryIndex + 1);
+  const sanitizedRoute = sanitizeUrlComponent(rawRoute, matchers);
+  const sanitizedQuery = sanitizeUrlQuery(rawQuery, matchers);
+
+  return sanitizedRoute !== rawRoute || sanitizedQuery !== rawQuery
+    ? `${sanitizedRoute}?${sanitizedQuery}`
+    : value;
+}
+
+/**
+ * @typedef {{
+ *   scheme: string,
+ *   authority: { start: number, end: number } | null,
+ *   path: { start: number, end: number },
+ *   query: { start: number, end: number } | null,
+ *   fragment: { start: number, end: number } | null,
+ * }} ParsedAbsoluteUri
+ */
+
+/**
+ * @param {string} value
+ * @returns {ParsedAbsoluteUri | null}
+ */
+function parseAbsoluteUri(value) {
+  const schemeEnd = findUriSchemeEnd(value, 0);
+  if (schemeEnd == null) {
+    return null;
+  }
+  const scheme = stripGitPlusPrefix(value.slice(0, schemeEnd)).toLowerCase();
+
+  const fragmentDelimiter = value.indexOf('#', schemeEnd + 1);
+  const resourceEnd = fragmentDelimiter === -1 ? value.length : fragmentDelimiter;
+  const queryDelimiter = value.indexOf('?', schemeEnd + 1);
+  const hasQuery = queryDelimiter !== -1 && queryDelimiter < resourceEnd;
+  const hierarchyEnd = hasQuery ? queryDelimiter : resourceEnd;
+  const hierarchyStart = schemeEnd + 1;
+  let pathStart = hierarchyStart;
+  let authority = null;
+
+  if (
+    (scheme === 'http' || scheme === 'https')
+    && (value[hierarchyStart] === '/' || value[hierarchyStart] === '\\')
+  ) {
+    let authorityStart = hierarchyStart;
+    while (value[authorityStart] === '/' || value[authorityStart] === '\\') {
+      authorityStart += 1;
+    }
+    let authorityEnd = authorityStart;
+    while (
+      authorityEnd < hierarchyEnd
+      && value[authorityEnd] !== '/'
+      && value[authorityEnd] !== '\\'
+    ) {
+      authorityEnd += 1;
+    }
+    authority = {
+      start: authorityStart,
+      end: authorityEnd,
+    };
+    pathStart = authorityEnd;
+  } else if (value.startsWith('//', hierarchyStart)) {
+    const authorityStart = hierarchyStart + 2;
+    const slashIndex = value.indexOf('/', authorityStart);
+    const authorityEnd = slashIndex === -1 || slashIndex > hierarchyEnd
+      ? hierarchyEnd
+      : slashIndex;
+    authority = {
+      start: authorityStart,
+      end: authorityEnd,
+    };
+    pathStart = authorityEnd;
+  }
+
+  return {
+    scheme,
+    authority,
+    path: {
+      start: pathStart,
+      end: hierarchyEnd,
+    },
+    query: hasQuery
+      ? { start: queryDelimiter + 1, end: resourceEnd }
+      : null,
+    fragment: fragmentDelimiter === -1
+      ? null
+      : { start: fragmentDelimiter + 1, end: value.length },
+  };
+}
+
+/**
+ * @param {string} value
+ * @param {ParsedAbsoluteUri} uri
+ * @returns {string}
+ */
+function stripUriUserinfo(value, uri) {
+  if (uri.authority == null) {
+    return value;
+  }
+  const authority = value.slice(uri.authority.start, uri.authority.end);
+  const atIndex = authority.lastIndexOf('@');
+  if (atIndex === -1) {
+    return value;
+  }
+  const absoluteAtIndex = uri.authority.start + atIndex;
+  return `${value.slice(0, uri.authority.start)}${value.slice(absoluteAtIndex + 1)}`;
+}
+
+/**
+ * @param {string} value
+ * @param {{ start: number, end: number } | null} range
+ * @param {(component: string) => string} sanitize
+ * @returns {{ start: number, end: number, value: string } | null}
+ */
+function sanitizeUriRange(value, range, sanitize) {
+  if (range == null || range.start === range.end) {
+    return null;
+  }
+  const component = value.slice(range.start, range.end);
+  const sanitized = sanitize(component);
+  return sanitized === component
+    ? null
+    : { ...range, value: sanitized };
+}
+
+/**
+ * @param {string} value
+ * @param {readonly { start: number, end: number, value: string }[]} replacements
+ * @returns {string}
+ */
+function replaceUriRanges(value, replacements) {
+  let replaced = value;
+  for (const replacement of [...replacements].sort((left, right) => right.start - left.start)) {
+    replaced = `${replaced.slice(0, replacement.start)}${replacement.value}${replaced.slice(replacement.end)}`;
+  }
+  return replaced;
+}
+
+/**
+ * @param {string} value
+ * @param {ParsedAbsoluteUri} uri
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeParsedUri(value, uri, matchers) {
+  const replacements = [];
+  const authorityReplacement = sanitizeUriRange(
+    value,
+    uri.authority,
+    (component) => sanitizeUrlComponent(component, matchers),
+  );
+  if (authorityReplacement?.value.includes(REDACTED_LOCAL_PATH)) {
+    return REDACTED_LOCAL_PATH;
+  }
+  if (authorityReplacement) {
+    replacements.push(authorityReplacement);
+  }
+
+  const pathReplacement = sanitizeUriRange(
+    value,
+    uri.path,
+    (component) => {
+      const sanitized = uri.scheme === 'http' || uri.scheme === 'https'
+        ? sanitizeHttpPathname(component, matchers)
+        : sanitizeUrlComponent(component, matchers);
+      const structurallyNormalized = uri.authority == null
+        ? sanitized.replace(/%3A/giu, ':').replace(/%2C/giu, ',')
+        : sanitized;
+      return component.startsWith('/') && !structurallyNormalized.startsWith('/')
+        ? `/${structurallyNormalized}`
+        : structurallyNormalized;
+    },
+  );
+  if (pathReplacement) {
+    replacements.push(pathReplacement);
+  }
+
+  const queryReplacement = sanitizeUriRange(
+    value,
+    uri.query,
+    (component) => sanitizeUrlQuery(component, matchers),
+  );
+  if (queryReplacement) {
+    replacements.push(queryReplacement);
+  }
+
+  const fragmentReplacement = sanitizeUriRange(
+    value,
+    uri.fragment,
+    (component) => sanitizeUrlHash(component, matchers),
+  );
+  if (fragmentReplacement) {
+    replacements.push(fragmentReplacement);
+  }
+
+  return replaceUriRanges(value, replacements);
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string | null}
+ */
+function redactStructurallyDecodedHttpPath(value, matchers) {
+  const inspected = inspectUrlCandidateMapped(createMappedInspectionText(value)).value;
+  const parsed = parseAbsoluteUri(inspected);
+  if (parsed == null || (parsed.scheme !== 'http' && parsed.scheme !== 'https')) {
+    return null;
+  }
+  const withoutUserinfo = stripUriUserinfo(inspected, parsed);
+  const uri = parseAbsoluteUri(withoutUserinfo);
+  if (uri == null) {
+    return null;
+  }
+  const pathname = withoutUserinfo.slice(uri.path.start, uri.path.end);
+  if (
+    !containsExactHomeDirectory(pathname, matchers)
+    && !containsLocalOperationalPath(pathname)
+  ) {
+    return null;
+  }
+
+  let safePrefix = withoutUserinfo.slice(0, uri.path.start);
+  if (uri.authority != null) {
+    const authority = withoutUserinfo.slice(uri.authority.start, uri.authority.end);
+    const sanitizedAuthority = sanitizeUrlComponent(authority, matchers);
+    if (sanitizedAuthority.includes(REDACTED_LOCAL_PATH)) {
+      return REDACTED_LOCAL_PATH;
+    }
+    safePrefix = `${withoutUserinfo.slice(0, uri.authority.start)}${sanitizedAuthority}`;
+  }
+
+  const safePath = pathname.startsWith('/')
+    ? `/${REDACTED_LOCAL_PATH}`
+    : REDACTED_LOCAL_PATH;
+  const query = uri.query == null
+    ? ''
+    : `?${sanitizeUrlQuery(
+      withoutUserinfo.slice(uri.query.start, uri.query.end),
+      matchers,
+    )}`;
+  const fragment = uri.fragment == null
+    ? ''
+    : `#${sanitizeUrlHash(
+      withoutUserinfo.slice(uri.fragment.start, uri.fragment.end),
+      matchers,
+    )}`;
+  return `${safePrefix}${safePath}${query}${fragment}`;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function sanitizeProtectedUrl(value, matchers) {
+  const structurallyRedacted = redactStructurallyDecodedHttpPath(value, matchers);
+  if (structurallyRedacted != null) {
+    return structurallyRedacted;
+  }
+
+  for (const [index, variant] of percentDecodedVariants(value).entries()) {
+    const uri = parseAbsoluteUri(variant);
+    if (uri == null) {
+      continue;
+    }
+
+    const withoutUserinfo = stripUriUserinfo(variant, uri);
+    const reparsed = parseAbsoluteUri(withoutUserinfo);
+    if (reparsed == null) {
+      return withoutUserinfo;
+    }
+    const sanitized = sanitizeParsedUri(withoutUserinfo, reparsed, matchers);
+    if (index === 0) {
+      return sanitized;
+    }
+    if (sanitized !== variant) {
+      return REDACTED_LOCAL_PATH;
+    }
+  }
+
+  return value;
+}
+
+/**
+ * @typedef {{
+ *   protectedValue: string,
+ *   protectedUrls: string[],
+ * }} ProtectedUrlState
+ */
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {ProtectedUrlState}
+ */
+function protectUrls(value, matchers) {
+  const protectedUrls = /** @type {string[]} */ ([]);
+  const protectedValue = replaceUrlCandidates(value, (match) => {
+    const placeholder = `${PROTECTED_URL_PLACEHOLDER_PREFIX}${protectedUrls.length}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`;
+    protectedUrls.push(sanitizeProtectedUrl(match, matchers));
+    return placeholder;
+  });
+
+  return {
+    protectedValue,
+    protectedUrls,
+  };
+}
+
+/**
+ * @param {string} value
+ * @param {readonly string[]} protectedUrls
+ * @returns {string}
+ */
+function restoreProtectedUrls(value, protectedUrls) {
+  let restored = value;
+
+  for (const [index, protectedUrl] of protectedUrls.entries()) {
+    restored = restored.replace(
+      `${PROTECTED_URL_PLACEHOLDER_PREFIX}${index}${PROTECTED_URL_PLACEHOLDER_SUFFIX}`,
+      protectedUrl,
+    );
+  }
+
+  return restored;
+}
+
+/**
+ * @param {string} token
+ * @param {string} prefix
+ * @param {string} replacement
+ * @returns {string}
+ */
+function replaceExactHomePrefix(token, prefix, replacement) {
+  if (!prefix) {
+    return token;
+  }
+
+  let sanitized = '';
+  let cursor = 0;
+  let changed = false;
+
+  while (cursor < token.length) {
+    const start = token.indexOf(prefix, cursor);
+    if (start === -1) {
+      break;
+    }
+
+    const end = start + prefix.length;
+    if (hasHomePathBoundary(token, start) && hasHomePathFollower(token, end)) {
+      sanitized += token.slice(cursor, start) + replacement;
+      cursor = end;
+      changed = true;
+      continue;
+    }
+
+    sanitized += token.slice(cursor, start + 1);
+    cursor = start + 1;
+  }
+
+  return changed ? sanitized + token.slice(cursor) : token;
+}
+
+/**
+ * @param {string} token
+ * @param {RegExp} pattern
+ * @param {string} replacement
+ * @returns {string}
+ */
+function replaceGenericHomePrefixPattern(token, pattern, replacement) {
+  pattern.lastIndex = 0;
+
+  let sanitized = '';
+  let cursor = 0;
+  let changed = false;
+
+  for (const match of token.matchAll(pattern)) {
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+
+    const end = start + match[0].length;
+    if (!hasHomePathBoundary(token, start) || !hasHomePathFollower(token, end)) {
+      continue;
+    }
+
+    sanitized += token.slice(cursor, start) + replacement;
+    cursor = end;
+    changed = true;
+  }
+
+  return changed ? sanitized + token.slice(cursor) : token;
+}
+
+/**
+ * @param {string} token
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {HomeDirectoryRedactionOptions} [options={}]
+ * @returns {string}
+ */
+function redactHomeDirectoryToken(token, matchers, options = {}) {
+  let sanitized = token;
+  const {
+    allowGenericFileUriPatterns = true,
+    allowGenericPathPatterns = true,
+  } = options;
+
+  for (const matcher of matchers) {
+    sanitized = replaceExactHomePrefix(sanitized, matcher.prefix, matcher.replacement);
+  }
+  if (allowGenericFileUriPatterns) {
+    for (const pattern of HOME_PATH_GENERIC_FILE_URI_PATTERNS) {
+      sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, 'file:///~');
+    }
+  }
+  if (allowGenericPathPatterns) {
+    for (const pattern of HOME_PATH_GENERIC_PATH_PATTERNS) {
+      sanitized = replaceGenericHomePrefixPattern(sanitized, pattern, '~');
+    }
+  }
+
+  return sanitized;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {string}
+ */
+function redactHomeDirectories(value, matchers) {
+  return value.replace(TOKEN_PATTERN, (token) =>
+    redactHomeDirectoryToken(token, matchers)
+  );
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isLocalPathComponentCharacter(value) {
+  return value != null && LOCAL_PATH_COMPONENT_CHARACTER_PATTERN.test(value);
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isPathSeparator(value) {
+  return value === '/' || value === '\\';
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasLocalPathComponentStart(value, index) {
+  return (
+    index === 0
+    || isPathSeparator(value[index - 1])
+    || !isLocalPathComponentCharacter(value[index - 1])
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function hasLocalPathComponentEnd(value, index) {
+  return (
+    index >= value.length
+    || isPathSeparator(value[index])
+    || !isLocalPathComponentCharacter(value[index])
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {string} component
+ * @param {number} [fromIndex=0]
+ * @returns {number}
+ */
+function findLocalPathComponent(value, component, fromIndex = 0) {
+  const lower = value.toLowerCase();
+  let index = lower.indexOf(component, fromIndex);
+
+  while (index >= 0) {
+    const end = index + component.length;
+    if (
+      hasLocalPathComponentStart(value, index)
+      && hasLocalPathComponentEnd(value, end)
+    ) {
+      return index;
+    }
+    index = lower.indexOf(component, index + 1);
+  }
+
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly string[]} components
+ * @param {number} [fromIndex=0]
+ * @returns {number}
+ */
+function findLocalPathComponentSequence(value, components, fromIndex = 0) {
+  const [firstComponent, ...remainingComponents] = components;
+  if (!firstComponent) {
+    return -1;
+  }
+
+  let start = findLocalPathComponent(value, firstComponent, fromIndex);
+  while (start >= 0) {
+    let cursor = start + firstComponent.length;
+    let matched = true;
+
+    for (const component of remainingComponents) {
+      if (!isPathSeparator(value[cursor])) {
+        matched = false;
+        break;
+      }
+
+      cursor += 1;
+      const end = cursor + component.length;
+      if (
+        value.slice(cursor, end).toLowerCase() !== component
+        || !hasLocalPathComponentEnd(value, end)
+      ) {
+        matched = false;
+        break;
+      }
+      cursor = end;
+    }
+
+    if (matched) {
+      return start;
+    }
+    start = findLocalPathComponent(value, firstComponent, start + 1);
+  }
+
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {number} [fromIndex=0]
+ * @returns {number}
+ */
+function findLocalOperationalPathMarker(value, fromIndex = 0) {
+  const candidates = [
+    findLocalPathComponent(value, '.worktrees', fromIndex),
+    findLocalPathComponentSequence(value, ['.copilot', 'session-state'], fromIndex),
+    findLocalPathComponentSequence(value, ['.psyche', 'worktrees'], fromIndex),
+  ];
+
+  return candidates
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0] ?? -1;
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function containsLocalOperationalPath(value) {
+  return findLocalOperationalPathMarker(value) >= 0;
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function isEscapedCharacter(value, index) {
+  let backslashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
+    backslashCount += 1;
+  }
+  return backslashCount % 2 === 1;
+}
+
+/**
+ * @typedef {{
+ *   contentEnd: number,
+ * }} LocalPathEnclosure
+ */
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} markerIndex
+ * @returns {LocalPathEnclosure | null}
+ */
+function findLocalPathEnclosure(value, pathStart, markerIndex) {
+  const openingIndex = pathStart - 1;
+  const openingDelimiter = value[openingIndex];
+  if (
+    openingDelimiter == null
+    || isEscapedCharacter(value, openingIndex)
+  ) {
+    return null;
+  }
+
+  const closingDelimiter = LOCAL_PATH_OPENING_DELIMITERS.get(openingDelimiter)
+    ?? (
+      LOCAL_PATH_QUOTE_DELIMITERS.has(openingDelimiter)
+        ? openingDelimiter
+        : null
+    );
+  if (!closingDelimiter) {
+    return null;
+  }
+
+  for (let index = markerIndex; index < value.length && value[index] !== '\n'; index += 1) {
+    if (
+      value[index] === closingDelimiter
+      && !isEscapedCharacter(value, index)
+      && !(
+        openingDelimiter === "'"
+        && isLocalPathComponentCharacter(value[index - 1])
+        && isLocalPathComponentCharacter(value[index + 1])
+      )
+    ) {
+      return {
+        contentEnd: index,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isLocalPathStartBoundary(value) {
+  return (
+    value == null
+    || /\s/u.test(value)
+    || value === '='
+    || value === ':'
+    || LOCAL_PATH_OPENING_DELIMITERS.has(value)
+    || LOCAL_PATH_QUOTE_DELIMITERS.has(value)
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} markerIndex
+ * @returns {boolean}
+ */
+function isConnectedLocalPathPrefix(value, pathStart, markerIndex) {
+  for (let index = pathStart; index < markerIndex; index += 1) {
+    if (!/\s/u.test(value[index])) {
+      continue;
+    }
+
+    let nextContentStart = index;
+    while (
+      nextContentStart < markerIndex
+      && /\s/u.test(value[nextContentStart])
+    ) {
+      nextContentStart += 1;
+    }
+    const remainingPrefix = value.slice(nextContentStart, markerIndex);
+    if (!remainingPrefix.includes('/') && !remainingPrefix.includes('\\')) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * @param {string} value
+ * @param {number} lowerBound
+ * @param {number} markerIndex
+ * @returns {number}
+ */
+function findExplicitLocalPathStart(value, lowerBound, markerIndex) {
+  for (let index = lowerBound; index < markerIndex; index += 1) {
+    const character = value[index];
+    const previous = value[index - 1];
+    const next = value[index + 1];
+
+    if (!isLocalPathStartBoundary(index === lowerBound ? undefined : previous)) {
+      continue;
+    }
+    if (
+      (character === '~' && isPathSeparator(next))
+      || isPathSeparator(character)
+      || (
+        /^[A-Za-z]$/u.test(character)
+        && value[index + 1] === ':'
+        && isPathSeparator(value[index + 2])
+      )
+      || (
+        character === '.'
+        && (
+          isPathSeparator(next)
+          || (next === '.' && isPathSeparator(value[index + 2]))
+        )
+      )
+    ) {
+      if (isConnectedLocalPathPrefix(value, index, markerIndex)) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {number} markerIndex
+ * @param {number} [lowerBound=0]
+ * @returns {number}
+ */
+function findLocalOperationalPathStart(value, markerIndex, lowerBound = 0) {
+  const explicitStart = findExplicitLocalPathStart(value, lowerBound, markerIndex);
+  if (explicitStart >= 0) {
+    return explicitStart;
+  }
+
+  let start = markerIndex;
+
+  while (start > lowerBound) {
+    const previous = value[start - 1];
+    if (isPathSeparator(previous) || isLocalPathComponentCharacter(previous)) {
+      start -= 1;
+      continue;
+    }
+    break;
+  }
+
+  return start;
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function hasLikelyLocalPathFileExtension(value) {
+  const finalComponent = value.split(/[\\/]/u).at(-1) ?? '';
+  return LOCAL_PATH_FILE_EXTENSION_PATTERN.test(finalComponent);
+}
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} whitespaceStart
+ * @param {number} nextContentStart
+ * @returns {boolean}
+ */
+function shouldContinueUnquotedLocalPath(
+  value,
+  pathStart,
+  whitespaceStart,
+  nextContentStart,
+) {
+  let nextContentEnd = nextContentStart;
+  while (nextContentEnd < value.length) {
+    const character = value[nextContentEnd];
+    if (
+      /\s/u.test(character)
+      || character === ','
+      || character === ';'
+      || character === '!'
+      || character === '?'
+      || character === ':'
+      || LOCAL_PATH_CLOSING_DELIMITERS.has(character)
+    ) {
+      break;
+    }
+    if (
+      character === '.'
+      && (
+        value[nextContentEnd + 1] == null
+        || /\s/u.test(value[nextContentEnd + 1])
+        || LOCAL_PATH_CLOSING_DELIMITERS.has(value[nextContentEnd + 1])
+      )
+    ) {
+      break;
+    }
+    nextContentEnd += 1;
+  }
+
+  const currentPath = value.slice(pathStart, whitespaceStart);
+  const nextContent = value.slice(nextContentStart, nextContentEnd);
+  return (
+    nextContent.includes('/')
+    || nextContent.includes('\\')
+    || (
+      !hasLikelyLocalPathFileExtension(currentPath)
+      && hasLikelyLocalPathFileExtension(nextContent)
+    )
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} markerIndex
+ * @returns {number}
+ */
+function findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex) {
+  let end = markerIndex;
+
+  while (end < value.length) {
+    const character = value[end];
+    const next = value[end + 1];
+
+    if (character === '\n' || character === '\r') {
+      break;
+    }
+    if (
+      character === ','
+      || character === ';'
+      || character === '!'
+      || character === '?'
+      || LOCAL_PATH_CLOSING_DELIMITERS.has(character)
+      || (
+        (character === '.' || character === ':')
+        && (
+          next == null
+          || /\s/u.test(next)
+          || LOCAL_PATH_CLOSING_DELIMITERS.has(next)
+        )
+      )
+    ) {
+      break;
+    }
+    if (/\s/u.test(character)) {
+      const whitespaceStart = end;
+      while (end < value.length && value[end] !== '\n' && /\s/u.test(value[end])) {
+        end += 1;
+      }
+      if (
+        end >= value.length
+        || value[end] === '\n'
+        || !shouldContinueUnquotedLocalPath(value, pathStart, whitespaceStart, end)
+      ) {
+        return whitespaceStart;
+      }
+      continue;
+    }
+
+    end += 1;
+  }
+
+  return end;
+}
+
+/**
+ * @param {string} value
+ * @returns {{ start: number, end: number }[]}
+ */
+function localOperationalPathRanges(value) {
+  const ranges = [];
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const markerIndex = findLocalOperationalPathMarker(value, cursor);
+    if (markerIndex < 0) {
+      break;
+    }
+
+    const pathStart = Math.max(
+      cursor,
+      findLocalOperationalPathStart(value, markerIndex, cursor),
+    );
+    const enclosure = findLocalPathEnclosure(value, pathStart, markerIndex);
+    const pathEnd = enclosure?.contentEnd
+      ?? findUnquotedLocalOperationalPathEnd(value, pathStart, markerIndex);
+    ranges.push({ start: pathStart, end: pathEnd });
+    cursor = pathEnd;
+  }
+
+  return ranges;
+}
+
+/**
+ * @param {string} value
+ * @param {number} pathStart
+ * @param {number} markerEnd
+ * @returns {number}
+ */
+function markdownCodeSensitivePathEnd(value, pathStart, markerEnd) {
+  const enclosure = findLocalPathEnclosure(value, pathStart, markerEnd);
+  if (enclosure != null) {
+    return enclosure.contentEnd;
+  }
+
+  let end = markerEnd;
+  while (end < value.length) {
+    const character = value[end];
+    if (
+      character == null
+      || /\s/u.test(character)
+      || /["'`()\[\]{}<>,;!?\uFFFC]/u.test(character)
+    ) {
+      break;
+    }
+    end += 1;
+  }
+  return end;
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {{start: number, end: number}[]}
+ */
+function markdownCodeSensitivePathRanges(value, matchers) {
+  const ranges = homeDirectoryDecodedRanges(value, matchers).map((range) => ({
+    start: range.start,
+    end: markdownCodeSensitivePathEnd(value, range.start, range.end),
+  }));
+  let cursor = 0;
+  while (cursor < value.length) {
+    const markerIndex = findLocalOperationalPathMarker(value, cursor);
+    if (markerIndex < 0) {
+      break;
+    }
+    const pathStart = findLocalOperationalPathStart(value, markerIndex, cursor);
+    const markerEnd = markerIndex + (
+      value.slice(markerIndex).match(
+        /^(?:\.worktrees|\.copilot[\\/]session-state|\.psyche[\\/]worktrees)/iu,
+      )?.[0].length ?? 1
+    );
+    const pathEnd = markdownCodeSensitivePathEnd(value, pathStart, markerEnd);
+    ranges.push({ start: pathStart, end: pathEnd });
+    cursor = Math.max(pathEnd, markerEnd);
+  }
+  return ranges;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function redactLocalOperationalPaths(value) {
+  const ranges = localOperationalPathRanges(value);
+  if (ranges.length === 0) {
+    return value;
+  }
+
+  let sanitized = '';
+  let cursor = 0;
+  for (const range of ranges) {
+    sanitized += `${value.slice(cursor, range.start)}${REDACTED_LOCAL_PATH}`;
+    cursor = range.end;
+  }
+  return sanitized + value.slice(cursor);
+}
+
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   value: string,
+ *   priority: number,
+ * }} SourceReplacement
+ */
+
+/**
+ * @param {SourceReplacement[]} replacements
+ * @param {string} original
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @param {string} replacement
+ * @param {number} priority
+ */
+function addMappedSourceReplacement(
+  replacements,
+  original,
+  mapped,
+  start,
+  end,
+  replacement,
+  priority,
+) {
+  if (start >= end) {
+    return;
+  }
+  const sourceRange = mappedSourceRange(mapped, start, end);
+  if (
+    original.slice(sourceRange.start, sourceRange.end)
+    === mapped.value.slice(start, end)
+  ) {
+    return;
+  }
+  replacements.push({
+    ...sourceRange,
+    value: replacement,
+    priority,
+  });
+}
+
+/**
+ * @param {string} value
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @returns {{ start: number, end: number, value: string }[]}
+ */
+function homeDirectoryDecodedRanges(value, matchers) {
+  const ranges = [];
+
+  for (const matcher of matchers) {
+    let cursor = 0;
+    while (cursor < value.length) {
+      const start = value.indexOf(matcher.prefix, cursor);
+      if (start === -1) {
+        break;
+      }
+      const end = start + matcher.prefix.length;
+      if (hasHomePathBoundary(value, start) && hasHomePathFollower(value, end)) {
+        ranges.push({ start, end, value: matcher.replacement });
+      }
+      cursor = start + 1;
+    }
+  }
+
+  for (const pattern of HOME_PATH_GENERIC_FILE_URI_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const match of value.matchAll(pattern)) {
+      const start = match.index ?? -1;
+      if (start < 0) {
+        continue;
+      }
+      const end = start + match[0].length;
+      if (hasHomePathBoundary(value, start) && hasHomePathFollower(value, end)) {
+        ranges.push({ start, end, value: 'file:///~' });
+      }
+    }
+  }
+  for (const pattern of HOME_PATH_GENERIC_PATH_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const match of value.matchAll(pattern)) {
+      const start = match.index ?? -1;
+      if (start < 0) {
+        continue;
+      }
+      const end = start + match[0].length;
+      if (hasHomePathBoundary(value, start) && hasHomePathFollower(value, end)) {
+        ranges.push({ start, end, value: '~' });
+      }
+    }
+  }
+
+  return ranges;
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {string} original
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMappedPathReplacements(mapped, original, matchers, replacements) {
+  for (const range of homeDirectoryDecodedRanges(mapped.value, matchers)) {
+    addMappedSourceReplacement(
+      replacements,
+      original,
+      mapped,
+      range.start,
+      range.end,
+      range.value,
+      1,
+    );
+  }
+  for (const range of localOperationalPathRanges(mapped.value)) {
+    addMappedSourceReplacement(
+      replacements,
+      original,
+      mapped,
+      range.start,
+      range.end,
+      REDACTED_LOCAL_PATH,
+      2,
+    );
+  }
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {ParsedAbsoluteUri} uri
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMappedHttpPathnameReplacement(
+  mapped,
+  uri,
+  matchers,
+  replacements,
+) {
+  if (uri.scheme !== 'http' && uri.scheme !== 'https') {
+    return;
+  }
+
+  const pathname = mapped.value.slice(uri.path.start, uri.path.end);
+  const sanitized = sanitizeDecodedHttpPathname(pathname, matchers);
+  if (sanitized === pathname) {
+    return;
+  }
+
+  replacements.push({
+    ...mappedSourceRange(mapped, uri.path.start, uri.path.end),
+    value: sanitized,
+    priority: 4,
+  });
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {string} original
+ * @param {SourceReplacement[]} replacements
+ */
+function collectMappedEmailReplacements(mapped, original, replacements) {
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of mapped.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+    addMappedSourceReplacement(
+      replacements,
+      original,
+      mapped,
+      start,
+      start + match[0].length,
+      REDACTED_EMAIL,
+      1,
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {Uint8Array | undefined} [entityProtectedMask]
+ * @returns {string}
+ */
+function redactDecodedHtmlEntitySensitiveText(value, config, entityProtectedMask) {
+  const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
+  const decoded = decodeMarkdownHtmlEntitiesMapped(
+    markdownDecoded,
+    entityProtectedMask,
+  );
+
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+  const matchers = buildHomeDirectoryMatchers(config);
+  if (decoded.value !== value) {
+    collectMappedEmailReplacements(decoded, value, replacements);
+
+    const candidates = scanUrlCandidates(decoded.value);
+    let cursor = 0;
+    for (const candidate of candidates) {
+      if (candidate.start > cursor) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(decoded, cursor, candidate.start),
+          value,
+          matchers,
+          replacements,
+        );
+      }
+
+      const inspectedCandidate = inspectUrlCandidateMapped(
+        sliceMappedInspectionText(decoded, candidate.start, candidate.end),
+      );
+      collectMappedEmailReplacements(
+        inspectedCandidate,
+        value,
+        replacements,
+      );
+      const uri = parseAbsoluteUri(inspectedCandidate.value);
+      if (uri != null) {
+        if (uri.authority != null) {
+          const authority = sliceMappedInspectionText(
+            inspectedCandidate,
+            uri.authority.start,
+            uri.authority.end,
+          );
+          if (containsLocalOperationalPath(authority.value)) {
+            addMappedSourceReplacement(
+              replacements,
+              value,
+              inspectedCandidate,
+              0,
+              inspectedCandidate.value.length,
+              REDACTED_LOCAL_PATH,
+              3,
+            );
+            cursor = candidate.end;
+            continue;
+          }
+        }
+
+        if (uri.scheme === 'http' || uri.scheme === 'https') {
+          collectMappedHttpPathnameReplacement(
+            inspectedCandidate,
+            uri,
+            matchers,
+            replacements,
+          );
+        } else {
+          const path = sliceMappedInspectionText(
+            inspectedCandidate,
+            uri.path.start,
+            uri.path.end,
+          );
+          if (uri.authority == null && containsLocalOperationalPath(path.value)) {
+            addMappedSourceReplacement(
+              replacements,
+              value,
+              inspectedCandidate,
+              uri.path.start,
+              uri.path.end,
+              REDACTED_LOCAL_PATH,
+              2,
+            );
+          } else {
+            collectMappedPathReplacements(
+              path,
+              value,
+              matchers,
+              replacements,
+            );
+          }
+        }
+        if (uri.query != null) {
+          collectMappedPathReplacements(
+            sliceMappedInspectionText(
+              inspectedCandidate,
+              uri.query.start,
+              uri.query.end,
+            ),
+            value,
+            matchers,
+            replacements,
+          );
+        }
+        if (uri.fragment != null) {
+          collectMappedPathReplacements(
+            sliceMappedInspectionText(
+              inspectedCandidate,
+              uri.fragment.start,
+              uri.fragment.end,
+            ),
+            value,
+            matchers,
+            replacements,
+          );
+        }
+      }
+      cursor = candidate.end;
+    }
+
+    if (cursor < decoded.value.length) {
+      collectMappedPathReplacements(
+        sliceMappedInspectionText(decoded, cursor, decoded.value.length),
+        value,
+        matchers,
+        replacements,
+      );
+    }
+  }
+  for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
+    const inspectedDestination = inspectUrlCandidateMapped(
+      sliceMappedInspectionText(
+        markdownDecoded,
+        destination.start,
+        destination.end,
+      ),
+      DecodingMode.Attribute,
+    );
+    assertNoDirectPublishableSecrets(inspectedDestination.value);
+    collectMappedEmailReplacements(
+      inspectedDestination,
+      value,
+      replacements,
+    );
+    const uri = parseAbsoluteUri(inspectedDestination.value);
+    if (uri != null) {
+      collectMappedHttpPathnameReplacement(
+        inspectedDestination,
+        uri,
+        matchers,
+        replacements,
+      );
+      if (uri.query != null) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(
+            inspectedDestination,
+            uri.query.start,
+            uri.query.end,
+          ),
+          value,
+          matchers,
+          replacements,
+        );
+      }
+      if (uri.fragment != null) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(
+            inspectedDestination,
+            uri.fragment.start,
+            uri.fragment.end,
+          ),
+          value,
+          matchers,
+          replacements,
+        );
+      }
+    } else if (
+      (
+        containsLocalOperationalPath(inspectedDestination.value)
+        || homeDirectoryDecodedRanges(inspectedDestination.value, matchers).length > 0
+      )
+    ) {
+      addMappedSourceReplacement(
+        replacements,
+        value,
+        inspectedDestination,
+        0,
+        inspectedDestination.value.length,
+        REDACTED_LOCAL_PATH,
+        4,
+      );
+    }
+  }
+  if (replacements.length === 0) {
+    return value;
+  }
+
+  const selected = /** @type {SourceReplacement[]} */ ([]);
+  for (const replacement of [...replacements].sort((left, right) =>
+    right.priority - left.priority
+    || (right.end - right.start) - (left.end - left.start)
+    || left.start - right.start
+  )) {
+    if (selected.some((existing) =>
+      replacement.start < existing.end && replacement.end > existing.start
+    )) {
+      continue;
+    }
+    selected.push(replacement);
+  }
+
+  let sanitized = value;
+  for (const replacement of selected.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string}
+ */
+function redactLocalPaths(value, config) {
+  const matchers = buildHomeDirectoryMatchers(config);
+  const { protectedValue, protectedUrls } = protectUrls(value, matchers);
+  const sanitized = redactLocalOperationalPaths(
+    redactHomeDirectories(protectedValue, matchers),
+  );
+
+  return restoreProtectedUrls(sanitized, protectedUrls);
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeGeneratedMarkers(value) {
+  return value.replace(GENERATED_MARKER_PATTERN, '&lt;!-- psyche-bead-sync:v1');
+}
+
+/**
+ * @param {string} value
+ * @returns {string | null}
+ */
+function normalizeMultilineText(value) {
+  const normalized = value
+    .replace(/\r\n?/gu, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/gu, ''))
+    .join('\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+
+  return normalized || null;
+}
+
+/**
+ * @param {string | null | undefined} value
+ * @param {string} fieldName
+ * @param {SanitizePublicTextConfig} config
+ * @returns {string}
+ */
+function sanitizeRequiredInlineText(value, fieldName, config) {
+  const sanitized = sanitizePublicText(value, config);
+  const inline = sanitized == null ? null : sanitized.replace(/\s+/gu, ' ').trim();
+  if (!inline) {
+    fail(`Public bead field "${fieldName}" must not be empty`);
+  }
+  return inline;
+}
+
+/**
+ * @param {string | null | undefined} value
+ * @param {string} fieldName
+ * @param {SanitizePublicTextConfig} config
+ * @returns {string | null}
+ */
+function sanitizeOptionalInlineText(value, fieldName, config) {
+  const sanitized = sanitizePublicText(value, config);
+  return sanitized == null ? null : sanitized.replace(/\s+/gu, ' ').trim() || null;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} fieldName
+ * @param {SanitizePublicTextConfig} config
+ * @returns {string[]}
+ */
+function sanitizeStringList(value, fieldName, config) {
+  if (value == null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    fail(`Public bead field "${fieldName}" must be an array`);
+  }
+
+  const sanitized = /** @type {string[]} */ ([]);
+  const seen = new Set();
+  for (const entry of value) {
+    const item = sanitizeRequiredInlineText(entry, fieldName, config);
+    if (seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    sanitized.push(item);
+  }
+  return sanitized;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {BeadPriority}
+ */
+function normalizePriority(value) {
+  return normalizeBeadPriority(value, 'Public bead field "priority"');
+}
+
+/**
+ * @typedef {{
+ *   value: string,
+ *   sourceNodeIds: number[],
+ * }} RenderedMarkdownProjection
+ */
+
+/**
+ * @param {string} value
+ * @returns {RenderedMarkdownProjection}
+ */
+function buildRenderedMarkdownProjection(value) {
+  const tree = /** @type {MdastNode} */ (fromMarkdown(value, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  }));
+  const parts = /** @type {string[]} */ ([]);
+  const sourceNodeIds = /** @type {number[]} */ ([]);
+  let projectionLength = 0;
+  let lastCharacter = '';
+  let markdownNodeCount = 0;
+  let htmlNodeCount = 0;
+  let sourceNodeIdCounter = 0;
+  let suppressedOptionLabelDepth = 0;
+
+  /**
+   * @returns {number}
+   */
+  function nextSourceNodeId() {
+    sourceNodeIdCounter += 1;
+    return sourceNodeIdCounter;
+  }
+
+  /**
+   * @param {string} visibleText
+   * @param {number} sourceNodeId
+   */
+  function appendVisibleText(visibleText, sourceNodeId) {
+    if (!visibleText) {
+      return;
+    }
+    projectionLength += visibleText.length;
+    if (projectionLength > MAX_RENDERED_TEXT_PROJECTION_LENGTH) {
+      fail('Rendered Markdown text exceeds the projection length limit');
+    }
+    parts.push(visibleText);
+    for (let index = 0; index < visibleText.length; index += 1) {
+      sourceNodeIds.push(sourceNodeId);
+    }
+    lastCharacter = visibleText.at(-1) ?? lastCharacter;
+  }
+
+  function appendBoundary() {
+    if (lastCharacter && lastCharacter !== '\uFFFC') {
+      appendVisibleText('\uFFFC', 0);
+    }
+  }
+
+  /**
+   * @param {string} html
+   */
+  function appendRenderedHtml(html) {
+    const fragment = parsePublicHtmlFragment(html);
+    /** @type {{node: ParsedHtmlNode, depth: number, exit: boolean}[]} */
+    const pending = [];
+    for (let index = fragment.childNodes.length - 1; index >= 0; index -= 1) {
+      const child = fragment.childNodes[index];
+      if (child != null) {
+        pending.push({ node: child, depth: 1, exit: false });
+      }
+    }
+
+    while (pending.length > 0) {
+      const entry = pending.pop();
+      if (entry == null) {
+        continue;
+      }
+      const { node, depth, exit } = entry;
+      if (exit) {
+        if (
+          isParsedHtmlElement(node)
+          && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(node.tagName.toLowerCase())
+        ) {
+          appendBoundary();
+        }
+        continue;
+      }
+
+      htmlNodeCount += 1;
+      if (htmlNodeCount > MAX_RENDERED_MARKDOWN_HTML_NODE_COUNT) {
+        fail('Rendered Markdown HTML exceeds the parsed node limit');
+      }
+      if (depth > MAX_PARSED_HTML_DEPTH) {
+        fail('Rendered Markdown HTML exceeds the parsed depth limit');
+      }
+      if (node.nodeName === '#text' && 'value' in node) {
+        appendVisibleText(node.value, nextSourceNodeId());
+        continue;
+      }
+      if (!isParsedHtmlElement(node)) {
+        continue;
+      }
+
+      const tagName = node.tagName.toLowerCase();
+      const isBoundary = RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(tagName);
+      if (isBoundary) {
+        appendBoundary();
+      }
+      if (tagName === 'img') {
+        const alt = node.attrs.find((attribute) =>
+          attribute.name.toLowerCase() === 'alt'
+        )?.value;
+        if (alt) {
+          appendVisibleText(alt, nextSourceNodeId());
+        }
+      }
+      const visibleControlText = parsedHtmlVisibleControlText(node);
+      if (visibleControlText) {
+        appendVisibleText(visibleControlText, nextSourceNodeId());
+      }
+      if (RAW_HTML_HIDDEN_TEXT_ELEMENTS.has(tagName)) {
+        if (isBoundary) {
+          appendBoundary();
+        }
+        continue;
+      }
+      if (parsedHtmlOptionLabelSuppressesDescendants(node)) {
+        continue;
+      }
+
+      pending.push({ node, depth, exit: true });
+      const children = parsedHtmlChildren(node);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child != null) {
+          pending.push({ node: child, depth: depth + 1, exit: false });
+        }
+      }
+    }
+  }
+
+  /**
+   * @typedef {{
+   *   node: MdastNode,
+   *   depth: number,
+   *   parentType: string | null,
+   *   exit: boolean,
+   * }} MarkdownProjectionEntry
+   */
+  /** @type {MarkdownProjectionEntry[]} */
+  const pending = [{
+    node: tree,
+    depth: 0,
+    parentType: null,
+    exit: false,
+  }];
+
+  while (pending.length > 0) {
+    const entry = pending.pop();
+    if (entry == null) {
+      continue;
+    }
+    const { node, depth, parentType, exit } = entry;
+    const isBlock = MARKDOWN_BLOCK_NODES.has(node.type)
+      || (node.type === 'html' && parentType === 'root');
+    if (exit) {
+      if (isBlock) {
+        appendBoundary();
+      }
+      continue;
+    }
+
+    markdownNodeCount += 1;
+    if (markdownNodeCount > MAX_RENDERED_MARKDOWN_NODE_COUNT) {
+      fail('Rendered Markdown exceeds the AST node limit');
+    }
+    if (depth > MAX_RENDERED_MARKDOWN_DEPTH) {
+      fail('Rendered Markdown exceeds the AST depth limit');
+    }
+    if (isBlock) {
+      appendBoundary();
+    }
+
+    if (
+      (node.type === 'text' || node.type === 'inlineCode' || node.type === 'code')
+      && typeof node.value === 'string'
+    ) {
+      if (suppressedOptionLabelDepth === 0) {
+        appendVisibleText(node.value, nextSourceNodeId());
+      }
+    } else if (
+      (node.type === 'image' || node.type === 'imageReference')
+      && typeof node.alt === 'string'
+    ) {
+      if (suppressedOptionLabelDepth === 0) {
+        appendVisibleText(node.alt, nextSourceNodeId());
+      }
+    } else if (node.type === 'html' && typeof node.value === 'string') {
+      const closingTagName = standaloneRawHtmlClosingTagName(node.value);
+      if (
+        closingTagName != null
+        && RAW_HTML_OPTION_LABEL_EXPLICIT_CLOSE_TAGS.has(closingTagName)
+        && suppressedOptionLabelDepth > 0
+      ) {
+        suppressedOptionLabelDepth -= 1;
+      }
+
+      const openingElement = standaloneRawHtmlOpeningElement(node.value);
+      if (
+        openingElement != null
+        && RAW_HTML_OPTION_LABEL_IMPLICIT_CLOSE_TAGS.has(openingElement.tagName.toLowerCase())
+        && suppressedOptionLabelDepth > 0
+      ) {
+        suppressedOptionLabelDepth -= 1;
+      }
+
+      if (suppressedOptionLabelDepth === 0) {
+        appendRenderedHtml(node.value);
+      }
+
+      if (
+        openingElement != null
+        && parsedHtmlOptionLabelSuppressesDescendants(openingElement)
+      ) {
+        suppressedOptionLabelDepth += 1;
+      }
+    } else if (node.type === 'break') {
+      appendBoundary();
+    }
+
+    const children = Array.isArray(node.children) ? node.children : [];
+    if (children.length > 0 || isBlock) {
+      pending.push({
+        node,
+        depth,
+        parentType,
+        exit: true,
+      });
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child != null) {
+          pending.push({
+            node: child,
+            depth: depth + 1,
+            parentType: node.type,
+            exit: false,
+          });
+        }
+      }
+    }
+  }
+
+  let projectedValue = parts.join('');
+  if (projectedValue.endsWith('\uFFFC')) {
+    projectedValue = projectedValue.slice(0, -1);
+    sourceNodeIds.pop();
+  }
+  return { value: projectedValue, sourceNodeIds };
+}
+
+/**
+ * @param {RenderedMarkdownProjection} projection
+ * @param {number} start
+ * @param {number} end
+ * @param {'email' | 'local path'} kind
+ */
+function assertSensitiveProjectionRangeSafe(projection, start, end, kind) {
+  let sourceNodeId = 0;
+  for (let index = start; index < end; index += 1) {
+    const candidate = projection.sourceNodeIds[index] ?? 0;
+    if (candidate === 0) {
+      continue;
+    }
+    if (sourceNodeId === 0) {
+      sourceNodeId = candidate;
+      continue;
+    }
+    if (candidate !== sourceNodeId) {
+      fail(`Publishable sensitive content spans Markdown nodes: ${kind}`);
+    }
+  }
+  fail(`Public Markdown sanitization invariant failed: ${kind} remains within one node`);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {boolean} [validateRedactableContent=true]
+ */
+function assertRenderedMarkdownSensitiveTextSafe(
+  value,
+  config,
+  validateRedactableContent = true,
+) {
+  const projection = buildRenderedMarkdownProjection(value);
+  assertNoDirectPublishableSecrets(projection.value);
+  assertNoEncodedUrlSecrets(projection.value, true);
+  assertSafeDataUrisInText(projection.value, config, 0);
+
+  if (!validateRedactableContent) {
+    return;
+  }
+
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of projection.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start >= 0) {
+      assertSensitiveProjectionRangeSafe(
+        projection,
+        start,
+        start + match[0].length,
+        'email',
+      );
+    }
+  }
+
+  const matchers = buildHomeDirectoryMatchers(config);
+  for (const range of markdownCodeSensitivePathRanges(projection.value, matchers)) {
+    assertSensitiveProjectionRangeSafe(
+      projection,
+      range.start,
+      range.end,
+      'local path',
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ */
+function assertNoDirectPublishableSecrets(value) {
+  if (GITHUB_TOKEN_PATTERN.test(value)) {
+    fail('Publishable GitHub token detected');
+  }
+  if (PRIVATE_KEY_PATTERN.test(value)) {
+    fail('Publishable private key detected');
+  }
+  if (API_KEY_ASSIGNMENT_PATTERN.test(value)) {
+    fail('Publishable API key assignment detected');
+  }
+  if (CREDENTIAL_ASSIGNMENT_PATTERN.test(value)) {
+    fail('Publishable credential assignment detected');
+  }
+}
+
+/**
+ * Keeps direct source inspection from joining separate Markdown blocks. The
+ * final rendered-text projection remains authoritative for visible adjacency.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function maskMarkdownBlankLineBoundaries(value) {
+  return value.replace(/\n(?=[\t ]*\r?\n)/gu, '\uFFFC');
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ */
+function assertMarkdownCodeTextSafe(value, config) {
+  assertPublicTextInspectionLength(value);
+  const decoded = decodeMarkdownCodeInspectionMapped(value);
+  for (const variant of new Set([value, decoded.value])) {
+    assertNoDirectPublishableSecrets(variant);
+    assertNoEncodedUrlSecrets(variant, true);
+    assertSafeDataUrisInText(variant, config, 0);
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {boolean} [rejectDirectUserinfo=false]
+ * @param {Uint8Array | undefined} [entityProtectedMask]
+ */
+function assertNoEncodedUrlSecrets(
+  value,
+  rejectDirectUserinfo = false,
+  entityProtectedMask,
+) {
+  assertNoCredentialUrlReferences(value, false, rejectDirectUserinfo);
+  const decodedText = decodeHtmlEntitiesMapped(
+    createMappedInspectionText(value),
+    entityProtectedMask,
+  );
+  if (decodedText.value !== value) {
+    assertNoDirectPublishableSecrets(decodedText.value);
+  }
+
+  for (const candidate of scanUrlCandidates(decodedText.value)) {
+    const mappedCandidate = sliceMappedInspectionText(
+      decodedText,
+      candidate.start,
+      candidate.end,
+    );
+    const inspectedCandidate = inspectUrlCandidateMapped(mappedCandidate);
+    const candidateWasDecoded = inspectedCandidate.value !== candidate.value;
+    if (candidateWasDecoded) {
+      assertNoDirectPublishableSecrets(inspectedCandidate.value);
+    }
+
+    const uri = parseAbsoluteUri(inspectedCandidate.value);
+    if (uri == null) {
+      continue;
+    }
+
+    const components = [
+      uri.authority == null
+        ? null
+        : {
+            kind: 'authority',
+            value: inspectedCandidate.value.slice(
+              uri.authority.start,
+              uri.authority.end,
+            ),
+          },
+      {
+        kind: 'path',
+        value: inspectedCandidate.value.slice(uri.path.start, uri.path.end),
+      },
+      uri.query == null
+        ? null
+        : {
+            kind: 'query',
+            value: inspectedCandidate.value.slice(uri.query.start, uri.query.end),
+          },
+      uri.fragment == null
+        ? null
+        : {
+            kind: 'fragment',
+            value: inspectedCandidate.value.slice(
+              uri.fragment.start,
+              uri.fragment.end,
+            ),
+          },
+    ].filter((component) => component != null);
+
+    for (const component of components) {
+      assertNoDirectPublishableSecrets(component.value);
+      if (component.kind !== 'authority') {
+        continue;
+      }
+      const atIndex = component.value.lastIndexOf('@');
+      if (atIndex === -1) {
+        continue;
+      }
+      const userinfo = component.value.slice(0, atIndex);
+      if (
+        rejectDirectUserinfo
+        || decodedText.value !== value
+        || candidateWasDecoded
+        || /[\[\]{}<>"'`\\]/u.test(userinfo)
+      ) {
+        fail('Publishable URL credentials detected');
+      }
+    }
+  }
+}
+
+/**
+ * @param {MappedInspectionText} markdownDecoded
+ * @param {SanitizePublicTextConfig | null | undefined} [config]
+ * @param {number} [depth]
+ */
+function assertNoMarkdownDestinationSecrets(markdownDecoded, config = {}, depth = 0) {
+  for (const destination of scanMarkdownDestinations(markdownDecoded.value)) {
+    const rawDestination = sliceMappedInspectionText(
+      markdownDecoded,
+      destination.start,
+      destination.end,
+    );
+    assertNoCredentialUrlReferences(rawDestination.value, true);
+    const inspectedDestination = inspectUrlCandidateMapped(
+      rawDestination,
+      DecodingMode.Attribute,
+    );
+    assertNoDirectPublishableSecrets(inspectedDestination.value);
+    if (inspectedDestination.value.toLowerCase().startsWith('data:')) {
+      assertSafeDataUriCandidate(inspectedDestination.value, config, depth);
+    }
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} [config]
+ * @param {number} [depth]
+ * @param {Uint8Array | undefined} [entityProtectedMask]
+ */
+function assertNoMarkdownReconstructedSecrets(
+  value,
+  config = {},
+  depth = 0,
+  entityProtectedMask,
+) {
+  const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
+  if (markdownDecoded.value !== value) {
+    const decoded = decodeMarkdownHtmlEntitiesMapped(
+      markdownDecoded,
+      entityProtectedMask,
+    );
+    assertNoDirectPublishableSecrets(decoded.value);
+    assertNoEncodedUrlSecrets(
+      markdownDecoded.value,
+      true,
+      entityProtectedMask == null
+        ? undefined
+        : mappedSourceProtectionMask(markdownDecoded, entityProtectedMask),
+    );
+  }
+  assertNoMarkdownDestinationSecrets(markdownDecoded, config, depth);
+}
+
+/**
+ * @param {string} value
+ */
+export function assertNoPublishableSecrets(value) {
+  if (typeof value !== 'string') {
+    fail('assertNoPublishableSecrets expected a string');
+  }
+
+  if (!value) {
+    return;
+  }
+
+  assertPublicTextInspectionLength(value);
+  const protectedSource = protectOriginalMarkdownCode(value);
+  const protectedValue = protectedSource.value;
+  assertParsedRawHtmlSourceSafe(protectedValue, {});
+  const entityProtectedMask = rawHtmlRewriteMask(
+    protectedValue,
+    parsePublicHtmlFragment(protectedValue),
+  );
+  assertSafeDataUrisInText(
+    maskProtectedHtmlEntityStarts(protectedValue, entityProtectedMask),
+    {},
+    0,
+  );
+  const sourceInspection = maskMarkdownBlankLineBoundaries(protectedValue);
+  assertNoDirectPublishableSecrets(sourceInspection);
+  assertNoEncodedUrlSecrets(sourceInspection, true, entityProtectedMask);
+  assertNoMarkdownReconstructedSecrets(sourceInspection, {}, 0, entityProtectedMask);
+  assertRenderedMarkdownSensitiveTextSafe(value, {}, false);
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig} [config={}]
+ */
+export function assertNoSensitiveMarkdownReconstruction(value, config = {}) {
+  if (typeof value !== 'string') {
+    fail('assertNoSensitiveMarkdownReconstruction expected a string');
+  }
+  if (!value) {
+    return;
+  }
+  assertPublicTextInspectionLength(value);
+  assertNoPublishableSecrets(value);
+  assertRenderedMarkdownSensitiveTextSafe(value, config);
+}
+
+/**
+ * @param {string | null | undefined} value
+ * @param {SanitizePublicTextConfig} [config={}]
+ * @returns {string | null}
+ */
+export function sanitizePublicText(value, config = {}) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value !== 'string') {
+    fail('sanitizePublicText expected a string when present');
+  }
+  assertPublicTextInspectionLength(value);
+  const protectedSource = protectOriginalMarkdownCode(value, config, true);
+  let sanitized = protectedSource.value.replace(/\r\n?/gu, '\n');
+  sanitized = rewriteRawHtmlFromParsedSource(sanitized, config, 0);
+  assertParsedRawHtmlUrlAttributesSafe(sanitized, config, 0);
+  assertParsedRawHtmlSourceSafe(sanitized, config);
+  assertParsedRawHtmlSafe(sanitized, config, 0);
+  const entityProtectedMask = rawHtmlRewriteMask(
+    sanitized,
+    parsePublicHtmlFragment(sanitized),
+  );
+  assertSafeDataUrisInText(
+    maskProtectedHtmlEntityStarts(sanitized, entityProtectedMask),
+    config,
+    0,
+  );
+  assertNoEncodedUrlSecrets(sanitized, false, entityProtectedMask);
+  assertNoMarkdownReconstructedSecrets(
+    sanitized,
+    config,
+    0,
+    entityProtectedMask,
+  );
+  sanitized = redactDecodedHtmlEntitySensitiveText(
+    sanitized,
+    config,
+    entityProtectedMask,
+  );
+  sanitized = replaceUrlCandidates(sanitized, (url) => {
+    const uri = parseAbsoluteUri(url);
+    return uri == null ? url : stripUriUserinfo(url, uri);
+  });
+  sanitized = sanitized.replace(EMAIL_PATTERN, REDACTED_EMAIL);
+  sanitized = redactLocalPaths(sanitized, config);
+  assertNoPublishableSecrets(sanitized);
+  sanitized = escapeGeneratedMarkers(sanitized);
+  const normalized = normalizeMultilineText(sanitized);
+  if (normalized == null) {
+    return null;
+  }
+  const restored = protectedSource.restore(normalized);
+  assertRenderedMarkdownSensitiveTextSafe(restored, config);
+  return restored;
+}
+
+/**
+ * @param {ParsedBead} bead
+ * @param {SanitizePublicTextConfig} [config={}]
+ * @returns {PublicBead}
+ */
+export function toPublicBead(bead, config = {}) {
+  if (!bead || typeof bead !== 'object' || Array.isArray(bead)) {
+    fail('toPublicBead expected a Beads record object');
+  }
+
+  return {
+    id: sanitizeRequiredInlineText(bead.id, 'id', config),
+    title: sanitizeRequiredInlineText(bead.title, 'title', config),
+    description: sanitizePublicText(bead.description, config),
+    design: sanitizePublicText(bead.design, config),
+    specId: sanitizePublicText(bead.specId, config),
+    acceptanceCriteria: sanitizePublicText(bead.acceptanceCriteria, config),
+    notes: sanitizePublicText(bead.notes, config),
+    status: sanitizeRequiredInlineText(bead.status, 'status', config),
+    priority: normalizePriority(bead.priority),
+    type: sanitizeRequiredInlineText(bead.type, 'type', config),
+    blocked: bead.blocked === true,
+    labels: sanitizeStringList(bead.labels, 'labels', config),
+    parentId: sanitizeOptionalInlineText(bead.parentId, 'parentId', config),
+    blockedByIds: sanitizeStringList(bead.blockedByIds, 'blockedByIds', config),
+    githubAssignee: sanitizeOptionalInlineText(bead.githubAssignee, 'githubAssignee', config),
+    createdAt: sanitizeRequiredInlineText(bead.createdAt, 'createdAt', config),
+    updatedAt: sanitizeRequiredInlineText(bead.updatedAt, 'updatedAt', config),
+    closedAt: sanitizeOptionalInlineText(bead.closedAt, 'closedAt', config),
+  };
+}

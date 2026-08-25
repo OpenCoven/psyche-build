@@ -1,7 +1,10 @@
 # Psyche Build support matrix
 
-**Status:** Active release contract  
-**Applies to:** planned `v0.0.1` unless a later release document supersedes it  
+**Status:** Active release contract
+
+**Applies to:** released `v0.0.1` and current post-release `main` unless a later
+release document supersedes it
+
 **Roadmap:** [ROADMAP.md](./ROADMAP.md)
 
 This document defines what Psyche Build may claim as supported. A feature is
@@ -25,7 +28,7 @@ contract, executable validation, and an owned recovery path.
 
 | Surface | `v0.0.1` status | Contract |
 |---|---|---|
-| macOS native application | **Planned public supported surface** after #194 closes | Signed and notarized Apple Silicon and Intel DMGs, checksums, stable GitHub Release, and native Homebrew Cask |
+| macOS native application | **Supported** | Signed and notarized Apple Silicon and Intel DMGs, checksums, stable [GitHub Release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1), and native [Homebrew Cask](https://github.com/OpenCoven/homebrew-tap/blob/main/Casks/psyche-build.rb) |
 | TUI / Node CLI from source checkout | **Source-supported** | Contributor/operator interface invoked from the repository checkout; its package archive is validated |
 | npm package | **Unavailable** | `psyche-build` is not published as an npm release for `v0.0.1` |
 | iOS application | **Planned internal beta pending #200** | No live TestFlight availability is claimed until an immutable distributed build and physical-device acceptance are linked from #200 |
@@ -37,32 +40,31 @@ contract, executable validation, and an owned recovery path.
 | Browser-hosted application | **Unavailable** | Psyche Build is not currently a hosted web product |
 | Cloud execution / hosted terminals | **Planned** | Future work only; not required for local use or the first release |
 
-Until [#194](https://github.com/OpenCoven/psyche-build/issues/194)
-closes with retained distribution evidence, public copy must describe the
-macOS installation path as pending rather than already available.
+The `v0.0.1` macOS release was published on 2026-08-23 from commit
+`57c6c71bd5264fde960b062e95de278c8438c94f`. Publication evidence includes the
+successful
+[release workflow](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508),
+the immutable release assets, and the public tap Cask. [#194](https://github.com/OpenCoven/psyche-build/issues/194)
+and [#203](https://github.com/OpenCoven/psyche-build/issues/203) are closed.
 
 The product contract keeps iOS-only failures off an explicitly selected
 desktop-only macOS release while retaining shared validation and every iOS gate
-for coordinated releases. The offline workflow contract is implemented, but
-[#203](https://github.com/OpenCoven/psyche-build/issues/203) remains open pending
-live desktop-only dry-run evidence: both `build-macos` matrix jobs must succeed,
-`upload-ios` is `skipped`, `publish` succeeds after `release` environment
-approval, and the Homebrew notification succeeds. Until that evidence is
-retained, the macOS-only path is not live-ready; iOS remains a separate planned
-surface rather than a macOS prerequisite.
+for coordinated releases. The verified desktop-only publication skipped iOS
+distribution while preserving shared validation. iOS remains a separate
+planned surface rather than a macOS prerequisite.
 
 ## Core capability contract
 
 | Capability | macOS / source status | iOS status | Notes |
 |---|---|---|---|
-| Open and manage explicit projects | Supported after release acceptance / source-supported | Planned observation pending #200 | Project identity and canonical scope must be proven |
-| Plain terminal panes | Supported after release acceptance / source-supported | Planned control where wired | Does not require an agent CLI |
-| Agent-backed panes | Supported after release acceptance / source-supported | Planned observation/control where wired | Requires an installed supported launcher; absence must not disable plain terminals |
-| Git worktree isolation | Supported after release acceptance / source-supported | Planned observation | Cleanup remains explicit; a pane close must not silently delete the only copy of work |
-| Multi-project cockpit | Supported after release acceptance / source-supported | Planned workspace view | Project ownership and active scope remain explicit |
-| File browsing and bounded diff inspection | Supported after release acceptance / source-supported | Not a first mobile-beta claim unless separately accepted | Large content must remain bounded |
+| Open and manage explicit projects | Supported / source-supported | Planned observation pending #200 | Project identity and canonical scope must be proven |
+| Plain terminal panes | Supported / source-supported | Planned control where wired | Does not require an agent CLI |
+| Agent-backed panes | Supported / source-supported | Planned observation/control where wired | Requires an installed supported launcher; absence must not disable plain terminals |
+| Git worktree isolation | Supported / source-supported | Planned observation | Cleanup remains explicit; a pane close must not silently delete the only copy of work |
+| Multi-project cockpit | Supported / source-supported | Planned workspace view | Project ownership and active scope remain explicit |
+| File browsing and bounded diff inspection | Supported / source-supported | Not a first mobile-beta claim unless separately accepted | Large content must remain bounded |
 | Ritual discovery and launch | Supported from source where current paths are accepted | Blocked pending #192 live-path repair | Fixtures or simulator menus do not establish production support |
-| Merge, pull request, and cleanup workflows | Supported after release acceptance / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
+| Merge, pull request, and cleanup workflows | Supported / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
 | Pane/browser control over MCP | Source-supported bounded interface | Not a direct mobile claim | Requires project scope, exact generations, leases, approvals where necessary, receipts, and revocation |
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
 | Bonjour host discovery | Not a desktop product claim | Planned pending #193 | Local discovery only; not the remote-connectivity architecture |
@@ -147,8 +149,8 @@ or a generated artifact alone is insufficient.
 
 ## Current known deferrals
 
-The following are not product prerequisites for `v0.0.1` unless they expose a
-shared defect in the supported macOS path:
+The following were not prerequisites for `v0.0.1` and remain post-release work
+unless they expose a shared defect in the supported macOS path:
 
 - internal, public, or external iOS distribution and mobile feature completion;
 - remote/off-LAN companion transport;
@@ -160,10 +162,6 @@ shared defect in the supported macOS path:
 - team collaboration;
 - marketplace/plugin behavior;
 - complete Threads and AgentFS convergence.
-
-[#203](https://github.com/OpenCoven/psyche-build/issues/203) is separately P0
-because it requires live proof that the offline workflow contract works under
-protected release conditions; it does not make iOS a product prerequisite.
 
 ## Changing this contract
 

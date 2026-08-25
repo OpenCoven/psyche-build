@@ -138,8 +138,17 @@ describe('spawnBridgePane prompt transports', () => {
     expect(promptFiles()).toEqual([]);
   });
 
+  it('launches coven-code bare without prompt bootstrap files or prompt keys', async () => {
+    const h = await spawn('coven-code', 'Fix the failing auth tests', harness(), 'bypassPermissions');
+
+    expect(h.commands[0]).toBe('coven');
+    expect(h.commands[0]).not.toContain('PSYCHE_PROMPT_CONTENT');
+    expect(h.commands[0]).not.toContain('read');
+    expect(h.sendPromptKeys).not.toHaveBeenCalled();
+    expect(promptFiles()).toEqual([]);
+  });
+
   it.each([
-    ['coven-code', 'positional'],
     ['opencode', 'option'],
     ['amp', 'stdin'],
   ])('keeps passing the prompt on the command line for %s (%s)', async (agent) => {

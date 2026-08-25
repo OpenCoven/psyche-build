@@ -50,18 +50,15 @@ function chroma(triplet: string) {
   return Math.max(...channels) - Math.min(...channels);
 }
 
-/** Below the canonical ink-950 spread (11), so the default cannot drift to a
- *  grayscale terminal surface without the exact palette contract also failing. */
-const MIN_DEFAULT_CHROMA = 10;
+const MIN_DEFAULT_ACCENT_CHROMA = 20;
+const MAX_DEFAULT_SURFACE_CHROMA = 4;
 
 describe('theme tokens', () => {
   const { names, defaultTheme } = declaredThemes();
 
-  // The regression this file exists for: coven-purple was the default and was
-  // documented as "lives in :root, so it needs no block". A later redesign
-  // restated :root as a deliberately neutral ramp without adding the block, so
-  // the theme most windows run silently lost every surface tint while the five
-  // themes that did have blocks kept theirs.
+  // coven-purple is the persisted default, so it must keep an explicit block
+  // that pins the canonical OpenCoven UI palette rather than inheriting the
+  // unknown-theme fallback from :root.
   it.each(names)('%s has its own data-theme block', (name) => {
     expect(themeBlock(name)).not.toBeNull();
   });
@@ -77,7 +74,7 @@ describe('theme tokens', () => {
     for (const shape of shapes) expect(shape).toEqual(shapes[0]);
   });
 
-  it('pins the canonical Coven Purple palette', () => {
+  it('pins the canonical OpenCoven UI graphite palette', () => {
     const block = themeBlock('coven-purple') ?? '';
 
     expect({
@@ -93,17 +90,17 @@ describe('theme tokens', () => {
       textSoft: customProperty(block, '--text-soft'),
       muted: customProperty(block, '--muted'),
     }).toEqual({
-      rgbAccent: '154, 113, 255',
-      accent: '#9a71ff',
-      accentStrong: '#8254eb',
-      deep: '18, 13, 24',
-      surface1: '27, 21, 36',
-      surface2: '42, 34, 56',
-      surface3: '63, 53, 80',
-      terminal: '18, 13, 24',
-      text: '#f3eff7',
-      textSoft: '#bdb3cd',
-      muted: '#9c8fb3',
+      rgbAccent: '147, 134, 208',
+      accent: '#9386d0',
+      accentStrong: '#6b5bbf',
+      deep: '11, 11, 13',
+      surface1: '19, 19, 21',
+      surface2: '26, 26, 30',
+      surface3: '32, 32, 36',
+      terminal: '11, 11, 13',
+      text: '#f1eff4',
+      textSoft: '#b8b4c0',
+      muted: '#7d7883',
     });
   });
 
@@ -137,11 +134,14 @@ describe('theme tokens', () => {
     });
   });
 
-  it('keeps the default theme saturated rather than grey', () => {
+  it('keeps the default theme graphite with a visible violet accent', () => {
     const block = themeBlock(defaultTheme) ?? '';
+    const accent = block.match(/--rgb-accent:\s*([0-9,\s]+);/);
     const term = block.match(/--rgb-term:\s*([0-9,\s]+);/);
+    expect(accent).not.toBeNull();
     expect(term).not.toBeNull();
-    expect(chroma(term![1])).toBeGreaterThanOrEqual(MIN_DEFAULT_CHROMA);
+    expect(chroma(accent![1])).toBeGreaterThanOrEqual(MIN_DEFAULT_ACCENT_CHROMA);
+    expect(chroma(term![1])).toBeLessThanOrEqual(MAX_DEFAULT_SURFACE_CHROMA);
   });
 
   it('ignores commented declarations when matching custom properties', () => {

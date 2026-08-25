@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { TmuxService } from '../services/TmuxService.js';
 import {
@@ -13,8 +12,8 @@ import { sendPromptViaTmux } from './agentPromptDispatch.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
- * enabled-agents settings list, and the default-enabled set. Coven Code leads
- * because it is this project's own coding harness.
+ * enabled-agents settings list, and the default-enabled set. Coven CLI leads
+ * because Coven CLI is this project's own default agent experience.
  */
 export const AGENT_IDS = [
   'coven-code',
@@ -33,11 +32,7 @@ export const AGENT_IDS = [
 
 export type AgentName = typeof AGENT_IDS[number];
 export type PermissionMode = '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
-export type PromptTransport = 'positional' | 'option' | 'stdin' | 'send-keys';
-
-export interface AgentCommandContext {
-  covenSessionId?: string;
-}
+export type PromptTransport = 'launch-only' | 'positional' | 'option' | 'stdin' | 'send-keys';
 
 export interface AgentLaunchOption {
   id: string;
@@ -327,9 +322,9 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
   },
   'coven-code': {
     id: 'coven-code',
-    name: 'Coven Code',
+    name: 'Coven CLI',
     shortLabel: 'cv',
-    description: 'OpenCoven coding harness — Claurst-based TUI with familiar personas',
+    description: 'OpenCoven Coven CLI terminal interface',
     slugSuffix: 'coven-code',
     installTestCommand: 'command -v coven 2>/dev/null || which coven 2>/dev/null',
     commonPaths: [
@@ -339,15 +334,10 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
       ...homePath('bin/coven'),
       ...homePath('.npm-global/bin/coven'),
     ],
-    promptCommand: 'coven code',
-    promptTransport: 'positional',
-    permissionFlags: {
-      plan: '--permission-mode plan',
-      acceptEdits: '--permission-mode accept-edits',
-      bypassPermissions: '--permission-mode bypass-permissions',
-    },
+    promptCommand: 'coven',
+    promptTransport: 'launch-only',
+    permissionFlags: {},
     defaultEnabled: true,
-    resumeCommandTemplate: 'coven code --resume{permissions}',
   },
 };
 
@@ -464,27 +454,6 @@ function appendFlags(base: string, flags: string): string {
   return flags ? `${base} ${flags}` : base;
 }
 
-function isValidCovenSessionId(value: string): boolean {
-  return /^[A-Za-z0-9._:-]{1,128}$/.test(value);
-}
-
-function appendCovenSessionId(
-  agent: AgentName,
-  command: string,
-  context: AgentCommandContext | undefined
-): string {
-  const sessionId = context?.covenSessionId;
-  if (sessionId === undefined || agent !== 'coven-code') {
-    return command;
-  }
-
-  if (!isValidCovenSessionId(sessionId)) {
-    throw new Error('Coven session id contains unsupported characters');
-  }
-
-  return `${command} --session-id ${sessionId}`;
-}
-
 export function appendSlugSuffix(baseSlug: string, slugSuffix?: string): string {
   if (!slugSuffix) return baseSlug;
 
@@ -533,12 +502,11 @@ export function getPermissionFlags(
 export function buildAgentCommand(
   agent: AgentName,
   permissionMode: PermissionMode | undefined,
-  context?: AgentCommandContext
 ): string {
   const definition = AGENT_REGISTRY[agent];
   const baseCommand = definition.noPromptCommand || definition.promptCommand;
   return appendFlags(
-    appendCovenSessionId(agent, baseCommand, context),
+    baseCommand,
     getPermissionFlags(agent, permissionMode)
   );
 }
@@ -547,15 +515,17 @@ export function buildInitialPromptCommand(
   agent: AgentName,
   promptToken: string,
   permissionMode: PermissionMode | undefined,
-  context?: AgentCommandContext
 ): string {
   const definition = AGENT_REGISTRY[agent];
-  if (definition.promptTransport === 'send-keys') {
-    return buildAgentCommand(agent, permissionMode, context);
+  if (
+    definition.promptTransport === 'launch-only'
+    || definition.promptTransport === 'send-keys'
+  ) {
+    return buildAgentCommand(agent, permissionMode);
   }
 
   const baseCommand = appendFlags(
-    appendCovenSessionId(agent, definition.promptCommand, context),
+    definition.promptCommand,
     getPermissionFlags(agent, permissionMode)
   );
 
@@ -612,7 +582,6 @@ export interface LaunchAgentInPaneOptions {
   permissionMode?: PermissionMode;
   psychePaneId?: string;
   codexHookEventFile?: string;
-  generateCovenSessionId?: () => string;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
@@ -644,7 +613,6 @@ export async function launchAgentInPane(
     permissionMode,
     psychePaneId,
     codexHookEventFile,
-    generateCovenSessionId = randomUUID,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -657,8 +625,7 @@ export async function launchAgentInPane(
 
   const hasInitialPrompt = !!(prompt && prompt.trim());
   const promptTransport = getPromptTransport(agent);
-  const covenCommandContext =
-    agent === 'coven-code' ? { covenSessionId: generateCovenSessionId() } : undefined;
+  const omitsPromptDelivery = promptTransport === 'launch-only';
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
@@ -672,7 +639,7 @@ export async function launchAgentInPane(
   }
 
   let launchCommand: string;
-  if (hasInitialPrompt && !shouldSendPromptViaTmux) {
+  if (hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery) {
     // Prefer a prompt file so the prompt never has to survive shell quoting.
     let promptFilePath: string | null = null;
     try {
@@ -687,7 +654,6 @@ export async function launchAgentInPane(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
         permissionMode,
-        covenCommandContext
       )}`;
     } else {
       const escapedPrompt = prompt
@@ -699,11 +665,10 @@ export async function launchAgentInPane(
         agent,
         `"${escapedPrompt}"`,
         permissionMode,
-        covenCommandContext
       );
     }
   } else {
-    launchCommand = buildAgentCommand(agent, permissionMode, covenCommandContext);
+    launchCommand = buildAgentCommand(agent, permissionMode);
   }
 
   if (agent === 'codex') {
