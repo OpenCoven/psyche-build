@@ -1,5 +1,8 @@
 // @ts-check
 
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
 import { summarizeInventory } from './model.mjs';
 import {
   DEFAULT_ISSUE_MARKER,
@@ -17,6 +20,18 @@ import {
 } from './sanitize.mjs';
 
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
+/**
+ * @typedef {{
+ *   type: string,
+ *   value?: string,
+ *   depth?: number,
+ *   position?: {
+ *     start: {offset?: number},
+ *     end: {offset?: number},
+ *   },
+ *   children?: MdastNode[],
+ * }} MdastNode
+ */
 
 /**
  * @typedef {{
@@ -46,6 +61,7 @@ export const GITHUB_ISSUE_BODY_MAX_CODE_POINTS = 65_536;
 export const GITHUB_PROJECT_README_MAX_CODE_POINTS = 10_000;
 const CLOSED_HISTORY_TITLE_MAX_CODE_POINTS = 160;
 const PROJECT_README_TRUNCATION_SUFFIX = '...';
+const GENERATED_BOUNDARY_SENTINEL = 'psyche-generated-boundary-sentinel';
 
 /**
  * @param {string} message
@@ -128,49 +144,244 @@ function normalizeOptionalInlineText(value, fieldName) {
   return normalized || null;
 }
 /**
- * @param {string} line
+ * @param {string} value
+ * @returns {MdastNode}
+ */
+function parseMarkdown(value) {
+  return /** @type {MdastNode} */ (fromMarkdown(value, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  }));
+}
+
+/**
+ * @param {MdastNode} root
+ * @returns {MdastNode[]}
+ */
+function flattenMdast(root) {
+  const nodes = /** @type {MdastNode[]} */ ([]);
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node == null) {
+      continue;
+    }
+    nodes.push(node);
+    if (Array.isArray(node.children)) {
+      pending.push(...node.children);
+    }
+  }
+  return nodes;
+}
+
+/**
+ * @param {MdastNode} node
  * @returns {string}
  */
-function normalizeHeadingLine(line) {
-  return line.replace(/^(#{1,6})(?=\s)/u, (heading) => '#'.repeat(Math.min(heading.length + 1, 6)));
+function mdastText(node) {
+  if (typeof node.value === 'string') {
+    return node.value;
+  }
+  return Array.isArray(node.children)
+    ? node.children.map(mdastText).join('')
+    : '';
 }
 
 /**
  * @param {string} value
  * @returns {string}
  */
-function promoteHeadingsOutsideCodeFences(value) {
-  const lines = value.split('\n');
-  /** @type {string | null} */
-  let activeFence = null;
+function promoteMarkdownHeadings(value) {
+  const insertions = flattenMdast(parseMarkdown(value))
+    .filter((node) => node.type === 'heading' && (node.depth ?? 0) < 6)
+    .map((node) => node.position?.start.offset)
+    .filter((offset) => typeof offset === 'number')
+    .filter((offset) => /^(#{1,5})(?=\s)/u.test(value.slice(offset)));
 
-  const normalized = lines.map((line) => {
-    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})(.*)$/u);
-    if (fenceMatch) {
-      const [, marker, suffix] = fenceMatch;
-      if (
-        activeFence == null
-        && (marker[0] !== '`' || !suffix.includes('`'))
-      ) {
-        activeFence = marker;
-      } else if (
-        activeFence != null
-        && marker[0] === activeFence[0]
-        && marker.length >= activeFence.length
-        && /^[ \t]*$/u.test(suffix)
-      ) {
-        activeFence = null;
-      }
-      return line;
-    }
-
-    return activeFence == null ? normalizeHeadingLine(line) : line;
-  });
-
-  if (activeFence != null) {
-    normalized.push(activeFence);
+  let normalized = value;
+  for (const offset of insertions.sort((left, right) => right - left)) {
+    normalized = `${normalized.slice(0, offset)}#${
+      normalized.slice(offset)
+    }`;
   }
-  return normalized.join('\n');
+  return normalized;
+}
+
+/**
+ * @param {string} value
+ * @param {number} offset
+ * @returns {string}
+ */
+function markdownContainerContinuationPrefix(value, offset) {
+  const lineStart = value.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+  return value
+    .slice(lineStart, offset)
+    .replace(/[^\t >]/gu, ' ');
+}
+
+/**
+ * @param {string} opener
+ * @returns {string | null}
+ */
+function markdownFenceMarker(opener) {
+  const match = opener.match(/^(?:(`{3,})[^`]*|(~{3,}).*)$/u);
+  return match?.[1] ?? match?.[2] ?? null;
+}
+
+/**
+ * @param {string} value
+ * @param {MdastNode} codeNode
+ * @returns {boolean}
+ */
+function fencedCodeIsUnclosed(value, codeNode) {
+  const start = codeNode.position?.start.offset;
+  if (typeof start !== 'number') {
+    return false;
+  }
+  const continuationPrefix = markdownContainerContinuationPrefix(value, start);
+  const probe = `${value}\n${continuationPrefix}psyche-boundary-probe`;
+  const reparsedCodeNode = flattenMdast(parseMarkdown(probe)).find((node) =>
+    node.type === 'code' && node.position?.start.offset === start
+  );
+  return (reparsedCodeNode?.position?.end.offset ?? 0) > value.length;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function closeTrailingFencedCode(value) {
+  const codeNode = flattenMdast(parseMarkdown(value)).find((node) => {
+    if (
+      node.type !== 'code'
+      || node.position?.end.offset !== value.length
+      || typeof node.position.start.offset !== 'number'
+    ) {
+      return false;
+    }
+    const opener = value.slice(
+      node.position.start.offset,
+      value.indexOf('\n', node.position.start.offset) === -1
+        ? value.length
+        : value.indexOf('\n', node.position.start.offset),
+    );
+    return markdownFenceMarker(opener) != null;
+  });
+  if (codeNode == null || !fencedCodeIsUnclosed(value, codeNode)) {
+    return value;
+  }
+
+  const start = codeNode.position?.start.offset;
+  if (typeof start !== 'number') {
+    return value;
+  }
+  const openerEnd = value.indexOf('\n', start);
+  const opener = value.slice(start, openerEnd === -1 ? value.length : openerEnd);
+  const marker = markdownFenceMarker(opener);
+  if (marker == null) {
+    return value;
+  }
+  const continuationPrefix = markdownContainerContinuationPrefix(value, start);
+  return `${value}\n${continuationPrefix}${marker}`;
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function hasExternalGeneratedBoundary(value) {
+  const sentinelOffset = value.length + 2;
+  const tree = parseMarkdown(
+    `${value}\n\n## ${GENERATED_BOUNDARY_SENTINEL}`,
+  );
+  return Array.isArray(tree.children) && tree.children.some((node) =>
+    node.type === 'heading'
+    && node.depth === 2
+    && node.position?.start.offset === sentinelOffset
+    && mdastText(node) === GENERATED_BOUNDARY_SENTINEL
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {string[]}
+ */
+function rawHtmlClosureCandidates(value) {
+  const htmlNode = flattenMdast(parseMarkdown(value)).find((node) =>
+    node.type === 'html' && node.position?.end.offset === value.length
+  );
+  const start = htmlNode?.position?.start.offset;
+  if (typeof start !== 'number') {
+    return [];
+  }
+  const continuationPrefix = markdownContainerContinuationPrefix(value, start);
+  const source = value.slice(start);
+  const candidates = /** @type {string[]} */ ([]);
+  if (source.lastIndexOf('<!--') > source.lastIndexOf('-->')) {
+    candidates.push('-->');
+  }
+  if (source.lastIndexOf('<![CDATA[') > source.lastIndexOf(']]>')) {
+    candidates.push(']]>');
+  }
+  if (source.lastIndexOf('<?') > source.lastIndexOf('?>')) {
+    candidates.push('?>');
+  }
+  const rawTextTags = [...source.matchAll(
+    /<(script|pre|style|textarea)(?:\s|>|$)/giu,
+  )]
+    .map((match) => match[1]?.toLowerCase())
+    .filter((tag) => tag != null)
+    .reverse();
+  for (const tag of rawTextTags) {
+    candidates.push(`</${tag}>`);
+  }
+  if (/^<![A-Za-z]/u.test(source) && !source.includes('>')) {
+    candidates.push('>');
+  }
+  return [...new Set(candidates)].map((candidate) =>
+    `${continuationPrefix}${candidate}`
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function ensureGeneratedMarkdownBoundary(value) {
+  const bounded = closeTrailingFencedCode(value);
+  if (hasExternalGeneratedBoundary(bounded)) {
+    return bounded;
+  }
+
+  for (const closure of rawHtmlClosureCandidates(bounded)) {
+    const candidate = `${bounded}\n${closure}`;
+    if (hasExternalGeneratedBoundary(candidate)) {
+      return candidate;
+    }
+  }
+  fail('Markdown source block cannot be closed before generated sections');
+}
+
+/**
+ * @param {string} rendered
+ */
+function assertGeneratedIssueHeadings(rendered) {
+  const tree = parseMarkdown(rendered);
+  const headings = Array.isArray(tree.children)
+    ? tree.children.filter((node) => node.type === 'heading' && node.depth === 2)
+    : [];
+  for (const expected of ['Source metadata', 'Authority notice']) {
+    const expectedOffset = rendered.lastIndexOf(`## ${expected}`);
+    if (
+      expectedOffset === -1
+      || !headings.some((node) =>
+        node.position?.start.offset === expectedOffset
+        && mdastText(node) === expected
+      )
+    ) {
+      fail(`Generated issue heading "${expected}" is not a top-level Markdown heading`);
+    }
+  }
 }
 
 /**
@@ -188,15 +399,12 @@ function normalizeMarkdownBlock(value, fieldName) {
 
   const normalized = escapeGeneratedMarkers(value)
     .replace(/\r\n?/gu, '\n')
-    .split('\n')
-    .map((line) => line.replace(/[ \t]+$/gu, ''))
-    .join('\n')
-    .trim();
-  if (!normalized) {
+    .replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/gu, '');
+  if (!normalized.trim()) {
     return null;
   }
 
-  return promoteHeadingsOutsideCodeFences(normalized);
+  return ensureGeneratedMarkdownBoundary(promoteMarkdownHeadings(normalized));
 }
 
 /**
@@ -905,7 +1113,9 @@ export function renderIssueBody(bead, context = {}) {
     ),
   ];
 
-  return sections.filter(Boolean).join('\n\n');
+  const rendered = sections.filter(Boolean).join('\n\n');
+  assertGeneratedIssueHeadings(rendered);
+  return rendered;
 }
 
 /**

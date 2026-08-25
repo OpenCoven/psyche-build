@@ -27,6 +27,18 @@ import { normalizeBeadPriority } from './model.mjs';
  *   children?: MdastNode[],
  * }} MdastNode
  */
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ * }} MarkdownCodeRange
+ */
+/**
+ * @typedef {{
+ *   value: string,
+ *   restore: (value: string) => string,
+ * }} ProtectedMarkdownSource
+ */
 
 /**
  * @typedef {{
@@ -889,14 +901,14 @@ function appendMappedInspectionValue(output, sourceRanges, value, sourceRange) {
 
 /**
  * @param {string} value
- * @returns {Uint8Array}
+ * @returns {MarkdownCodeRange[]}
  */
-function markdownCodeMask(value) {
+function markdownCodeRanges(value) {
   const tree = fromMarkdown(value, {
     extensions: [gfm()],
     mdastExtensions: [gfmFromMarkdown()],
   });
-  const mask = new Uint8Array(value.length);
+  const candidateRanges = /** @type {MarkdownCodeRange[]} */ ([]);
   const pending = /** @type {MdastNode[]} */ ([tree]);
 
   while (pending.length > 0) {
@@ -916,14 +928,103 @@ function markdownCodeMask(value) {
       ) {
         fail('Markdown parser returned an invalid code source range');
       }
-      mask.fill(1, start, end);
+      candidateRanges.push({ start, end });
       continue;
     }
     if ('children' in node && Array.isArray(node.children)) {
       pending.push(...node.children);
     }
   }
-  return mask;
+
+  candidateRanges.sort((left, right) => left.start - right.start);
+  const parseInput = value.split('');
+  for (const range of candidateRanges) {
+    for (let index = range.start; index < range.end; index += 1) {
+      if (parseInput[index] !== '\n' && parseInput[index] !== '\r') {
+        parseInput[index] = ' ';
+      }
+    }
+  }
+
+  const htmlAttributeRanges = /** @type {MarkdownCodeRange[]} */ ([]);
+  const htmlFragment = parsePublicHtmlFragment(parseInput.join(''));
+  traverseParsedHtml(htmlFragment, (node) => {
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+    for (const [qualifiedName, location] of Object.entries(
+      node.sourceCodeLocation?.attrs ?? {},
+    )) {
+      const range = rawHtmlAttributeValueRange(value, location, qualifiedName);
+      if (range != null) {
+        htmlAttributeRanges.push(range);
+      }
+    }
+  });
+
+  return candidateRanges.filter((candidate) =>
+    !htmlAttributeRanges.some((attribute) =>
+      attribute.start <= candidate.start && attribute.end >= candidate.end
+    )
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {ProtectedMarkdownSource}
+ */
+function protectOriginalMarkdownCode(value) {
+  const ranges = markdownCodeRanges(value);
+  if (ranges.length === 0) {
+    return {
+      value,
+      restore: (restored) => restored,
+    };
+  }
+
+  let nonce = 0;
+  let placeholderPrefix = '';
+  do {
+    placeholderPrefix = `\uE000psyche-bead-code-${nonce}-`;
+    nonce += 1;
+  } while (value.includes(placeholderPrefix));
+
+  const protectedCode = ranges.map((range, index) => ({
+    placeholder: `${placeholderPrefix}${index}\uE001`,
+    source: value.slice(range.start, range.end),
+  }));
+
+  let protectedValue = value;
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const range = ranges[index];
+    const entry = protectedCode[index];
+    if (range == null || entry == null) {
+      fail('Markdown code protection range is missing');
+    }
+    protectedValue = `${protectedValue.slice(0, range.start)}${entry.placeholder}${
+      protectedValue.slice(range.end)
+    }`;
+  }
+
+  return {
+    value: protectedValue,
+    restore: (restored) => {
+      let result = restored;
+      for (const entry of protectedCode) {
+        const placeholderIndex = result.indexOf(entry.placeholder);
+        if (
+          placeholderIndex === -1
+          || result.indexOf(entry.placeholder, placeholderIndex + entry.placeholder.length) !== -1
+        ) {
+          fail('Markdown code placeholder was not preserved during public text processing');
+        }
+        result = `${result.slice(0, placeholderIndex)}${entry.source}${
+          result.slice(placeholderIndex + entry.placeholder.length)
+        }`;
+      }
+      return result;
+    },
+  };
 }
 
 /**
@@ -935,7 +1036,6 @@ function decodeMarkdownEscapesMapped(mapped) {
     return mapped;
   }
 
-  const protectedMask = markdownCodeMask(mapped.value);
   const output = /** @type {string[]} */ ([]);
   const sourceRanges = /** @type {SourceRange[]} */ ([]);
   let cursor = 0;
@@ -943,8 +1043,7 @@ function decodeMarkdownEscapesMapped(mapped) {
   while (cursor < mapped.value.length) {
     const next = mapped.value[cursor + 1];
     if (
-      !protectedMask[cursor]
-      && mapped.value[cursor] === '\\'
+      mapped.value[cursor] === '\\'
       && next != null
       && MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN.test(next)
     ) {
@@ -1133,13 +1232,9 @@ function decodeMarkdownHtmlEntitiesMapped(mapped, sourceProtectedMask) {
   let current = mapped;
 
   for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
-    const protectedMask = markdownCodeMask(current.value);
-    if (sourceProtectedMask != null) {
-      const mappedMask = mappedSourceProtectionMask(current, sourceProtectedMask);
-      for (let index = 0; index < protectedMask.length; index += 1) {
-        protectedMask[index] ||= mappedMask[index] ?? 0;
-      }
-    }
+    const protectedMask = sourceProtectedMask == null
+      ? undefined
+      : mappedSourceProtectionMask(current, sourceProtectedMask);
     const decoded = decodeHtmlEntitiesMappedOnce(
       current,
       protectedMask,
@@ -1150,13 +1245,9 @@ function decodeMarkdownHtmlEntitiesMapped(mapped, sourceProtectedMask) {
     current = decoded;
   }
 
-  const protectedMask = markdownCodeMask(current.value);
-  if (sourceProtectedMask != null) {
-    const mappedMask = mappedSourceProtectionMask(current, sourceProtectedMask);
-    for (let index = 0; index < protectedMask.length; index += 1) {
-      protectedMask[index] ||= mappedMask[index] ?? 0;
-    }
-  }
+  const protectedMask = sourceProtectedMask == null
+    ? undefined
+    : mappedSourceProtectionMask(current, sourceProtectedMask);
   if (decodeHtmlEntitiesMappedOnce(current, protectedMask).value !== current.value) {
     fail('HTML character reference exceeds the decoding limit');
   }
@@ -1923,24 +2014,11 @@ function assertSafeDataUrisInText(value, config, depth) {
 
 /**
  * @param {string} value
- * @returns {string}
- */
-function protectMarkdownLiteralsFromHtmlParser(value) {
-  const protectedMask = markdownCodeMask(value);
-  return Array.from({ length: value.length }, (_, index) => {
-    const character = value[index] ?? '';
-    return protectedMask[index] && character !== '\n' ? ' ' : character;
-  }).join('');
-}
-
-/**
- * @param {string} value
  */
 function parsePublicHtmlFragment(value) {
-  const parseInput = protectMarkdownLiteralsFromHtmlParser(value);
   try {
     return parseFragment(
-      parseInput,
+      value,
       { sourceCodeLocationInfo: true },
     );
   } catch (error) {
@@ -2398,7 +2476,7 @@ function rawHtmlAttributeValueRange(value, location, qualifiedName) {
  * @returns {Uint8Array}
  */
 function rawHtmlRewriteMask(value, fragment) {
-  const mask = markdownCodeMask(value);
+  const mask = new Uint8Array(value.length);
   traverseParsedHtml(fragment, (node, _depth, parentTag) => {
     const location = node.sourceCodeLocation;
     if (
@@ -2944,7 +3022,7 @@ function parseMarkdownDestinationAt(value, protectedMask, start) {
  */
 function scanMarkdownDestinations(value) {
   const destinations = /** @type {MarkdownDestination[]} */ ([]);
-  const protectedMask = markdownCodeMask(value);
+  const protectedMask = new Uint8Array(value.length);
 
   for (let cursor = 0; cursor < value.length; cursor += 1) {
     if (protectedMask[cursor]) {
@@ -4860,18 +4938,20 @@ export function assertNoPublishableSecrets(value) {
   }
 
   assertPublicTextInspectionLength(value);
+  const protectedSource = protectOriginalMarkdownCode(value);
+  const protectedValue = protectedSource.value;
   const entityProtectedMask = rawHtmlRewriteMask(
-    value,
-    parsePublicHtmlFragment(value),
+    protectedValue,
+    parsePublicHtmlFragment(protectedValue),
   );
   assertSafeDataUrisInText(
-    maskProtectedHtmlEntityStarts(value, entityProtectedMask),
+    maskProtectedHtmlEntityStarts(protectedValue, entityProtectedMask),
     {},
     0,
   );
-  assertNoDirectPublishableSecrets(value);
-  assertNoEncodedUrlSecrets(value, true, entityProtectedMask);
-  assertNoMarkdownReconstructedSecrets(value, {}, 0, entityProtectedMask);
+  assertNoDirectPublishableSecrets(protectedValue);
+  assertNoEncodedUrlSecrets(protectedValue, true, entityProtectedMask);
+  assertNoMarkdownReconstructedSecrets(protectedValue, {}, 0, entityProtectedMask);
 }
 
 /**
@@ -4887,7 +4967,8 @@ export function sanitizePublicText(value, config = {}) {
     fail('sanitizePublicText expected a string when present');
   }
   assertPublicTextInspectionLength(value);
-  let sanitized = value.replace(/\r\n?/gu, '\n');
+  const protectedSource = protectOriginalMarkdownCode(value);
+  let sanitized = protectedSource.value.replace(/\r\n?/gu, '\n');
   sanitized = rewriteRawHtmlFromParsedSource(sanitized, config, 0);
   assertParsedRawHtmlUrlAttributesSafe(sanitized, config, 0);
   assertParsedRawHtmlSafe(sanitized, config, 0);
@@ -4920,7 +5001,8 @@ export function sanitizePublicText(value, config = {}) {
   sanitized = redactLocalPaths(sanitized, config);
   assertNoPublishableSecrets(sanitized);
   sanitized = escapeGeneratedMarkers(sanitized);
-  return normalizeMultilineText(sanitized);
+  const normalized = normalizeMultilineText(sanitized);
+  return normalized == null ? null : protectedSource.restore(normalized);
 }
 
 /**

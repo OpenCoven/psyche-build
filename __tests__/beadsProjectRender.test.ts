@@ -1,5 +1,8 @@
 import os from 'node:os';
 import { readFileSync } from 'node:fs';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
 import { describe, expect, it } from 'vitest';
 
 import { buildBeadIndex, parseBeadExport } from '../scripts/beads-project-sync/model.mjs';
@@ -124,6 +127,21 @@ function renderSourceDescription(description: string): string {
     description,
   });
   return renderIssueBody(publicBead, buildContext([publicBead]));
+}
+
+function assertGeneratedIssueHeadingsAreTopLevel(rendered: string): void {
+  const tree = fromMarkdown(rendered, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  const headings = tree.children
+    .filter((node) => node.type === 'heading')
+    .map((node) => node.children
+      .map((child) => 'value' in child ? child.value : '')
+      .join(''));
+
+  expect(headings).toContain('Source metadata');
+  expect(headings).toContain('Authority notice');
 }
 
 describe('Beads project renderers', () => {
@@ -952,6 +970,53 @@ describe('Beads project renderers', () => {
     ].join('\n');
 
     expect(sanitizePublicText(safe)).toBe(safe);
+  });
+
+  it('only protects code ranges parsed from the original Markdown source', () => {
+    const source = [
+      '\\`alice&#64;example.com\\` stays visible.',
+      '\\`\\`\\`md',
+      'bob&#64;example.com',
+      '\\`\\`\\`',
+      '\\~\\~\\~md',
+      'carol&#64;example.com',
+      '\\~\\~\\~',
+      '&#96;dave&#64;example.com&#96; is not source code.',
+      '😀 Real code stays exact: `eve&#64;example.com`.',
+      'After Unicode: frank&#64;example.com.',
+    ].join('\n');
+
+    expect(sanitizePublicText(source)).toBe([
+      '\\`[redacted-email]\\` stays visible.',
+      '\\`\\`\\`md',
+      '[redacted-email]',
+      '\\`\\`\\`',
+      '\\~\\~\\~md',
+      '[redacted-email]',
+      '\\~\\~\\~',
+      '&#96;[redacted-email]&#96; is not source code.',
+      '😀 Real code stays exact: `eve&#64;example.com`.',
+      'After Unicode: [redacted-email].',
+    ].join('\n'));
+  });
+
+  it('rejects secrets inside escaped code delimiters that are visible text', () => {
+    expect(() =>
+      sanitizePublicText('\\`ghp\\_abcdefghijklmnopqrstuvwxyz123456\\`')
+    ).toThrow(/Publishable GitHub token/i);
+  });
+
+  it('restores original inline and block code exactly after all public processing', () => {
+    const source = [
+      '😀 `alice@example.com /Users/alice/private`',
+      '',
+      '> ```text',
+      '> api_key = "live-secret-value"',
+      '> https://alice:secret@example.com/private',
+      '> ```',
+    ].join('\n');
+
+    expect(sanitizePublicText(source)).toBe(source);
   });
 
   it('keeps backticks inside custom and namespaced raw HTML attributes active', () => {
@@ -1902,12 +1967,12 @@ describe('Beads project renderers', () => {
     );
   });
 
-  it('redacts complete delimiter-aware operational paths', () => {
+  it('preserves code and redacts complete delimiter-aware operational paths', () => {
     expect(
       sanitizePublicText(
         'Open `~/.worktrees/public-beads-project/秘密 roadmap.md` next.',
       ),
-    ).toBe('Open `[redacted-local-path]` next.');
+    ).toBe('Open `~/.worktrees/public-beads-project/秘密 roadmap.md` next.');
     expect(
       sanitizePublicText(
         'Plan: ".psyche/worktrees/public-beads-project/秘密 roadmap.md"; keep this note.',
@@ -2427,6 +2492,103 @@ describe('Beads project renderers', () => {
 
     expect(countMatches(rendered, '`````')).toBe(2);
     expect(countMatches(rendered, '~~~~')).toBe(2);
+  });
+
+  it('does not append a fence to an already closed nested source fence', () => {
+    const rendered = renderSourceDescription([
+      '- ```md',
+      '  literal',
+      '  ```',
+      '- after',
+    ].join('\n'));
+
+    expect(rendered).toContain([
+      '## Description',
+      '- ```md',
+      '  literal',
+      '  ```',
+      '- after',
+      '',
+      '## Design',
+    ].join('\n'));
+    expect(countMatches(rendered, '```')).toBe(2);
+    assertGeneratedIssueHeadingsAreTopLevel(rendered);
+  });
+
+  it('closes trailing fenced code with its container continuation prefix', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        description: '> `````md\n> blockquote code',
+        design: '- > ~~~~md\n  > nested code',
+        specId: null,
+        notes: '- ```text\n  list code',
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(rendered).toContain(
+      '## Description\n> `````md\n> blockquote code\n> `````\n\n## Design',
+    );
+    expect(rendered).toContain(
+      '## Design\n- > ~~~~md\n  > nested code\n  > ~~~~\n\n## Acceptance criteria',
+    );
+    expect(rendered).toContain(
+      '## Implementation notes\n- ```text\n  list code\n  ```\n\n## Dependencies',
+    );
+    assertGeneratedIssueHeadingsAreTopLevel(rendered);
+  });
+
+  it('leaves indented code alone and closes raw HTML before generated sections', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        description: '    indented code',
+        design: '<script>\nconst safe = true;',
+        specId: null,
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(rendered).toContain(
+      '## Description\n    indented code\n\n## Design',
+    );
+    expect(rendered).toContain(
+      '## Design\n<script>\nconst safe = true;\n</script>\n\n## Acceptance criteria',
+    );
+    assertGeneratedIssueHeadingsAreTopLevel(rendered);
+  });
+
+  it('keeps generated metadata headings top-level for every source section combination', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const sourceValues = {
+      description: '> ```md\n> description',
+      design: '- ~~~~md\n  design',
+      acceptanceCriteria: '    acceptance code',
+      notes: '<script>\nnotes',
+    };
+
+    for (let mask = 0; mask < 16; mask += 1) {
+      const bead: PublicBead = {
+        ...feature,
+        description: mask & 1 ? sourceValues.description : null,
+        design: mask & 2 ? sourceValues.design : null,
+        specId: null,
+        acceptanceCriteria: mask & 4 ? sourceValues.acceptanceCriteria : null,
+        notes: mask & 8 ? sourceValues.notes : null,
+      };
+      const rendered = renderIssueBody(bead, {
+        inventoryById: new Map([[bead.id, bead]]),
+      });
+
+      assertGeneratedIssueHeadingsAreTopLevel(rendered);
+    }
   });
 
   it('renders labels with locale-independent deterministic ordering', () => {
