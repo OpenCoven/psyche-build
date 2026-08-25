@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
+import { parseFragment } from 'parse5';
 import { describe, expect, it } from 'vitest';
+import type { DefaultTreeAdapterTypes } from 'parse5';
 
 import { buildBeadIndex, parseBeadExport } from '../scripts/beads-project-sync/model.mjs';
 import {
@@ -26,6 +28,16 @@ import {
 } from '../scripts/beads-project-sync/markers.mjs';
 import type { RenderContext } from '../scripts/beads-project-sync/render.mjs';
 import type { PublicBead } from '../scripts/beads-project-sync/sanitize.mjs';
+
+type MarkdownNode = {
+  type: string;
+  value?: string;
+  position?: {
+    start: { offset?: number };
+    end: { offset?: number };
+  };
+  children?: MarkdownNode[];
+};
 
 const fixturePath = new URL('./fixtures/beads-project-sync/issues.jsonl', import.meta.url);
 const issuesJsonl = readFileSync(fixturePath, 'utf8');
@@ -142,6 +154,82 @@ function assertGeneratedIssueHeadingsAreTopLevel(rendered: string): void {
 
   expect(headings).toContain('Source metadata');
   expect(headings).toContain('Authority notice');
+}
+
+function assertGeneratedIssueHeadingsOutsideRawHtml(rendered: string): void {
+  const tree = fromMarkdown(rendered, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  }) as MarkdownNode;
+  const htmlMask: string[] = Array.from(
+    { length: rendered.length },
+    (_, index) => rendered[index] === '\n' ? '\n' : ' ',
+  );
+  const pending = [tree];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node == null) {
+      continue;
+    }
+    if (
+      node.type === 'html'
+      && typeof node.position?.start.offset === 'number'
+      && typeof node.position.end.offset === 'number'
+    ) {
+      for (
+        let index = node.position.start.offset;
+        index < node.position.end.offset;
+        index += 1
+      ) {
+        htmlMask[index] = rendered[index]!;
+      }
+    }
+    if (Array.isArray(node.children)) {
+      pending.push(...node.children);
+    }
+  }
+
+  let html = htmlMask.join('');
+  let addedLength = 0;
+  const sentinelOffsets = new Set<number>();
+  for (const heading of ['Source metadata', 'Authority notice']) {
+    const headingOffset = rendered.lastIndexOf(`## ${heading}`);
+    expect(headingOffset).toBeGreaterThanOrEqual(0);
+    const sentinel = `<h2 data-psyche-heading="${heading}"></h2>`;
+    const sentinelOffset = headingOffset + addedLength;
+    html = `${html.slice(0, sentinelOffset)}${sentinel}${html.slice(sentinelOffset)}`;
+    sentinelOffsets.add(sentinelOffset);
+    addedLength += sentinel.length;
+  }
+
+  const fragment = parseFragment(html, { sourceCodeLocationInfo: true });
+  const capturedHeadings: string[] = [];
+
+  function visit(
+    node: DefaultTreeAdapterTypes.Node,
+    ancestors: readonly string[],
+  ): void {
+    if (
+      'tagName' in node
+      && node.tagName === 'h2'
+      && node.sourceCodeLocation?.startOffset != null
+      && sentinelOffsets.has(node.sourceCodeLocation.startOffset)
+      && ancestors.length > 0
+    ) {
+      capturedHeadings.push(...ancestors);
+    }
+    const nextAncestors = 'tagName' in node
+      ? [...ancestors, node.tagName]
+      : ancestors;
+    if ('childNodes' in node) {
+      for (const child of node.childNodes) {
+        visit(child, nextAncestors);
+      }
+    }
+  }
+
+  visit(fragment, []);
+  expect(capturedHeadings).toEqual([]);
 }
 
 describe('Beads project renderers', () => {
@@ -2563,6 +2651,139 @@ describe('Beads project renderers', () => {
       '## Design\n<script>\nconst safe = true;\n</script>\n\n## Acceptance criteria',
     );
     assertGeneratedIssueHeadingsAreTopLevel(rendered);
+  });
+
+  it('closes the exact trailing details regression before generated sections', () => {
+    const rendered = renderSourceDescription('<details>\nsource');
+
+    expect(rendered).toContain(
+      '## Description\n<details>\nsource\n</details>\n\n## Design',
+    );
+    assertGeneratedIssueHeadingsAreTopLevel(rendered);
+    assertGeneratedIssueHeadingsOutsideRawHtml(rendered);
+  });
+
+  it('closes nested standard and custom HTML containers in reverse source order', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        description: '<div><details>\ndescription',
+        design: '<x-shell><inner-panel>\ndesign',
+        specId: null,
+        notes: '<section><blockquote>\nnotes',
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(rendered).toContain(
+      '<div><details>\ndescription\n</details>\n</div>\n\n## Design',
+    );
+    expect(rendered).toContain(
+      '<x-shell><inner-panel>\ndesign\n</inner-panel>\n</x-shell>'
+        + '\n\n## Acceptance criteria',
+    );
+    expect(rendered).toContain(
+      '<section><blockquote>\nnotes\n</blockquote>\n</section>'
+        + '\n\n## Dependencies',
+    );
+    assertGeneratedIssueHeadingsOutsideRawHtml(rendered);
+  });
+
+  it('preserves closed containers and void elements without extra closing tags', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const rendered = renderIssueBody(
+      {
+        ...feature,
+        description: '<details>\nsource\n</details>',
+        design: [
+          '<img src="public.png">',
+          '<hr>',
+          '<basefont>',
+          '<bgsound>',
+          '<frame>',
+          '<keygen>',
+        ].join('\n'),
+        specId: null,
+        notes: '<section>notes</section>',
+      },
+      {
+        inventoryById: new Map([[feature.id, feature]]),
+      },
+    );
+
+    expect(countMatches(rendered, '</details>')).toBe(1);
+    expect(countMatches(rendered, '</section>')).toBe(1);
+    expect(rendered).not.toContain('</img>');
+    expect(rendered).not.toContain('</hr>');
+    expect(rendered).not.toContain('</basefont>');
+    expect(rendered).not.toContain('</bgsound>');
+    expect(rendered).not.toContain('</frame>');
+    expect(rendered).not.toContain('</keygen>');
+    assertGeneratedIssueHeadingsOutsideRawHtml(rendered);
+  });
+
+  it('closes table scopes and raw-text elements before generated headings', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const bead: PublicBead = {
+      ...feature,
+      description: '<table>\n<tr><td>cell',
+      design: '<textarea>\ndesign',
+      specId: null,
+      notes: '<style>.public { color: green; }',
+    };
+    const context = {
+      inventoryById: new Map([[feature.id, feature]]),
+    };
+    const rendered = renderIssueBody(bead, context);
+
+    expect(rendered).toContain(
+      '<table>\n<tr><td>cell\n</td>\n</tr>\n</table>\n\n## Design',
+    );
+    expect(rendered).toContain(
+      '<textarea>\ndesign\n</textarea>\n\n## Acceptance criteria',
+    );
+    expect(rendered).toContain(
+      '<style>.public { color: green; }\n</style>\n\n## Dependencies',
+    );
+    expect(renderIssueBody(bead, context)).toBe(rendered);
+    assertGeneratedIssueHeadingsOutsideRawHtml(rendered);
+  });
+
+  it('ignores raw HTML-looking tags inside Markdown code fences', () => {
+    const rendered = renderSourceDescription([
+      '```html',
+      '<details>',
+      '<x-panel>',
+      '```',
+    ].join('\n'));
+
+    expect(countMatches(rendered, '</details>')).toBe(0);
+    expect(countMatches(rendered, '</x-panel>')).toBe(0);
+    assertGeneratedIssueHeadingsOutsideRawHtml(rendered);
+  });
+
+  it('fails closed for unterminated comments instead of synthesizing comment syntax', () => {
+    expect(() => renderSourceDescription('<!-- unclosed')).toThrow(
+      /Markdown source block cannot be closed before generated sections/i,
+    );
+  });
+
+  it('bounds raw HTML boundary parsing by node count and depth', () => {
+    const [feature] = buildPublicInventory().filter((bead) => bead.id === 'pb-feature');
+    const renderDescription = (description: string) => renderIssueBody(
+      { ...feature, description },
+      { inventoryById: new Map([[feature.id, feature]]) },
+    );
+
+    expect(() =>
+      renderDescription('<x-node></x-node>'.repeat(5_000))
+    ).toThrow(/HTML boundary.*node.*limit/i);
+    expect(() =>
+      renderDescription(`${'<x-node>'.repeat(256)}source`)
+    ).toThrow(/HTML boundary.*depth.*limit/i);
   });
 
   it('keeps generated metadata headings top-level for every source section combination', () => {

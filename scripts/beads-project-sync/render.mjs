@@ -3,6 +3,7 @@
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
+import { parseFragment } from 'parse5';
 import { summarizeInventory } from './model.mjs';
 import {
   DEFAULT_ISSUE_MARKER,
@@ -20,6 +21,8 @@ import {
 } from './sanitize.mjs';
 
 /** @typedef {import('./sanitize.mjs').PublicBead} PublicBead */
+/** @typedef {import('parse5').DefaultTreeAdapterTypes.Node} ParsedHtmlNode */
+/** @typedef {import('parse5').DefaultTreeAdapterTypes.Element} ParsedHtmlElement */
 /**
  * @typedef {{
  *   type: string,
@@ -62,6 +65,30 @@ export const GITHUB_PROJECT_README_MAX_CODE_POINTS = 10_000;
 const CLOSED_HISTORY_TITLE_MAX_CODE_POINTS = 160;
 const PROJECT_README_TRUNCATION_SUFFIX = '...';
 const GENERATED_BOUNDARY_SENTINEL = 'psyche-generated-boundary-sentinel';
+const MAX_HTML_BOUNDARY_NODE_COUNT = 4_096;
+const MAX_HTML_BOUNDARY_DEPTH = 128;
+const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
+const HTML_VOID_ELEMENTS = new Set([
+  'area',
+  'base',
+  'basefont',
+  'bgsound',
+  'br',
+  'col',
+  'embed',
+  'frame',
+  'hr',
+  'img',
+  'input',
+  'keygen',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
+const SAFE_HTML_CLOSING_TAG_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9._:-]*$/u;
 
 /**
  * @param {string} message
@@ -214,9 +241,37 @@ function promoteMarkdownHeadings(value) {
  */
 function markdownContainerContinuationPrefix(value, offset) {
   const lineStart = value.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
-  return value
-    .slice(lineStart, offset)
-    .replace(/[^\t >]/gu, ' ');
+  const linePrefix = value.slice(lineStart, offset);
+  let sourceOffset = 0;
+  let continuation = '';
+
+  while (sourceOffset < linePrefix.length) {
+    const whitespace = linePrefix.slice(sourceOffset).match(/^[ \t]+/u)?.[0] ?? '';
+    continuation += whitespace;
+    sourceOffset += whitespace.length;
+
+    if (linePrefix[sourceOffset] === '>') {
+      continuation += '>';
+      sourceOffset += 1;
+      if (linePrefix[sourceOffset] === ' ' || linePrefix[sourceOffset] === '\t') {
+        continuation += linePrefix[sourceOffset];
+        sourceOffset += 1;
+      }
+      continue;
+    }
+
+    const listMarker = linePrefix
+      .slice(sourceOffset)
+      .match(/^(?:[-+*]|\d{1,9}[.)])[ \t]+/u)?.[0];
+    if (listMarker != null) {
+      continuation += listMarker.replace(/[^\t]/gu, ' ');
+      sourceOffset += listMarker.length;
+      continue;
+    }
+    break;
+  }
+
+  return continuation;
 }
 
 /**
@@ -304,43 +359,203 @@ function hasExternalGeneratedBoundary(value) {
 
 /**
  * @param {string} value
+ * @returns {string}
+ */
+function markdownRawHtmlMask(value) {
+  const masked = /** @type {string[]} */ (Array.from(
+    { length: value.length },
+    (_, index) => value[index] === '\n' ? '\n' : ' ',
+  ));
+  for (const node of flattenMdast(parseMarkdown(value))) {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (
+      node.type !== 'html'
+      || typeof start !== 'number'
+      || typeof end !== 'number'
+    ) {
+      continue;
+    }
+    for (let index = start; index < end; index += 1) {
+      masked[index] = value[index];
+    }
+  }
+  return masked.join('');
+}
+
+/**
+ * @param {string} value
+ * @returns {import('parse5').DefaultTreeAdapterTypes.DocumentFragment}
+ */
+function parseHtmlBoundaryFragment(value) {
+  try {
+    return parseFragment(value, { sourceCodeLocationInfo: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Markdown HTML boundary parsing failed: ${message}`);
+  }
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @returns {node is ParsedHtmlElement}
+ */
+function isParsedHtmlElement(node) {
+  return 'tagName' in node;
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @returns {ParsedHtmlNode[]}
+ */
+function parsedHtmlChildren(node) {
+  const children = 'childNodes' in node
+    ? /** @type {ParsedHtmlNode[]} */ (node.childNodes)
+    : [];
+  if (node.nodeName === 'template' && 'content' in node) {
+    return [
+      ...children,
+      .../** @type {ParsedHtmlNode[]} */ (node.content.childNodes),
+    ];
+  }
+  return children;
+}
+
+/**
+ * @param {ParsedHtmlNode} root
+ * @param {(node: ParsedHtmlNode, depth: number, ancestors: readonly string[]) => void} visit
+ */
+function traverseHtmlBoundary(root, visit) {
+  let nodeCount = 0;
+  const pending = [{ node: root, depth: 0, ancestors: /** @type {string[]} */ ([]) }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current == null) {
+      continue;
+    }
+    nodeCount += 1;
+    if (nodeCount > MAX_HTML_BOUNDARY_NODE_COUNT) {
+      fail('Markdown HTML boundary parsing exceeded the node limit');
+    }
+    if (current.depth > MAX_HTML_BOUNDARY_DEPTH) {
+      fail('Markdown HTML boundary parsing exceeded the depth limit');
+    }
+
+    visit(current.node, current.depth, current.ancestors);
+    const ancestors = isParsedHtmlElement(current.node)
+      ? [...current.ancestors, current.node.tagName]
+      : current.ancestors;
+    const children = parsedHtmlChildren(current.node);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push({
+        node: children[index],
+        depth: current.depth + 1,
+        ancestors,
+      });
+    }
+  }
+}
+
+/**
+ * @param {string} value
  * @returns {string[]}
  */
-function rawHtmlClosureCandidates(value) {
-  const htmlNode = flattenMdast(parseMarkdown(value)).find((node) =>
-    node.type === 'html' && node.position?.end.offset === value.length
+function rawHtmlClosures(value) {
+  const source = markdownRawHtmlMask(value);
+  const fragment = parseHtmlBoundaryFragment(source);
+  const unclosed = /** @type {{
+    tagName: string,
+    startOffset: number,
+    depth: number,
+  }[]} */ ([]);
+  const seen = new Set();
+
+  traverseHtmlBoundary(fragment, (node, depth) => {
+    if (!isParsedHtmlElement(node) || HTML_VOID_ELEMENTS.has(node.tagName)) {
+      return;
+    }
+    const location = node.sourceCodeLocation;
+    if (location == null || location.startTag == null || location.endTag != null) {
+      return;
+    }
+    const startTag = location.startTag;
+    const { startOffset, endOffset } = startTag;
+    if (
+      !Number.isInteger(startOffset)
+      || !Number.isInteger(endOffset)
+      || startOffset < 0
+      || endOffset <= startOffset
+      || endOffset > value.length
+    ) {
+      fail('Markdown HTML boundary has an invalid source tag location');
+    }
+    if (!SAFE_HTML_CLOSING_TAG_NAME_PATTERN.test(node.tagName)) {
+      fail(`Markdown HTML boundary cannot safely close tag "${node.tagName}"`);
+    }
+    if (
+      node.namespaceURI !== HTML_NAMESPACE
+      && /\/\s*>$/u.test(value.slice(startOffset, endOffset))
+    ) {
+      return;
+    }
+    const key = `${startOffset}:${endOffset}:${node.tagName}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    unclosed.push({ tagName: node.tagName, startOffset, depth });
+  });
+
+  return unclosed
+    .sort((left, right) =>
+      right.startOffset - left.startOffset
+      || right.depth - left.depth
+      || compareStrings(right.tagName, left.tagName)
+    )
+    .map(({ tagName, startOffset }) =>
+      `${markdownContainerContinuationPrefix(value, startOffset)}</${tagName}>`
+    );
+}
+
+/**
+ * @param {string} rendered
+ * @param {readonly number[]} headingOffsets
+ */
+function assertGeneratedHeadingsOutsideSourceHtml(rendered, headingOffsets) {
+  let html = markdownRawHtmlMask(rendered);
+  let addedLength = 0;
+  const sentinelOffsets = new Set();
+  for (const headingOffset of [...headingOffsets].sort((left, right) => left - right)) {
+    const sentinel = '<h2 data-psyche-generated-heading></h2>';
+    const sentinelOffset = headingOffset + addedLength;
+    html = `${html.slice(0, sentinelOffset)}${sentinel}${html.slice(sentinelOffset)}`;
+    sentinelOffsets.add(sentinelOffset);
+    addedLength += sentinel.length;
+  }
+
+  const foundOffsets = new Set();
+  traverseHtmlBoundary(
+    parseHtmlBoundaryFragment(html),
+    (node, _depth, ancestors) => {
+      if (
+        !isParsedHtmlElement(node)
+        || node.tagName !== 'h2'
+        || node.sourceCodeLocation?.startOffset == null
+        || !sentinelOffsets.has(node.sourceCodeLocation.startOffset)
+      ) {
+        return;
+      }
+      foundOffsets.add(node.sourceCodeLocation.startOffset);
+      if (ancestors.length > 0) {
+        fail(
+          `Generated issue heading is contained by source HTML element <${ancestors.at(-1)}>`,
+        );
+      }
+    },
   );
-  const start = htmlNode?.position?.start.offset;
-  if (typeof start !== 'number') {
-    return [];
+  if (foundOffsets.size !== sentinelOffsets.size) {
+    fail('Generated issue heading is contained by source raw-text HTML');
   }
-  const continuationPrefix = markdownContainerContinuationPrefix(value, start);
-  const source = value.slice(start);
-  const candidates = /** @type {string[]} */ ([]);
-  if (source.lastIndexOf('<!--') > source.lastIndexOf('-->')) {
-    candidates.push('-->');
-  }
-  if (source.lastIndexOf('<![CDATA[') > source.lastIndexOf(']]>')) {
-    candidates.push(']]>');
-  }
-  if (source.lastIndexOf('<?') > source.lastIndexOf('?>')) {
-    candidates.push('?>');
-  }
-  const rawTextTags = [...source.matchAll(
-    /<(script|pre|style|textarea)(?:\s|>|$)/giu,
-  )]
-    .map((match) => match[1]?.toLowerCase())
-    .filter((tag) => tag != null)
-    .reverse();
-  for (const tag of rawTextTags) {
-    candidates.push(`</${tag}>`);
-  }
-  if (/^<![A-Za-z]/u.test(source) && !source.includes('>')) {
-    candidates.push('>');
-  }
-  return [...new Set(candidates)].map((candidate) =>
-    `${continuationPrefix}${candidate}`
-  );
 }
 
 /**
@@ -349,15 +564,12 @@ function rawHtmlClosureCandidates(value) {
  */
 function ensureGeneratedMarkdownBoundary(value) {
   const bounded = closeTrailingFencedCode(value);
-  if (hasExternalGeneratedBoundary(bounded)) {
-    return bounded;
-  }
-
-  for (const closure of rawHtmlClosureCandidates(bounded)) {
-    const candidate = `${bounded}\n${closure}`;
-    if (hasExternalGeneratedBoundary(candidate)) {
-      return candidate;
-    }
+  const closures = rawHtmlClosures(bounded);
+  const candidate = closures.length > 0
+    ? `${bounded}\n${closures.join('\n')}`
+    : bounded;
+  if (hasExternalGeneratedBoundary(candidate)) {
+    return candidate;
   }
   fail('Markdown source block cannot be closed before generated sections');
 }
@@ -370,6 +582,7 @@ function assertGeneratedIssueHeadings(rendered) {
   const headings = Array.isArray(tree.children)
     ? tree.children.filter((node) => node.type === 'heading' && node.depth === 2)
     : [];
+  const headingOffsets = /** @type {number[]} */ ([]);
   for (const expected of ['Source metadata', 'Authority notice']) {
     const expectedOffset = rendered.lastIndexOf(`## ${expected}`);
     if (
@@ -381,7 +594,9 @@ function assertGeneratedIssueHeadings(rendered) {
     ) {
       fail(`Generated issue heading "${expected}" is not a top-level Markdown heading`);
     }
+    headingOffsets.push(expectedOffset);
   }
+  assertGeneratedHeadingsOutsideSourceHtml(rendered, headingOffsets);
 }
 
 /**
