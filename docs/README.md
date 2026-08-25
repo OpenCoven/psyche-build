@@ -14,16 +14,21 @@ Use these sources in this order when determining current delivery status:
    ownership, implementation state, blockers, review findings, and evidence.
 2. [Roadmap](ROADMAP.md) — active outcomes, priorities, dependencies, delivery
    trains, and phase-gate policy.
-3. [Support matrix](SUPPORT-MATRIX.md) — the contract for what may be claimed
-   as supported, source-supported, pending, compile-only, or unavailable.
-4. [Release acceptance](RELEASE-ACCEPTANCE.md) and
+3. [Post-release execution contract](POST-RELEASE-EXECUTION.md) — the ordered
+   critical path, permitted concurrency, focused replacement slices, and merge
+   and closure gates.
+4. [Support matrix](SUPPORT-MATRIX.md) — the contract for what may be claimed
+   as supported, source-supported, planned, internal beta, compile-only, or
+   unavailable.
+5. [Release acceptance](RELEASE-ACCEPTANCE.md) and
    [release runbook](RELEASE.md) — proof requirements and publication
    procedures.
-5. Dated specs and plans — design intent and historical reasoning.
+6. Dated specs and plans — design intent and historical reasoning.
 
-The roadmap and support matrix are policy and reconciliation snapshots. When a
-snapshot conflicts with the owning issue or pull request, treat the live GitHub
-state as authoritative and repair the snapshot in the same change.
+The roadmap, execution contract, and support matrix are policy and
+reconciliation snapshots. When a snapshot conflicts with the owning issue or
+pull request, treat the live GitHub state as authoritative and repair the
+snapshot in the same controlled change.
 
 `docs/superpowers/` contains dated design and implementation records. Those
 records remain useful history, but they are not the executable backlog and do
@@ -98,6 +103,7 @@ TestFlight, and public App Store distribution are unavailable. See the
 ## Active delivery documents
 
 - [Canonical roadmap](ROADMAP.md)
+- [Post-release execution contract](POST-RELEASE-EXECUTION.md)
 - [Support matrix](SUPPORT-MATRIX.md)
 - [Release acceptance](RELEASE-ACCEPTANCE.md)
 - [Release runbook](RELEASE.md)
@@ -117,6 +123,6 @@ TestFlight, and public App Store distribution are unavailable. See the
 - [Contributing guide](../CONTRIBUTING.md)
 - [Repository test guide](https://github.com/OpenCoven/psyche-build/blob/main/__tests__/README.md)
 
-When a change alters support status, roadmap dependencies, or release evidence,
-update the relevant active delivery document and owning GitHub issue in the
-same pull request.
+When a change alters support status, roadmap dependencies, execution order, or
+release evidence, update the relevant active delivery document and owning
+GitHub issue in the same pull request.
