@@ -2,7 +2,11 @@
 
 import os from 'node:os';
 import { TextDecoder } from 'node:util';
-import { decodeHTMLStrict } from 'entities';
+import {
+  DecodingMode,
+  EntityDecoder,
+  htmlDecodeTree,
+} from 'entities/decode';
 import { normalizeBeadPriority } from './model.mjs';
 
 /** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
@@ -943,14 +947,14 @@ function decodeMarkdownEscapesMapped(mapped) {
 /**
  * @param {string} value
  * @param {number} start
- * @returns {number | null}
+ * @returns {void}
  */
-function findHtmlEntityReferenceEnd(value, start) {
+function assertHtmlEntityReferenceWithinLimit(value, start) {
   if (
     value[start] !== '&'
     || !HTML_ENTITY_REFERENCE_START_PATTERN.test(value[start + 1] ?? '')
   ) {
-    return null;
+    return;
   }
 
   const boundedEnd = Math.min(
@@ -959,26 +963,61 @@ function findHtmlEntityReferenceEnd(value, start) {
   );
   for (let index = start + 1; index < boundedEnd; index += 1) {
     const character = value[index] ?? '';
-    if (character === ';') {
-      return index;
-    }
-    if (!HTML_ENTITY_REFERENCE_BODY_PATTERN.test(character)) {
-      return null;
+    if (
+      character === ';'
+      || !HTML_ENTITY_REFERENCE_BODY_PATTERN.test(character)
+    ) {
+      return;
     }
   }
   if (boundedEnd === start + MAX_HTML_ENTITY_REFERENCE_LENGTH) {
     fail('HTML character reference exceeds the inspection limit');
   }
+}
 
-  return null;
+/**
+ * @param {string} value
+ * @param {number} start
+ * @param {DecodingMode} mode
+ * @returns {{ end: number, value: string } | null}
+ */
+function decodeHtmlEntityReferenceAt(value, start, mode) {
+  if (
+    value[start] !== '&'
+    || !HTML_ENTITY_REFERENCE_START_PATTERN.test(value[start + 1] ?? '')
+  ) {
+    return null;
+  }
+  assertHtmlEntityReferenceWithinLimit(value, start);
+
+  let decoded = '';
+  const decoder = new EntityDecoder(
+    htmlDecodeTree,
+    (codePoint) => {
+      decoded += String.fromCodePoint(codePoint);
+    },
+  );
+  decoder.startEntity(mode);
+  let consumed = decoder.write(value, start + 1);
+  if (consumed < 0) {
+    consumed = decoder.end();
+  }
+  return consumed > 0
+    ? { end: start + consumed, value: decoded }
+    : null;
 }
 
 /**
  * @param {MappedInspectionText} mapped
  * @param {Uint8Array | undefined} [protectedMask]
+ * @param {DecodingMode} [mode]
  * @returns {MappedInspectionText}
  */
-function decodeHtmlEntitiesMappedOnce(mapped, protectedMask) {
+function decodeHtmlEntitiesMappedOnce(
+  mapped,
+  protectedMask,
+  mode = DecodingMode.Strict,
+) {
   if (!mapped.value.includes('&')) {
     return mapped;
   }
@@ -998,8 +1037,8 @@ function decodeHtmlEntitiesMappedOnce(mapped, protectedMask) {
       cursor += 1;
       continue;
     }
-    const referenceEnd = findHtmlEntityReferenceEnd(mapped.value, cursor);
-    if (referenceEnd == null) {
+    const reference = decodeHtmlEntityReferenceAt(mapped.value, cursor, mode);
+    if (reference == null) {
       appendMappedInspectionValue(
         output,
         sourceRanges,
@@ -1010,26 +1049,13 @@ function decodeHtmlEntitiesMappedOnce(mapped, protectedMask) {
       continue;
     }
 
-    const reference = mapped.value.slice(cursor, referenceEnd + 1);
-    const decoded = decodeHTMLStrict(reference);
-    if (decoded === reference) {
-      for (let index = cursor; index <= referenceEnd; index += 1) {
-        appendMappedInspectionValue(
-          output,
-          sourceRanges,
-          mapped.value[index] ?? '',
-          mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
-        );
-      }
-    } else {
-      appendMappedInspectionValue(
-        output,
-        sourceRanges,
-        decoded,
-        mappedSourceRange(mapped, cursor, referenceEnd + 1),
-      );
-    }
-    cursor = referenceEnd + 1;
+    appendMappedInspectionValue(
+      output,
+      sourceRanges,
+      reference.value,
+      mappedSourceRange(mapped, cursor, reference.end),
+    );
+    cursor = reference.end;
   }
 
   return {
@@ -1193,12 +1219,16 @@ function decodePercentMappedOnce(mapped, allowDecodedLiteralPercent = false) {
  * @param {MappedInspectionText} mapped
  * @returns {MappedInspectionText}
  */
-function decodeUrlInspectionMapped(mapped) {
+function decodeUrlInspectionMapped(mapped, mode = DecodingMode.Strict) {
   let current = mapped;
 
   for (let round = 0; round < MAX_PERCENT_DECODE_ROUNDS; round += 1) {
     const percentDecoded = decodePercentMappedOnce(current, round > 0);
-    const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
+    const entityDecoded = decodeHtmlEntitiesMappedOnce(
+      percentDecoded,
+      undefined,
+      mode,
+    );
     if (entityDecoded.value === current.value) {
       return current;
     }
@@ -1206,7 +1236,11 @@ function decodeUrlInspectionMapped(mapped) {
   }
 
   const percentDecoded = decodePercentMappedOnce(current, true);
-  const entityDecoded = decodeHtmlEntitiesMappedOnce(percentDecoded);
+  const entityDecoded = decodeHtmlEntitiesMappedOnce(
+    percentDecoded,
+    undefined,
+    mode,
+  );
   if (entityDecoded.value !== current.value) {
     fail('Encoded public URL component exceeds the decoding limit');
   }
@@ -1262,11 +1296,17 @@ function decodeAsciiPercentMappedOnce(mapped) {
  * @param {string} description
  * @returns {MappedInspectionText}
  */
-function decodeAsciiEntityDiscoveryMapped(value, description) {
+function decodeAsciiEntityDiscoveryMapped(
+  value,
+  description,
+  mode = DecodingMode.Strict,
+) {
   let current = createMappedInspectionText(value);
   for (let round = 0; round < MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS; round += 1) {
     const decoded = decodeHtmlEntitiesMappedOnce(
       decodeAsciiPercentMappedOnce(current),
+      undefined,
+      mode,
     );
     if (decoded.value === current.value) {
       return current;
@@ -1276,6 +1316,8 @@ function decodeAsciiEntityDiscoveryMapped(value, description) {
 
   const decoded = decodeHtmlEntitiesMappedOnce(
     decodeAsciiPercentMappedOnce(current),
+    undefined,
+    mode,
   );
   if (decoded.value !== current.value) {
     fail(`Encoded ${description} discovery exceeds the decoding limit`);
@@ -1287,8 +1329,8 @@ function decodeAsciiEntityDiscoveryMapped(value, description) {
  * @param {string} value
  * @returns {MappedInspectionText}
  */
-function decodeDataUriDiscoveryMapped(value) {
-  return decodeAsciiEntityDiscoveryMapped(value, 'data URI');
+function decodeDataUriDiscoveryMapped(value, mode = DecodingMode.Strict) {
+  return decodeAsciiEntityDiscoveryMapped(value, 'data URI', mode);
 }
 
 /**
@@ -1324,13 +1366,16 @@ function credentialUrlSeparatorAt(value, start) {
     }
   }
 
-  const referenceEnd = findHtmlEntityReferenceEnd(value, start);
-  if (referenceEnd == null) {
+  const reference = decodeHtmlEntityReferenceAt(
+    value,
+    start,
+    DecodingMode.Attribute,
+  );
+  if (reference == null) {
     return null;
   }
-  const decoded = decodeHTMLStrict(value.slice(start, referenceEnd + 1));
-  return decoded === '/' || decoded === '\\'
-    ? { end: referenceEnd + 1, value: decoded }
+  return reference.value === '/' || reference.value === '\\'
+    ? { end: reference.end, value: reference.value }
     : null;
 }
 
@@ -1388,18 +1433,19 @@ function decodeCredentialUrlStructureOnce(value) {
       }
     }
 
-    const referenceEnd = findHtmlEntityReferenceEnd(value, cursor);
-    if (referenceEnd != null) {
-      const reference = value.slice(cursor, referenceEnd + 1);
-      const decoded = decodeHTMLStrict(reference);
+    const reference = decodeHtmlEntityReferenceAt(
+      value,
+      cursor,
+      DecodingMode.Attribute,
+    );
+    if (reference != null) {
       if (
-        decoded !== reference
-        && [...decoded].every((character) =>
+        [...reference.value].every((character) =>
           isCredentialUrlStructuralCharacter(character)
         )
       ) {
-        output.push(decoded);
-        cursor = referenceEnd + 1;
+        output.push(reference.value);
+        cursor = reference.end;
         continue;
       }
     }
@@ -1499,8 +1545,10 @@ function normalizeSpecialSchemeSeparatorsMapped(mapped) {
  * @param {MappedInspectionText} mapped
  * @returns {MappedInspectionText}
  */
-function inspectUrlCandidateMapped(mapped) {
-  return normalizeSpecialSchemeSeparatorsMapped(decodeUrlInspectionMapped(mapped));
+function inspectUrlCandidateMapped(mapped, mode = DecodingMode.Strict) {
+  return normalizeSpecialSchemeSeparatorsMapped(
+    decodeUrlInspectionMapped(mapped, mode),
+  );
 }
 
 /**
@@ -1512,11 +1560,12 @@ function containsEncodedCredentialUrlUserinfo(value) {
     if (/^%[A-F0-9]{2}$/iu.test(value.slice(cursor, cursor + 3))) {
       return true;
     }
-    const referenceEnd = findHtmlEntityReferenceEnd(value, cursor);
     if (
-      referenceEnd != null
-      && decodeHTMLStrict(value.slice(cursor, referenceEnd + 1))
-        !== value.slice(cursor, referenceEnd + 1)
+      decodeHtmlEntityReferenceAt(
+        value,
+        cursor,
+        DecodingMode.Attribute,
+      ) != null
     ) {
       return true;
     }
@@ -1924,6 +1973,7 @@ function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
   assertNoCredentialUrlReferences(rawValue, true);
   const decoded = inspectUrlCandidateMapped(
     createMappedInspectionText(rawValue),
+    DecodingMode.Attribute,
   ).value;
   assertNoDirectPublishableSecrets(decoded);
   assertNoEncodedUrlSecrets(decoded, true);
@@ -1968,6 +2018,7 @@ function sanitizeRawHtmlSrcset(rawValue, quote, config, depth) {
     const start = cursor;
     const isData = decodeDataUriDiscoveryMapped(
       rawValue.slice(cursor),
+      DecodingMode.Attribute,
     ).value.toLowerCase().startsWith('data:');
     let urlEnd;
     let trailingSeparator = false;
@@ -3793,8 +3844,14 @@ function redactDecodedHtmlEntitySensitiveText(value, config) {
         destination.start,
         destination.end,
       ),
+      DecodingMode.Attribute,
     );
     assertNoDirectPublishableSecrets(inspectedDestination.value);
+    collectMappedEmailReplacements(
+      inspectedDestination,
+      value,
+      replacements,
+    );
     const uri = parseAbsoluteUri(inspectedDestination.value);
     if (uri != null) {
       collectMappedHttpPathnameReplacement(
@@ -3803,6 +3860,30 @@ function redactDecodedHtmlEntitySensitiveText(value, config) {
         matchers,
         replacements,
       );
+      if (uri.query != null) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(
+            inspectedDestination,
+            uri.query.start,
+            uri.query.end,
+          ),
+          value,
+          matchers,
+          replacements,
+        );
+      }
+      if (uri.fragment != null) {
+        collectMappedPathReplacements(
+          sliceMappedInspectionText(
+            inspectedDestination,
+            uri.fragment.start,
+            uri.fragment.end,
+          ),
+          value,
+          matchers,
+          replacements,
+        );
+      }
     } else if (
       (
         containsLocalOperationalPath(inspectedDestination.value)
@@ -4059,7 +4140,10 @@ function assertNoMarkdownDestinationSecrets(markdownDecoded, config = {}, depth 
       destination.end,
     );
     assertNoCredentialUrlReferences(rawDestination.value, true);
-    const inspectedDestination = inspectUrlCandidateMapped(rawDestination);
+    const inspectedDestination = inspectUrlCandidateMapped(
+      rawDestination,
+      DecodingMode.Attribute,
+    );
     assertNoDirectPublishableSecrets(inspectedDestination.value);
     if (inspectedDestination.value.toLowerCase().startsWith('data:')) {
       assertSafeDataUriCandidate(inspectedDestination.value, config, depth);

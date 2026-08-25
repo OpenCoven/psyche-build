@@ -1072,6 +1072,160 @@ describe('Beads project renderers', () => {
     expect(() => sanitizePublicText(unsafeDescription)).toThrow(/URL credentials/i);
   });
 
+  it('rejects 1,250 browser-decoded semicolonless numeric credential variants', () => {
+    const schemes = ['ftp', 'http', 'https', 'ws', 'wss'];
+    const authoritySeparators = [
+      '//',
+      '&#47&#47',
+      '&#x2f&#x2f',
+      '&#92&#92',
+      '&#x5c&#x5c',
+    ];
+    const credentialLayouts = [
+      (scheme: string, separators: string) =>
+        `${scheme}&#58${separators}user:secret@host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#x3a${separators}user:secret@host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#58${separators}user&#58secret@host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#x3a${separators}user&#x3asecret@host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#58${separators}user:secret&#64host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#x3a${separators}user:secret&#x40host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#58${separators}user&#58secret&#64host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#x3a${separators}user&#x3asecret&#x40host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&amp;#58${separators}user:secret@host.example/releases?view=public#summary`,
+      (scheme: string, separators: string) =>
+        `${scheme}&#58${separators}user%3Asecret%40host.example/releases?view=public#summary`,
+    ];
+    const contexts = [
+      (url: string) => `Publish ${url} next.`,
+      (url: string) => `[credentials](${url})`,
+      (url: string) => `![credentials](${url})`,
+      (url: string) => `<a href="${url}">private</a>`,
+      (url: string) => `<a href=${url}>private</a>`,
+    ];
+    const accepted: string[] = [];
+    let count = 0;
+
+    for (const scheme of schemes) {
+      for (const separators of authoritySeparators) {
+        for (const buildCredentialUrl of credentialLayouts) {
+          for (const wrap of contexts) {
+            const source = wrap(buildCredentialUrl(scheme, separators));
+            count += 1;
+            try {
+              sanitizePublicText(source);
+              accepted.push(source);
+            } catch (error) {
+              expect(error).toMatchObject({
+                message: expect.stringMatching(/URL credentials/i),
+              });
+            }
+          }
+        }
+      }
+    }
+
+    expect(count).toBe(1_250);
+    expect(
+      accepted,
+      `${accepted.length} credential variants were accepted; first: ${accepted[0] ?? 'none'}`,
+    ).toHaveLength(0);
+  });
+
+  it('applies browser reference rules to URL structures in every rendered context', () => {
+    const referenceStyles = [
+      ['decimal with semicolon', (codePoint: number) => `&#${codePoint};`],
+      ['decimal without semicolon', (codePoint: number) => `&#${codePoint}`],
+      ['hex with semicolon', (codePoint: number) => `&#x${codePoint.toString(16)};`],
+      ['hex without semicolon', (codePoint: number) => `&#x${codePoint.toString(16)}`],
+    ] as const;
+    const contexts = [
+      ['plain text', (url: string) => `Publish ${url} next.`],
+      ['Markdown link', (url: string) => `[credentials](${url})`],
+      ['Markdown image', (url: string) => `![credentials](${url})`],
+      ['Markdown autolink', (url: string) => `<${url}>`],
+      ['double-quoted raw HTML', (url: string) => `<a href="${url}">private</a>`],
+      ['single-quoted raw HTML', (url: string) => `<a href='${url}'>private</a>`],
+      ['unquoted raw HTML', (url: string) => `<a href=${url}>private</a>`],
+    ] as const;
+
+    for (const [referenceName, encode] of referenceStyles) {
+      const colon = encode(58);
+      const slash = encode(47);
+      const at = encode(64);
+      const backslash = encode(92);
+      const query = encode(63);
+      const fragment = encode(35);
+      const credentialUrls = [
+        `https${colon}//user:secret${at}host.example/releases`,
+        `https:${slash}${slash}user:secret${at}host.example/releases`,
+        `https${colon}${slash}${slash}user${colon}secret${at}host.example/releases`,
+        `https${colon}${slash}${slash}user:secret${at}host.example/releases`,
+        `https:${backslash}${backslash}user:secret${at}host.example/releases`,
+        `https${colon}${slash}${slash}user:secret${at}host.example/releases${query}view=public`,
+        `https${colon}${slash}${slash}user:secret${at}host.example/releases${fragment}public`,
+      ];
+
+      for (const [contextName, wrap] of contexts) {
+        for (const credentialUrl of credentialUrls) {
+          expect(
+            () => sanitizePublicText(wrap(credentialUrl)),
+            `${referenceName}, ${contextName}: ${credentialUrl}`,
+          ).toThrow(/URL credentials/i);
+        }
+      }
+    }
+  });
+
+  it('follows HTML attribute ambiguity rules without changing safe prose or code', () => {
+    const safe = [
+      'AT&T remains ordinary prose.',
+      '<a href="https://example.com/docs?label=AT&T">Public</a>',
+      '<a href="https://example.com/a&ampx">Ambiguous named reference</a>',
+      '<a href="https://example.com/a&amp!b">Legacy named reference</a>',
+      '```html',
+      '<a href="https&#58//example.com/public">literal code</a>',
+      '```',
+    ].join('\n');
+
+    expect(sanitizePublicText(safe)).toBe(safe);
+    expect(() =>
+      sanitizePublicText(
+        '<a href="https&amp;#58//alice&amp;#58secret&amp;#64host.example/releases">'
+          + 'private</a>',
+      )
+    ).toThrow(/URL credentials/i);
+  });
+
+  it('sanitizes semicolonless references in HTML attributes and Markdown destinations', () => {
+    const source = [
+      '<a href="https&#58&#47&#47host.example&#47srv&#47user&#47private.md">'
+        + 'decimal</a>',
+      '<a href=https&#x3a&#x2f&#x2fhost.example&#x2fsrv&#x2fuser&#x2fprivate.md>'
+        + 'hex</a>',
+      '[path](https&#x3a&#x2f&#x2fhost.example&#x2fsrv&#x2fuser&#x2fprivate.md)',
+      '[query](https&#58&#47&#47host.example&#63contact=user&#64example.net&#35public)',
+      '[fragment](https&#58&#47&#47host.example&#35cwd=&#47srv&#47user&#47private)',
+    ].join('\n');
+
+    expect(sanitizePublicText(source, {
+      homeDirectories: ['/srv/user'],
+    })).toBe([
+      '<a href="https://host.example/&lt;redacted-local-path&gt;">decimal</a>',
+      '<a href=https://host.example/&lt;redacted-local-path&gt;>hex</a>',
+      '[path](https&#x3a&#x2f&#x2fhost.example/<redacted-local-path>)',
+      '[query](https&#58&#47&#47host.example&#63contact=<redacted-email>&#35public)',
+      '[fragment](https&#58&#47&#47host.example&#35cwd=~&#47private)',
+    ].join('\n'));
+  });
+
   it.each([
     ['leading host punctuation', 'http://user:password@!host.example/releases'],
     ['IDN host', 'https://user:password@☃.example/releases'],
@@ -1299,6 +1453,7 @@ describe('Beads project renderers', () => {
   it.each([
     ['safe ASCII text', 'public release notes;'],
     ['dense candidate-like text', '//cdn.example.com?topic=public#release;'],
+    ['dense incomplete entity-like text', 'AT&T &ampx &#xZZ; '],
   ])('scans %s with near-linear scaling', (_name, unit) => {
     const sizes = [16_384, 32_768, 65_536, 131_072];
     const durations = sizes.map((size) => {
