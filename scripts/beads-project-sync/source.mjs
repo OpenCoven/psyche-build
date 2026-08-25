@@ -18,11 +18,17 @@ import {
 } from 'node:path';
 
 const TERMINATION_SIGNALS = /** @type {const} */ (['SIGHUP', 'SIGINT', 'SIGTERM']);
+const SOURCE_COMMAND_UNSET_ENV = Object.freeze([
+  'BEADS_PROJECT_TOKEN',
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+]);
 
 /**
  * @typedef {{
  *   cwd?: string,
  *   env?: Readonly<Record<string, string>>,
+ *   unsetEnv?: readonly string[],
  *   stdin?: string,
  * }} ExecFileRunOptions
  */
@@ -162,13 +168,13 @@ export async function selectSafeTemporaryRoot(cwd, options = {}) {
   const worktreeResult = await run(
     'git',
     ['worktree', 'list', '--porcelain', '-z'],
-    { cwd: canonicalCwd },
+    { cwd: canonicalCwd, unsetEnv: SOURCE_COMMAND_UNSET_ENV },
   );
   assertCommandSucceeded(worktreeResult, 'git worktree list');
   const commonDirectoryResult = await run(
     'git',
     ['rev-parse', '--git-common-dir'],
-    { cwd: canonicalCwd },
+    { cwd: canonicalCwd, unsetEnv: SOURCE_COMMAND_UNSET_ENV },
   );
   assertCommandSucceeded(commonDirectoryResult, 'git rev-parse --git-common-dir');
   const commonDirectory = commonDirectoryResult.stdout.trim();
@@ -238,14 +244,18 @@ export async function selectSafeTemporaryRoot(cwd, options = {}) {
  */
 export function createExecFileRun(execFile = nodeExecFile) {
   return (command, args, options = {}) => new Promise((resolve) => {
+    const environment = options.env == null
+      ? { ...process.env }
+      : { ...process.env, ...options.env };
+    for (const name of options.unsetEnv ?? []) {
+      delete environment[name];
+    }
     const child = execFile(
       command,
       [...args],
       {
         cwd: options.cwd,
-        env: options.env == null
-          ? process.env
-          : { ...process.env, ...options.env },
+        env: environment,
         encoding: 'utf8',
         maxBuffer: 16 * 1024 * 1024,
       },
@@ -284,7 +294,10 @@ function assertCommandSucceeded(result, operation) {
  * @param {{cwd: string, run: ExecFileRun}} options
  */
 export async function bootstrapBeads(options) {
-  const result = await options.run('bd', ['bootstrap', '--yes'], { cwd: options.cwd });
+  const result = await options.run('bd', ['bootstrap', '--yes'], {
+    cwd: options.cwd,
+    unsetEnv: SOURCE_COMMAND_UNSET_ENV,
+  });
   assertCommandSucceeded(result, 'bd bootstrap');
 }
 
@@ -295,7 +308,7 @@ export async function exportBeads(options) {
   const result = await options.run(
     'bd',
     ['--readonly', 'export', '-o', options.outputPath],
-    { cwd: options.cwd },
+    { cwd: options.cwd, unsetEnv: SOURCE_COMMAND_UNSET_ENV },
   );
   assertCommandSucceeded(result, 'bd readonly export');
 }

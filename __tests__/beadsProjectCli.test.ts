@@ -22,6 +22,7 @@ import {
   runBeadsProjectCli,
 } from '../scripts/beads-project-sync/cli.mjs';
 import {
+  createExecFileRun,
   loadBeadsSource,
   selectSafeTemporaryRoot,
 } from '../scripts/beads-project-sync/source.mjs';
@@ -31,6 +32,7 @@ import type {
   ProjectContext,
 } from '../scripts/beads-project-sync/github.mjs';
 import type {
+  ExecFileImplementation,
   ExecFileRun,
   ExecFileRunOptions,
   SignalProcess,
@@ -53,6 +55,11 @@ const mappedAssigneeConfigPath = join(
 const configPath = join(repositoryRoot, '.github/beads-project-sync.json');
 const token = 'github_pat_DO_NOT_LEAK';
 const projectNodeId = 'PVT_kwDOECXnmc4BhMIA';
+const sourceCommandUnsetEnv = [
+  'BEADS_PROJECT_TOKEN',
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+];
 
 interface CapturedCli {
   exitCode: number;
@@ -573,8 +580,43 @@ describe('Beads project sync configuration', () => {
 });
 
 describe('Beads source adapter', () => {
+  it('removes sensitive environment variables from spawned source commands', async () => {
+    vi.stubEnv('BEADS_PROJECT_TOKEN', 'source-write-token');
+    vi.stubEnv('GH_TOKEN', 'source-gh-token');
+    vi.stubEnv('GITHUB_TOKEN', 'source-github-token');
+    let childEnvironment: NodeJS.ProcessEnv | undefined;
+    const execFile: ExecFileImplementation = (
+      _file,
+      _args,
+      options,
+      callback,
+    ) => {
+      childEnvironment = { ...options.env };
+      callback(null, '', '');
+      return {
+        stdin: {
+          end() {},
+        },
+      } as ReturnType<ExecFileImplementation>;
+    };
+
+    try {
+      const run = createExecFileRun(execFile);
+      await run('bd', ['--readonly', 'export'], {
+        unsetEnv: ['BEADS_PROJECT_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'],
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(childEnvironment).not.toHaveProperty('BEADS_PROJECT_TOKEN');
+    expect(childEnvironment).not.toHaveProperty('GH_TOKEN');
+    expect(childEnvironment).not.toHaveProperty('GITHUB_TOKEN');
+  });
+
   it('rejects temp roots inside every registered worktree and the common Git root', async () => {
     const cwd = '/repo/worktrees/current';
+    const callOptions: ExecFileRunOptions[] = [];
     const candidates = [
       '/repo/worktrees/current/tmp',
       '/repo/main/tmp',
@@ -582,7 +624,8 @@ describe('Beads source adapter', () => {
       '/repo/main/.git/tmp',
       '/safe/system-temp',
     ];
-    const run: ExecFileRun = async (_command, args) => {
+    const run: ExecFileRun = async (_command, args, options) => {
+      callOptions.push({ ...options });
       if (args.includes('worktree')) {
         return {
           stdout: [
@@ -612,6 +655,10 @@ describe('Beads source adapter', () => {
       candidates,
       realpath: async (path) => path,
     })).resolves.toBe('/safe/system-temp');
+    expect(callOptions).toEqual([
+      { cwd, unsetEnv: sourceCommandUnsetEnv },
+      { cwd, unsetEnv: sourceCommandUnsetEnv },
+    ]);
   });
 
   it('compares canonical temp and worktree paths and fails when no root is safe', async () => {
@@ -674,7 +721,7 @@ describe('Beads source adapter', () => {
           '-o',
           join(temporaryDirectory, 'issues.jsonl'),
         ],
-        options: { cwd: repositoryRoot },
+        options: { cwd: repositoryRoot, unsetEnv: sourceCommandUnsetEnv },
       },
     ]);
     expect(prefixes).toEqual([
@@ -769,12 +816,12 @@ describe('Beads source adapter', () => {
             '-o',
             join(temporaryDirectory, 'issues.jsonl'),
           ],
-          options: { cwd: repositoryRoot },
+          options: { cwd: repositoryRoot, unsetEnv: sourceCommandUnsetEnv },
         },
         {
           command: 'bd',
           args: ['bootstrap', '--yes'],
-          options: { cwd: repositoryRoot },
+          options: { cwd: repositoryRoot, unsetEnv: sourceCommandUnsetEnv },
         },
         {
           command: 'bd',
@@ -784,7 +831,7 @@ describe('Beads source adapter', () => {
             '-o',
             join(temporaryDirectory, 'issues.jsonl'),
           ],
-          options: { cwd: repositoryRoot },
+          options: { cwd: repositoryRoot, unsetEnv: sourceCommandUnsetEnv },
         },
       ]);
     },
@@ -1606,6 +1653,24 @@ describe('Beads project sync CLI', () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toMatch(/missing\.jsonl/);
+    expect(result.stderr).toMatch(/no such file or directory/i);
+    expect(result.stderr).toContain('[redacted-local-path]');
+    expect(result.stderr).not.toContain('missing.jsonl');
+  });
+
+  it('does not publish malformed source text in failure diagnostics', async () => {
+    const malformedPath = join(tmpdir(), `psyche-beads-malformed-${process.pid}.jsonl`);
+    await writeFile(malformedPath, 'owner@example.com\n', 'utf8');
+
+    try {
+      const result = await runCli(['--dry-run', '--inventory-file', malformedPath]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toMatch(/malformed json.*line 1/i);
+      expect(result.stderr).not.toContain('owner@example.com');
+    } finally {
+      await rm(malformedPath, { force: true });
+    }
   });
 });

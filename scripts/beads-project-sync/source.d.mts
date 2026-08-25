@@ -3,6 +3,7 @@ import type { ChildProcess, ExecFileException, ExecFileOptionsWithStringEncoding
 export interface ExecFileRunOptions {
   cwd?: string;
   env?: Readonly<Record<string, string>>;
+  unsetEnv?: readonly string[];
   stdin?: string;
 }
 

@@ -16,7 +16,7 @@ import {
   LEGACY_ISSUE_MARKERS,
   LEGACY_PROJECT_MARKERS,
 } from './markers.mjs';
-import { toPublicBead } from './sanitize.mjs';
+import { sanitizePublicText, toPublicBead } from './sanitize.mjs';
 import { createExecFileRun, loadBeadsSource } from './source.mjs';
 
 /**
@@ -174,14 +174,24 @@ function errorMessage(error, secrets = []) {
       ? error
       : 'Unknown Beads Project sync failure';
 
-  return redactSecrets(message, secrets)
+  const structurallyRedacted = redactSecrets(message, secrets)
     .replace(/(?:github_pat|gh[pousr])_[A-Za-z0-9_]+/gu, '<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer <redacted>')
     .replace(/\{[\s\S]*\}/gu, '<record redacted>')
     .replace(/\[[\s\S]*\]/gu, '<record redacted>')
     .replace(/\s+/gu, ' ')
     .trim()
-    .slice(0, 500);
+    .slice(0, 2_000);
+
+  try {
+    return (sanitizePublicText(structurallyRedacted)
+      ?? 'Unknown Beads Project sync failure')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 500);
+  } catch {
+    return 'Sensitive source details omitted from Beads Project sync failure';
+  }
 }
 
 /**
