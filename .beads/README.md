@@ -1,81 +1,189 @@
-# Beads - AI-Native Issue Tracking
+# Beads in Psyche Build
 
-Welcome to Beads! This repository uses **Beads** for issue tracking - a modern, AI-native tool designed to live directly in your codebase alongside your code.
+Beads is the authoritative issue and planning store for this repository. The
+public GitHub Project is a one-way, sanitized mirror for readers who do not use
+the Beads CLI.
 
-## What is Beads?
+Do not edit mirrored issue titles, bodies, fields, relationships, or state in
+GitHub and expect those changes to persist. The next sync restores Beads state.
+Make planning changes with `bd`; the sync never imports GitHub changes into
+Beads and leaves unmanaged GitHub issues alone.
 
-Beads is issue tracking that lives in your repo, making it perfect for AI coding agents and developers who want their issues close to their code. No web UI required - everything works through the CLI and integrates seamlessly with git.
+GitHub preserves issue body edit history, and the sync cannot purge individual
+revisions. Sanitize content before its first publication. If sensitive material
+is published accidentally, remediation requires explicit approval to delete and
+recreate the issue, or assistance from GitHub Support. Keep sensitive details
+and affected issue identifiers out of public updates.
 
-**Learn more:** [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
+Psyche Build currently standardizes automation on Beads CLI **1.2.2**.
 
-## Quick Start
-
-### Essential Commands
+## Daily Beads commands
 
 ```bash
-# Create new issues
-bd create "Add user authentication"
-
-# View all issues
+bd create "Describe the work"
 bd list
-
-# View issue details
 bd show <issue-id>
-
-# Update issue status
 bd update <issue-id> --claim
 bd update <issue-id> --status done
-
-# Sync with Dolt remote
+bd dolt pull
 bd dolt push
 ```
 
-### Working with Issues
+## Sole migrator rule
 
-Issues in Beads are:
-- **Git-native**: Stored in Dolt database with version control and branching
-- **AI-friendly**: CLI-first design works perfectly with AI coding agents
-- **Branch-aware**: Issues can follow your branch workflow
-- **Sync-ready**: Uses Dolt remotes for backup and team sharing
+Only one designated maintainer checkout or automation process may migrate the
+Beads schema. Before changing Beads versions or running a migration, stop other
+bootstrap/migration-capable jobs, complete and push the migration from the sole
+migrator, then let every other checkout pull the resulting Dolt state. Never
+run competing migrations from separate clones or worktrees.
 
-## Why Beads?
+The Project sync workflow is serialized with the `beads-project-sync`
+concurrency group. Source loading always tries a read-only export first. Apply
+mode runs `bd bootstrap --yes` only when that export reports a missing or
+uninitialized database, so coordinate any recovery or migration-capable run
+with the workflow.
 
-✨ **AI-Native Design**
-- Built specifically for AI-assisted development workflows
-- CLI-first interface works seamlessly with AI coding agents
-- No context switching to web UIs
+## Local Project export, check, and apply
 
-🚀 **Developer Focused**
-- Issues live in your repo, right next to your code
-- Works offline, syncs when you push
-- Fast, lightweight, and stays out of your way
-
-🔧 **Git Integration**
-- Dolt-native sync via bd dolt push / bd dolt pull
-- Branch-aware issue tracking
-- Dolt-native three-way merge resolution
-
-## Get Started with Beads
-
-Try Beads in your own projects:
+Raw Beads exports can contain non-public fields. Keep them outside the
+repository and delete them when finished:
 
 ```bash
-# Install Beads
-curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
-
-# Initialize in your repo
-bd init
-
-# Create your first issue
-bd create "Try out Beads"
+mkdir -p "$HOME/.local/state/psyche-build"
+export BEADS_EXPORT="$HOME/.local/state/psyche-build/issues.jsonl"
+bd --readonly export -o "$BEADS_EXPORT"
 ```
 
-## Learn More
+Check the live Beads database with no GitHub writes:
 
-- **Documentation**: [github.com/steveyegge/beads/docs](https://github.com/steveyegge/beads/tree/main/docs)
-- **Quick Start Guide**: Run `bd quickstart`
-- **Examples**: [github.com/steveyegge/beads/examples](https://github.com/steveyegge/beads/tree/main/examples)
+```bash
+pnpm beads:project:check
+```
 
----
+Local dry-run source loading is read-only and never bootstraps or mutates
+Beads. If the local database is missing, the command stops with instructions
+to run `bd bootstrap --yes` explicitly.
 
-*Beads: Issue tracking that moves at the speed of thought* ⚡
+With `BEADS_PROJECT_TOKEN` exported, the check compares against the current
+Project. Without it, the command produces a first-run plan without contacting
+GitHub. A saved export can be checked explicitly:
+
+```bash
+node scripts/sync-beads-project.mjs --dry-run --inventory-file "$BEADS_EXPORT"
+```
+
+Applying is a maintainer operation:
+
+```bash
+export BEADS_PROJECT_TOKEN="<load from your password manager>"
+pnpm beads:project:sync
+```
+
+Never store the token in the repository, Beads configuration, command history,
+or an artifact.
+
+## Token and workflow configuration
+
+`BEADS_PROJECT_TOKEN` remains a manual fine-grained token setup; the workflow
+does not create or rotate it. Scope it to the `OpenCoven/psyche-build`
+repository with repository **Contents: read and write** (for the atomic
+commit/branch-ref apply lock), **Issues: read and write**, and **Metadata: read**,
+plus organization **Projects: read and write**. Create two protected
+environments restricted to the main branch (`main`):
+
+- The `beads-project-sync-automation` environment has no required reviewers, so
+  the daily schedule remains unattended.
+- The `beads-project-sync` environment has required reviewers, so every manual
+  `workflow_dispatch` run is reviewer-gated.
+
+Install the fine-grained token as the environment secret
+`BEADS_PROJECT_TOKEN` in both environments (or use a secure equivalent that
+preserves unattended scheduled runs and reviewer-gated manual runs). Scheduled
+sync must remain disabled until both environment secrets and their protection
+rules are set.
+
+Apply mode uses the persistent remote coordination branch
+`psyche-beads-project-sync-lock`. Release appends a `released` tombstone instead
+of deleting the branch, so its linear commit history remains an audit trail and
+the next apply can acquire immediately by appending a child active lease.
+Renewal, release, reacquisition, and stale takeover commits fast-forward from
+the exact current lock commit. Do not delete or rewrite this coordination ref.
+The branch is excluded from Psyche's product-branch discovery and does not
+affect `git fetch origin main --tags`.
+
+### Immutable Project binding and visibility safety
+
+The mirror is bound to
+[OpenCoven Project 11](https://github.com/orgs/OpenCoven/projects/11) by its
+immutable Project node ID, `PVT_kwDOECXnmc4BhMIA`, in
+`.github/beads-project-sync.json`. The synchronizer requires that exact ID plus
+the repository-bound README marker or the canonical repository link. A
+matching marker on another Project never authorizes adoption, repair, or
+publication.
+
+Do not change `projectNodeId` to recover from a missing or renamed Project.
+First verify the Project's identity and repository ownership. Title, README,
+repository link, fields, and views remain repairable on the pinned public
+Project, but an absent pinned Project fails closed instead of provisioning a
+replacement. This repository does not support unpinned CLI provisioning.
+
+If the pinned Project is private, every dry-run, apply, and provision attempt
+fails before acquiring the apply lock or making a Project mutation. Automatic
+visibility changes are intentionally disabled. A maintainer must manually
+review the Project at the URL above, confirm its node ID and contents, change
+its visibility to public in GitHub, and then rerun a dry-run. Do not use a
+different marked Project as a substitute.
+
+Managed issue marker ownership is pinned separately by
+`trustedIssueAuthors` in `.github/beads-project-sync.json`. Logins are matched
+case-insensitively against GitHub's issue `user.login`; the mutable
+`author_association` value is informational and never authorizes a marker.
+The allowlist must remain non-empty. Every newly created mirror issue is
+re-read and rejected if its actor is not pinned.
+
+For a new repository with no pinned identity, any explicit bootstrap flow must
+create a fresh Project and return its node ID for a maintainer to review and
+commit before future synchronization. It must never adopt an existing marked
+private Project.
+
+`.github/workflows/beads-project-sync.yml` applies the mirror every day at
+03:17 UTC. Maintainers can also use **Actions → Beads Project Sync → Run
+workflow**:
+
+- `dry_run: true` makes Actions dry-run bootstrap an ephemeral runner database
+  from the authoritative Beads remote, without a GitHub token, before selecting
+  the read-only plan. The ephemeral database is discarded with the runner;
+  local dry-run remains read-only and never bootstraps Beads. The default
+  applies.
+- `allow_mass_close: true` overrides only the close-count guard.
+- Scheduled runs always apply and never enable the override.
+
+Every run uploads a sanitized `summary.json` and `diagnostics.log`, including
+failed runs. The summary reports counts by operation kind and body-free closure
+candidates with Bead ID, issue number, and public issue title when available.
+
+The generated Project README stays within GitHub's 10,000-Unicode-code-point
+limit. Required snapshot, field-guide, sync, and authority sections take
+priority; the remaining budget includes as many sorted closed-history entries
+as fit, with long titles bounded and an exact omission count when truncated.
+
+The guard normally refuses to close more than the greater of five managed
+issues or 25% of currently open managed issues. Run a dry-run first and inspect
+its artifact before manually enabling `allow_mass_close`; a refused run still
+publishes the same reviewable summary.
+
+Apply and provision runs acquire the GitHub-backed lease before repairing the
+Project. After acquisition they discard all cached Project discovery, item, and
+field state, then re-read the pinned ID, ownership marker or repository link,
+visibility, title, and README. Every individual REST, GraphQL, and `gh project`
+mutation revalidates lease ownership immediately before sending, including
+each request inside compound Project, view, field, and relationship repairs.
+Dry-runs take no lease and perform no writes.
+
+Project view names, layouts, and filters are automated. GitHub does not expose
+all view grouping and sorting controls through the API used here, so a
+maintainer may configure preferred grouping/sorting once in the Project UI
+after provisioning; sync preserves those manual display settings.
+
+Learn more about Beads at
+[github.com/gastownhall/beads](https://github.com/gastownhall/beads).
