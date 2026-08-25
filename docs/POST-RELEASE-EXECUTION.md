@@ -28,8 +28,7 @@ skipped deliberately.
 The remaining P0 work is post-release control and stabilization work. It does
 not make the public macOS artifact unreleased. The iOS companion remains
 planned pending [#200](https://github.com/OpenCoven/psyche-build/issues/200);
-source, simulator, fixture, and UI-test success do not establish live TestFlight
-availability.
+source, simulator, fixture, and UI-test success do not establish live TestFlight availability.
 
 ## Authority and evidence
 
@@ -43,7 +42,8 @@ availability.
 
 A claim moves to complete only when its owning outcome links durable evidence.
 Screenshots without build identity, undocumented maintainer memory, generated
-mirror text, or raw test counts are insufficient.
+mirror text, or raw test counts are insufficient. Documentation and test counts
+are not substitutes for retained evidence.
 
 ## Critical path
 
@@ -210,5 +210,4 @@ A PR may merge only when:
 7. rollback or safe recovery is explicit for contract-changing work.
 
 Closing an implementation issue requires the merged commit and retained evidence,
-not merely a merged source diff. Closing a public outcome requires every child
-gate or an explicit, truthful deferral.
+not merely a merged source diff. Closing a public outcome requires every child gate or an explicit, truthful deferral.
