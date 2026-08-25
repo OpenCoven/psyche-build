@@ -44,8 +44,6 @@ const API_KEY_ASSIGNMENT_PATTERN =
   /\b(?:api[_-]?key|apikey|client[_-]?secret|access[_-]?token|auth[_-]?token)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
 const CREDENTIAL_ASSIGNMENT_PATTERN =
   /\b(?:github[_-]?token|token|secret|password|passwd)\b(?:\s*["'`])?\s*[:=]\s*(?:"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s,;]+)/iu;
-const URL_USERINFO_PATTERN =
-  /(?:git\+)?[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\\\s"'`()\[\]{}<>@]+@/iu;
 const WHATWG_SPECIAL_CREDENTIAL_SCHEMES = new Set([
   'ftp',
   'http',
@@ -70,7 +68,7 @@ const CREDENTIAL_URL_PREFIXES = [
   ...[...WHATWG_SPECIAL_CREDENTIAL_SCHEMES].map((scheme) => `git+${scheme}`),
 ].sort((left, right) => right.length - left.length);
 const CREDENTIAL_URL_AMBIGUOUS_USERINFO_PATTERN =
-  /[\[\]{}<>"'`\\?#]/u;
+  /[\[\]{}<>"'`]/u;
 const HOME_PATH_SEGMENT_CHARACTER_PATTERN = /[A-Za-z0-9._~%-]/u;
 const LOCAL_PATH_COMPONENT_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}._~%+@-]/u;
 const LOCAL_PATH_FILE_EXTENSION_PATTERN =
@@ -155,6 +153,15 @@ const STRICT_BASE64_PATTERN =
  */
 function fail(message) {
   throw new Error(message);
+}
+
+/**
+ * @param {string} value
+ */
+function assertPublicTextInspectionLength(value) {
+  if (value.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Public text exceeds the HTML character reference inspection limit');
+  }
 }
 
 /**
@@ -380,6 +387,30 @@ function trimUriCandidateEnd(value, start, end) {
 
 /**
  * @param {string} value
+ * @param {number} start
+ * @returns {string | null}
+ */
+function urlCandidateStructuralBoundary(value, start) {
+  const previous = value[start - 1];
+  if (previous === '<') {
+    return '>';
+  }
+  if (previous === '=') {
+    return '>';
+  }
+  if (previous !== '"' && previous !== "'") {
+    return null;
+  }
+
+  let cursor = start - 2;
+  while (cursor >= 0 && /\s/u.test(value[cursor] ?? '')) {
+    cursor -= 1;
+  }
+  return value[cursor] === '=' ? previous : null;
+}
+
+/**
+ * @param {string} value
  * @returns {UrlCandidate[]}
  */
 function scanUrlCandidates(value) {
@@ -397,8 +428,13 @@ function scanUrlCandidates(value) {
     }
 
     const start = cursor;
+    const structuralBoundary = urlCandidateStructuralBoundary(value, start);
     let scanEnd = schemeEnd + 1;
-    while (scanEnd < value.length && !isUriCandidateBoundary(value[scanEnd])) {
+    while (
+      scanEnd < value.length
+      && !isUriCandidateBoundary(value[scanEnd])
+      && value[scanEnd] !== structuralBoundary
+    ) {
       if (scanEnd - start >= MAX_URL_CANDIDATE_LENGTH) {
         fail('Public URL candidate exceeds the inspection limit');
       }
@@ -461,6 +497,7 @@ function hasCredentialUrlCandidatePrefixBoundary(value, start) {
  *   conventionalAuthority: boolean,
  *   protocolRelative: boolean,
  *   lastAt: number | null,
+ *   structuralBoundary: string | null,
  * }} CredentialUrlScanState
  */
 
@@ -493,6 +530,7 @@ function credentialUrlStartAt(value, start) {
       conventionalAuthority: true,
       protocolRelative: true,
       lastAt: null,
+      structuralBoundary: urlCandidateStructuralBoundary(value, start),
     };
   }
 
@@ -518,6 +556,7 @@ function credentialUrlStartAt(value, start) {
       conventionalAuthority: separatorCount >= 2,
       protocolRelative: false,
       lastAt: null,
+      structuralBoundary: urlCandidateStructuralBoundary(value, start),
     };
   }
 
@@ -525,57 +564,31 @@ function credentialUrlStartAt(value, start) {
 }
 
 /**
- * @param {string} value
- * @param {number} start
- * @param {number} end
- * @returns {boolean}
- */
-function hasCredentialUrlHost(value, start, end) {
-  if (start >= end) {
-    return false;
-  }
-  if (value[start] === '[') {
-    const closingBracket = value.indexOf(']', start + 1);
-    return (
-      closingBracket !== -1
-      && closingBracket < end
-      && closingBracket > start + 1
-    );
-  }
-
-  let cursor = start;
-  while (
-    cursor < end
-    && /[\p{L}\p{N}\p{M}._~%:-]/u.test(value[cursor] ?? '')
-  ) {
-    cursor += 1;
-  }
-  return cursor > start;
-}
-
-/**
  * @param {CredentialUrlScanState} state
  * @param {string} value
  * @param {number} authorityEnd
  * @param {boolean} decoded
+ * @param {boolean} rejectDirectUserinfo
  */
 function assertCredentialUrlAuthoritySafe(
   state,
   value,
   authorityEnd,
   decoded,
+  rejectDirectUserinfo,
 ) {
   if (
     state.lastAt == null
     || state.lastAt <= state.authorityStart
-    || !hasCredentialUrlHost(value, state.lastAt + 1, authorityEnd)
+    || state.lastAt + 1 >= authorityEnd
   ) {
     return;
   }
 
   const userinfo = value.slice(state.authorityStart, state.lastAt);
   if (
-    decoded
+    rejectDirectUserinfo
+    || decoded
     || state.protocolRelative
     || !state.conventionalAuthority
     || containsEncodedCredentialUrlUserinfo(userinfo)
@@ -590,24 +603,21 @@ function assertCredentialUrlAuthoritySafe(
 /**
  * @param {string} value
  * @param {boolean} decoded
+ * @param {boolean} rejectDirectUserinfo
  */
-function assertCredentialUrlVariantSafe(value, decoded) {
+function assertCredentialUrlVariantSafe(value, decoded, rejectDirectUserinfo) {
   /** @type {CredentialUrlScanState | null} */
   let state = null;
   let cursor = 0;
 
   while (cursor < value.length) {
-    const nextState = credentialUrlStartAt(value, cursor);
-    if (nextState != null) {
-      if (state != null) {
-        assertCredentialUrlAuthoritySafe(state, value, cursor, decoded);
-      }
-      state = nextState;
-      cursor = nextState.authorityStart;
-      continue;
-    }
-
     if (state == null) {
+      const nextState = credentialUrlStartAt(value, cursor);
+      if (nextState != null) {
+        state = nextState;
+        cursor = nextState.authorityStart;
+        continue;
+      }
       cursor += 1;
       continue;
     }
@@ -616,26 +626,46 @@ function assertCredentialUrlVariantSafe(value, decoded) {
     }
 
     const character = value[cursor];
-    if (character === '@') {
-      state.lastAt = cursor;
-    } else if (character === '/' || character === '\\') {
-      assertCredentialUrlAuthoritySafe(state, value, cursor, decoded);
+    if (
+      character === '/'
+      || character === '\\'
+      || character === '?'
+      || character === '#'
+      || isCredentialUrlTokenBoundary(character)
+      || character === state.structuralBoundary
+    ) {
+      assertCredentialUrlAuthoritySafe(
+        state,
+        value,
+        cursor,
+        decoded,
+        rejectDirectUserinfo,
+      );
       state = null;
+    } else if (character === '@') {
+      state.lastAt = cursor;
     }
     cursor += 1;
   }
 
   if (state != null) {
-    assertCredentialUrlAuthoritySafe(state, value, value.length, decoded);
+    assertCredentialUrlAuthoritySafe(
+      state,
+      value,
+      value.length,
+      decoded,
+      rejectDirectUserinfo,
+    );
   }
 }
 
 /**
  * @param {string} value
+ * @param {boolean} rejectDirectUserinfo
  */
-function assertCredentialUrlSpanSafe(value) {
+function assertCredentialUrlSpanSafe(value, rejectDirectUserinfo) {
   for (const [index, variant] of credentialUrlStructuralVariants(value).entries()) {
-    assertCredentialUrlVariantSafe(variant, index > 0);
+    assertCredentialUrlVariantSafe(variant, index > 0, rejectDirectUserinfo);
   }
 }
 
@@ -1497,10 +1527,15 @@ function containsEncodedCredentialUrlUserinfo(value) {
 /**
  * @param {string} value
  * @param {boolean} [exactSpan=false]
+ * @param {boolean} [rejectDirectUserinfo=false]
  */
-function assertNoCredentialUrlReferences(value, exactSpan = false) {
+function assertNoCredentialUrlReferences(
+  value,
+  exactSpan = false,
+  rejectDirectUserinfo = false,
+) {
   if (exactSpan) {
-    assertCredentialUrlSpanSafe(value);
+    assertCredentialUrlSpanSafe(value, rejectDirectUserinfo);
     return;
   }
 
@@ -1520,7 +1555,10 @@ function assertNoCredentialUrlReferences(value, exactSpan = false) {
       cursor += 1;
     }
     if (cursor > start) {
-      assertCredentialUrlSpanSafe(value.slice(start, cursor));
+      assertCredentialUrlSpanSafe(
+        value.slice(start, cursor),
+        rejectDirectUserinfo,
+      );
     }
   }
 }
@@ -3925,9 +3963,6 @@ function assertNoDirectPublishableSecrets(value) {
   if (CREDENTIAL_ASSIGNMENT_PATTERN.test(value)) {
     fail('Publishable credential assignment detected');
   }
-  if (URL_USERINFO_PATTERN.test(value)) {
-    fail('Publishable URL credentials detected');
-  }
 }
 
 /**
@@ -3935,7 +3970,7 @@ function assertNoDirectPublishableSecrets(value) {
  * @param {boolean} [rejectDirectUserinfo=false]
  */
 function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
-  assertNoCredentialUrlReferences(value);
+  assertNoCredentialUrlReferences(value, false, rejectDirectUserinfo);
   const decodedText = decodeHtmlEntitiesMapped(createMappedInspectionText(value));
   if (decodedText.value !== value) {
     assertNoDirectPublishableSecrets(decodedText.value);
@@ -4059,6 +4094,7 @@ export function assertNoPublishableSecrets(value) {
     return;
   }
 
+  assertPublicTextInspectionLength(value);
   assertSafeDataUrisInText(value, {}, 0);
   assertNoDirectPublishableSecrets(value);
   assertNoEncodedUrlSecrets(value, true);
@@ -4077,6 +4113,7 @@ export function sanitizePublicText(value, config = {}) {
   if (typeof value !== 'string') {
     fail('sanitizePublicText expected a string when present');
   }
+  assertPublicTextInspectionLength(value);
   let sanitized = value.replace(/\r\n?/gu, '\n');
   sanitized = sanitizeRawHtmlUrlAttributes(sanitized, config, 0);
   assertSafeDataUrisInText(sanitized, config, 0);

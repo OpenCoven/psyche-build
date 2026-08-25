@@ -1073,6 +1073,61 @@ describe('Beads project renderers', () => {
   });
 
   it.each([
+    ['leading host punctuation', 'http://user:password@!host.example/releases'],
+    ['IDN host', 'https://user:password@☃.example/releases'],
+    ['IPv6 host and port', 'ws://user:password@[2001:db8::1]:8443/releases'],
+    ['punycode host and port', 'ftp://user:password@xn--n3h.example:2121/releases'],
+  ])('rejects URL credentials with a %s', (_name, unsafeUrl) => {
+    for (const unsafeDescription of [
+      `Publish ${unsafeUrl} next.`,
+      `[credentials](${unsafeUrl})`,
+      `<a href="${unsafeUrl}">private</a>`,
+    ]) {
+      expect(() => assertNoPublishableSecrets(unsafeDescription)).toThrow(
+        /URL credentials/i,
+      );
+    }
+  });
+
+  it.each([
+    ['HTTP query', 'http://example.com?contact=user@example.net'],
+    ['HTTP fragment', 'http://example.com#contact=user@example.net'],
+    ['protocol-relative query', '//example.com?contact=user@example.net'],
+    ['protocol-relative fragment', '//example.com#contact=user@example.net'],
+    ['slashless query', 'https:example.com?contact=user@example.net'],
+    ['slashless fragment', 'https:example.com#contact=user@example.net'],
+  ])('does not treat an email in a %s as URL userinfo', (_name, safeUrl) => {
+    const expectedUrl = safeUrl.replace('user@example.net', '<redacted-email>');
+    expect(() => assertNoPublishableSecrets(safeUrl)).not.toThrow();
+    expect(sanitizePublicText(`Publish ${safeUrl} next.`)).toBe(
+      `Publish ${expectedUrl} next.`,
+    );
+    expect(sanitizePublicText(`[contact](${safeUrl})`)).toBe(
+      `[contact](${expectedUrl})`,
+    );
+    expect(sanitizePublicText(`<a href="${safeUrl}">contact</a>`)).toBe(
+      `<a href="${expectedUrl.replace('<', '&lt;').replace('>', '&gt;')}">contact</a>`,
+    );
+  });
+
+  it.each([
+    ['encoded question mark', 'https://user%3Fname:password@host.example/releases'],
+    ['encoded hash', 'https://user%23name:password@host.example/releases'],
+    ['recursively encoded question mark', 'https%3A%2F%2Fuser%253Fname%3Apassword%40host.example/releases'],
+    ['entity-encoded hash', 'https&colon;&sol;&sol;user&percnt;23name&colon;password&commat;host.example/releases'],
+  ])('rejects URL credentials containing an %s', (_name, unsafeUrl) => {
+    for (const unsafeDescription of [
+      `Publish ${unsafeUrl} next.`,
+      `[credentials](${unsafeUrl})`,
+      `<a href="${unsafeUrl}">private</a>`,
+    ]) {
+      expect(() => sanitizePublicText(unsafeDescription)).toThrow(
+        /URL credentials/i,
+      );
+    }
+  });
+
+  it.each([
     ['comma', ',', '//user%20name:password@[2001:db8::1]:8443/releases(foo)'],
     ['semicolon', ';', 'https:user%2Fname:password@host.example:8443/releases(foo)'],
     ['colon', '::', '//user%20name:password@host.example/releases(foo)'],
@@ -1115,8 +1170,6 @@ describe('Beads project renderers', () => {
     ['single quote', "'"],
     ['backtick', '`'],
     ['exclamation mark', '!'],
-    ['question mark', '?'],
-    ['hash', '#'],
   ])('inspects a %s anywhere in URL userinfo', (_name, punctuation) => {
     const unsafeUrl =
       `//alice${punctuation}:password@host.example/releases`;
@@ -1142,8 +1195,6 @@ describe('Beads project renderers', () => {
     ['single quote', '27'],
     ['backtick', '60'],
     ['exclamation mark', '21'],
-    ['question mark', '3F'],
-    ['hash', '23'],
   ])('inspects encoded %s in URL userinfo', (_name, encodedPunctuation) => {
     const unsafeUrl =
       `https%3A%2F%2Falice%${encodedPunctuation}%3Apassword`
@@ -1245,12 +1296,39 @@ describe('Beads project renderers', () => {
     expect(sanitizePublicText(source)).toBe(source);
   });
 
-  it('scans dense rejected URL prefixes in bounded linear time', () => {
-    const source = `${',%'.repeat(5_000)} ${',&'.repeat(5_000)}`;
-    const startedAt = performance.now();
+  it.each([
+    ['safe ASCII text', 'public release notes;'],
+    ['dense candidate-like text', '//cdn.example.com?topic=public#release;'],
+  ])('scans %s with near-linear scaling', (_name, unit) => {
+    const sizes = [16_384, 32_768, 65_536, 131_072];
+    const durations = sizes.map((size) => {
+      const source = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+      expect(sanitizePublicText(source)).toBe(source);
 
-    expect(sanitizePublicText(source)).toBe(source);
-    expect(performance.now() - startedAt).toBeLessThan(2_500);
+      const samples = Array.from({ length: 2 }, () => {
+        const startedAt = performance.now();
+        expect(sanitizePublicText(source)).toBe(source);
+        return performance.now() - startedAt;
+      });
+      return Math.min(...samples);
+    });
+
+    for (let index = 1; index < durations.length; index += 1) {
+      expect(durations[index]! / Math.max(durations[index - 1]!, 0.1)).toBeLessThan(4);
+    }
+    const perCharacter = durations.map((duration, index) => duration / sizes[index]!);
+    expect(Math.max(...perCharacter) / Math.min(...perCharacter)).toBeLessThan(3.5);
+  });
+
+  it('enforces the public text cap before scanning malformed candidates', () => {
+    const overLimit = `<a href="${'a'.repeat(131_072)}"`;
+
+    expect(() => sanitizePublicText(overLimit)).toThrow(
+      /HTML character reference inspection limit/i,
+    );
+    expect(() => assertNoPublishableSecrets(overLimit)).toThrow(
+      /HTML character reference inspection limit/i,
+    );
   });
 
   it('preserves safe protocol-relative URLs and redacts ordinary email prose', () => {
