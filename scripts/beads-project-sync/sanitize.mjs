@@ -7,10 +7,13 @@ import {
   EntityDecoder,
   htmlDecodeTree,
 } from 'entities/decode';
+import { parseFragment } from 'parse5';
 import { normalizeBeadPriority } from './model.mjs';
 
 /** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
 /** @typedef {import('./model.mjs').BeadPriority} BeadPriority */
+/** @typedef {import('parse5').DefaultTreeAdapterTypes.Node} ParsedHtmlNode */
+/** @typedef {import('parse5').DefaultTreeAdapterTypes.Element} ParsedHtmlElement */
 
 /**
  * @typedef {{
@@ -105,10 +108,11 @@ const MAX_DATA_URI_METADATA_LENGTH = 1_024;
 const MAX_DATA_URI_RECURSION_DEPTH = 4;
 const MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS =
   MAX_PERCENT_DECODE_ROUNDS + MAX_HTML_ENTITY_DECODE_ROUNDS;
-const MAX_RAW_HTML_START_TAG_COUNT = 1_024;
 const MAX_RAW_HTML_START_TAG_LENGTH = 16_384;
 const MAX_RAW_HTML_ATTRIBUTE_COUNT = 512;
-const MAX_RAW_HTML_TOKEN_COUNT = 2_048;
+const MAX_PARSED_HTML_NODE_COUNT = 4_096;
+const MAX_PARSED_HTML_DEPTH = 128;
+const MAX_PARSED_HTML_TOTAL_ATTRIBUTE_COUNT = 4_096;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
 const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
 const MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN =
@@ -125,6 +129,7 @@ const HOME_PATH_GENERIC_PATH_PATTERNS = [
 ];
 // URL-bearing HTML attributes are mode-classified so URL lists are sanitized
 // candidate-by-candidate instead of being treated as one destination.
+/** @type {Map<string, 'single' | 'list' | 'srcset'>} */
 const RAW_HTML_URL_ATTRIBUTE_MODES = new Map([
   ['href', 'single'],
   ['xlink:href', 'single'],
@@ -149,29 +154,18 @@ const RAW_HTML_URL_ATTRIBUTE_MODES = new Map([
   ['srcset', 'srcset'],
   ['imagesrcset', 'srcset'],
 ]);
-const RAW_HTML_VOID_ELEMENTS = new Set([
-  'area',
-  'base',
-  'br',
-  'col',
-  'embed',
-  'hr',
-  'img',
-  'input',
-  'link',
-  'meta',
-  'param',
-  'source',
-  'track',
-  'wbr',
-]);
 const RAW_HTML_TEXT_BOUNDARY_ELEMENTS = new Set([
   'address',
   'article',
   'aside',
   'blockquote',
   'br',
+  'caption',
+  'center',
   'dd',
+  'details',
+  'dialog',
+  'dir',
   'div',
   'dl',
   'dt',
@@ -188,13 +182,16 @@ const RAW_HTML_TEXT_BOUNDARY_ELEMENTS = new Set([
   'h6',
   'header',
   'hr',
+  'hgroup',
   'li',
   'main',
+  'menu',
   'nav',
   'ol',
   'p',
   'pre',
   'section',
+  'summary',
   'table',
   'tbody',
   'td',
@@ -203,6 +200,29 @@ const RAW_HTML_TEXT_BOUNDARY_ELEMENTS = new Set([
   'thead',
   'tr',
   'ul',
+]);
+const RAW_HTML_ISOLATED_TEXT_ELEMENTS = new Set([
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'plaintext',
+  'script',
+  'style',
+  'template',
+  'textarea',
+  'title',
+  'xmp',
+]);
+const RAW_HTML_RAW_TEXT_ELEMENTS = new Set([
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'plaintext',
+  'script',
+  'style',
+  'xmp',
 ]);
 const STRICT_BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
@@ -815,6 +835,28 @@ function mappedSourceRange(mapped, start, end) {
 }
 
 /**
+ * @param {MappedInspectionText} mapped
+ * @param {Uint8Array} sourceMask
+ * @returns {Uint8Array}
+ */
+function mappedSourceProtectionMask(mapped, sourceMask) {
+  const mask = new Uint8Array(mapped.value.length);
+  for (let index = 0; index < mapped.sourceRanges.length; index += 1) {
+    const range = mapped.sourceRanges[index];
+    if (range == null) {
+      continue;
+    }
+    for (let sourceIndex = range.start; sourceIndex < range.end; sourceIndex += 1) {
+      if (sourceMask[sourceIndex]) {
+        mask[index] = 1;
+        break;
+      }
+    }
+  }
+  return mask;
+}
+
+/**
  * @param {string[]} output
  * @param {SourceRange[]} sourceRanges
  * @param {string} value
@@ -1122,20 +1164,30 @@ function decodeHtmlEntitiesMappedOnce(
 
 /**
  * @param {MappedInspectionText} mapped
+ * @param {Uint8Array | undefined} [sourceProtectedMask]
  * @returns {MappedInspectionText}
  */
-function decodeHtmlEntitiesMapped(mapped) {
+function decodeHtmlEntitiesMapped(mapped, sourceProtectedMask) {
   let current = mapped;
 
   for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
-    const decoded = decodeHtmlEntitiesMappedOnce(current);
+    const protectedMask = sourceProtectedMask == null
+      ? undefined
+      : mappedSourceProtectionMask(current, sourceProtectedMask);
+    const decoded = decodeHtmlEntitiesMappedOnce(current, protectedMask);
     if (decoded.value === current.value) {
       return current;
     }
     current = decoded;
   }
 
-  if (decodeHtmlEntitiesMappedOnce(current).value !== current.value) {
+  const protectedMask = sourceProtectedMask == null
+    ? undefined
+    : mappedSourceProtectionMask(current, sourceProtectedMask);
+  if (
+    decodeHtmlEntitiesMappedOnce(current, protectedMask).value
+    !== current.value
+  ) {
     fail('HTML character reference exceeds the decoding limit');
   }
   return current;
@@ -1143,15 +1195,23 @@ function decodeHtmlEntitiesMapped(mapped) {
 
 /**
  * @param {MappedInspectionText} mapped
+ * @param {Uint8Array | undefined} [sourceProtectedMask]
  * @returns {MappedInspectionText}
  */
-function decodeMarkdownHtmlEntitiesMapped(mapped) {
+function decodeMarkdownHtmlEntitiesMapped(mapped, sourceProtectedMask) {
   let current = mapped;
 
   for (let round = 0; round < MAX_HTML_ENTITY_DECODE_ROUNDS; round += 1) {
+    const protectedMask = markdownCodeMask(current.value);
+    if (sourceProtectedMask != null) {
+      const mappedMask = mappedSourceProtectionMask(current, sourceProtectedMask);
+      for (let index = 0; index < protectedMask.length; index += 1) {
+        protectedMask[index] ||= mappedMask[index] ?? 0;
+      }
+    }
     const decoded = decodeHtmlEntitiesMappedOnce(
       current,
-      markdownCodeMask(current.value),
+      protectedMask,
     );
     if (decoded.value === current.value) {
       return current;
@@ -1159,10 +1219,14 @@ function decodeMarkdownHtmlEntitiesMapped(mapped) {
     current = decoded;
   }
 
-  if (
-    decodeHtmlEntitiesMappedOnce(current, markdownCodeMask(current.value)).value
-    !== current.value
-  ) {
+  const protectedMask = markdownCodeMask(current.value);
+  if (sourceProtectedMask != null) {
+    const mappedMask = mappedSourceProtectionMask(current, sourceProtectedMask);
+    for (let index = 0; index < protectedMask.length; index += 1) {
+      protectedMask[index] ||= mappedMask[index] ?? 0;
+    }
+  }
+  if (decodeHtmlEntitiesMappedOnce(current, protectedMask).value !== current.value) {
     fail('HTML character reference exceeds the decoding limit');
   }
   return current;
@@ -1927,107 +1991,6 @@ function assertSafeDataUrisInText(value, config, depth) {
 }
 
 /**
- * @typedef {{
- *   start: number,
- *   end: number,
- *   tagNameEnd: number,
- *   name: string,
- *   selfClosing: boolean,
- * }} RawHtmlStartTag
- */
-
-/**
- * @typedef {{
- *   output: string[],
- *   sourceRanges: SourceRange[],
- *   lastWasBoundary: boolean,
- * }} RawHtmlTextGroupBuilder
- */
-
-/**
- * @typedef {{
- *   startTags: RawHtmlStartTag[],
- *   textGroups: MappedInspectionText[],
- * }} RawHtmlTokenization
- */
-
-/**
- * @param {string} value
- * @param {number} start
- * @returns {number}
- */
-function findRawHtmlTokenEnd(value, start) {
-  let quote = '';
-  for (let cursor = start; cursor < value.length; cursor += 1) {
-    if (cursor - start > MAX_RAW_HTML_START_TAG_LENGTH) {
-      fail('Raw HTML tag exceeds the inspection limit');
-    }
-    const character = value[cursor] ?? '';
-    if (quote) {
-      if (character === quote) {
-        quote = '';
-      }
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === '>') {
-      return cursor + 1;
-    }
-  }
-  fail('Unterminated or malformed raw HTML tag');
-}
-
-/**
- * @param {RawHtmlTextGroupBuilder | null} group
- * @param {string} value
- * @param {number} start
- * @param {number} end
- */
-function appendRawHtmlText(group, value, start, end) {
-  if (group == null || end <= start) {
-    return;
-  }
-  group.output.push(value.slice(start, end));
-  for (let index = start; index < end; index += 1) {
-    group.sourceRanges.push({ start: index, end: index + 1 });
-  }
-  group.lastWasBoundary = false;
-  if (group.sourceRanges.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
-    fail('Decoded public text exceeds the HTML character reference inspection limit');
-  }
-}
-
-/**
- * @param {RawHtmlTextGroupBuilder | null} group
- * @param {number} start
- * @param {number} end
- */
-function appendRawHtmlTextBoundary(group, start, end) {
-  if (group == null || group.lastWasBoundary) {
-    return;
-  }
-  group.output.push('\u0000');
-  group.sourceRanges.push({ start, end });
-  group.lastWasBoundary = true;
-}
-
-/**
- * @param {MappedInspectionText[]} textGroups
- * @param {RawHtmlTextGroupBuilder | null} group
- */
-function finishRawHtmlTextGroup(textGroups, group) {
-  if (group != null && group.output.length > 0) {
-    textGroups.push({
-      value: group.output.join(''),
-      sourceRanges: group.sourceRanges,
-    });
-  }
-}
-
-/**
  * @param {string} value
  * @param {number} index
  * @returns {boolean}
@@ -2042,242 +2005,178 @@ function isMarkdownEscaped(value, index) {
 
 /**
  * @param {string} value
- * @returns {RawHtmlTokenization}
+ * @returns {boolean}
  */
-function tokenizeRawHtml(value) {
-  const startTags = /** @type {RawHtmlStartTag[]} */ ([]);
-  const textGroups = /** @type {MappedInspectionText[]} */ ([]);
+function isMarkdownAutolink(value) {
+  return (
+    /^[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*$/u.test(value)
+    || /^[^<>\s@]+@[^<>\s@]+$/u.test(value)
+  );
+}
+
+/**
+ * @param {string} value
+ * @returns {Uint8Array}
+ */
+function markdownLiteralHtmlMask(value) {
   const protectedMask = markdownCodeMask(value);
-  const stack = /** @type {string[]} */ ([]);
-  /** @type {RawHtmlTextGroupBuilder | null} */
-  let group = null;
-  let tokenCount = 0;
-  let cursor = 0;
-
-  while (cursor < value.length) {
-    if (protectedMask[cursor]) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      const start = cursor;
-      while (cursor < value.length && protectedMask[cursor]) {
-        cursor += 1;
-      }
-      appendRawHtmlTextBoundary(group, start, cursor);
-      continue;
-    }
-
-    if (value[cursor] !== '<') {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      appendRawHtmlText(group, value, cursor, cursor + 1);
-      cursor += 1;
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    if (protectedMask[cursor] || value[cursor] !== '<') {
       continue;
     }
     if (isMarkdownEscaped(value, cursor)) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      appendRawHtmlText(group, value, cursor, cursor + 1);
-      cursor += 1;
+      protectedMask[cursor] = 1;
       continue;
     }
-
-    if (value.startsWith('<!--', cursor)) {
-      const endMarker = value.indexOf('-->', cursor + 4);
-      if (endMarker === -1) {
-        fail('Unterminated or malformed raw HTML comment');
-      }
-      const end = endMarker + 3;
-      if (end - cursor > MAX_RAW_HTML_START_TAG_LENGTH) {
-        fail('Raw HTML comment exceeds the inspection limit');
-      }
-      if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
-        fail('Public text exceeds the raw HTML token inspection limit');
-      }
+    const end = value.indexOf('>', cursor + 1);
+    if (end === -1 || value.slice(cursor, end).includes('\n')) {
+      continue;
+    }
+    if (isMarkdownAutolink(value.slice(cursor + 1, end))) {
+      protectedMask.fill(1, cursor, end + 1);
       cursor = end;
-      continue;
+    }
+  }
+  return protectedMask;
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function protectMarkdownLiteralsFromHtmlParser(value) {
+  const protectedMask = markdownLiteralHtmlMask(value);
+  return Array.from({ length: value.length }, (_, index) => {
+    const character = value[index] ?? '';
+    return protectedMask[index] && character !== '\n' ? ' ' : character;
+  }).join('');
+}
+
+/**
+ * @param {string} value
+ */
+function parsePublicHtmlFragment(value) {
+  const parseInput = protectMarkdownLiteralsFromHtmlParser(value);
+  try {
+    return parseFragment(
+      parseInput,
+      { sourceCodeLocationInfo: true },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/invalid code point|character reference/iu.test(message)) {
+      fail('HTML character reference exceeds the inspection limit');
+    }
+    fail(`Public HTML sanitization could not parse the fragment: ${message}`);
+  }
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @returns {node is ParsedHtmlElement}
+ */
+function isParsedHtmlElement(node) {
+  return 'tagName' in node;
+}
+
+/**
+ * @param {ParsedHtmlNode} node
+ * @returns {ParsedHtmlNode[]}
+ */
+function parsedHtmlChildren(node) {
+  const children = 'childNodes' in node
+    ? /** @type {ParsedHtmlNode[]} */ (node.childNodes)
+    : [];
+  if (node.nodeName === 'template' && 'content' in node) {
+    return [
+      ...children,
+      .../** @type {ParsedHtmlNode[]} */ (node.content.childNodes),
+    ];
+  }
+  return children;
+}
+
+/**
+ * @param {ParsedHtmlNode} root
+ * @param {(node: ParsedHtmlNode, depth: number, parentTag: string | null) => void} visit
+ */
+function traverseParsedHtml(root, visit) {
+  let nodeCount = 0;
+  let attributeCount = 0;
+
+  /**
+   * @param {ParsedHtmlNode} node
+   * @param {number} depth
+   * @param {string | null} parentTag
+   */
+  function walk(node, depth, parentTag) {
+    nodeCount += 1;
+    if (nodeCount > MAX_PARSED_HTML_NODE_COUNT) {
+      fail('Public HTML sanitization exceeded the parsed node limit');
+    }
+    if (depth > MAX_PARSED_HTML_DEPTH) {
+      fail('Public HTML sanitization exceeded the parsed depth limit');
+    }
+    if (isParsedHtmlElement(node)) {
+      if (node.attrs.length > MAX_RAW_HTML_ATTRIBUTE_COUNT) {
+        fail('Public HTML sanitization exceeded the per-element attribute limit');
+      }
+      attributeCount += node.attrs.length;
+      if (attributeCount > MAX_PARSED_HTML_TOTAL_ATTRIBUTE_COUNT) {
+        fail('Public HTML sanitization exceeded the total attribute limit');
+      }
     }
 
-    if (value.startsWith('</', cursor)) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      let nameEnd = cursor + 2;
-      if (!/[A-Za-z]/u.test(value[nameEnd] ?? '')) {
-        appendRawHtmlText(group, value, cursor, cursor + 1);
-        cursor += 1;
-        continue;
-      }
-      nameEnd += 1;
-      while (/[A-Za-z0-9:-]/u.test(value[nameEnd] ?? '')) {
-        nameEnd += 1;
-      }
-      let end = nameEnd;
-      while (/\s/u.test(value[end] ?? '')) {
-        end += 1;
-      }
-      if (value[end] !== '>') {
-        fail('Malformed raw HTML closing tag');
-      }
-      end += 1;
-      if (end - cursor > MAX_RAW_HTML_START_TAG_LENGTH) {
-        fail('Raw HTML closing tag exceeds the inspection limit');
-      }
-      if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
-        fail('Public text exceeds the raw HTML token inspection limit');
-      }
-
-      const name = value.slice(cursor + 2, nameEnd).toLowerCase();
-      const stackIndex = stack.lastIndexOf(name);
-      if (stackIndex >= 0) {
-        if (
-          stackIndex > 0
-          && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)
-        ) {
-          appendRawHtmlTextBoundary(group, cursor, end);
-        }
-        stack.length = stackIndex;
-        if (
-          stack.length === 0
-          && group != null
-          && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)
-        ) {
-          finishRawHtmlTextGroup(textGroups, group);
-          group = null;
-        }
-      }
-      cursor = end;
-      continue;
+    visit(node, depth, parentTag);
+    const nextParentTag = isParsedHtmlElement(node)
+      ? node.tagName.toLowerCase()
+      : parentTag;
+    for (const child of parsedHtmlChildren(node)) {
+      walk(child, depth + 1, nextParentTag);
     }
-
-    if (value.startsWith('<!', cursor) || value.startsWith('<?', cursor)) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      const end = findRawHtmlTokenEnd(value, cursor + 2);
-      if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
-        fail('Public text exceeds the raw HTML token inspection limit');
-      }
-      cursor = end;
-      continue;
-    }
-
-    if (!/[A-Za-z]/u.test(value[cursor + 1] ?? '')) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      appendRawHtmlText(group, value, cursor, cursor + 1);
-      cursor += 1;
-      continue;
-    }
-
-    let tagNameEnd = cursor + 2;
-    while (/[A-Za-z0-9:-]/u.test(value[tagNameEnd] ?? '')) {
-      tagNameEnd += 1;
-    }
-    if (
-      value[tagNameEnd] === '/'
-      && value.slice(cursor + 1, tagNameEnd).endsWith(':')
-    ) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      appendRawHtmlText(group, value, cursor, cursor + 1);
-      cursor += 1;
-      continue;
-    }
-    if (!/[\s/>]/u.test(value[tagNameEnd] ?? '')) {
-      if (stack.length === 0 && group != null) {
-        finishRawHtmlTextGroup(textGroups, group);
-        group = null;
-      }
-      appendRawHtmlText(group, value, cursor, cursor + 1);
-      cursor += 1;
-      continue;
-    }
-    if (startTags.length >= MAX_RAW_HTML_START_TAG_COUNT) {
-      fail('Public text exceeds the raw HTML start tag inspection limit');
-    }
-    if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
-      fail('Public text exceeds the raw HTML token inspection limit');
-    }
-
-    const end = findRawHtmlTokenEnd(value, tagNameEnd);
-    const name = value.slice(cursor + 1, tagNameEnd).toLowerCase();
-    const selfClosing = RAW_HTML_VOID_ELEMENTS.has(name)
-      || /\/\s*>$/u.test(value.slice(cursor, end));
-    if (
-      stack.length === 0
-      && group != null
-      && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)
-    ) {
-      finishRawHtmlTextGroup(textGroups, group);
-      group = null;
-    }
-    startTags.push({
-      start: cursor,
-      end,
-      tagNameEnd,
-      name,
-      selfClosing,
-    });
-
-    if (stack.length > 0 && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)) {
-      appendRawHtmlTextBoundary(group, cursor, end);
-    }
-    if (!selfClosing) {
-      if (stack.length === 0 && group == null) {
-        group = {
-          output: [],
-          sourceRanges: [],
-          lastWasBoundary: false,
-        };
-      }
-      stack.push(name);
-    } else if (stack.length > 0 && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)) {
-      appendRawHtmlTextBoundary(group, cursor, end);
-    }
-    cursor = end;
   }
 
-  finishRawHtmlTextGroup(textGroups, group);
+  for (const child of parsedHtmlChildren(root)) {
+    walk(child, 1, null);
+  }
+}
 
+/**
+ * @param {string} value
+ * @param {number} offset
+ * @returns {MappedInspectionText}
+ */
+function createOffsetMappedInspectionText(value, offset) {
   return {
-    startTags,
-    textGroups,
+    value,
+    sourceRanges: Array.from({ length: value.length }, (_, index) => ({
+      start: offset + index,
+      end: offset + index + 1,
+    })),
   };
 }
 
 /**
- * @param {MappedInspectionText} mapped
- * @param {number} start
- * @param {number} end
- * @returns {SourceRange[]}
+ * @param {ParsedHtmlNode} node
+ * @param {string} source
+ * @param {string | null} parentTag
+ * @returns {MappedInspectionText | null}
  */
-function mappedSourceIntervals(mapped, start, end) {
-  const intervals = /** @type {SourceRange[]} */ ([]);
-  for (let index = start; index < end; index += 1) {
-    const sourceRange = mapped.sourceRanges[index];
-    if (sourceRange == null) {
-      fail('Invalid raw HTML text inspection range');
-    }
-    const previous = intervals.at(-1);
-    if (previous != null && sourceRange.start <= previous.end) {
-      previous.end = Math.max(previous.end, sourceRange.end);
-    } else {
-      intervals.push({ ...sourceRange });
-    }
+function parsedHtmlTextMapping(node, source, parentTag) {
+  if (
+    node.nodeName !== '#text'
+    || !('value' in node)
+    || node.sourceCodeLocation == null
+  ) {
+    return null;
   }
-  return intervals;
+  const { startOffset, endOffset } = node.sourceCodeLocation;
+  const raw = source.slice(startOffset, endOffset);
+  const mapped = createOffsetMappedInspectionText(raw, startOffset);
+  const decoded = parentTag != null && RAW_HTML_RAW_TEXT_ELEMENTS.has(parentTag)
+    ? mapped
+    : decodeHtmlEntitiesMappedOnce(mapped, undefined, DecodingMode.Legacy);
+  return decoded.value === node.value ? decoded : null;
 }
 
 /**
@@ -2288,7 +2187,7 @@ function mappedSourceIntervals(mapped, start, end) {
  * @param {string} replacement
  * @param {number} priority
  */
-function addDisjointMappedSourceReplacement(
+function addParsedTextReplacement(
   replacements,
   mapped,
   start,
@@ -2296,13 +2195,52 @@ function addDisjointMappedSourceReplacement(
   replacement,
   priority,
 ) {
-  const intervals = mappedSourceIntervals(mapped, start, end);
-  for (const [index, interval] of intervals.entries()) {
-    replacements.push({
-      ...interval,
-      value: index === 0 ? replacement : '',
-      priority,
-    });
+  replacements.push({
+    ...mappedSourceRange(mapped, start, end),
+    value: replacement,
+    priority,
+  });
+}
+
+/**
+ * @param {SourceReplacement[]} replacements
+ * @param {MappedInspectionText} mapped
+ * @param {readonly HomeDirectoryMatcher[]} matchers
+ */
+function collectParsedTextReplacements(replacements, mapped, matchers) {
+  EMAIL_PATTERN.lastIndex = 0;
+  for (const match of mapped.value.matchAll(EMAIL_PATTERN)) {
+    const start = match.index ?? -1;
+    if (start >= 0) {
+      addParsedTextReplacement(
+        replacements,
+        mapped,
+        start,
+        start + match[0].length,
+        '<redacted-email>',
+        1,
+      );
+    }
+  }
+  for (const range of homeDirectoryDecodedRanges(mapped.value, matchers)) {
+    addParsedTextReplacement(
+      replacements,
+      mapped,
+      range.start,
+      range.end,
+      range.value,
+      1,
+    );
+  }
+  for (const range of localOperationalPathRanges(mapped.value)) {
+    addParsedTextReplacement(
+      replacements,
+      mapped,
+      range.start,
+      range.end,
+      '<redacted-local-path>',
+      2,
+    );
   }
 }
 
@@ -2337,74 +2275,6 @@ function applySourceReplacements(value, replacements) {
     }`;
   }
   return sanitized;
-}
-
-/**
- * @param {string} value
- * @param {SanitizePublicTextConfig | null | undefined} config
- * @returns {string}
- */
-function sanitizeRawHtmlText(value, config) {
-  const replacements = /** @type {SourceReplacement[]} */ ([]);
-  const matchers = buildHomeDirectoryMatchers(config);
-
-  for (const textGroup of tokenizeRawHtml(value).textGroups) {
-    const decoded = decodeHtmlEntitiesMappedOnce(
-      textGroup,
-      undefined,
-      DecodingMode.Legacy,
-    );
-    assertSafeDataUrisInText(decoded.value, config, 0);
-    assertNoDirectPublishableSecrets(decoded.value);
-    assertNoEncodedUrlSecrets(decoded.value, true);
-    assertNoMarkdownReconstructedSecrets(decoded.value, config, 0);
-
-    EMAIL_PATTERN.lastIndex = 0;
-    for (const match of decoded.value.matchAll(EMAIL_PATTERN)) {
-      const start = match.index ?? -1;
-      if (start < 0) {
-        continue;
-      }
-      addDisjointMappedSourceReplacement(
-        replacements,
-        decoded,
-        start,
-        start + match[0].length,
-        '<redacted-email>',
-        1,
-      );
-    }
-    for (const range of homeDirectoryDecodedRanges(decoded.value, matchers)) {
-      addDisjointMappedSourceReplacement(
-        replacements,
-        decoded,
-        range.start,
-        range.end,
-        range.value,
-        1,
-      );
-    }
-    for (const range of localOperationalPathRanges(decoded.value)) {
-      addDisjointMappedSourceReplacement(
-        replacements,
-        decoded,
-        range.start,
-        range.end,
-        '<redacted-local-path>',
-        2,
-      );
-    }
-  }
-
-  return applySourceReplacements(value, replacements);
-}
-
-/**
- * @param {string} value
- * @returns {RawHtmlStartTag[]}
- */
-function scanRawHtmlStartTags(value) {
-  return tokenizeRawHtml(value).startTags;
 }
 
 /**
@@ -2561,109 +2431,546 @@ function sanitizeRawHtmlUrlList(rawValue, quote, config, depth) {
 }
 
 /**
- * @param {string} value
+ * @param {string} rawValue
+ * @param {'single' | 'list' | 'srcset'} mode
+ * @param {string | null} quote
  * @param {SanitizePublicTextConfig | null | undefined} config
  * @param {number} depth
  * @returns {string}
  */
-function sanitizeRawHtmlUrlAttributes(value, config, depth) {
-  const replacements = /** @type {{start: number, end: number, value: string}[]} */ ([]);
+function sanitizeRawHtmlAttributeValue(rawValue, mode, quote, config, depth) {
+  return mode === 'srcset'
+    ? sanitizeRawHtmlSrcset(rawValue, quote, config, depth)
+    : mode === 'list'
+      ? sanitizeRawHtmlUrlList(rawValue, quote, config, depth)
+      : sanitizeRawHtmlDestination(rawValue, quote, config, depth);
+}
 
-  for (const tag of scanRawHtmlStartTags(value)) {
-    let cursor = tag.tagNameEnd;
-    let attributeCount = 0;
+/**
+ * @typedef {{
+ *   start: number,
+ *   end: number,
+ *   quote: string | null,
+ * }} RawHtmlAttributeValueRange
+ */
 
-    while (cursor < tag.end - 1) {
-      while (cursor < tag.end - 1 && /\s/u.test(value[cursor] ?? '')) {
+/**
+ * This scanner only maps a parse5-validated attribute back to its source
+ * spelling for deterministic rewriting; parse5 remains the security authority.
+ *
+ * @param {string} value
+ * @param {{startOffset: number, endOffset: number}} location
+ * @param {string} qualifiedName
+ * @returns {RawHtmlAttributeValueRange | null}
+ */
+function rawHtmlAttributeValueRange(value, location, qualifiedName) {
+  const { startOffset, endOffset } = location;
+  if (
+    endOffset <= startOffset
+    || endOffset - startOffset > MAX_RAW_HTML_START_TAG_LENGTH
+  ) {
+    return null;
+  }
+  let cursor = startOffset;
+  while (
+    cursor < endOffset
+    && !/[\s=/>]/u.test(value[cursor] ?? '')
+  ) {
+    cursor += 1;
+  }
+  if (value.slice(startOffset, cursor).toLowerCase() !== qualifiedName) {
+    return null;
+  }
+  while (cursor < endOffset && /\s/u.test(value[cursor] ?? '')) {
+    cursor += 1;
+  }
+  if (value[cursor] !== '=') {
+    return null;
+  }
+  cursor += 1;
+  while (cursor < endOffset && /\s/u.test(value[cursor] ?? '')) {
+    cursor += 1;
+  }
+
+  const quote = value[cursor] === '"' || value[cursor] === "'"
+    ? value[cursor] ?? null
+    : null;
+  if (quote != null) {
+    cursor += 1;
+    const end = value.indexOf(quote, cursor);
+    if (end === -1 || end >= endOffset) {
+      return null;
+    }
+    return { start: cursor, end, quote };
+  }
+
+  let end = cursor;
+  while (end < endOffset && !/\s/u.test(value[end] ?? '')) {
+    end += 1;
+  }
+  return { start: cursor, end, quote: null };
+}
+
+/**
+ * @param {string} value
+ * @param {ReturnType<typeof parsePublicHtmlFragment>} fragment
+ * @returns {Uint8Array}
+ */
+function rawHtmlRewriteMask(value, fragment) {
+  const mask = markdownLiteralHtmlMask(value);
+  traverseParsedHtml(fragment, (node, _depth, parentTag) => {
+    const location = node.sourceCodeLocation;
+    if (
+      location == null
+      || (
+        node.nodeName !== '#comment'
+        && node.nodeName !== '#documentType'
+        && !(
+          node.nodeName === '#text'
+          && parentTag != null
+          && (
+            RAW_HTML_RAW_TEXT_ELEMENTS.has(parentTag)
+            || parentTag === 'textarea'
+            || parentTag === 'title'
+          )
+        )
+      )
+    ) {
+      return;
+    }
+    mask.fill(1, location.startOffset, location.endOffset);
+  });
+  return mask;
+}
+
+/**
+ * @param {string} value
+ * @param {Uint8Array} protectedMask
+ * @returns {string}
+ */
+function maskProtectedHtmlEntityStarts(value, protectedMask) {
+  return Array.from({ length: value.length }, (_, index) =>
+    protectedMask[index] && value[index] === '&' ? ' ' : value[index] ?? ''
+  ).join('');
+}
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {number | null}
+ */
+function rawHtmlStartTagEnd(value, start) {
+  let quote = '';
+  const limit = Math.min(value.length, start + MAX_RAW_HTML_START_TAG_LENGTH);
+  for (let cursor = start; cursor < limit; cursor += 1) {
+    const character = value[cursor] ?? '';
+    if (quote) {
+      if (character === quote) {
+        quote = '';
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '>') {
+      return cursor + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort source rewriting preserves the existing output format. Any
+ * missed or ambiguous case is rejected later from parse5's normalized DOM.
+ *
+ * @param {string} value
+ * @param {ReturnType<typeof parsePublicHtmlFragment>} fragment
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function rewriteRawHtmlAttributesFromSource(value, fragment, config, depth) {
+  const mask = rawHtmlRewriteMask(value, fragment);
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+
+  for (let tagStart = 0; tagStart < value.length; tagStart += 1) {
+    if (
+      mask[tagStart]
+      || value[tagStart] !== '<'
+      || !/[A-Za-z]/u.test(value[tagStart + 1] ?? '')
+    ) {
+      continue;
+    }
+    const tagEnd = rawHtmlStartTagEnd(value, tagStart + 1);
+    if (tagEnd == null) {
+      continue;
+    }
+    let cursor = tagStart + 2;
+    while (/[A-Za-z0-9:-]/u.test(value[cursor] ?? '')) {
+      cursor += 1;
+    }
+    if (!/[\s/>]/u.test(value[cursor] ?? '')) {
+      continue;
+    }
+
+    while (cursor < tagEnd - 1) {
+      while (cursor < tagEnd - 1 && /\s/u.test(value[cursor] ?? '')) {
         cursor += 1;
       }
       if (value[cursor] === '/') {
         cursor += 1;
         continue;
       }
-      if (cursor >= tag.end - 1) {
-        break;
-      }
-      if (++attributeCount > MAX_RAW_HTML_ATTRIBUTE_COUNT) {
-        fail('Raw HTML start tag exceeds the attribute inspection limit');
-      }
-
       const nameStart = cursor;
       while (
-        cursor < tag.end - 1
+        cursor < tagEnd - 1
         && !/[\s=/>]/u.test(value[cursor] ?? '')
       ) {
         cursor += 1;
       }
       if (cursor === nameStart) {
-        fail('Malformed raw HTML start tag attribute');
+        break;
       }
       const name = value.slice(nameStart, cursor).toLowerCase();
-      while (cursor < tag.end - 1 && /\s/u.test(value[cursor] ?? '')) {
+      while (cursor < tagEnd - 1 && /\s/u.test(value[cursor] ?? '')) {
         cursor += 1;
       }
       if (value[cursor] !== '=') {
         continue;
       }
       cursor += 1;
-      while (cursor < tag.end - 1 && /\s/u.test(value[cursor] ?? '')) {
+      while (cursor < tagEnd - 1 && /\s/u.test(value[cursor] ?? '')) {
         cursor += 1;
       }
-
-      const openingQuote = value[cursor] === '"' || value[cursor] === "'"
+      const quote = value[cursor] === '"' || value[cursor] === "'"
         ? value[cursor] ?? null
         : null;
-      if (openingQuote) {
+      if (quote != null) {
         cursor += 1;
       }
       const valueStart = cursor;
-      if (openingQuote) {
-        while (cursor < tag.end - 1 && value[cursor] !== openingQuote) {
+      if (quote != null) {
+        while (cursor < tagEnd - 1 && value[cursor] !== quote) {
           cursor += 1;
         }
-        if (cursor >= tag.end - 1) {
-          fail('Unterminated raw HTML attribute value');
+        if (value[cursor] !== quote) {
+          break;
         }
       } else {
         while (
-          cursor < tag.end - 1
+          cursor < tagEnd - 1
           && !/[\s>]/u.test(value[cursor] ?? '')
         ) {
           cursor += 1;
         }
       }
       const valueEnd = cursor;
-      if (openingQuote) {
+      if (quote != null) {
         cursor += 1;
       }
       const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(name);
       if (mode == null) {
         continue;
       }
-
       const rawValue = value.slice(valueStart, valueEnd);
-      const sanitized = mode === 'srcset'
-        ? sanitizeRawHtmlSrcset(rawValue, openingQuote, config, depth)
-        : mode === 'list'
-          ? sanitizeRawHtmlUrlList(rawValue, openingQuote, config, depth)
-          : sanitizeRawHtmlDestination(rawValue, openingQuote, config, depth);
+      try {
+        const sanitized = sanitizeRawHtmlAttributeValue(
+          rawValue,
+          mode,
+          quote,
+          config,
+          depth,
+        );
+        if (sanitized !== rawValue) {
+          replacements.push({
+            start: valueStart,
+            end: valueEnd,
+            value: sanitized,
+            priority: 3,
+          });
+        }
+      } catch {
+        // parse5 validation below owns all fail-closed security decisions.
+      }
+    }
+    tagStart = tagEnd - 1;
+  }
+
+  return applySourceReplacements(value, replacements);
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @param {{name: string, value: string, prefix?: string}} attribute
+ * @returns {string}
+ */
+function parsedHtmlAttributeName(element, attribute) {
+  if (attribute.prefix) {
+    return `${attribute.prefix}:${attribute.name}`.toLowerCase();
+  }
+  if (
+    element.namespaceURI === 'http://www.w3.org/2000/svg'
+    && attribute.name === 'href'
+    && attribute.prefix === 'xlink'
+  ) {
+    return 'xlink:href';
+  }
+  return attribute.name.toLowerCase();
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @param {string} qualifiedName
+ */
+function parsedHtmlAttributeLocation(element, qualifiedName) {
+  return element.sourceCodeLocation?.attrs?.[qualifiedName] ?? null;
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ * @returns {string}
+ */
+function rewriteRawHtmlFromParsedSource(value, config, depth) {
+  const fragment = parsePublicHtmlFragment(value);
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+  const matchers = buildHomeDirectoryMatchers(config);
+
+  traverseParsedHtml(fragment, (node, _nodeDepth, parentTag) => {
+    if (node.nodeName === '#text') {
+      const mapped = parsedHtmlTextMapping(node, value, parentTag);
+      if (mapped != null && parentTag != null) {
+        collectParsedTextReplacements(replacements, mapped, matchers);
+      }
+      return;
+    }
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+
+    for (const attribute of node.attrs) {
+      const qualifiedName = parsedHtmlAttributeName(node, attribute);
+      const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(qualifiedName);
+      if (mode == null) {
+        continue;
+      }
+      const location = parsedHtmlAttributeLocation(node, qualifiedName);
+      const valueRange = location == null
+        ? null
+        : rawHtmlAttributeValueRange(value, location, qualifiedName);
+      if (valueRange == null) {
+        continue;
+      }
+      const rawValue = value.slice(valueRange.start, valueRange.end);
+      const parsedValue = decodeHtmlEntitiesMappedOnce(
+        createMappedInspectionText(rawValue),
+        undefined,
+        DecodingMode.Attribute,
+      ).value;
+      if (parsedValue !== attribute.value) {
+        continue;
+      }
+
+      let sanitized;
+      try {
+        sanitized = sanitizeRawHtmlAttributeValue(
+          rawValue,
+          mode,
+          valueRange.quote,
+          config,
+          depth,
+        );
+      } catch {
+        continue;
+      }
       if (sanitized !== rawValue) {
         replacements.push({
-          start: valueStart,
-          end: valueEnd,
+          start: valueRange.start,
+          end: valueRange.end,
           value: sanitized,
+          priority: 3,
         });
+      }
+    }
+  });
+
+  const rewritten = applySourceReplacements(value, replacements);
+  return rewriteRawHtmlAttributesFromSource(
+    rewritten,
+    parsePublicHtmlFragment(rewritten),
+    config,
+    depth,
+  );
+}
+
+/**
+ * @param {string} value
+ * @param {'single' | 'list' | 'srcset'} mode
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertParsedHtmlUrlAttributeSafe(value, mode, config, depth) {
+  if (value.length > MAX_RAW_HTML_START_TAG_LENGTH) {
+    fail('Raw HTML attribute exceeds the inspection limit');
+  }
+  let sanitized;
+  try {
+    sanitized = sanitizeRawHtmlAttributeValue(value, mode, '"', config, depth);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Public HTML sanitization rejected a parsed URL attribute: ${message}`);
+  }
+  if (sanitized !== value) {
+    const kind = containsEmail(value)
+      ? /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\//u.test(value)
+        ? 'URL credentials or email'
+        : 'email'
+      : (
+          containsLocalOperationalPath(value)
+          || homeDirectoryDecodedRanges(value, buildHomeDirectoryMatchers(config)).length > 0
+        )
+        ? 'local path'
+        : 'sensitive destination';
+    fail(
+      `Public HTML sanitization could not safely rewrite a parser-derived ${kind}`,
+    );
+  }
+}
+
+/**
+ * @param {string} text
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ */
+function assertParsedHtmlTextSafe(text, config) {
+  try {
+    assertNoDirectPublishableSecrets(text);
+    for (const candidate of scanDataUriCandidates(text)) {
+      assertSafeDataUriCandidate(candidate.value, config, 0);
+    }
+    for (const candidate of scanUrlCandidates(text)) {
+      const uri = parseAbsoluteUri(candidate.value);
+      if (
+        uri?.authority != null
+        && candidate.value.slice(uri.authority.start, uri.authority.end).includes('@')
+      ) {
+        fail('Publishable URL credentials detected');
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Public HTML sanitization rejected rendered text: ${message}`);
+  }
+  if (containsEmail(text)) {
+    fail('Public HTML sanitization could not safely rewrite parser-derived email text');
+  }
+  const matchers = buildHomeDirectoryMatchers(config);
+  if (
+    containsLocalOperationalPath(text)
+    || homeDirectoryDecodedRanges(text, matchers).length > 0
+  ) {
+    fail(
+      'Public HTML sanitization could not safely rewrite parser-derived local path text',
+    );
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertParsedRawHtmlUrlAttributesSafe(value, config, depth) {
+  const fragment = parsePublicHtmlFragment(value);
+  traverseParsedHtml(fragment, (node) => {
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+    for (const attribute of node.attrs) {
+      const qualifiedName = parsedHtmlAttributeName(node, attribute);
+      const mode = RAW_HTML_URL_ATTRIBUTE_MODES.get(qualifiedName);
+      if (mode != null) {
+        assertParsedHtmlUrlAttributeSafe(attribute.value, mode, config, depth);
+      }
+    }
+  });
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {number} depth
+ */
+function assertParsedRawHtmlSafe(value, config, depth) {
+  const fragment = parsePublicHtmlFragment(value);
+  /** @type {{parts: string[], hasElement: boolean}} */
+  let current = { parts: [], hasElement: false };
+
+  function finishTextGroup() {
+    if (current.hasElement && current.parts.length > 0) {
+      assertParsedHtmlTextSafe(current.parts.join(''), config);
+    }
+    current = { parts: [], hasElement: false };
+  }
+
+  /**
+   * @param {string} text
+   * @param {boolean} insideElement
+   */
+  function appendText(text, insideElement) {
+    const parts = text.split(/(\n+)/u);
+    for (const part of parts) {
+      if (/^\n+$/u.test(part)) {
+        finishTextGroup();
+        continue;
+      }
+      if (part) {
+        current.parts.push(part);
+        current.hasElement ||= insideElement;
       }
     }
   }
 
-  let sanitized = value;
-  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
-    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
-      sanitized.slice(replacement.end)
-    }`;
+  /**
+   * @param {ParsedHtmlNode} node
+   * @param {number} nodeDepth
+   * @param {boolean} insideElement
+   */
+  function collectRenderedText(node, nodeDepth, insideElement) {
+    if (nodeDepth > MAX_PARSED_HTML_DEPTH) {
+      fail('Public HTML sanitization exceeded the parsed depth limit');
+    }
+    if (node.nodeName === '#text' && 'value' in node) {
+      appendText(node.value, insideElement);
+      return;
+    }
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+
+    const tagName = node.tagName.toLowerCase();
+    const isBoundary = RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(tagName)
+      || RAW_HTML_ISOLATED_TEXT_ELEMENTS.has(tagName);
+    if (isBoundary) {
+      finishTextGroup();
+    } else {
+      current.hasElement = true;
+    }
+
+    if (tagName !== 'template') {
+      for (const child of /** @type {ParsedHtmlNode[]} */ (node.childNodes)) {
+        collectRenderedText(child, nodeDepth + 1, true);
+      }
+    }
+    if (isBoundary) {
+      finishTextGroup();
+    }
   }
-  return sanitized;
+
+  assertParsedRawHtmlUrlAttributesSafe(value, config, depth);
+
+  for (const child of /** @type {ParsedHtmlNode[]} */ (fragment.childNodes)) {
+    collectRenderedText(child, 1, false);
+  }
+  finishTextGroup();
 }
 
 /**
@@ -4180,11 +4487,15 @@ function collectMappedEmailReplacements(mapped, original, replacements) {
 /**
  * @param {string} value
  * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {Uint8Array | undefined} [entityProtectedMask]
  * @returns {string}
  */
-function redactDecodedHtmlEntitySensitiveText(value, config) {
+function redactDecodedHtmlEntitySensitiveText(value, config, entityProtectedMask) {
   const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
-  const decoded = decodeMarkdownHtmlEntitiesMapped(markdownDecoded);
+  const decoded = decodeMarkdownHtmlEntitiesMapped(
+    markdownDecoded,
+    entityProtectedMask,
+  );
 
   const replacements = /** @type {SourceReplacement[]} */ ([]);
   const matchers = buildHomeDirectoryMatchers(config);
@@ -4515,10 +4826,18 @@ function assertNoDirectPublishableSecrets(value) {
 /**
  * @param {string} value
  * @param {boolean} [rejectDirectUserinfo=false]
+ * @param {Uint8Array | undefined} [entityProtectedMask]
  */
-function assertNoEncodedUrlSecrets(value, rejectDirectUserinfo = false) {
+function assertNoEncodedUrlSecrets(
+  value,
+  rejectDirectUserinfo = false,
+  entityProtectedMask,
+) {
   assertNoCredentialUrlReferences(value, false, rejectDirectUserinfo);
-  const decodedText = decodeHtmlEntitiesMapped(createMappedInspectionText(value));
+  const decodedText = decodeHtmlEntitiesMapped(
+    createMappedInspectionText(value),
+    entityProtectedMask,
+  );
   if (decodedText.value !== value) {
     assertNoDirectPublishableSecrets(decodedText.value);
   }
@@ -4621,13 +4940,28 @@ function assertNoMarkdownDestinationSecrets(markdownDecoded, config = {}, depth 
  * @param {string} value
  * @param {SanitizePublicTextConfig | null | undefined} [config]
  * @param {number} [depth]
+ * @param {Uint8Array | undefined} [entityProtectedMask]
  */
-function assertNoMarkdownReconstructedSecrets(value, config = {}, depth = 0) {
+function assertNoMarkdownReconstructedSecrets(
+  value,
+  config = {},
+  depth = 0,
+  entityProtectedMask,
+) {
   const markdownDecoded = decodeMarkdownEscapesMapped(createMappedInspectionText(value));
   if (markdownDecoded.value !== value) {
-    const decoded = decodeMarkdownHtmlEntitiesMapped(markdownDecoded);
+    const decoded = decodeMarkdownHtmlEntitiesMapped(
+      markdownDecoded,
+      entityProtectedMask,
+    );
     assertNoDirectPublishableSecrets(decoded.value);
-    assertNoEncodedUrlSecrets(markdownDecoded.value, true);
+    assertNoEncodedUrlSecrets(
+      markdownDecoded.value,
+      true,
+      entityProtectedMask == null
+        ? undefined
+        : mappedSourceProtectionMask(markdownDecoded, entityProtectedMask),
+    );
   }
   assertNoMarkdownDestinationSecrets(markdownDecoded, config, depth);
 }
@@ -4645,10 +4979,18 @@ export function assertNoPublishableSecrets(value) {
   }
 
   assertPublicTextInspectionLength(value);
-  assertSafeDataUrisInText(value, {}, 0);
+  const entityProtectedMask = rawHtmlRewriteMask(
+    value,
+    parsePublicHtmlFragment(value),
+  );
+  assertSafeDataUrisInText(
+    maskProtectedHtmlEntityStarts(value, entityProtectedMask),
+    {},
+    0,
+  );
   assertNoDirectPublishableSecrets(value);
-  assertNoEncodedUrlSecrets(value, true);
-  assertNoMarkdownReconstructedSecrets(value, {}, 0);
+  assertNoEncodedUrlSecrets(value, true, entityProtectedMask);
+  assertNoMarkdownReconstructedSecrets(value, {}, 0, entityProtectedMask);
 }
 
 /**
@@ -4665,12 +5007,30 @@ export function sanitizePublicText(value, config = {}) {
   }
   assertPublicTextInspectionLength(value);
   let sanitized = value.replace(/\r\n?/gu, '\n');
-  sanitized = sanitizeRawHtmlUrlAttributes(sanitized, config, 0);
-  sanitized = sanitizeRawHtmlText(sanitized, config);
-  assertSafeDataUrisInText(sanitized, config, 0);
-  assertNoEncodedUrlSecrets(sanitized);
-  assertNoMarkdownReconstructedSecrets(sanitized, config, 0);
-  sanitized = redactDecodedHtmlEntitySensitiveText(sanitized, config);
+  sanitized = rewriteRawHtmlFromParsedSource(sanitized, config, 0);
+  assertParsedRawHtmlUrlAttributesSafe(sanitized, config, 0);
+  assertParsedRawHtmlSafe(sanitized, config, 0);
+  const entityProtectedMask = rawHtmlRewriteMask(
+    sanitized,
+    parsePublicHtmlFragment(sanitized),
+  );
+  assertSafeDataUrisInText(
+    maskProtectedHtmlEntityStarts(sanitized, entityProtectedMask),
+    config,
+    0,
+  );
+  assertNoEncodedUrlSecrets(sanitized, false, entityProtectedMask);
+  assertNoMarkdownReconstructedSecrets(
+    sanitized,
+    config,
+    0,
+    entityProtectedMask,
+  );
+  sanitized = redactDecodedHtmlEntitySensitiveText(
+    sanitized,
+    config,
+    entityProtectedMask,
+  );
   sanitized = replaceUrlCandidates(sanitized, (url) => {
     const uri = parseAbsoluteUri(url);
     return uri == null ? url : stripUriUserinfo(url, uri);

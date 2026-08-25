@@ -772,9 +772,9 @@ describe('Beads project renderers', () => {
         '<a href="https&colon;&sol;&sol;alice&commat;example.com/private">private</a>',
       )
     ).toThrow(/URL credentials/i);
-    expect(() =>
-      sanitizePublicText('<a href="https://example.com"')
-    ).toThrow(/malformed raw HTML|unterminated raw HTML/i);
+    expect(sanitizePublicText('<a href="https://example.com"')).toBe(
+      '<a href="https://example.com"',
+    );
     expect(() =>
       sanitizePublicText(`<img src="${'a'.repeat(17_000)}">`)
     ).toThrow(/raw HTML.*inspection limit|tag.*inspection limit/i);
@@ -830,28 +830,121 @@ describe('Beads project renderers', () => {
         '<p>to<strong>ken</strong>&#58supersecretvalue</p>',
       )
     ).toThrow(/Publishable credential assignment/i);
-    expect(
+    expect(() =>
       sanitizePublicText('<p>alice&#64;<em>example</em>.com</p>'),
-    ).toBe('<p><redacted-email><em></em></p>');
-    expect(
+    ).toThrow(/Public HTML sanitization.*email/i);
+    expect(() =>
       sanitizePublicText('<span>alice</span><span>&#64example.com</span>'),
-    ).toBe('<span><redacted-email></span><span></span>');
-    expect(
+    ).toThrow(/Public HTML sanitization.*email/i);
+    expect(() =>
       sanitizePublicText(
         '<p>&#47Users<em>&#47alice</em>&#47private&#47plan.md</p>',
       ),
-    ).toBe('<p>~<em></em>&#47private&#47plan.md</p>');
+    ).toThrow(/Public HTML sanitization.*local path/i);
   });
 
-  it('sanitizes sensitive script and style text without rewriting safe raw HTML syntax', () => {
+  it('validates browser-rendered raw HTML across inline and comment boundaries', () => {
+    expect(() =>
+      sanitizePublicText('<span>token</span>&#58;supersecretvalue')
+    ).toThrow(/Publishable credential assignment/i);
+    expect(() =>
+      sanitizePublicText('<span>alice</span>&#64;example.com')
+    ).toThrow(/Public HTML sanitization.*email/i);
     expect(() =>
       sanitizePublicText(
-        '<script>token&#58supersecretvalue</script>',
+        '<span>alice</span><!-- browser comment -->&#64;example.com',
+      )
+    ).toThrow(/Public HTML sanitization.*email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<!-- harmless --!><span>token</span>&#58;supersecretvalue',
       )
     ).toThrow(/Publishable credential assignment/i);
+
+    const crossInlinePath =
+      '<span>/Users</span><em>/alice/private/plan.md</em>';
+    expect(() => sanitizePublicText(crossInlinePath)).toThrow(
+      /Public HTML sanitization.*local path/i,
+    );
+  });
+
+  it('uses parse5 fragment normalization for declarations and malformed markup', () => {
+    expect(() =>
+      sanitizePublicText(
+        '<!DOCTYPE html PUBLIC "quoted > value">'
+          + '<span>token</span>&#58;supersecretvalue',
+      )
+    ).toThrow(/Publishable credential assignment/i);
+    expect(() =>
+      sanitizePublicText(
+        '<!not "quoted > value">'
+          + '<span>token</span>&#58;supersecretvalue',
+      )
+    ).toThrow(/Publishable credential assignment/i);
+    expect(() =>
+      sanitizePublicText('<span><em>alice</span>&#64;example.com')
+    ).toThrow(/Public HTML sanitization.*email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<a href="https://alice@example.com/private"</div>',
+      )
+    ).toThrow(/Public HTML sanitization.*URL credentials/i);
+
+    const safeAlternateComment =
+      '<p>Public<!-- alternate close --!> information.</p>';
+    expect(sanitizePublicText(safeAlternateComment)).toBe(safeAlternateComment);
+  });
+
+  it('separates block text and follows raw-text and RCDATA parsing semantics', () => {
+    const safe = [
+      '<p>token</p><p>:supersecretvalue</p>',
+      '<p>alice</p><p>@example.com</p>',
+      '<div>/Users</div><div>/alice/private/plan.md</div>',
+      '<textarea><span>alice</span>&#64;example.com</textarea>',
+      '<script><span>token</span>&#58;supersecretvalue</script>',
+    ].join('\n');
+
+    expect(sanitizePublicText(safe)).toBe(safe);
     expect(
-      sanitizePublicText('<style>/* alice&#64example.com */</style>'),
-    ).toBe('<style>/* <redacted-email> */</style>');
+      sanitizePublicText('<textarea>alice&#64;example.com</textarea>'),
+    ).toBe('<textarea><redacted-email></textarea>');
+  });
+
+  it('treats Markdown code examples as literal while validating adjacent raw HTML', () => {
+    const safe = [
+      '`<span>token</span>&#58;supersecretvalue`',
+      '```html',
+      '<span>alice</span>&#64;example.com',
+      '```',
+      '<https://example.com> and alice&#64example.com are Markdown.',
+      '\\<span>alice\\</span>&#64;example.com is escaped Markdown.',
+    ].join('\n');
+    expect(sanitizePublicText(safe)).toBe(safe);
+
+    expect(() =>
+      sanitizePublicText(
+        '`<span>safe</span>` then '
+          + '<span>token</span>&#58;supersecretvalue',
+      )
+    ).toThrow(/Publishable credential assignment/i);
+  });
+
+  it('bounds parse5 raw HTML traversal by node count and depth', () => {
+    expect(() =>
+      sanitizePublicText('<i></i>'.repeat(5_000))
+    ).toThrow(/Public HTML sanitization.*node.*limit/i);
+    expect(() =>
+      sanitizePublicText(`${'<i>'.repeat(256)}safe${'</i>'.repeat(256)}`)
+    ).toThrow(/Public HTML sanitization.*depth.*limit/i);
+  });
+
+  it('follows raw-text parsing without rewriting safe raw HTML syntax', () => {
+    expect(
+      sanitizePublicText('<script>token&#58;supersecretvalue</script>'),
+    ).toBe('<script>token&#58;supersecretvalue</script>');
+    expect(
+      sanitizePublicText('<style>/* alice&#64;example.com */</style>'),
+    ).toBe('<style>/* alice&#64;example.com */</style>');
 
     const safe = [
       '<div title="alice&#64example.com"><span>AT&T &copy</span></div>',
