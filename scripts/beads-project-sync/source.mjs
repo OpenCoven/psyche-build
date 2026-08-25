@@ -247,8 +247,13 @@ export function createExecFileRun(execFile = nodeExecFile) {
     const environment = options.env == null
       ? { ...process.env }
       : { ...process.env, ...options.env };
-    for (const name of options.unsetEnv ?? []) {
-      delete environment[name];
+    const unsetEnvironmentNames = new Set(
+      (options.unsetEnv ?? []).map((name) => name.toLowerCase()),
+    );
+    for (const name of Object.keys(environment)) {
+      if (unsetEnvironmentNames.has(name.toLowerCase())) {
+        delete environment[name];
+      }
     }
     const child = execFile(
       command,

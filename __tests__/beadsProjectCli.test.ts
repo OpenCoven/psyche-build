@@ -584,6 +584,9 @@ describe('Beads source adapter', () => {
     vi.stubEnv('BEADS_PROJECT_TOKEN', 'source-write-token');
     vi.stubEnv('GH_TOKEN', 'source-gh-token');
     vi.stubEnv('GITHUB_TOKEN', 'source-github-token');
+    vi.stubEnv('beads_project_token', 'source-lowercase-write-token');
+    vi.stubEnv('gh_token', 'source-lowercase-gh-token');
+    vi.stubEnv('github_token', 'source-lowercase-github-token');
     let childEnvironment: NodeJS.ProcessEnv | undefined;
     const execFile: ExecFileImplementation = (
       _file,
@@ -612,6 +615,9 @@ describe('Beads source adapter', () => {
     expect(childEnvironment).not.toHaveProperty('BEADS_PROJECT_TOKEN');
     expect(childEnvironment).not.toHaveProperty('GH_TOKEN');
     expect(childEnvironment).not.toHaveProperty('GITHUB_TOKEN');
+    expect(childEnvironment).not.toHaveProperty('beads_project_token');
+    expect(childEnvironment).not.toHaveProperty('gh_token');
+    expect(childEnvironment).not.toHaveProperty('github_token');
   });
 
   it('rejects temp roots inside every registered worktree and the common Git root', async () => {
