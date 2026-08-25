@@ -108,6 +108,7 @@ const MAX_DATA_URI_DISCOVERY_DECODE_ROUNDS =
 const MAX_RAW_HTML_START_TAG_COUNT = 1_024;
 const MAX_RAW_HTML_START_TAG_LENGTH = 16_384;
 const MAX_RAW_HTML_ATTRIBUTE_COUNT = 512;
+const MAX_RAW_HTML_TOKEN_COUNT = 2_048;
 const INVALID_PERCENT_ESCAPE_PATTERN = /%(?![A-F0-9]{2})/iu;
 const VALID_PERCENT_ESCAPE_PATTERN = /%[A-F0-9]{2}/iu;
 const MARKDOWN_ESCAPABLE_PUNCTUATION_PATTERN =
@@ -147,6 +148,61 @@ const RAW_HTML_URL_ATTRIBUTE_MODES = new Map([
   ['itemtype', 'list'],
   ['srcset', 'srcset'],
   ['imagesrcset', 'srcset'],
+]);
+const RAW_HTML_VOID_ELEMENTS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
+const RAW_HTML_TEXT_BOUNDARY_ELEMENTS = new Set([
+  'address',
+  'article',
+  'aside',
+  'blockquote',
+  'br',
+  'dd',
+  'div',
+  'dl',
+  'dt',
+  'fieldset',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'hr',
+  'li',
+  'main',
+  'nav',
+  'ol',
+  'p',
+  'pre',
+  'section',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'ul',
 ]);
 const STRICT_BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
@@ -1875,70 +1931,480 @@ function assertSafeDataUrisInText(value, config, depth) {
  *   start: number,
  *   end: number,
  *   tagNameEnd: number,
+ *   name: string,
+ *   selfClosing: boolean,
  * }} RawHtmlStartTag
  */
+
+/**
+ * @typedef {{
+ *   output: string[],
+ *   sourceRanges: SourceRange[],
+ *   lastWasBoundary: boolean,
+ * }} RawHtmlTextGroupBuilder
+ */
+
+/**
+ * @typedef {{
+ *   startTags: RawHtmlStartTag[],
+ *   textGroups: MappedInspectionText[],
+ * }} RawHtmlTokenization
+ */
+
+/**
+ * @param {string} value
+ * @param {number} start
+ * @returns {number}
+ */
+function findRawHtmlTokenEnd(value, start) {
+  let quote = '';
+  for (let cursor = start; cursor < value.length; cursor += 1) {
+    if (cursor - start > MAX_RAW_HTML_START_TAG_LENGTH) {
+      fail('Raw HTML tag exceeds the inspection limit');
+    }
+    const character = value[cursor] ?? '';
+    if (quote) {
+      if (character === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '>') {
+      return cursor + 1;
+    }
+  }
+  fail('Unterminated or malformed raw HTML tag');
+}
+
+/**
+ * @param {RawHtmlTextGroupBuilder | null} group
+ * @param {string} value
+ * @param {number} start
+ * @param {number} end
+ */
+function appendRawHtmlText(group, value, start, end) {
+  if (group == null || end <= start) {
+    return;
+  }
+  group.output.push(value.slice(start, end));
+  for (let index = start; index < end; index += 1) {
+    group.sourceRanges.push({ start: index, end: index + 1 });
+  }
+  group.lastWasBoundary = false;
+  if (group.sourceRanges.length > MAX_HTML_ENTITY_INSPECTION_LENGTH) {
+    fail('Decoded public text exceeds the HTML character reference inspection limit');
+  }
+}
+
+/**
+ * @param {RawHtmlTextGroupBuilder | null} group
+ * @param {number} start
+ * @param {number} end
+ */
+function appendRawHtmlTextBoundary(group, start, end) {
+  if (group == null || group.lastWasBoundary) {
+    return;
+  }
+  group.output.push('\u0000');
+  group.sourceRanges.push({ start, end });
+  group.lastWasBoundary = true;
+}
+
+/**
+ * @param {MappedInspectionText[]} textGroups
+ * @param {RawHtmlTextGroupBuilder | null} group
+ */
+function finishRawHtmlTextGroup(textGroups, group) {
+  if (group != null && group.output.length > 0) {
+    textGroups.push({
+      value: group.output.join(''),
+      sourceRanges: group.sourceRanges,
+    });
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function isMarkdownEscaped(value, index) {
+  let backslashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
+    backslashCount += 1;
+  }
+  return backslashCount % 2 === 1;
+}
+
+/**
+ * @param {string} value
+ * @returns {RawHtmlTokenization}
+ */
+function tokenizeRawHtml(value) {
+  const startTags = /** @type {RawHtmlStartTag[]} */ ([]);
+  const textGroups = /** @type {MappedInspectionText[]} */ ([]);
+  const protectedMask = markdownCodeMask(value);
+  const stack = /** @type {string[]} */ ([]);
+  /** @type {RawHtmlTextGroupBuilder | null} */
+  let group = null;
+  let tokenCount = 0;
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    if (protectedMask[cursor]) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      const start = cursor;
+      while (cursor < value.length && protectedMask[cursor]) {
+        cursor += 1;
+      }
+      appendRawHtmlTextBoundary(group, start, cursor);
+      continue;
+    }
+
+    if (value[cursor] !== '<') {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      appendRawHtmlText(group, value, cursor, cursor + 1);
+      cursor += 1;
+      continue;
+    }
+    if (isMarkdownEscaped(value, cursor)) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      appendRawHtmlText(group, value, cursor, cursor + 1);
+      cursor += 1;
+      continue;
+    }
+
+    if (value.startsWith('<!--', cursor)) {
+      const endMarker = value.indexOf('-->', cursor + 4);
+      if (endMarker === -1) {
+        fail('Unterminated or malformed raw HTML comment');
+      }
+      const end = endMarker + 3;
+      if (end - cursor > MAX_RAW_HTML_START_TAG_LENGTH) {
+        fail('Raw HTML comment exceeds the inspection limit');
+      }
+      if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
+        fail('Public text exceeds the raw HTML token inspection limit');
+      }
+      cursor = end;
+      continue;
+    }
+
+    if (value.startsWith('</', cursor)) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      let nameEnd = cursor + 2;
+      if (!/[A-Za-z]/u.test(value[nameEnd] ?? '')) {
+        appendRawHtmlText(group, value, cursor, cursor + 1);
+        cursor += 1;
+        continue;
+      }
+      nameEnd += 1;
+      while (/[A-Za-z0-9:-]/u.test(value[nameEnd] ?? '')) {
+        nameEnd += 1;
+      }
+      let end = nameEnd;
+      while (/\s/u.test(value[end] ?? '')) {
+        end += 1;
+      }
+      if (value[end] !== '>') {
+        fail('Malformed raw HTML closing tag');
+      }
+      end += 1;
+      if (end - cursor > MAX_RAW_HTML_START_TAG_LENGTH) {
+        fail('Raw HTML closing tag exceeds the inspection limit');
+      }
+      if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
+        fail('Public text exceeds the raw HTML token inspection limit');
+      }
+
+      const name = value.slice(cursor + 2, nameEnd).toLowerCase();
+      const stackIndex = stack.lastIndexOf(name);
+      if (stackIndex >= 0) {
+        if (
+          stackIndex > 0
+          && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)
+        ) {
+          appendRawHtmlTextBoundary(group, cursor, end);
+        }
+        stack.length = stackIndex;
+        if (
+          stack.length === 0
+          && group != null
+          && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)
+        ) {
+          finishRawHtmlTextGroup(textGroups, group);
+          group = null;
+        }
+      }
+      cursor = end;
+      continue;
+    }
+
+    if (value.startsWith('<!', cursor) || value.startsWith('<?', cursor)) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      const end = findRawHtmlTokenEnd(value, cursor + 2);
+      if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
+        fail('Public text exceeds the raw HTML token inspection limit');
+      }
+      cursor = end;
+      continue;
+    }
+
+    if (!/[A-Za-z]/u.test(value[cursor + 1] ?? '')) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      appendRawHtmlText(group, value, cursor, cursor + 1);
+      cursor += 1;
+      continue;
+    }
+
+    let tagNameEnd = cursor + 2;
+    while (/[A-Za-z0-9:-]/u.test(value[tagNameEnd] ?? '')) {
+      tagNameEnd += 1;
+    }
+    if (
+      value[tagNameEnd] === '/'
+      && value.slice(cursor + 1, tagNameEnd).endsWith(':')
+    ) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      appendRawHtmlText(group, value, cursor, cursor + 1);
+      cursor += 1;
+      continue;
+    }
+    if (!/[\s/>]/u.test(value[tagNameEnd] ?? '')) {
+      if (stack.length === 0 && group != null) {
+        finishRawHtmlTextGroup(textGroups, group);
+        group = null;
+      }
+      appendRawHtmlText(group, value, cursor, cursor + 1);
+      cursor += 1;
+      continue;
+    }
+    if (startTags.length >= MAX_RAW_HTML_START_TAG_COUNT) {
+      fail('Public text exceeds the raw HTML start tag inspection limit');
+    }
+    if (++tokenCount > MAX_RAW_HTML_TOKEN_COUNT) {
+      fail('Public text exceeds the raw HTML token inspection limit');
+    }
+
+    const end = findRawHtmlTokenEnd(value, tagNameEnd);
+    const name = value.slice(cursor + 1, tagNameEnd).toLowerCase();
+    const selfClosing = RAW_HTML_VOID_ELEMENTS.has(name)
+      || /\/\s*>$/u.test(value.slice(cursor, end));
+    if (
+      stack.length === 0
+      && group != null
+      && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)
+    ) {
+      finishRawHtmlTextGroup(textGroups, group);
+      group = null;
+    }
+    startTags.push({
+      start: cursor,
+      end,
+      tagNameEnd,
+      name,
+      selfClosing,
+    });
+
+    if (stack.length > 0 && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)) {
+      appendRawHtmlTextBoundary(group, cursor, end);
+    }
+    if (!selfClosing) {
+      if (stack.length === 0 && group == null) {
+        group = {
+          output: [],
+          sourceRanges: [],
+          lastWasBoundary: false,
+        };
+      }
+      stack.push(name);
+    } else if (stack.length > 0 && RAW_HTML_TEXT_BOUNDARY_ELEMENTS.has(name)) {
+      appendRawHtmlTextBoundary(group, cursor, end);
+    }
+    cursor = end;
+  }
+
+  finishRawHtmlTextGroup(textGroups, group);
+
+  return {
+    startTags,
+    textGroups,
+  };
+}
+
+/**
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @returns {SourceRange[]}
+ */
+function mappedSourceIntervals(mapped, start, end) {
+  const intervals = /** @type {SourceRange[]} */ ([]);
+  for (let index = start; index < end; index += 1) {
+    const sourceRange = mapped.sourceRanges[index];
+    if (sourceRange == null) {
+      fail('Invalid raw HTML text inspection range');
+    }
+    const previous = intervals.at(-1);
+    if (previous != null && sourceRange.start <= previous.end) {
+      previous.end = Math.max(previous.end, sourceRange.end);
+    } else {
+      intervals.push({ ...sourceRange });
+    }
+  }
+  return intervals;
+}
+
+/**
+ * @param {SourceReplacement[]} replacements
+ * @param {MappedInspectionText} mapped
+ * @param {number} start
+ * @param {number} end
+ * @param {string} replacement
+ * @param {number} priority
+ */
+function addDisjointMappedSourceReplacement(
+  replacements,
+  mapped,
+  start,
+  end,
+  replacement,
+  priority,
+) {
+  const intervals = mappedSourceIntervals(mapped, start, end);
+  for (const [index, interval] of intervals.entries()) {
+    replacements.push({
+      ...interval,
+      value: index === 0 ? replacement : '',
+      priority,
+    });
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SourceReplacement[]} replacements
+ * @returns {string}
+ */
+function applySourceReplacements(value, replacements) {
+  if (replacements.length === 0) {
+    return value;
+  }
+
+  const selected = /** @type {SourceReplacement[]} */ ([]);
+  for (const replacement of [...replacements].sort((left, right) =>
+    right.priority - left.priority
+    || (right.end - right.start) - (left.end - left.start)
+    || left.start - right.start
+  )) {
+    if (selected.some((existing) =>
+      replacement.start < existing.end && replacement.end > existing.start
+    )) {
+      continue;
+    }
+    selected.push(replacement);
+  }
+
+  let sanitized = value;
+  for (const replacement of selected.sort((left, right) => right.start - left.start)) {
+    sanitized = `${sanitized.slice(0, replacement.start)}${replacement.value}${
+      sanitized.slice(replacement.end)
+    }`;
+  }
+  return sanitized;
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @returns {string}
+ */
+function sanitizeRawHtmlText(value, config) {
+  const replacements = /** @type {SourceReplacement[]} */ ([]);
+  const matchers = buildHomeDirectoryMatchers(config);
+
+  for (const textGroup of tokenizeRawHtml(value).textGroups) {
+    const decoded = decodeHtmlEntitiesMappedOnce(
+      textGroup,
+      undefined,
+      DecodingMode.Legacy,
+    );
+    assertSafeDataUrisInText(decoded.value, config, 0);
+    assertNoDirectPublishableSecrets(decoded.value);
+    assertNoEncodedUrlSecrets(decoded.value, true);
+    assertNoMarkdownReconstructedSecrets(decoded.value, config, 0);
+
+    EMAIL_PATTERN.lastIndex = 0;
+    for (const match of decoded.value.matchAll(EMAIL_PATTERN)) {
+      const start = match.index ?? -1;
+      if (start < 0) {
+        continue;
+      }
+      addDisjointMappedSourceReplacement(
+        replacements,
+        decoded,
+        start,
+        start + match[0].length,
+        '<redacted-email>',
+        1,
+      );
+    }
+    for (const range of homeDirectoryDecodedRanges(decoded.value, matchers)) {
+      addDisjointMappedSourceReplacement(
+        replacements,
+        decoded,
+        range.start,
+        range.end,
+        range.value,
+        1,
+      );
+    }
+    for (const range of localOperationalPathRanges(decoded.value)) {
+      addDisjointMappedSourceReplacement(
+        replacements,
+        decoded,
+        range.start,
+        range.end,
+        '<redacted-local-path>',
+        2,
+      );
+    }
+  }
+
+  return applySourceReplacements(value, replacements);
+}
 
 /**
  * @param {string} value
  * @returns {RawHtmlStartTag[]}
  */
 function scanRawHtmlStartTags(value) {
-  const tags = /** @type {RawHtmlStartTag[]} */ ([]);
-  const protectedMask = markdownCodeMask(value);
-
-  for (let start = 0; start < value.length; start += 1) {
-    if (
-      value[start] !== '<'
-      || protectedMask[start]
-      || !/[A-Za-z]/u.test(value[start + 1] ?? '')
-    ) {
-      continue;
-    }
-
-    let tagNameEnd = start + 2;
-    while (/[A-Za-z0-9:-]/u.test(value[tagNameEnd] ?? '')) {
-      tagNameEnd += 1;
-    }
-    if (!/[\s/>]/u.test(value[tagNameEnd] ?? '')) {
-      continue;
-    }
-    if (tags.length >= MAX_RAW_HTML_START_TAG_COUNT) {
-      fail('Public text exceeds the raw HTML start tag inspection limit');
-    }
-
-    let quote = '';
-    let end = tagNameEnd;
-    for (; end < value.length; end += 1) {
-      if (end - start > MAX_RAW_HTML_START_TAG_LENGTH) {
-        fail('Raw HTML start tag exceeds the inspection limit');
-      }
-      const character = value[end] ?? '';
-      if (quote) {
-        if (character === quote) {
-          quote = '';
-        }
-        continue;
-      }
-      if (character === '"' || character === "'") {
-        quote = character;
-        continue;
-      }
-      if (character === '>') {
-        break;
-      }
-    }
-    if (end >= value.length || quote) {
-      fail('Unterminated or malformed raw HTML start tag');
-    }
-    tags.push({
-      start,
-      end: end + 1,
-      tagNameEnd,
-    });
-    start = end;
-  }
-
-  return tags;
+  return tokenizeRawHtml(value).startTags;
 }
 
 /**
@@ -4200,6 +4666,7 @@ export function sanitizePublicText(value, config = {}) {
   assertPublicTextInspectionLength(value);
   let sanitized = value.replace(/\r\n?/gu, '\n');
   sanitized = sanitizeRawHtmlUrlAttributes(sanitized, config, 0);
+  sanitized = sanitizeRawHtmlText(sanitized, config);
   assertSafeDataUrisInText(sanitized, config, 0);
   assertNoEncodedUrlSecrets(sanitized);
   assertNoMarkdownReconstructedSecrets(sanitized, config, 0);

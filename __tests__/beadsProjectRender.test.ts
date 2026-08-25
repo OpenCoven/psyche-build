@@ -803,6 +803,94 @@ describe('Beads project renderers', () => {
     expect(sanitizePublicText(safe)).toBe(safe);
   });
 
+  it('sanitizes browser-decoded semicolonless numeric references in raw HTML text', () => {
+    expect(() =>
+      sanitizePublicText('<p>token&#58supersecretvalue</p>')
+    ).toThrow(/Publishable credential assignment/i);
+    expect(sanitizePublicText('<p>alice&#64example.com</p>')).toBe(
+      '<p><redacted-email></p>',
+    );
+    expect(
+      sanitizePublicText('<p>&#47Users&#47alice&#47private&#47plan.md</p>'),
+    ).toBe('<p>~&#47private&#47plan.md</p>');
+    expect(
+      sanitizePublicText('<p>.worktrees&#47private&#47plan.md</p>'),
+    ).toBe('<p><redacted-local-path></p>');
+    expect(
+      sanitizePublicText('<p>&#x2fUsers&#x2fzed&#x2fprivate&#x2fplan.md</p>'),
+    ).toBe('<p>~&#x2fprivate&#x2fplan.md</p>');
+    expect(sanitizePublicText('<p>alice&#x40test.com</p>')).toBe(
+      '<p><redacted-email></p>',
+    );
+  });
+
+  it('inspects visible raw HTML text across nested inline tags', () => {
+    expect(() =>
+      sanitizePublicText(
+        '<p>to<strong>ken</strong>&#58supersecretvalue</p>',
+      )
+    ).toThrow(/Publishable credential assignment/i);
+    expect(
+      sanitizePublicText('<p>alice&#64;<em>example</em>.com</p>'),
+    ).toBe('<p><redacted-email><em></em></p>');
+    expect(
+      sanitizePublicText('<span>alice</span><span>&#64example.com</span>'),
+    ).toBe('<span><redacted-email></span><span></span>');
+    expect(
+      sanitizePublicText(
+        '<p>&#47Users<em>&#47alice</em>&#47private&#47plan.md</p>',
+      ),
+    ).toBe('<p>~<em></em>&#47private&#47plan.md</p>');
+  });
+
+  it('sanitizes sensitive script and style text without rewriting safe raw HTML syntax', () => {
+    expect(() =>
+      sanitizePublicText(
+        '<script>token&#58supersecretvalue</script>',
+      )
+    ).toThrow(/Publishable credential assignment/i);
+    expect(
+      sanitizePublicText('<style>/* alice&#64example.com */</style>'),
+    ).toBe('<style>/* <redacted-email> */</style>');
+
+    const safe = [
+      '<div title="alice&#64example.com"><span>AT&T &copy</span></div>',
+      '<p>Safe<!-- alice&#64example.com -->text.</p>',
+      '`<p>alice&#64example.com</p>`',
+      '\\<p>alice&#64example.com\\</p>',
+      '<https://example.com> then alice&#64example.com stays Markdown text.',
+      '```html',
+      '<p>alice&#64example.com</p>',
+      '<script>token&#58supersecretvalue</script>',
+      '```',
+      'Ordinary Markdown keeps alice&#64example.com unchanged.',
+    ].join('\n');
+    expect(sanitizePublicText(safe)).toBe(safe);
+  });
+
+  it('scans raw HTML text references with near-linear scaling', () => {
+    const sizes = [16_384, 32_768, 65_536, 131_000];
+    const durations = sizes.map((size) => {
+      const unit = 'AT&T &copy &#169 ';
+      const body = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+      const source = `<p>${body}</p>`;
+      expect(sanitizePublicText(source)).toBe(source);
+
+      const samples = Array.from({ length: 2 }, () => {
+        const startedAt = performance.now();
+        expect(sanitizePublicText(source)).toBe(source);
+        return performance.now() - startedAt;
+      });
+      return Math.min(...samples);
+    });
+
+    for (let index = 1; index < durations.length; index += 1) {
+      expect(durations[index]! / Math.max(durations[index - 1]!, 0.1)).toBeLessThan(4);
+    }
+    const perCharacter = durations.map((duration, index) => duration / sizes[index]!);
+    expect(Math.max(...perCharacter) / Math.min(...perCharacter)).toBeLessThan(3.5);
+  });
+
   it.each([
     ['closing bracket in userinfo', 'https://alice]@example.com/releases', /URL credentials/i],
     ['double quote', 'https://example.com/docs"ghp%5Fabcdefghijklmnopqrstuvwxyz123456', /GitHub token/i],
