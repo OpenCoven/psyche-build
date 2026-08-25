@@ -130,6 +130,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
   const ensureProjectObservedTitles: string[] = [];
   const lockCalls: string[] = [];
   const provisionReadmes: string[] = [];
+  const createdIssueBodies: string[] = [];
   const validatedAssignees: string[][] = [];
   const writes: string[] = [];
   let nextIssueNumber = 100;
@@ -272,8 +273,9 @@ function createFakeGh(options: FakeGhOptions = {}) {
         views: [],
       };
     },
-    async createIssue() {
+    async createIssue(operation: { body: string }) {
       writes.push('createIssue');
+      createdIssueBodies.push(operation.body);
       nextIssueNumber += 1;
       return { number: nextIssueNumber };
     },
@@ -320,6 +322,7 @@ function createFakeGh(options: FakeGhOptions = {}) {
     calls,
     client,
     clientOptions,
+    createdIssueBodies,
     ensureProjectInputs,
     ensureProjectObservedTitles,
     lockCalls,
@@ -1397,6 +1400,24 @@ describe('Beads project sync CLI', () => {
     expect(fakeGh.writes.at(-1)).toBe('syncBlocker');
     expect(summary.appliedOperationCount).toBe(summary.plannedOperationCount);
     expect(summary.projectUrl).toBe('https://github.com/orgs/OpenCoven/projects/11');
+  });
+
+  it('uses the stable main ref for source links instead of the workflow commit SHA', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCli(
+      ['--apply', '--inventory-file', fixturePath],
+      {
+        env: {
+          BEADS_PROJECT_TOKEN: token,
+          GITHUB_SHA: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(fakeGh.createdIssueBodies.some((body) => body.includes('/blob/main/'))).toBe(true);
+    expect(fakeGh.createdIssueBodies.join('\n')).not.toContain('deadbeef');
   });
 
   it('surfaces terminal lease loss after the final mutation before reporting success', async () => {
