@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  createGraphqlPaginationGuard,
   createGhClient as createGhClientImplementation,
   PROJECT_VIEWS,
 } from '../scripts/beads-project-sync/github.mjs';
@@ -79,6 +80,10 @@ function httpError(status: number, message: string): Error {
 
 function createRunner(
   responses: readonly (GhRunResult | Error | ((call: RunCall) => GhRunResult | Promise<GhRunResult>))[],
+  runnerOptions: {
+    authenticatedUser?: Record<string, unknown> | Error;
+    recordAuthenticatedUser?: boolean;
+  } = {},
 ): { calls: RunCall[]; run: GhRun } {
   const calls: RunCall[] = [];
   let index = 0;
@@ -87,6 +92,16 @@ function createRunner(
     calls,
     async run(command, args, options) {
       const call = { command, args: [...args], options: { ...options } };
+      if (command === 'gh' && args[0] === 'api' && args[1] === 'user') {
+        if (runnerOptions.recordAuthenticatedUser === true) {
+          calls.push(call);
+        }
+        const authenticatedUser = runnerOptions.authenticatedUser ?? { login: 'BunsDev' };
+        if (authenticatedUser instanceof Error) {
+          throw authenticatedUser;
+        }
+        return success(authenticatedUser);
+      }
       calls.push(call);
       const response = responses[index++];
       if (response == null) {
@@ -111,12 +126,18 @@ function parseStdinIfPresent(call: RunCall): Record<string, unknown> {
     : {};
 }
 
-function createApplyLockBackend() {
+function createApplyLockBackend(backendOptions: {
+  defaultBranch?: string;
+  defaultRefObject?: { type: string; sha: string };
+  tagObjects?: Readonly<Record<string, { type: string; sha: string }>>;
+} = {}) {
   const lockRef = 'refs/heads/psyche-beads-project-sync-lock';
   const lockRefEndpoint = 'heads/psyche-beads-project-sync-lock';
+  const defaultBranch = backendOptions.defaultBranch ?? 'main';
+  const defaultRefObject = backendOptions.defaultRefObject ?? { type: 'commit', sha: 'BASE' };
   const calls: RunCall[] = [];
   const commits = new Map<string, Record<string, unknown>>([
-    ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
+    ['BASE', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
   ]);
   let lockSha: string | null = null;
   let nextCommit = 0;
@@ -134,6 +155,23 @@ function createApplyLockBackend() {
     const methodIndex = args.indexOf('--method');
     const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
 
+    if (endpoint === 'user') {
+      return success({ login: 'BunsDev' });
+    }
+    if (endpoint === `repos/${owner}/${repo}`) {
+      return success({ id: 1, default_branch: defaultBranch });
+    }
+    if (endpoint === `repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(defaultBranch)}`) {
+      return success({ object: defaultRefObject });
+    }
+    if (endpoint?.startsWith(`repos/${owner}/${repo}/git/tags/`) && method === 'GET') {
+      const sha = endpoint.split('/').at(-1) ?? '';
+      const object = backendOptions.tagObjects?.[sha];
+      if (!object) {
+        throw httpError(404, `tag ${sha} not found`);
+      }
+      return success({ object });
+    }
     if (endpoint === `repos/${owner}/${repo}/git/ref/${lockRefEndpoint}`) {
       if (lockSha == null) {
         throw httpError(404, 'not found');
@@ -381,6 +419,65 @@ function linkedRepositoriesPage(
 }
 
 describe('createGhClient', () => {
+  it('bounds GraphQL pagination and rejects missing or repeated cursors', () => {
+    const repeated = createGraphqlPaginationGuard('project', {
+      maxPages: 3,
+      maxItems: 10,
+    });
+    expect(repeated.advance(
+      { hasNextPage: true, endCursor: 'cursor-1' },
+      2,
+    )).toBe('cursor-1');
+    expect(() => repeated.advance(
+      { hasNextPage: true, endCursor: 'cursor-1' },
+      2,
+    )).toThrow(/project.*repeated.*cursor/i);
+
+    const missing = createGraphqlPaginationGuard('field', {
+      maxPages: 3,
+      maxItems: 10,
+    });
+    expect(() => missing.advance(
+      { hasNextPage: true, endCursor: null },
+      1,
+    )).toThrow(/field.*cursor.*non-empty/i);
+
+    const pageCeiling = createGraphqlPaginationGuard('item', {
+      maxPages: 1,
+      maxItems: 10,
+    });
+    expect(pageCeiling.advance(
+      { hasNextPage: true, endCursor: 'cursor-1' },
+      1,
+    )).toBe('cursor-1');
+    expect(() => pageCeiling.advance(
+      { hasNextPage: false, endCursor: null },
+      1,
+    )).toThrow(/item.*page.*limit/i);
+
+    const itemCeiling = createGraphqlPaginationGuard('repository', {
+      maxPages: 3,
+      maxItems: 1,
+    });
+    expect(() => itemCeiling.advance(
+      { hasNextPage: false, endCursor: null },
+      2,
+    )).toThrow(/repository.*item.*limit/i);
+  });
+
+  it('bounds repeated cursors in Project discovery', async () => {
+    const runner = createRunner([
+      projectDiscovery([], true, 'repeated'),
+      projectDiscovery([], true, 'repeated'),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.discoverProject()).rejects.toThrow(
+      /project.*repeated.*cursor/i,
+    );
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it('allows managed issue snapshots to include a parent issue number', () => {
     const snapshot: ManagedIssueSnapshot = {
       beadId: 'pb-child',
@@ -408,7 +505,10 @@ describe('createGhClient', () => {
   });
 
   it('verifies gh authentication plus repository and organization access with safe argument arrays', async () => {
-    const runner = createRunner([success(''), success({ id: 1 }), success({ id: 2 })]);
+    const runner = createRunner(
+      [success(''), success({ id: 1 }), success({ id: 2 })],
+      { recordAuthenticatedUser: true },
+    );
     const client = createGhClient({ run: runner.run, owner, repo, token });
     const adapters: ReconciliationAdapters = client;
 
@@ -417,11 +517,15 @@ describe('createGhClient', () => {
       repository: { id: 1 },
     });
     expect(adapters).toBe(client);
-
     expect(runner.calls).toEqual([
       {
         command: 'gh',
         args: ['auth', 'status', '--hostname', 'github.com', '--active'],
+        options: { env: { GH_TOKEN: token } },
+      },
+      {
+        command: 'gh',
+        args: ['api', 'user', '--method', 'GET', ...apiHeaders],
         options: { env: { GH_TOKEN: token } },
       },
       {
@@ -436,6 +540,138 @@ describe('createGhClient', () => {
       },
     ]);
     expect(JSON.stringify(runner.calls.map((call) => call.args))).not.toContain(token);
+  });
+
+  it('validates unique assignee logins through the canonical read-only endpoint', async () => {
+    const runner = createRunner([
+      success({ login: 'octocat' }),
+      success({ login: 'hubot' }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.validateAssignees([
+      'octocat',
+      'hubot',
+      'OCTOCAT',
+    ])).resolves.toBeUndefined();
+
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      [
+        'api',
+        `repos/${owner}/${repo}/assignees/octocat`,
+        '--method',
+        'GET',
+        ...apiHeaders,
+      ],
+      [
+        'api',
+        `repos/${owner}/${repo}/assignees/hubot`,
+        '--method',
+        'GET',
+        ...apiHeaders,
+      ],
+    ]);
+  });
+
+  it('normalizes managed issue assignee snapshots case-insensitively', async () => {
+    const runner = createRunner([
+      success([
+        trustedIssue({
+          number: 42,
+          title: '[pb-42] Work',
+          body: managedBody('pb-42'),
+          state: 'open',
+          assignees: [
+            { login: 'BunsDev' },
+            { login: 'bunsdev' },
+          ],
+          labels: [],
+          html_url: 'https://github.com/OpenCoven/psyche-build/issues/42',
+        }),
+      ]),
+      projectDiscovery([]),
+      httpError(404, 'parent not found'),
+      success([]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listManagedIssues()).resolves.toEqual([
+      expect.objectContaining({ assignees: ['BunsDev'] }),
+    ]);
+  });
+
+  it('fails assignee validation on a nonexistent login without mutation requests', async () => {
+    const runner = createRunner([
+      httpError(404, 'Not Found'),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.validateAssignees(['missing-maintainer'])).rejects.toThrow(
+      /missing-maintainer.*not assignable/i,
+    );
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls.every((call) => !call.args.includes('POST') && !call.args.includes('PATCH')
+      && !call.args.includes('DELETE'))).toBe(true);
+  });
+
+  it('preflights and caches the trusted token actor before any mutation', async () => {
+    const body = managedBody('pb-actor-preflight');
+    const runner = createRunner([
+      success(''),
+      success({ id: 1, default_branch: 'main' }),
+      success({ id: 2 }),
+      success({ number: 42 }),
+      success(trustedIssue({ number: 42, body })),
+    ], {
+      authenticatedUser: { login: 'bUnSdEv' },
+      recordAuthenticatedUser: true,
+    });
+    const client = createGhClient({
+      run: runner.run,
+      owner,
+      repo,
+      token,
+      trustedIssueAuthors: ['BUNSDEV'],
+    });
+
+    await client.verifyAccess();
+    await client.createIssue({
+      beadId: 'pb-actor-preflight',
+      title: '[pb-actor-preflight] Verify publisher',
+      body,
+    });
+
+    expect(runner.calls.map((call) => call.args[1] ?? call.args[0])).toEqual([
+      'status',
+      'user',
+      `repos/${owner}/${repo}`,
+      `orgs/${owner}`,
+      `repos/${owner}/${repo}/issues`,
+      `repos/${owner}/${repo}/issues/42`,
+    ]);
+    expect(runner.calls.filter((call) => call.args[1] === 'user')).toHaveLength(1);
+  });
+
+  it('rejects an untrusted token actor before lock, issue, or Project mutations', async () => {
+    const runner = createRunner([success('')], {
+      authenticatedUser: { login: 'outside-publisher' },
+      recordAuthenticatedUser: true,
+    });
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.verifyAccess()).rejects.toThrow(
+      /token actor.*trustedIssueAuthors|trusted.*publisher/i,
+    );
+    expect(runner.calls.map((call) => call.args[1] ?? call.args[0])).toEqual([
+      'status',
+      'user',
+    ]);
+    expect(runner.calls.some((call) =>
+      call.args.includes('POST')
+      || call.args.includes('PATCH')
+      || call.args.includes('DELETE')
+      || String(call.options.stdin ?? '').includes('mutation ')
+    )).toBe(false);
   });
 
   it('paginates all repository issues including closed issues and parses managed markers', async () => {
@@ -2482,6 +2718,9 @@ describe('createGhClient', () => {
     const run: GhRun = async (command, args, options) => {
       const call = { command, args: [...args], options: { ...options } };
       calls.push(call);
+      if (args[0] === 'api' && args[1] === 'user') {
+        return success({ login: 'BunsDev' });
+      }
       if (args[0] === 'project' && args[1] === 'item-add') {
         addedItemCount += 1;
         return success({ id: `ITEM-${addedItemCount}` });
@@ -3097,7 +3336,7 @@ describe('createGhClient', () => {
   it('serializes two lock contenders with atomic ref creation', async () => {
     const calls: RunCall[] = [];
     const commits = new Map<string, Record<string, unknown>>([
-      ['main', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
+      ['BASE', { sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }],
     ]);
     let lockSha: string | null = null;
     let nextCommit = 0;
@@ -3107,6 +3346,15 @@ describe('createGhClient', () => {
       const endpoint = args[1];
       const methodIndex = args.indexOf('--method');
       const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      if (endpoint === 'user') {
+        return success({ login: 'BunsDev' });
+      }
+      if (endpoint === `repos/${owner}/${repo}`) {
+        return success({ id: 1, default_branch: 'main' });
+      }
+      if (endpoint === `repos/${owner}/${repo}/git/ref/heads/main`) {
+        return success({ object: { type: 'commit', sha: 'BASE' } });
+      }
       if (endpoint === `repos/${owner}/${repo}/git/ref/heads/psyche-beads-project-sync-lock`) {
         if (lockSha == null) {
           throw httpError(404, 'not found');
@@ -3311,6 +3559,102 @@ describe('createGhClient', () => {
     });
   });
 
+  it.each([
+    ['main', 'main'],
+    ['custom default branch', 'release/stable'],
+  ])('seeds an initial lock from the resolved %s commit SHA', async (_name, defaultBranch) => {
+    const backend = createApplyLockBackend({ defaultBranch });
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 10_000,
+    });
+
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'resolved-seed',
+      leaseId: `seed-${defaultBranch.replace('/', '-')}`,
+      ttlMs: 90,
+    });
+
+    expect(backend.parentOf(handle.sha)).toBe('BASE');
+    expect(backend.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/ref/heads/${
+        encodeURIComponent(defaultBranch)
+      }`
+    )).toBe(true);
+    expect(backend.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/commits/BASE`
+    )).toBe(true);
+    expect(backend.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/commits/${
+        encodeURIComponent(defaultBranch)
+      }`
+    )).toBe(false);
+  });
+
+  it('peels annotated default-branch ref objects before reading the seed commit', async () => {
+    const backend = createApplyLockBackend({
+      defaultRefObject: { type: 'tag', sha: 'TAG-1' },
+      tagObjects: {
+        'TAG-1': { type: 'tag', sha: 'TAG-2' },
+        'TAG-2': { type: 'commit', sha: 'BASE' },
+      },
+    });
+    const client = createGhClient({
+      run: backend.run,
+      owner,
+      repo,
+      token,
+      now: () => 10_000,
+    });
+
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'annotated-seed',
+      leaseId: 'annotated-seed-lease',
+      ttlMs: 90,
+    });
+
+    expect(backend.parentOf(handle.sha)).toBe('BASE');
+    expect(backend.calls.map((call) => call.args[1])).toContain(
+      `repos/${owner}/${repo}/git/tags/TAG-1`,
+    );
+    expect(backend.calls.map((call) => call.args[1])).toContain(
+      `repos/${owner}/${repo}/git/tags/TAG-2`,
+    );
+  });
+
+  it('refreshes repository metadata once and diagnoses a missing default-branch ref', async () => {
+    const runner = createRunner([
+      httpError(404, 'lock ref not found'),
+      success({ id: 1, default_branch: 'renamed/default' }),
+      httpError(404, 'default ref not found'),
+      success({ id: 1, default_branch: 'renamed/default' }),
+      httpError(404, 'default ref still not found'),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'missing-default-ref',
+      leaseId: 'missing-default-ref-lease',
+      ttlMs: 90,
+    })).rejects.toThrow(/default branch.*renamed\/default.*ref.*not found|missing.*default.*ref/i);
+
+    expect(runner.calls.filter((call) =>
+      call.args[1] === `repos/${owner}/${repo}`
+    )).toHaveLength(2);
+    expect(runner.calls.some((call) =>
+      call.args[1] === `repos/${owner}/${repo}/git/commits/renamed%2Fdefault`
+    )).toBe(false);
+    expect(runner.calls.some((call) =>
+      call.args.includes('POST') || call.args.includes('PATCH') || call.args.includes('DELETE')
+    )).toBe(false);
+  });
+
   it('renews a long apply, blocks a contender, releases the renewed lease, and stops heartbeats', async () => {
     const backend = createApplyLockBackend();
     const timers = createTimerHarness();
@@ -3371,6 +3715,189 @@ describe('createGhClient', () => {
     }
     await Promise.resolve();
     expect(backend.calls).toHaveLength(callCountAfterRelease);
+  });
+
+  it('quarantines further writes when a managed mutation outlives the lease after passing preflight', async () => {
+    const backend = createApplyLockBackend();
+    const timers = createTimerHarness();
+    const calls: RunCall[] = [];
+    const beadId = 'pb-in-flight-lease-expiry';
+    const title = '[pb-in-flight-lease-expiry] Fence the write';
+    const body = managedBody(beadId);
+    let currentTime = 10_000;
+    const createdIssue = trustedIssue({
+      number: 91,
+      title,
+      body,
+      state: 'open',
+      assignees: [],
+      labels: [],
+      html_url: `https://github.com/${owner}/${repo}/issues/91`,
+    });
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args: [...args], options: { ...options } };
+      calls.push(call);
+      const methodIndex = args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      const endpoint = args[1];
+
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues` && method === 'POST') {
+        currentTime = 10_101;
+        return success({ number: 91 });
+      }
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues/91` && method === 'GET') {
+        return success(createdIssue);
+      }
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues/91` && method === 'PATCH') {
+        return success({ number: 91, title, body, state: 'open' });
+      }
+
+      return backend.run(command, args, options);
+    };
+    const client = createGhClient({
+      run,
+      owner,
+      repo,
+      token,
+      mutationMode: 'lease-required',
+      now: () => currentTime,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'in-flight-write',
+      leaseId: 'in-flight-write-lease',
+      ttlMs: 100,
+    });
+    const lease = client.startApplyLockLease(handle);
+
+    try {
+      await expect(client.createIssue({ beadId, title, body })).rejects.toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+      expect(lease.failure()).toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+      await expect(client.updateIssue({
+        issueNumber: 91,
+        title,
+        body,
+        state: 'open',
+      })).rejects.toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+    } finally {
+      await lease.stop();
+    }
+
+    expect(calls.filter((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues`
+        && method === 'POST';
+    })).toHaveLength(1);
+    expect(calls.some((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues/91`
+        && method === 'GET';
+    })).toBe(false);
+    expect(calls.some((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues/91`
+        && method === 'PATCH';
+    })).toBe(false);
+  });
+
+  it('quarantines a mutation when remote lease ownership changes in flight', async () => {
+    const backend = createApplyLockBackend();
+    const calls: RunCall[] = [];
+    const beadId = 'pb-in-flight-lease-theft';
+    const title = '[pb-in-flight-lease-theft] Verify the remote fence';
+    const body = managedBody(beadId);
+    const currentTime = 20_000;
+    const createdIssue = trustedIssue({
+      number: 92,
+      title,
+      body,
+      state: 'open',
+      assignees: [],
+      labels: [],
+      html_url: `https://github.com/${owner}/${repo}/issues/92`,
+    });
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args: [...args], options: { ...options } };
+      calls.push(call);
+      const methodIndex = args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      const endpoint = args[1];
+
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues` && method === 'POST') {
+        backend.stealLock({
+          owner: 'github-actions',
+          runId: 'contender-run',
+          leaseId: 'contender-lease',
+          acquiredAt: currentTime,
+          expiresAt: currentTime + 1_000,
+        });
+        return success({ number: 92 });
+      }
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues/92` && method === 'GET') {
+        return success(createdIssue);
+      }
+      return backend.run(command, args, options);
+    };
+    const client = createGhClient({
+      run,
+      owner,
+      repo,
+      token,
+      mutationMode: 'lease-required',
+      now: () => currentTime,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'in-flight-owner',
+      leaseId: 'in-flight-owner-lease',
+      ttlMs: 1_000,
+    });
+    const lease = client.startApplyLockLease(handle);
+
+    try {
+      await expect(client.createIssue({ beadId, title, body })).rejects.toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+      expect(lease.failure()).toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+    } finally {
+      await lease.stop();
+    }
+
+    const issueMutationIndex = calls.findIndex((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues`
+        && method === 'POST';
+    });
+    const postMutationLeaseReadIndex = calls.findIndex((call, index) =>
+      index > issueMutationIndex
+      && call.args[0] === 'api'
+      && call.args[1] === `repos/${owner}/${repo}/git/ref/heads/psyche-beads-project-sync-lock`
+    );
+    expect(issueMutationIndex).toBeGreaterThanOrEqual(0);
+    expect(postMutationLeaseReadIndex).toBeGreaterThan(issueMutationIndex);
   });
 
   it('makes renewal transport failure terminal before the next reconciliation mutation', async () => {
@@ -3686,6 +4213,8 @@ describe('createGhClient', () => {
   it('redacts tokens from lock API failures', async () => {
     const runner = createRunner([
       httpError(404, 'not found'),
+      success({ id: 1, default_branch: 'main' }),
+      success({ object: { type: 'commit', sha: 'BASE' } }),
       success({ sha: 'BASE', tree: { sha: 'TREE' }, message: 'base' }),
       Object.assign(new Error(`HTTP 422 invalid lock ${token}`), { status: 422 }),
     ]);

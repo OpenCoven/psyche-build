@@ -1,4 +1,4 @@
-import type { ParsedBead } from './model.mjs';
+import type { BeadPriority, ParsedBead } from './model.mjs';
 
 export interface SanitizePublicTextConfig {
   homeDirectories?: readonly string[] | ReadonlySet<string>;
@@ -13,7 +13,7 @@ export interface PublicBead {
   acceptanceCriteria: string | null;
   notes: string | null;
   status: ParsedBead['status'];
-  priority: number;
+  priority: BeadPriority;
   type: ParsedBead['type'];
   blocked: boolean;
   labels: string[];
@@ -26,6 +26,11 @@ export interface PublicBead {
 }
 
 export function assertNoPublishableSecrets(value: string): void;
+
+export function assertNoSensitiveMarkdownReconstruction(
+  value: string,
+  config?: SanitizePublicTextConfig,
+): void;
 
 export function containsLocalOperationalPath(value: string): boolean;
 

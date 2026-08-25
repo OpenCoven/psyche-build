@@ -45,6 +45,8 @@ const MAX_ERROR_DETAIL = 512;
 const MAX_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 25;
 const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_GRAPHQL_PAGES = 100;
+const MAX_GRAPHQL_ITEMS = 10_000;
 const APPLY_LOCK_MESSAGE_PREFIX = 'psyche-beads-project-lock:v1 ';
 const DEFAULT_APPLY_LOCK_TTL_MS = 30 * 60 * 1_000;
 const MAX_APPLY_LOCK_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -55,6 +57,7 @@ const APPLY_LOCK_PERMISSION_MESSAGE =
 const SAFE_LOCK_IDENTITY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const GITHUB_LOGIN_PATTERN =
   /^(?!-)(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
+const MAX_GIT_OBJECT_INDIRECTION = 8;
 
 const STATUS_OPTIONS = Object.freeze([
   Object.freeze({ name: 'Backlog', color: 'GRAY', description: '' }),
@@ -514,6 +517,7 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   failure: () => GhClientError | null,
  *   release: () => Promise<void>,
  *   renewNow: () => Promise<ApplyLockHandle>,
+ *   settleManagedMutation: (description: string, error?: unknown) => Promise<void>,
  *   stop: () => Promise<void>,
  * }} ApplyLockLeaseController
  */
@@ -550,6 +554,61 @@ function requiredString(value, fieldName) {
     fail(`${fieldName} must be a non-empty string`);
   }
   return value.trim();
+}
+
+/**
+ * @param {string} label
+ * @param {{maxPages?: number, maxItems?: number}} [options]
+ */
+export function createGraphqlPaginationGuard(label, options = {}) {
+  const normalizedLabel = requiredString(label, 'pagination label');
+  const maxPages = options.maxPages ?? MAX_GRAPHQL_PAGES;
+  const maxItems = options.maxItems ?? MAX_GRAPHQL_ITEMS;
+  if (!Number.isSafeInteger(maxPages) || maxPages <= 0) {
+    fail(`${normalizedLabel} pagination maxPages must be a positive integer`);
+  }
+  if (!Number.isSafeInteger(maxItems) || maxItems <= 0) {
+    fail(`${normalizedLabel} pagination maxItems must be a positive integer`);
+  }
+
+  let pageCount = 0;
+  let itemCount = 0;
+  const seenCursors = new Set();
+
+  return Object.freeze({
+    /**
+     * @param {unknown} rawPageInfo
+     * @param {number} pageItemCount
+     * @returns {string | null}
+     */
+    advance(rawPageInfo, pageItemCount) {
+      if (!Number.isSafeInteger(pageItemCount) || pageItemCount < 0) {
+        fail(`${normalizedLabel} pagination item count must be a non-negative integer`);
+      }
+      pageCount += 1;
+      itemCount += pageItemCount;
+      if (pageCount > maxPages) {
+        fail(`${normalizedLabel} pagination exceeded the ${maxPages} page limit`);
+      }
+      if (itemCount > maxItems) {
+        fail(`${normalizedLabel} pagination exceeded the ${maxItems} item limit`);
+      }
+
+      const pageInfo = record(rawPageInfo);
+      if (pageInfo.hasNextPage !== true) {
+        return null;
+      }
+      const cursor = requiredString(
+        pageInfo.endCursor,
+        `${normalizedLabel} pagination cursor`,
+      );
+      if (seenCursors.has(cursor)) {
+        fail(`${normalizedLabel} pagination returned repeated cursor "${cursor}"`);
+      }
+      seenCursors.add(cursor);
+      return cursor;
+    },
+  });
 }
 
 /**
@@ -1246,15 +1305,19 @@ function assigneeLogins(value, fieldName) {
   if (!Array.isArray(value)) {
     fail(`${fieldName} must be an array`);
   }
-  const logins = new Set();
+  const logins = new Map();
   for (const rawAssignee of value) {
     const assignee = record(rawAssignee);
     const login = typeof rawAssignee === 'string'
       ? requiredString(rawAssignee, 'assignee')
       : requiredString(assignee.login, 'assignee login');
-    logins.add(login);
+    const canonicalLogin = login.toLowerCase();
+    if (!logins.has(canonicalLogin)) {
+      logins.set(canonicalLogin, login);
+    }
   }
-  return [...logins].sort();
+  return [...logins.values()].sort((left, right) =>
+    left.toLowerCase().localeCompare(right.toLowerCase()));
 }
 
 /**
@@ -1432,7 +1495,12 @@ export function createGhClient(options) {
   let organizationId = null;
   /** @type {string | null} */
   let repositoryId = null;
-  let repositoryDefaultBranch = 'main';
+  /** @type {Record<string, unknown> | null} */
+  let repositoryMetadata = null;
+  /** @type {{sha: string, treeSha: string, branch: string} | null} */
+  let defaultBranchSeed = null;
+  /** @type {Promise<string> | null} */
+  let trustedActorLoginPromise = null;
   /** @type {Map<number, number>} */
   const issueDatabaseIds = new Map();
   /** @type {ProjectContext[]} */
@@ -1473,6 +1541,32 @@ export function createGhClient(options) {
     );
   }
 
+  /**
+   * @returns {Promise<string>}
+   */
+  async function trustedActorLogin() {
+    if (trustedActorLoginPromise == null) {
+      trustedActorLoginPromise = (async () => {
+        const authenticatedUser = record(await rest('GET', 'user'));
+        const login = requiredString(authenticatedUser.login, 'authenticated GitHub actor login');
+        if (!GITHUB_LOGIN_PATTERN.test(login)) {
+          throw new GhClientError(
+            'ownership',
+            'Authenticated GitHub token actor returned an invalid login',
+          );
+        }
+        if (!trustedIssueAuthors.has(login.toLowerCase())) {
+          throw new GhClientError(
+            'ownership',
+            `Authenticated GitHub token actor "${login}" is not in trustedIssueAuthors`,
+          );
+        }
+        return login;
+      })();
+    }
+    return trustedActorLoginPromise;
+  }
+
   async function assertManagedMutationLease() {
     if (mutationMode === 'trusted-setup') {
       return;
@@ -1507,6 +1601,40 @@ export function createGhClient(options) {
       }
     }
     throw new GhClientError('github', 'GitHub request exhausted retries');
+  }
+
+  /**
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  function mutationMayHaveApplied(error) {
+    return (
+      error == null
+      || isTransportFailure(error)
+      || (!isDefiniteRateLimit(error) && isRetryable(error))
+      || (error instanceof GhClientError && error.kind === 'response')
+    );
+  }
+
+  /**
+   * @template TValue
+   * @param {string} description
+   * @param {() => Promise<TValue>} action
+   * @returns {Promise<TValue>}
+   */
+  async function runLeaseManagedMutation(description, action) {
+    await trustedActorLogin();
+    await assertManagedMutationLease();
+    try {
+      const result = await action();
+      await activeApplyLockLease?.settleManagedMutation(description);
+      return result;
+    } catch (error) {
+      if (mutationMayHaveApplied(error)) {
+        await activeApplyLockLease?.settleManagedMutation(description, error);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1556,8 +1684,10 @@ export function createGhClient(options) {
    * @returns {Promise<GhRunResult>}
    */
   async function runManagedGhOnce(args, stdin) {
-    await assertManagedMutationLease();
-    return runGhOnce(args, stdin);
+    const description = args[0] === 'api'
+      ? `GitHub API mutation ${args[1]}`
+      : `GitHub mutation ${args.slice(0, 2).join(' ')}`;
+    return runLeaseManagedMutation(description, () => runGhOnce(args, stdin));
   }
 
   /**
@@ -1586,6 +1716,9 @@ export function createGhClient(options) {
       ...(body === undefined ? [] : ['--input', '-']),
     ];
     const isMutation = method !== 'GET';
+    if (isMutation) {
+      await trustedActorLogin();
+    }
     const execute = !isMutation || mutationScope === 'lock'
       ? (method === 'POST' || method === 'DELETE' ? runGhOnce : runGh)
       : (method === 'POST' || method === 'DELETE' ? runManagedGhOnce : runManagedGh);
@@ -1665,6 +1798,9 @@ export function createGhClient(options) {
 
       const kind = /** @type {ErrorLike} */ (error ?? {}).kind;
       if (!isRetryable(error) && !isTransportFailure(error) && kind !== 'ambiguous') {
+        throw toClientError(error);
+      }
+      if (isApplyLeaseMutationQuarantined(error)) {
         throw toClientError(error);
       }
 
@@ -1748,8 +1884,11 @@ export function createGhClient(options) {
    * @returns {Promise<Record<string, unknown>>}
    */
   async function managedGraphqlOnce(query, variables) {
-    await assertManagedMutationLease();
-    return graphqlOnce(query, variables);
+    const operation = query.match(/\bmutation\s+([A-Za-z0-9_]+)/u)?.[1] ?? 'anonymous';
+    return runLeaseManagedMutation(
+      `GitHub GraphQL mutation ${operation}`,
+      () => graphqlOnce(query, variables),
+    );
   }
 
   /**
@@ -1772,19 +1911,213 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {boolean} [refresh=false]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function loadRepositoryMetadata(refresh = false) {
+    if (repositoryMetadata == null || refresh) {
+      repositoryMetadata = record(await rest('GET', `repos/${owner}/${repo}`));
+      if (refresh) {
+        defaultBranchSeed = null;
+      }
+    }
+    return repositoryMetadata;
+  }
+
+  /**
+   * @param {Record<string, unknown>} repository
+   * @returns {string}
+   */
+  function defaultBranchName(repository) {
+    const branch = requiredString(repository.default_branch, 'repository default branch');
+    if (
+      branch.length > 255
+      || branch.startsWith('/')
+      || branch.endsWith('/')
+      || branch.endsWith('.')
+      || branch.includes('..')
+      || branch.includes('@{')
+      || /[\u0000-\u0020\u007f~^:?*[\]\\]/u.test(branch)
+      || branch.split('/').some((component) =>
+        !component || component.startsWith('.') || component.endsWith('.lock')
+      )
+    ) {
+      throw new GhClientError(
+        'response',
+        `GitHub returned unsafe repository default branch "${branch}"`,
+      );
+    }
+    return branch;
+  }
+
+  /**
+   * @param {Record<string, unknown>} rawObject
+   * @param {string} branch
+   * @returns {Promise<string>}
+   */
+  async function peelDefaultBranchObject(rawObject, branch) {
+    let object = rawObject;
+    const seen = new Set();
+
+    for (let depth = 0; depth <= MAX_GIT_OBJECT_INDIRECTION; depth += 1) {
+      const type = requiredString(object.type, `default branch "${branch}" object type`);
+      const sha = requiredString(object.sha, `default branch "${branch}" object sha`);
+      if (type === 'commit') {
+        return sha;
+      }
+      if (type !== 'tag') {
+        throw new GhClientError(
+          'response',
+          `GitHub default branch "${branch}" resolved to unsupported ${type} object ${sha}`,
+        );
+      }
+      if (seen.has(sha) || depth === MAX_GIT_OBJECT_INDIRECTION) {
+        throw new GhClientError(
+          'response',
+          `GitHub default branch "${branch}" object indirection is cyclic or too deep`,
+        );
+      }
+      seen.add(sha);
+      try {
+        const tag = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/tags/${encodeURIComponent(sha)}`,
+        ));
+        object = record(tag.object);
+      } catch (error) {
+        if (errorStatus(error) === 404) {
+          throw new GhClientError(
+            'lock',
+            `GitHub default branch "${branch}" tag object ${sha} was not found`,
+            404,
+          );
+        }
+        throw error;
+      }
+    }
+
+    throw new GhClientError(
+      'response',
+      `GitHub default branch "${branch}" object indirection is too deep`,
+    );
+  }
+
+  /**
+   * @returns {Promise<{sha: string, treeSha: string, branch: string}>}
+   */
+  async function resolveDefaultBranchSeed() {
+    if (defaultBranchSeed != null) {
+      return defaultBranchSeed;
+    }
+
+    let repository = await loadRepositoryMetadata();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const branch = defaultBranchName(repository);
+      let rawRef;
+      try {
+        rawRef = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
+        ));
+      } catch (error) {
+        if (errorStatus(error) !== 404) {
+          throw error;
+        }
+        if (attempt === 0) {
+          repository = await loadRepositoryMetadata(true);
+          continue;
+        }
+        throw new GhClientError(
+          'lock',
+          `GitHub default branch "${branch}" ref was not found after refreshing repository metadata`,
+          404,
+        );
+      }
+
+      const sha = await peelDefaultBranchObject(record(rawRef.object), branch);
+      let commit;
+      try {
+        commit = record(await rest(
+          'GET',
+          `repos/${owner}/${repo}/git/commits/${encodeURIComponent(sha)}`,
+        ));
+      } catch (error) {
+        if (errorStatus(error) === 404) {
+          throw new GhClientError(
+            'lock',
+            `GitHub default branch "${branch}" commit object ${sha} was not found`,
+            404,
+          );
+        }
+        throw error;
+      }
+      const resolvedSha = requiredString(commit.sha, 'apply lock base commit sha');
+      if (resolvedSha !== sha) {
+        throw new GhClientError(
+          'response',
+          `GitHub default branch "${branch}" commit response changed SHA from ${sha} to `
+            + `${resolvedSha}`,
+        );
+      }
+      defaultBranchSeed = {
+        branch,
+        sha,
+        treeSha: requiredString(record(commit.tree).sha, 'apply lock base tree sha'),
+      };
+      return defaultBranchSeed;
+    }
+
+    throw new GhClientError('lock', 'GitHub default branch ref could not be resolved');
+  }
+
+  /**
    * @returns {Promise<{organization: Record<string, unknown>, repository: Record<string, unknown>}>}
    */
   async function verifyAccess() {
     await runGh(['auth', 'status', '--hostname', 'github.com', '--active']);
-    const repository = record(await rest('GET', `repos/${owner}/${repo}`));
+    await trustedActorLogin();
+    const repository = await loadRepositoryMetadata(true);
     const organization = record(await rest('GET', `orgs/${owner}`));
-    if (
-      typeof repository.default_branch === 'string'
-      && SAFE_BEAD_ID_PATTERN.test(repository.default_branch)
-    ) {
-      repositoryDefaultBranch = repository.default_branch;
-    }
     return { organization, repository };
+  }
+
+  /**
+   * @param {readonly string[]} logins
+   * @returns {Promise<void>}
+   */
+  async function validateAssignees(logins) {
+    const uniqueLogins = new Map();
+    for (const rawLogin of logins) {
+      const login = requiredString(rawLogin, 'assignee login');
+      if (!GITHUB_LOGIN_PATTERN.test(login)) {
+        throw new GhClientError(
+          'validation',
+          `Configured assignee "${login}" is not a valid GitHub login`,
+        );
+      }
+      const canonicalLogin = login.toLowerCase();
+      if (!uniqueLogins.has(canonicalLogin)) {
+        uniqueLogins.set(canonicalLogin, login);
+      }
+    }
+
+    for (const login of uniqueLogins.values()) {
+      try {
+        await rest(
+          'GET',
+          `repos/${owner}/${repo}/assignees/${encodeURIComponent(login)}`,
+        );
+      } catch (error) {
+        if (errorStatus(error) === 404) {
+          throw new GhClientError(
+            'validation',
+            `GitHub assignee "${login}" is not assignable to ${repositoryIdentity}`,
+            404,
+          );
+        }
+        throw error;
+      }
+    }
   }
 
   /**
@@ -1831,6 +2164,48 @@ export function createGhClient(options) {
       'lease-lost',
       `GitHub apply lease lost: ${errorDetail(error)}`,
       errorStatus(error),
+    );
+  }
+
+  /**
+   * @param {string} description
+   * @param {unknown} error
+   * @returns {GhClientError}
+   */
+  function applyLeaseMutationAmbiguousError(description, error) {
+    if (isApplyLeaseMutationQuarantined(error)) {
+      return /** @type {GhClientError} */ (error);
+    }
+    const ambiguous = new GhClientError(
+      'ambiguous',
+      `${description} may have succeeded after the apply lease expired or ownership was lost; `
+        + `further writes are quarantined and manual recovery is required: ${errorDetail(error)}`,
+      errorStatus(error) ?? 409,
+    );
+    Object.defineProperty(ambiguous, 'applyLeaseQuarantined', {
+      configurable: false,
+      enumerable: false,
+      value: true,
+      writable: false,
+    });
+    Object.defineProperty(ambiguous, 'cause', {
+      configurable: false,
+      enumerable: false,
+      value: error,
+      writable: false,
+    });
+    return ambiguous;
+  }
+
+  /**
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  function isApplyLeaseMutationQuarantined(error) {
+    return (
+      error instanceof GhClientError
+      && error.kind === 'ambiguous'
+      && /** @type {{applyLeaseQuarantined?: unknown}} */ (error).applyLeaseQuarantined === true
     );
   }
 
@@ -2131,6 +2506,7 @@ export function createGhClient(options) {
    */
   async function acquireApplyLock(input) {
     try {
+      await trustedActorLogin();
       const lockOwner = lockIdentity(input?.owner, 'apply lock owner');
       const runId = lockIdentity(input?.runId, 'apply lock runId');
       const leaseId = lockIdentity(input?.leaseId, 'apply lock leaseId');
@@ -2161,12 +2537,9 @@ export function createGhClient(options) {
         parentSha = current.sha;
         treeSha = current.treeSha;
       } else {
-        const base = record(await rest(
-          'GET',
-          `repos/${owner}/${repo}/git/commits/${encodeURIComponent(repositoryDefaultBranch)}`,
-        ));
-        parentSha = requiredString(base.sha, 'apply lock base commit sha');
-        treeSha = requiredString(record(base.tree).sha, 'apply lock base tree sha');
+        const base = await resolveDefaultBranchSeed();
+        parentSha = base.sha;
+        treeSha = base.treeSha;
       }
 
       const sha = await createApplyLockCommit(state, parentSha, treeSha);
@@ -2274,9 +2647,14 @@ export function createGhClient(options) {
      * @returns {GhClientError}
      */
     function lose(error) {
-      terminalFailure ??= applyLeaseLostError(error);
+      const nextFailure = isApplyLeaseMutationQuarantined(error)
+        ? /** @type {GhClientError} */ (error)
+        : applyLeaseLostError(error);
+      if (terminalFailure == null || isApplyLeaseMutationQuarantined(error)) {
+        terminalFailure = nextFailure;
+      }
       clearHeartbeat();
-      return terminalFailure;
+      return terminalFailure ?? nextFailure;
     }
 
     function scheduleHeartbeat() {
@@ -2393,6 +2771,47 @@ export function createGhClient(options) {
       }
     }
 
+    /**
+     * @param {string} description
+     * @param {unknown} [error]
+     * @returns {Promise<void>}
+     */
+    async function settleManagedMutation(description, error) {
+      if (verification) {
+        await verification.catch(() => undefined);
+      }
+      if (renewal) {
+        await renewal.catch(() => undefined);
+      }
+      if (!mutationMayHaveApplied(error)) {
+        return;
+      }
+      if (terminalFailure) {
+        throw lose(applyLeaseMutationAmbiguousError(description, terminalFailure));
+      }
+      if (stopped || released) {
+        throw lose(applyLeaseMutationAmbiguousError(
+          description,
+          new GhClientError('lease-lost', 'GitHub apply lease is no longer active', 409),
+        ));
+      }
+      if (currentHandle.expiresAt <= now()) {
+        throw lose(applyLeaseMutationAmbiguousError(
+          description,
+          new GhClientError(
+            'lease-lost',
+            'GitHub apply lease expired before the mutation outcome could be fenced',
+            409,
+          ),
+        ));
+      }
+      try {
+        await assertOwned();
+      } catch (leaseError) {
+        throw lose(applyLeaseMutationAmbiguousError(description, leaseError));
+      }
+    }
+
     async function release() {
       if (released) {
         return;
@@ -2413,6 +2832,7 @@ export function createGhClient(options) {
       failure: () => terminalFailure,
       release,
       renewNow,
+      settleManagedMutation,
       stop,
     }));
     activeApplyLockLease = controller;
@@ -2520,6 +2940,7 @@ export function createGhClient(options) {
     }
     const project = requireProject();
     const items = [];
+    const pagination = createGraphqlPaginationGuard('project item');
     let cursor = null;
 
     for (;;) {
@@ -2530,15 +2951,15 @@ export function createGhClient(options) {
       const data = record(payload.data);
       const node = record(data.node);
       const connection = record(node.items);
-      for (const rawItem of array(connection.nodes)) {
+      const pageItems = array(connection.nodes);
+      for (const rawItem of pageItems) {
         items.push(record(rawItem));
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageItems.length);
+      if (cursor == null) {
         projectItemsCache = items;
         return [...items];
       }
-      cursor = requiredString(pageInfo.endCursor, 'project item page cursor');
     }
   }
 
@@ -2784,6 +3205,7 @@ export function createGhClient(options) {
       return [...lastDiscoveredProjects];
     }
     const projectsFound = [];
+    const pagination = createGraphqlPaginationGuard('project');
     let cursor = null;
 
     for (;;) {
@@ -2792,7 +3214,6 @@ export function createGhClient(options) {
       const organization = record(data.organization);
       const repository = record(data.repository);
       const projects = record(organization.projectsV2);
-      const pageInfo = record(projects.pageInfo);
 
       if (typeof organization.id === 'string') {
         organizationId = organization.id;
@@ -2801,14 +3222,15 @@ export function createGhClient(options) {
         repositoryId = repository.id;
       }
 
-      for (const rawProject of array(projects.nodes)) {
+      const pageProjects = array(projects.nodes);
+      for (const rawProject of pageProjects) {
         projectsFound.push(normalizeProject(rawProject));
       }
 
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(projects.pageInfo, pageProjects.length);
+      if (cursor == null) {
         break;
       }
-      cursor = requiredString(pageInfo.endCursor, 'project page cursor');
     }
 
     lastDiscoveredProjects = projectsFound;
@@ -2939,20 +3361,30 @@ export function createGhClient(options) {
     let cursor = project?.linkedRepositoriesKnown
       ? project.linkedRepositoriesEndCursor ?? null
       : null;
+    const pagination = createGraphqlPaginationGuard('linked repository');
+    if (project?.linkedRepositoriesKnown) {
+      cursor = pagination.advance(
+        {
+          hasNextPage: project.linkedRepositoriesHasNextPage === true,
+          endCursor: project.linkedRepositoriesEndCursor ?? null,
+        },
+        project.linkedRepositoryIds?.length ?? 0,
+      );
+    }
     for (;;) {
       const payload = await graphql(DISCOVER_LINKED_REPOSITORIES_QUERY, {
         projectId,
         cursor,
       });
       const connection = record(record(record(payload.data).node).repositories);
-      if (array(connection.nodes).some((rawRepository) => record(rawRepository).id === repositoryId)) {
+      const pageRepositories = array(connection.nodes);
+      if (pageRepositories.some((rawRepository) => record(rawRepository).id === repositoryId)) {
         return true;
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageRepositories.length);
+      if (cursor == null) {
         return false;
       }
-      cursor = requiredString(pageInfo.endCursor, 'linked repository page cursor');
     }
   }
 
@@ -3103,6 +3535,7 @@ export function createGhClient(options) {
   async function discoverFields() {
     const project = requireProject();
     const fields = new Map();
+    const pagination = createGraphqlPaginationGuard('field');
     let cursor = null;
 
     for (;;) {
@@ -3113,17 +3546,17 @@ export function createGhClient(options) {
       const data = record(payload.data);
       const node = record(data.node);
       const connection = record(node.fields);
-      for (const rawField of array(connection.nodes)) {
+      const pageFields = array(connection.nodes);
+      for (const rawField of pageFields) {
         const field = normalizeField(rawField);
         if (field) {
           fields.set(field.name, field);
         }
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageFields.length);
+      if (cursor == null) {
         break;
       }
-      cursor = requiredString(pageInfo.endCursor, 'field page cursor');
     }
 
     fieldContext = fields;
@@ -3209,6 +3642,7 @@ export function createGhClient(options) {
   async function discoverViews() {
     const project = requireProject();
     const views = [];
+    const pagination = createGraphqlPaginationGuard('view');
     let cursor = null;
 
     for (;;) {
@@ -3219,17 +3653,17 @@ export function createGhClient(options) {
       const data = record(payload.data);
       const node = record(data.node);
       const connection = record(node.views);
-      for (const rawView of array(connection.nodes)) {
+      const pageViews = array(connection.nodes);
+      for (const rawView of pageViews) {
         const view = normalizeView(rawView);
         if (view) {
           views.push(view);
         }
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageViews.length);
+      if (cursor == null) {
         break;
       }
-      cursor = requiredString(pageInfo.endCursor, 'view page cursor');
     }
     return views;
   }
@@ -3990,6 +4424,7 @@ ${selections.join('\n')}
 
   return Object.freeze({
     verifyAccess,
+    validateAssignees,
     acquireApplyLock,
     assertApplyLockOwned,
     releaseApplyLock,

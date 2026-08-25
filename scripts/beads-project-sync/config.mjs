@@ -165,9 +165,17 @@ function assigneeMap(value) {
   const input = record(value, '"assigneeMap"');
   /** @type {Record<string, string>} */
   const normalized = {};
+  const configuredSpellingByLogin = new Map();
   for (const [sourceAssignee, githubAssignee] of Object.entries(input)) {
     const source = requiredString(sourceAssignee, 'assigneeMap key');
-    normalized[source] = requiredString(githubAssignee, `assigneeMap.${source}`);
+    const login = requiredString(githubAssignee, `assigneeMap.${source}`);
+    if (!GITHUB_LOGIN_PATTERN.test(login)) {
+      fail(`"assigneeMap.${source}" must be a valid GitHub login`);
+    }
+    const canonicalLogin = login.toLowerCase();
+    const configuredSpelling = configuredSpellingByLogin.get(canonicalLogin) ?? login;
+    configuredSpellingByLogin.set(canonicalLogin, configuredSpelling);
+    normalized[source] = configuredSpelling;
   }
   return normalized;
 }

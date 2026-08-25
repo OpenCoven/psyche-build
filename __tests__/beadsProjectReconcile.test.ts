@@ -314,6 +314,20 @@ function managedIssue(
 }
 
 describe('Beads project reconciliation', () => {
+  it.each([true, '1', 1.5, -1, 5])(
+    'rejects invalid priority %s before planning operations',
+    (priority) => {
+      expect(() => planReconciliation({
+        inventory: [makeBead('pb-invalid-priority', {
+          priority: priority as unknown as PublicBead['priority'],
+        })],
+        existingIssues: [],
+        readme: null,
+        renderContext: baseContext,
+      })).toThrow(/priority.*integer.*0.*4|priority.*0.*4/i);
+    },
+  );
+
   it('accepts a complete ASCII managed issue body at exactly 65,536 code points', () => {
     const inventory = finalizeInventory([
       makeBeadWithManagedBodyLength(
@@ -981,6 +995,29 @@ describe('Beads project reconciliation', () => {
     for (const assignees of [
       ['BunsDev', ' BunsDev '],
       [' BunsDev ', 'BunsDev'],
+    ]) {
+      const plan = planReconciliation({
+        inventory,
+        existingIssues: [
+          managedIssue(inventory[0]!, inventory, issueNumbers, { assignees }),
+        ],
+        readme: { body: canonicalReadmeBody(inventory) },
+        renderContext: baseContext,
+      });
+
+      expect(plan.operations.filter((operation) => operation.type === 'updateIssue')).toEqual([]);
+    }
+  });
+
+  it('treats GitHub login casing and duplicate casing as the same exact assignee set', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-assignee-case', { githubAssignee: 'BunsDev' }),
+    ]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 425);
+
+    for (const assignees of [
+      ['bunsdev'],
+      ['BunsDev', 'bunsdev'],
     ]) {
       const plan = planReconciliation({
         inventory,

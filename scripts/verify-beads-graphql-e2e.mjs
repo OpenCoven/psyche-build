@@ -16,7 +16,17 @@ const REQUIRED_OPERATIONS = Object.freeze([
   'DiscoverManagedProject',
   'DiscoverManagedProjectItems',
 ]);
-const MAX_GRAPHQL_REQUESTS = 2;
+const REQUIRED_OPERATION_NAMES = new Set(REQUIRED_OPERATIONS);
+const ALLOWED_OPERATION_NAMES = new Set([
+  ...REQUIRED_OPERATIONS,
+  'DiscoverLinkedProjectRepositories',
+]);
+const MAX_PAGES_PER_OPERATION = 100;
+const MAX_ATTEMPTS_PER_REQUEST = 4;
+const MAX_GRAPHQL_REQUESTS =
+  ALLOWED_OPERATION_NAMES.size
+  * MAX_PAGES_PER_OPERATION
+  * MAX_ATTEMPTS_PER_REQUEST;
 
 /**
  * @returns {{
@@ -45,6 +55,7 @@ function captureStream() {
  *   kind: 'query' | 'mutation',
  *   name: string,
  *   signature: string,
+ *   cursorKey: string,
  * }}
  */
 function parseGraphqlRequest(stdin) {
@@ -62,10 +73,28 @@ function parseGraphqlRequest(stdin) {
   if (!match) {
     throw new Error('GraphQL request is missing a named operation');
   }
+  const variables = payload?.variables;
+  if (
+    variables != null
+    && (typeof variables !== 'object' || Array.isArray(variables))
+  ) {
+    throw new Error('GraphQL request variables must be an object when present');
+  }
+  const cursor = variables == null
+    ? undefined
+    : /** @type {Record<string, unknown>} */ (variables).cursor;
+  if (cursor != null && typeof cursor !== 'string') {
+    throw new Error(`GraphQL pagination cursor for "${match[2]}" must be a string or null`);
+  }
   return {
     kind: match[1],
     name: match[2],
     signature: createHash('sha256').update(stdin).digest('hex'),
+    cursorKey: cursor === undefined
+      ? 'missing'
+      : cursor === null
+        ? 'null'
+        : `string:${cursor}`,
   };
 }
 
@@ -112,8 +141,14 @@ export async function runBeadsGraphqlE2e(options = {}) {
    *   kind: 'query',
    *   name: string,
    *   signature: string,
+   *   cursorKey: string,
    * }[]} */ ([]);
   const signatures = new Set();
+  const attemptsBySignature = new Map();
+  const cursorsByOperation = new Map(
+    [...ALLOWED_OPERATION_NAMES].map((name) => [name, new Set()]),
+  );
+  let graphqlAttemptCount = 0;
 
   /** @type {ExecFileRun} */
   const tracedRun = async (command, args, runOptions) => {
@@ -124,15 +159,54 @@ export async function runBeadsGraphqlE2e(options = {}) {
           `GraphQL mutation "${operation.name}" is forbidden during the read-only E2E`,
         );
       }
+      if (!ALLOWED_OPERATION_NAMES.has(operation.name)) {
+        throw new Error(`Unexpected GraphQL operation "${operation.name}" during read-only E2E`);
+      }
+      if (graphqlAttemptCount >= MAX_GRAPHQL_REQUESTS) {
+        throw new Error(
+          `GraphQL request ceiling exceeded: ${graphqlAttemptCount + 1} > `
+            + `${MAX_GRAPHQL_REQUESTS}`,
+        );
+      }
+      graphqlAttemptCount += 1;
       if (signatures.has(operation.signature)) {
         throw new Error(`Duplicate GraphQL request detected for "${operation.name}"`);
       }
-      signatures.add(operation.signature);
-      operations.push({
-        kind: 'query',
-        name: operation.name,
-        signature: operation.signature,
-      });
+      const requestAttempts = attemptsBySignature.get(operation.signature) ?? 0;
+      if (requestAttempts >= MAX_ATTEMPTS_PER_REQUEST) {
+        throw new Error(
+          `GraphQL retry attempt ceiling exceeded for "${operation.name}": `
+            + `${requestAttempts + 1} > ${MAX_ATTEMPTS_PER_REQUEST}`,
+        );
+      }
+      attemptsBySignature.set(operation.signature, requestAttempts + 1);
+      const cursors = cursorsByOperation.get(operation.name);
+      if (!cursors) {
+        throw new Error(`Unexpected GraphQL operation "${operation.name}" during read-only E2E`);
+      }
+      if (cursors.has(operation.cursorKey)) {
+        throw new Error(
+          `Duplicate GraphQL pagination cursor detected for "${operation.name}"`,
+        );
+      }
+      if (cursors.size >= MAX_PAGES_PER_OPERATION) {
+        throw new Error(
+          `GraphQL pagination page ceiling exceeded for "${operation.name}": `
+            + `${cursors.size + 1} > ${MAX_PAGES_PER_OPERATION}`,
+        );
+      }
+      const result = await delegateRun(command, args, runOptions);
+      if ((result.exitCode ?? 0) === 0) {
+        signatures.add(operation.signature);
+        cursors.add(operation.cursorKey);
+        operations.push({
+          kind: 'query',
+          name: operation.name,
+          signature: operation.signature,
+          cursorKey: operation.cursorKey,
+        });
+      }
+      return result;
     }
     return delegateRun(command, args, runOptions);
   };
@@ -157,9 +231,9 @@ export async function runBeadsGraphqlE2e(options = {}) {
     throw new Error(detail || `Beads GraphQL E2E failed with exit code ${exitCode}`);
   }
 
-  if (operations.length > MAX_GRAPHQL_REQUESTS) {
+  if (graphqlAttemptCount > MAX_GRAPHQL_REQUESTS) {
     throw new Error(
-      `GraphQL request ceiling exceeded: ${operations.length} > ${MAX_GRAPHQL_REQUESTS}`,
+      `GraphQL request ceiling exceeded: ${graphqlAttemptCount} > ${MAX_GRAPHQL_REQUESTS}`,
     );
   }
   for (const required of REQUIRED_OPERATIONS) {
@@ -172,10 +246,19 @@ export async function runBeadsGraphqlE2e(options = {}) {
   if (summary?.mode !== 'dry-run' || summary?.appliedOperationCount !== 0) {
     throw new Error('Beads GraphQL E2E did not remain read-only');
   }
+  const pageCounts = {
+    DiscoverManagedProject:
+      cursorsByOperation.get('DiscoverManagedProject')?.size ?? 0,
+    DiscoverLinkedProjectRepositories:
+      cursorsByOperation.get('DiscoverLinkedProjectRepositories')?.size ?? 0,
+    DiscoverManagedProjectItems:
+      cursorsByOperation.get('DiscoverManagedProjectItems')?.size ?? 0,
+  };
 
   return {
     graphqlRequestCount: operations.length,
     operations: operations.map(({ kind, name }) => ({ kind, name })),
+    pageCounts,
     summary,
     diagnostics: redact(stderr.read().trim(), token),
   };

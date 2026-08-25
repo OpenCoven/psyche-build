@@ -16,7 +16,7 @@ import {
   LEGACY_ISSUE_MARKERS,
   LEGACY_PROJECT_MARKERS,
 } from './markers.mjs';
-import { toPublicBead } from './sanitize.mjs';
+import { sanitizePublicText, toPublicBead } from './sanitize.mjs';
 import { createExecFileRun, loadBeadsSource } from './source.mjs';
 
 /**
@@ -174,14 +174,26 @@ function errorMessage(error, secrets = []) {
       ? error
       : 'Unknown Beads Project sync failure';
 
-  return redactSecrets(message, secrets)
+  const structurallyRedacted = redactSecrets(message, secrets)
     .replace(/(?:github_pat|gh[pousr])_[A-Za-z0-9_]+/gu, '<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer <redacted>')
     .replace(/\{[\s\S]*\}/gu, '<record redacted>')
     .replace(/\[[\s\S]*\]/gu, '<record redacted>')
     .replace(/\s+/gu, ' ')
     .trim()
-    .slice(0, 500);
+    .slice(0, 2_000);
+
+  try {
+    const publicMessage = sanitizePublicText(structurallyRedacted)
+      ?? 'Unknown Beads Project sync failure';
+    return publicMessage
+      .replace(/~[\\/].*$/gu, '[redacted-local-path]')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 500);
+  } catch {
+    return 'Sensitive source details omitted from Beads Project sync failure';
+  }
 }
 
 /**
@@ -331,6 +343,27 @@ function summarizePlan(plan, secrets) {
           .trim()
           .slice(0, 256),
     })),
+  };
+}
+
+function summarizeNoReconciliation() {
+  return {
+    plannedOperationCount: 0,
+    operationCounts: {
+      createIssue: 0,
+      updateIssue: 0,
+      labelIssue: 0,
+      closeIssue: 0,
+      ensureProjectItem: 0,
+      restoreItem: 0,
+      setFields: 0,
+      syncParent: 0,
+      syncBlocker: 0,
+      archiveItem: 0,
+      updateReadme: 0,
+    },
+    visibilityDrift: false,
+    closureCandidates: [],
   };
 }
 
@@ -494,6 +527,20 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       legacyIssueMarkers: LEGACY_ISSUE_MARKERS,
     });
     await gh.verifyAccess();
+    if (options.mode === 'apply') {
+      const assigneesByLogin = new Map();
+      for (const login of Object.values(config.assigneeMap)) {
+        const canonicalLogin = login.toLowerCase();
+        if (!assigneesByLogin.has(canonicalLogin)) {
+          assigneesByLogin.set(canonicalLogin, login);
+        }
+      }
+      await gh.validateAssignees(
+        [...assigneesByLogin.values()].sort((left, right) =>
+          left.toLowerCase().localeCompare(right.toLowerCase())
+        ),
+      );
+    }
     let project = await gh.discoverProject();
     assertPinnedPublicProject(project, config.projectNodeId);
     let provisionedThisRun = false;
@@ -519,14 +566,13 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         assertPinnedPublicProject(project, config.projectNodeId);
       }
 
-      if (options.mode !== 'dry-run' && project) {
+      if (options.mode === 'provision' && project) {
         const repairedProject = await gh.ensureProject({
           title: config.projectTitle,
           readme: desiredProjectReadme,
         });
-        if (options.mode === 'provision') {
-          project = repairedProject;
-        }
+        assertPinnedPublicProject(repairedProject, config.projectNodeId);
+        project = repairedProject;
       }
 
       if (options.provision) {
@@ -541,6 +587,12 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         }
 
         if (options.mode === 'provision') {
+          await applyLease?.assertOwned();
+          await gh.ensureLabels();
+          await applyLease?.assertOwned();
+          await gh.ensureFields();
+          await applyLease?.assertOwned();
+          await gh.ensureViews();
           await applyLease?.assertOwned();
           const url = project.url
             ?? `https://github.com/orgs/${config.owner}/projects/${project.number}`;
@@ -558,7 +610,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
           writeSummary({
             mode: options.mode,
             inventory: inventorySummary,
-            ...summarizePlan(firstRunPlan, diagnosticSecrets),
+            ...summarizeNoReconciliation(),
             appliedOperationCount: 0,
             warnings,
             projectUrl: url,
@@ -572,7 +624,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       }
 
       const existingIssues = await gh.listManagedIssues();
-      const plan = planReconciliation({
+      let plan = planReconciliation({
         inventory,
         existingIssues,
         readme: project == null ? null : { body: project.readme, public: project.public },
@@ -623,6 +675,15 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         return 0;
       }
 
+      if (project) {
+        const repairedProject = await gh.ensureProject({
+          title: config.projectTitle,
+          readme: desiredProjectReadme,
+        });
+        assertPinnedPublicProject(repairedProject, config.projectNodeId);
+        project = repairedProject;
+      }
+
       if (!provisionedThisRun) {
         await applyLease?.assertOwned();
         await gh.ensureLabels();
@@ -631,6 +692,17 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         await applyLease?.assertOwned();
         await gh.ensureViews();
       }
+
+      if (project) {
+        plan = planReconciliation({
+          inventory,
+          existingIssues,
+          readme: { body: project.readme, public: project.public },
+          renderContext,
+        });
+        validatePlanSafety(plan, config.massClose, options.allowMassClose);
+      }
+
       let applied;
       try {
         applied = await applyReconciliation(plan, gh);

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import {
   activeBeads,
   buildBeadIndex,
+  normalizeBeadPriority,
   normalizeBeadId,
   normalizePublicBeadType,
 } from './model.mjs';
@@ -640,11 +641,16 @@ function normalizeAssigneeLogins(value, legacyAssignee, context) {
     fail(`${context} must be an array when present`);
   }
 
-  const assignees = new Set();
+  const assignees = new Map();
   for (const entry of rawAssignees) {
-    assignees.add(normalizeRequiredTrimmedString(entry, 'assignee', context));
+    const login = normalizeRequiredTrimmedString(entry, 'assignee', context);
+    const canonicalLogin = login.toLowerCase();
+    if (!assignees.has(canonicalLogin)) {
+      assignees.set(canonicalLogin, login);
+    }
   }
-  return [...assignees].sort(compareStrings);
+  return [...assignees.values()].sort((left, right) =>
+    compareStrings(left.toLowerCase(), right.toLowerCase()));
 }
 
 /**
@@ -1078,7 +1084,7 @@ function buildDesiredFields(beadId, bead) {
     beadId: bead.id,
     status: bead.status,
     type: bead.type,
-    priority: Number(bead.priority),
+    priority: bead.priority,
     blocked: Boolean(bead.blocked),
     done: bead.status === 'closed',
     parentGoal: bead.parentId ?? null,
@@ -1323,11 +1329,12 @@ function stringListsEqual(left, right) {
  * @returns {boolean}
  */
 function stringSetsEqual(left, right) {
-  if (left.length !== right.length) {
+  const leftSet = new Set(left.map((value) => value.toLowerCase()));
+  const rightSet = new Set(right.map((value) => value.toLowerCase()));
+  if (leftSet.size !== rightSet.size) {
     return false;
   }
-  const rightSet = new Set(right);
-  return left.every((value) => rightSet.has(value));
+  return [...leftSet].every((value) => rightSet.has(value));
 }
 
 /**
@@ -1422,6 +1429,10 @@ export function planReconciliation(input) {
     fail('planReconciliation cannot reconcile an empty source inventory');
   }
   for (const bead of inventory) {
+    normalizeBeadPriority(
+      bead?.priority,
+      `planReconciliation inventory bead "${bead?.id ?? 'unknown'}" priority`,
+    );
     normalizePublicBeadType(
       bead?.type,
       `planReconciliation inventory bead "${bead?.id ?? 'unknown'}"`,

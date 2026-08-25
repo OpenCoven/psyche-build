@@ -1,6 +1,10 @@
 // @ts-check
 
 /**
+ * @typedef {0 | 1 | 2 | 3 | 4} BeadPriority
+ */
+
+/**
  * @typedef {{
  *   issue_id?: unknown,
  *   type?: unknown,
@@ -40,7 +44,7 @@
  *   acceptanceCriteria: string | null,
  *   notes: string | null,
  *   status: string,
- *   priority: number,
+ *   priority: BeadPriority,
  *   type: string,
  *   blocked: boolean,
  *   labels: string[],
@@ -78,6 +82,8 @@ export const PUBLIC_BEAD_TYPES = Object.freeze([
 ]);
 const supportedPublicBeadTypes = new Set(PUBLIC_BEAD_TYPES);
 const BEAD_ID_SOURCE = '[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?';
+const DATE_TIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/u;
 
 export const BEAD_ID_PATTERN = new RegExp(`^${BEAD_ID_SOURCE}$`, 'u');
 
@@ -165,18 +171,85 @@ function normalizeOptionalString(value, fieldName, context) {
 
 /**
  * @param {unknown} value
+ * @param {string} fieldName
  * @param {string} context
- * @returns {number}
+ * @param {boolean} optional
+ * @returns {string | null}
  */
-function normalizePriority(value, context) {
-  if (value == null || value === '') {
-    return 0;
+function normalizeDateTime(value, fieldName, context, optional) {
+  if (value == null && optional) {
+    return null;
   }
-  const priority = Number(value);
-  if (!Number.isFinite(priority)) {
-    fail(`${context} has an invalid priority`);
+  const normalized = normalizeRequiredString(value, fieldName, context);
+  const match = normalized.match(DATE_TIME_PATTERN);
+  if (!match) {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
   }
-  return priority;
+
+  const [, rawYear, rawMonth, rawDay, rawHour, rawMinute, rawSecond, , rawOffset] = match;
+  const year = Number(rawYear);
+  const month = Number(rawMonth);
+  const day = Number(rawDay);
+  const hour = Number(rawHour);
+  const minute = Number(rawMinute);
+  const second = Number(rawSecond);
+  const offsetHour = rawOffset === 'Z' ? 0 : Number(rawOffset.slice(1, 3));
+  const offsetMinute = rawOffset === 'Z' ? 0 : Number(rawOffset.slice(4, 6));
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month - 1] ?? 0;
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInMonth
+    || hour > 23
+    || minute > 59
+    || second > 59
+    || offsetHour > 23
+    || offsetMinute > 59
+  ) {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
+
+  const milliseconds = Date.parse(normalized);
+  if (!Number.isFinite(milliseconds)) {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
+  try {
+    return new Date(milliseconds).toISOString().replace(/\.000Z$/u, 'Z');
+  } catch {
+    fail(`${context} field "${fieldName}" must be a valid date-time`);
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
+ * @returns {BeadPriority}
+ */
+export function normalizeBeadPriority(value, context) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 0
+    || value > 4
+  ) {
+    fail(`${context} must be an integer from 0 to 4`);
+  }
+  return /** @type {BeadPriority} */ (value);
 }
 
 /**
@@ -241,6 +314,7 @@ function normalizeAssigneeMap(assigneeMap) {
       : fail('parseBeadExport config.assigneeMap must be an object or Map');
 
   const normalized = new Map();
+  const configuredSpellingByLogin = new Map();
   for (const [rawAssignee, rawGithubAssignee] of entries) {
     const assignee = normalizeRequiredString(rawAssignee, 'assigneeMap key', 'parseBeadExport config');
     const githubAssignee = normalizeRequiredString(
@@ -248,7 +322,11 @@ function normalizeAssigneeMap(assigneeMap) {
       'assigneeMap value',
       'parseBeadExport config',
     );
-    normalized.set(assignee, githubAssignee);
+    const canonicalLogin = githubAssignee.toLowerCase();
+    const configuredSpelling = configuredSpellingByLogin.get(canonicalLogin)
+      ?? githubAssignee;
+    configuredSpellingByLogin.set(canonicalLogin, configuredSpelling);
+    normalized.set(assignee, configuredSpelling);
   }
   return normalized;
 }
@@ -419,27 +497,33 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
       'status',
       `Beads record "${id}" on line ${lineNumber}`,
     ),
-    priority: normalizePriority(beadRecord.priority, `Beads record "${id}" on line ${lineNumber}`),
+    priority: normalizeBeadPriority(
+      beadRecord.priority,
+      `Beads record "${id}" on line ${lineNumber} field "priority"`,
+    ),
     type: issueType,
     blocked: false,
     labels: normalizeLabels(beadRecord.labels, `Beads record "${id}" on line ${lineNumber}`),
     parentId,
     blockedByIds,
     githubAssignee: rawAssignee == null ? null : assigneeMap.get(rawAssignee) ?? null,
-    createdAt: normalizeRequiredString(
+    createdAt: /** @type {string} */ (normalizeDateTime(
       beadRecord.created_at,
       'created_at',
       `Beads record "${id}" on line ${lineNumber}`,
-    ),
-    updatedAt: normalizeRequiredString(
+      false,
+    )),
+    updatedAt: /** @type {string} */ (normalizeDateTime(
       beadRecord.updated_at,
       'updated_at',
       `Beads record "${id}" on line ${lineNumber}`,
-    ),
-    closedAt: normalizeOptionalString(
+      false,
+    )),
+    closedAt: normalizeDateTime(
       beadRecord.closed_at,
       'closed_at',
       `Beads record "${id}" on line ${lineNumber}`,
+      true,
     ),
   };
 }

@@ -3,6 +3,7 @@ import type { ChildProcess, ExecFileException, ExecFileOptionsWithStringEncoding
 export interface ExecFileRunOptions {
   cwd?: string;
   env?: Readonly<Record<string, string>>;
+  unsetEnv?: readonly string[];
   stdin?: string;
 }
 
@@ -52,12 +53,22 @@ export function exportBeads(options: {
   outputPath: string;
 }): Promise<void>;
 
+export function selectSafeTemporaryRoot(
+  cwd: string,
+  options?: {
+    run?: ExecFileRun;
+    realpath?: (path: string) => Promise<string>;
+    candidates?: readonly string[];
+  },
+): Promise<string>;
+
 export function loadBeadsSource(options: {
   cwd: string;
   mode?: BeadsSourceMode;
   inventoryFile?: string | null;
   run?: ExecFileRun;
   makeTemporaryDirectory?: (prefix: string) => Promise<string>;
+  gitRun?: ExecFileRun;
   readFile?: (path: string, encoding: 'utf8') => Promise<string>;
   remove?: (
     path: string,

@@ -121,6 +121,23 @@ describe('Beads project model', () => {
     expect(JSON.stringify(beads)).not.toContain('feature-owner@example.com');
   });
 
+  it('uses one configured spelling for case-equivalent GitHub assignee mappings', () => {
+    const beads = parseBeadExport(toJsonl(
+      makeIssue({ id: 'one', assignee: 'first-owner' }),
+      makeIssue({ id: 'two', assignee: 'second-owner' }),
+    ), {
+      assigneeMap: new Map([
+        ['first-owner', 'BunsDev'],
+        ['second-owner', 'bunsdev'],
+      ]),
+    });
+
+    expect(beads.map((bead) => bead.githubAssignee)).toEqual([
+      'BunsDev',
+      'BunsDev',
+    ]);
+  });
+
   it('builds lookup indexes for ids, children, and blocker dependents', () => {
     const beads = parseBeadExport(issuesJsonl, {
       assigneeMap: {
@@ -211,6 +228,54 @@ describe('Beads project model', () => {
         { issue_id: 'child', depends_on_id: 'parent-b', type: 'parent-child' },
       ],
     })), { assigneeMap: {} })).toThrow(/multiple parents/i);
+  });
+
+  it('validates and normalizes source timestamps during model parsing', () => {
+    const [bead] = parseBeadExport(toJsonl(makeIssue({
+      created_at: '2026-08-20T01:30:00+01:30',
+      updated_at: '2026-08-20T00:00:00.125Z',
+      closed_at: '2026-08-21T00:00:00Z',
+    })), { assigneeMap: {} });
+
+    expect(bead).toMatchObject({
+      createdAt: '2026-08-20T00:00:00Z',
+      updatedAt: '2026-08-20T00:00:00.125Z',
+      closedAt: '2026-08-21T00:00:00Z',
+    });
+
+    for (const [field, value] of [
+      ['created_at', '2026-02-30T00:00:00Z'],
+      ['updated_at', 'not-a-date'],
+      ['closed_at', '2026-08-20'],
+      ['closed_at', '999999-01-01T00:00:00Z'],
+    ] as const) {
+      expect(() => parseBeadExport(toJsonl(makeIssue({ [field]: value })), {
+        assigneeMap: {},
+      })).toThrow(new RegExp(`${field}.*date|date.*${field}`, 'i'));
+    }
+    expect(parseBeadExport(toJsonl(makeIssue({ closed_at: null })), {
+      assigneeMap: {},
+    })[0]?.closedAt).toBeNull();
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['boolean', true],
+    ['string', '1'],
+    ['fractional', 1.5],
+    ['negative', -1],
+    ['above P4', 5],
+  ])('rejects %s priority values before reconciliation', (_name, priority) => {
+    expect(() => parseBeadExport(toJsonl(makeIssue({ priority })), {
+      assigneeMap: {},
+    })).toThrow(/priority.*integer.*0.*4|priority.*0.*4/i);
+  });
+
+  it.each([0, 1, 2, 3, 4])('accepts integer priority P%s', (priority) => {
+    expect(parseBeadExport(toJsonl(makeIssue({ priority })), {
+      assigneeMap: {},
+    })[0]?.priority).toBe(priority);
   });
 
   it.each(['bad id', 'bad>id', 'bad]id'])(

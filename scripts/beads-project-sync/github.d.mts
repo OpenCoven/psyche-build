@@ -198,6 +198,21 @@ export class GhClientError extends Error {
   constructor(kind: string, message: string, status?: number);
 }
 
+export interface GraphqlPaginationGuard {
+  advance(
+    pageInfo: unknown,
+    pageItemCount: number,
+  ): string | null;
+}
+
+export function createGraphqlPaginationGuard(
+  label: string,
+  options?: {
+    maxPages?: number;
+    maxItems?: number;
+  },
+): GraphqlPaginationGuard;
+
 export const PROJECT_README_MARKER: string;
 export const LEGACY_PROJECT_README_MARKER: string;
 export const PROJECT_VIEWS: readonly ProjectViewDefinition[];
@@ -207,6 +222,7 @@ export interface GhClient {
     organization: Record<string, unknown>;
     repository: Record<string, unknown>;
   }>;
+  validateAssignees(logins: readonly string[]): Promise<void>;
   acquireApplyLock(input: {
     owner: string;
     runId: string;
