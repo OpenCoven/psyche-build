@@ -1,7 +1,8 @@
 # Psyche Build post-release execution contract
 
 **Status:** Active delivery plan  
-**Last reconciled:** 2026-08-24  
+**Last reconciled:** 2026-08-25
+
 **Portfolio owner:** [@BunsDev](https://github.com/BunsDev)  
 **Roadmap control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)  
 **Documentation delivery:** [#238](https://github.com/OpenCoven/psyche-build/issues/238)
@@ -30,6 +31,20 @@ not make the public macOS artifact unreleased. The iOS companion remains
 planned pending [#200](https://github.com/OpenCoven/psyche-build/issues/200);
 source, simulator, fixture, and UI-test success do not establish live TestFlight availability.
 
+Since this plan was drafted, [PR #248](https://github.com/OpenCoven/psyche-build/pull/248)
+and [PR #249](https://github.com/OpenCoven/psyche-build/pull/249) landed the
+managed Beads-to-GitHub Project synchronization, bounded GraphQL request model,
+drift checks, mutation fencing, and sanitizer hardening. The production
+automation and manual environments are restricted to `main`; the manual path
+requires Maintainer approval. A current live dry-run plans zero mutations with
+two GraphQL queries. [PR #236](https://github.com/OpenCoven/psyche-build/pull/236)
+is closed as superseded. The public tracker outcomes remain open until their
+owning issues link and accept this evidence.
+
+[PR #247](https://github.com/OpenCoven/psyche-build/pull/247) also closed the
+desktop Git-log command-execution path by routing log inspection through the
+isolated repository snapshot while preserving bare-repository support.
+
 ## Authority and evidence
 
 | System | Owns | Does not prove |
@@ -50,11 +65,11 @@ are not substitutes for retained evidence.
 The numbered order below is the default delivery order. A later item may start
 only where the concurrency rules explicitly permit it.
 
-| Order | Outcome | Priority | Exit gate |
+| Order | Outcome | Priority | Current state and exit gate |
 |---:|---|---:|---|
-| 1 | [#238 — current critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | Current-main plan, roadmap links, acceptance classification, and contract tests merge; stale PR #236 is retired |
+| 1 | [#238 — current critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | PR #236 is retired. Merge this current-main plan, roadmap links, acceptance classification, and contract tests; then reconcile #195 |
 | 2 | [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Required checks and review apply to administrators, standing bypasses are removed, and a protected proof PR is retained |
-| 3 | [#237 — tracker reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) and [#240 — drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | Beads and generated mirrors agree; obsolete P0/release-blocker metadata is removed; deterministic drift validation passes |
+| 3 | [#237 — tracker reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) and [#240 — drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | Core synchronization and validation landed in PRs #248/#249 and are live. Link the before/after evidence, reconcile the issue checklists, and close only when their public acceptance gates agree |
 | 4 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths |
 | 5 | [#241 — atomic iOS host readiness](https://github.com/OpenCoven/psyche-build/issues/241) | P1 | A focused current-main PR cannot expose a new workspace when host authority or readiness commit fails |
 | 6 | #200 discovery, reconnect, and physical same-LAN acceptance | P1 | A physical iPhone preserves authoritative host/workspace state through restart, suspension, network interruption, revocation, and reconnect |
@@ -69,16 +84,17 @@ only where the concurrency rules explicitly permit it.
 
 **Owners:** #238, #31, #237, and #240.
 
-1. Merge the current-main documentation replacement and close stale #236 as
-   superseded rather than attempting to revive its obsolete branch history.
+1. Merge the current-main documentation replacement. PR #236 is already closed
+   as superseded; preserve its useful history without reviving its branch.
 2. Capture sanitized branch-protection/ruleset state, enforce checks and review
    for administrators, remove standing broad bypass actors, and merge a proof
    PR through the protected path.
-3. Designate one Beads writer/schema migrator for reconciliation.
-4. Repair Beads source state first, synchronize generated mirrors, and normalize
-   P0/P1/P2 ownership.
-5. Add a deterministic local/CI check for status, priority, mapping, and mirror
-   drift.
+3. Preserve the deployed single-writer/lease contract and protected
+   `main`-only automation environments delivered by PRs #248/#249.
+4. Reconcile #237/#240 against the landed source-first synchronization,
+   canonical mapping, drift validation, and final zero-operation live dry-run.
+5. Keep deterministic local/CI validation mandatory for status, priority,
+   mapping, mirror integrity, and bounded GraphQL behavior.
 
 **Exit:** roadmap, support claims, branch policy, Beads, GitHub mirrors, and live
 PR disposition agree on what is delivered, active, blocked, and deferred.
@@ -173,13 +189,13 @@ providers, transports, and UI selections.
 
 | Pull request | Disposition | Replacement contract |
 |---|---|---|
-| [#236](https://github.com/OpenCoven/psyche-build/pull/236) | **Superseded** by current-main reconciliation and #238 | Preserve useful review/history, close after the #238 replacement merges; do not force-update or merge the stale branch |
+| [#236](https://github.com/OpenCoven/psyche-build/pull/236) | **Closed as superseded** by current-main reconciliation and #238 | Preserve useful review/history; do not force-update, reopen, or merge the stale branch |
 | [#190](https://github.com/OpenCoven/psyche-build/pull/190) | **Source material only** | Integrate bounded pieces through #199/#243 after callback safety, readiness retry, redaction, and diagnostic limits are proven |
 | [#193](https://github.com/OpenCoven/psyche-build/pull/193) | **Source material only** | Extract #241 first, then discovery/reconnect, then physical acceptance; do not merge the large branch as one unit |
 | [#192](https://github.com/OpenCoven/psyche-build/pull/192) | **Source material only** | Extract production publication, execution, and UI in #242 order after accepted host readiness |
 
-No listed open PR is merge-ready merely because it can be rebased or its tests
-once passed. Every replacement starts from current `main`, has one owning
+No listed active implementation PR is merge-ready merely because it can be
+rebased or its tests once passed. Every replacement starts from current `main`, has one owning
 outcome and one acceptance gate, resolves current review findings, and passes
 required checks on its exact final head.
 

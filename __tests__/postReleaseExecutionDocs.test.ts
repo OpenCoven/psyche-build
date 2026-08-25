@@ -22,6 +22,10 @@ describe('post-release execution documentation', () => {
     expect(execution).toMatch(/#241 atomic readiness[\s\S]{0,200}#242 publication/i);
     expect(execution).toMatch(/#242 publication precedes execution/i);
     expect(execution).toMatch(/execution precedes mobile controls/i);
+    expect(execution).toContain(pullUrl(248));
+    expect(execution).toContain(pullUrl(249));
+    expect(execution).toContain(pullUrl(247));
+    expect(execution).toMatch(/zero mutations[\s\S]{0,80}two GraphQL queries/i);
   });
 
   it('records stale pull requests as source or history rather than merge-ready work', async () => {
@@ -33,10 +37,10 @@ describe('post-release execution documentation', () => {
       expect(roadmap, `roadmap missing pull request #${pull}`).toContain(pullUrl(pull));
     }
 
-    expect(execution).toMatch(/#236[\s\S]{0,160}\*\*Superseded\*\*/i);
-    expect(roadmap).toMatch(/#236[\s\S]{0,160}\*\*Superseded\*\*/i);
-    expect(execution).toMatch(/No listed open PR is merge-ready/i);
-    expect(roadmap).toMatch(/No open PR above is merge-ready/i);
+    expect(execution).toMatch(/#236[\s\S]{0,160}\*\*Closed as superseded\*\*/i);
+    expect(roadmap).toMatch(/#236[\s\S]{0,160}\*\*Closed as superseded\*\*/i);
+    expect(execution).toMatch(/No listed active implementation PR is merge-ready/i);
+    expect(roadmap).toMatch(/No active implementation PR above is merge-ready/i);
   });
 
   it('keeps the roadmap, docs index, and acceptance contract connected', async () => {
