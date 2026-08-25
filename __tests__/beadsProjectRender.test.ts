@@ -1016,11 +1016,11 @@ describe('Beads project renderers', () => {
     ).toBe('<textarea>[redacted-email]</textarea>');
   });
 
-  it('treats Markdown code examples as literal while validating adjacent raw HTML', () => {
+  it('keeps safe Markdown code examples literal while validating adjacent raw HTML', () => {
     const safe = [
-      '`<span>token</span>&#58;supersecretvalue`',
+      '`<span>release</span>&#58;public-value`',
       '```html',
-      '<span>alice</span>&#64;example.com',
+      '<span>public release</span>',
       '```',
       '<https://example.com> and alice&#64example.com are Markdown.',
       '\\<span>alice\\</span>&#64;example.com is escaped Markdown.',
@@ -1044,17 +1044,17 @@ describe('Beads project renderers', () => {
     const safe = [
       'Before.',
       '',
-      '    <span>token</span>&#58;supersecretvalue',
+      '    <span>release</span>&#58;public-value',
       '',
       '- ````html',
-      '  <span>alice</span>&#64;example.com',
+      '  <span>public release</span>',
       '  ````',
       '',
       '> ~~~~~html',
-      '> <span>token</span>&#58;supersecretvalue',
+      '> <span>release</span>&#58;public-value',
       '> ~~~~~',
       '',
-      'Inline ``<x-y href="`&#x67;hp_ABC123`">`` stays literal.',
+      'Inline ``<x-y href="`public-value`">`` stays literal.',
     ].join('\n');
 
     expect(sanitizePublicText(safe)).toBe(safe);
@@ -1070,7 +1070,7 @@ describe('Beads project renderers', () => {
       'carol&#64;example.com',
       '\\~\\~\\~',
       '&#96;dave&#64;example.com&#96; is not source code.',
-      '😀 Real code stays exact: `eve&#64;example.com`.',
+      '😀 Real code stays source-protected: `eve&#64;example.com`.',
       'After Unicode: frank&#64;example.com.',
     ].join('\n');
 
@@ -1083,7 +1083,7 @@ describe('Beads project renderers', () => {
       '[redacted-email]',
       '\\~\\~\\~',
       '&#96;[redacted-email]&#96; is not source code.',
-      '😀 Real code stays exact: `eve&#64;example.com`.',
+      '😀 Real code stays source-protected: `[redacted-email]`.',
       'After Unicode: [redacted-email].',
     ].join('\n'));
   });
@@ -1094,7 +1094,7 @@ describe('Beads project renderers', () => {
     ).toThrow(/Publishable GitHub token/i);
   });
 
-  it('restores original inline and block code exactly after all public processing', () => {
+  it('rejects secret-bearing inline and block code before restoration', () => {
     const source = [
       '😀 `alice@example.com /Users/alice/private`',
       '',
@@ -1104,7 +1104,149 @@ describe('Beads project renderers', () => {
       '> ```',
     ].join('\n');
 
-    expect(sanitizePublicText(source)).toBe(source);
+    expect(() => sanitizePublicText(source)).toThrow(
+      /Publishable (?:API key|credential|URL credentials)/i,
+    );
+  });
+
+  it.each([
+    ['inline token', '`ghp&#95;abcdefghijklmnopqrstuvwxyz123456`', /GitHub token/i],
+    [
+      'variable backtick token assignment',
+      '``token = `github%5Fpat%5Fabcdefghijklmnopqrstuvwxyz1234567890` ``',
+      /credential assignment/i,
+    ],
+    [
+      'fenced API key assignment',
+      ['```ts', 'api_key = "example-only-secret"', '```'].join('\n'),
+      /API key assignment/i,
+    ],
+    [
+      'fenced legacy entity assignment',
+      ['```html', '<script>token&#58example-only-secret</script>', '```'].join('\n'),
+      /credential assignment/i,
+    ],
+    [
+      'password assignment',
+      '`password = "example-only-secret"`',
+      /credential assignment/i,
+    ],
+    [
+      'tilde-fenced credential URL',
+      ['~~~text', 'https&colon;&sol;&sol;alice&colon;secret&commat;example.com/private', '~~~'].join('\n'),
+      /URL credentials/i,
+    ],
+    [
+      'indented private key',
+      '    -----BEGIN PRIVATE KEY-----',
+      /private key/i,
+    ],
+    [
+      'nested data URI secret',
+      ['> ```text', '> data:text/plain,token%20%3D%20example-only-secret', '> ```'].join('\n'),
+      /credential assignment/i,
+    ],
+    [
+      'fence info string secret',
+      ['```ts token=example-only-secret', 'const release = true;', '```'].join('\n'),
+      /credential assignment/i,
+    ],
+  ])('rejects secret-bearing %s before restoring Markdown code', (_name, source, error) => {
+    expect(() => sanitizePublicText(source)).toThrow(error);
+    expect(() => assertNoPublishableSecrets(source)).toThrow(error);
+  });
+
+  it('redacts sensitive code substrings without changing code delimiters or structure', () => {
+    const source = [
+      'Unicode 😀 ``const owner = `alice&#64;example.com`; const home = "%2FUsers%2Falice%2F%E7%A7%98%E5%AF%86.md";``',
+      '',
+      '~~~ts contact=ops%40example.com workspace=%2Ecopilot%2Fsession-state%2Frun',
+      'const worktree = ".worktrees/public-beads-project/private.ts";',
+      '~~~',
+      '',
+      '> ```txt',
+      '> /home/alice/private/notes.md',
+      '> .psyche/worktrees/run/file',
+      '> ```',
+      '',
+      `    ${runtimeHomeDirectory}/runtime-private/config.json`,
+      '    /configured/home/private/config.json',
+    ].join('\n');
+    const expected = [
+      'Unicode 😀 ``const owner = `[redacted-email]`; const home = "[redacted-local-path]";``',
+      '',
+      '~~~ts contact=[redacted-email] workspace=[redacted-local-path]',
+      'const worktree = "[redacted-local-path]";',
+      '~~~',
+      '',
+      '> ```txt',
+      '> [redacted-local-path]',
+      '> [redacted-local-path]',
+      '> ```',
+      '',
+      '    [redacted-local-path]',
+      '    [redacted-local-path]',
+    ].join('\n');
+
+    const sanitized = sanitizePublicText(source, {
+      homeDirectories: ['/Users/alice', '/home/alice', '/configured/home'],
+    });
+
+    expect(sanitized).toBe(expected);
+    const tree = fromMarkdown(sanitized!, {
+      extensions: [gfm()],
+      mdastExtensions: [gfmFromMarkdown()],
+    }) as MarkdownNode;
+    const codeTypes: string[] = [];
+    const pending = [tree];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (node == null) {
+        continue;
+      }
+      if (node.type === 'code' || node.type === 'inlineCode') {
+        codeTypes.push(node.type);
+      }
+      pending.push(...(node.children ?? []));
+    }
+    expect(codeTypes.sort()).toEqual(['code', 'code', 'code', 'inlineCode']);
+  });
+
+  it('never decodes code-source entities into executable HTML while redacting them', () => {
+    const source = '`&lt;img src=x alt=&quot;alice&#64;example.com&quot;&gt;`';
+    const sanitized = sanitizePublicText(source);
+
+    expect(sanitized).toBe(
+      '`&lt;img src=x alt=&quot;[redacted-email]&quot;&gt;`',
+    );
+    expect(sanitized).not.toContain('<img');
+  });
+
+  it('bounds inspection across hundreds of Markdown code nodes', () => {
+    const source = Array.from(
+      { length: 500 },
+      (_, index) => `\`user${index}%40example.com\``,
+    ).join(' ');
+    const sanitized = sanitizePublicText(source);
+
+    expect(countMatches(sanitized!, '`[redacted-email]`')).toBe(500);
+    expect(() =>
+      sanitizePublicText(Array.from({ length: 1_025 }, () => '`public`').join(' '))
+    ).toThrow(/Markdown code.*inspection limit/i);
+  });
+
+  it('renders only redacted code content into the first issue body version', () => {
+    const rendered = renderSourceDescription([
+      '```text contact=alice%40example.com',
+      `${runtimeHomeDirectory}/private/notes.md`,
+      '.worktrees/public-beads-project/private.md',
+      '```',
+    ].join('\n'));
+
+    expect(rendered).toContain('```text contact=[redacted-email]');
+    expect(countMatches(rendered, '[redacted-local-path]')).toBe(2);
+    expect(rendered).not.toMatch(/alice(?:%40|@)example\.com|\.worktrees/iu);
+    expect(rendered).not.toContain(runtimeHomeDirectory);
   });
 
   it('keeps backticks inside custom and namespaced raw HTML attributes active', () => {
@@ -1993,18 +2135,18 @@ describe('Beads project renderers', () => {
       '```',
     ].join('\n'));
 
-    expect(countMatches(rendered, '[redacted-local-path]')).toBe(5);
+    expect(countMatches(rendered, '[redacted-local-path]')).toBe(7);
     expect(rendered).toContain('Safe escaped prose: \\*literal emphasis\\* and \\[not a link\\].');
     expect(rendered).toContain('[safe route](docs/My%20Project.md)');
     expect(rendered).toContain([
       '```md',
-      '[literal](%2Epsyche%2Fworktrees%2Finside-code.md)',
-      '[entity literal](&period;copilot&sol;session-state&sol;inside-code.md)',
+      '[literal]([redacted-local-path])',
+      '[entity literal]([redacted-local-path])',
       '\\*literal fenced prose\\*',
       '```',
     ].join('\n'));
-    expect(countMatches(rendered, '%2Epsyche')).toBe(1);
-    expect(countMatches(rendered, '&period;copilot')).toBe(1);
+    expect(rendered).not.toContain('%2Epsyche');
+    expect(rendered).not.toContain('&period;copilot');
     expect(rendered).not.toMatch(
       /%252Eworktrees|%2FUsers|&sol;home/iu,
     );
@@ -2055,12 +2197,12 @@ describe('Beads project renderers', () => {
     );
   });
 
-  it('preserves code and redacts complete delimiter-aware operational paths', () => {
+  it('redacts complete delimiter-aware operational paths including code', () => {
     expect(
       sanitizePublicText(
         'Open `~/.worktrees/public-beads-project/秘密 roadmap.md` next.',
       ),
-    ).toBe('Open `~/.worktrees/public-beads-project/秘密 roadmap.md` next.');
+    ).toBe('Open `[redacted-local-path]` next.');
     expect(
       sanitizePublicText(
         'Plan: ".psyche/worktrees/public-beads-project/秘密 roadmap.md"; keep this note.',
