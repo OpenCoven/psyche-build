@@ -3717,6 +3717,189 @@ describe('createGhClient', () => {
     expect(backend.calls).toHaveLength(callCountAfterRelease);
   });
 
+  it('quarantines further writes when a managed mutation outlives the lease after passing preflight', async () => {
+    const backend = createApplyLockBackend();
+    const timers = createTimerHarness();
+    const calls: RunCall[] = [];
+    const beadId = 'pb-in-flight-lease-expiry';
+    const title = '[pb-in-flight-lease-expiry] Fence the write';
+    const body = managedBody(beadId);
+    let currentTime = 10_000;
+    const createdIssue = trustedIssue({
+      number: 91,
+      title,
+      body,
+      state: 'open',
+      assignees: [],
+      labels: [],
+      html_url: `https://github.com/${owner}/${repo}/issues/91`,
+    });
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args: [...args], options: { ...options } };
+      calls.push(call);
+      const methodIndex = args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      const endpoint = args[1];
+
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues` && method === 'POST') {
+        currentTime = 10_101;
+        return success({ number: 91 });
+      }
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues/91` && method === 'GET') {
+        return success(createdIssue);
+      }
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues/91` && method === 'PATCH') {
+        return success({ number: 91, title, body, state: 'open' });
+      }
+
+      return backend.run(command, args, options);
+    };
+    const client = createGhClient({
+      run,
+      owner,
+      repo,
+      token,
+      mutationMode: 'lease-required',
+      now: () => currentTime,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'in-flight-write',
+      leaseId: 'in-flight-write-lease',
+      ttlMs: 100,
+    });
+    const lease = client.startApplyLockLease(handle);
+
+    try {
+      await expect(client.createIssue({ beadId, title, body })).rejects.toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+      expect(lease.failure()).toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+      await expect(client.updateIssue({
+        issueNumber: 91,
+        title,
+        body,
+        state: 'open',
+      })).rejects.toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+    } finally {
+      await lease.stop();
+    }
+
+    expect(calls.filter((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues`
+        && method === 'POST';
+    })).toHaveLength(1);
+    expect(calls.some((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues/91`
+        && method === 'GET';
+    })).toBe(false);
+    expect(calls.some((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues/91`
+        && method === 'PATCH';
+    })).toBe(false);
+  });
+
+  it('quarantines a mutation when remote lease ownership changes in flight', async () => {
+    const backend = createApplyLockBackend();
+    const calls: RunCall[] = [];
+    const beadId = 'pb-in-flight-lease-theft';
+    const title = '[pb-in-flight-lease-theft] Verify the remote fence';
+    const body = managedBody(beadId);
+    const currentTime = 20_000;
+    const createdIssue = trustedIssue({
+      number: 92,
+      title,
+      body,
+      state: 'open',
+      assignees: [],
+      labels: [],
+      html_url: `https://github.com/${owner}/${repo}/issues/92`,
+    });
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args: [...args], options: { ...options } };
+      calls.push(call);
+      const methodIndex = args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : args[methodIndex + 1];
+      const endpoint = args[1];
+
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues` && method === 'POST') {
+        backend.stealLock({
+          owner: 'github-actions',
+          runId: 'contender-run',
+          leaseId: 'contender-lease',
+          acquiredAt: currentTime,
+          expiresAt: currentTime + 1_000,
+        });
+        return success({ number: 92 });
+      }
+      if (args[0] === 'api' && endpoint === `repos/${owner}/${repo}/issues/92` && method === 'GET') {
+        return success(createdIssue);
+      }
+      return backend.run(command, args, options);
+    };
+    const client = createGhClient({
+      run,
+      owner,
+      repo,
+      token,
+      mutationMode: 'lease-required',
+      now: () => currentTime,
+    });
+    const handle = await client.acquireApplyLock({
+      owner: 'local-cli',
+      runId: 'in-flight-owner',
+      leaseId: 'in-flight-owner-lease',
+      ttlMs: 1_000,
+    });
+    const lease = client.startApplyLockLease(handle);
+
+    try {
+      await expect(client.createIssue({ beadId, title, body })).rejects.toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+      expect(lease.failure()).toMatchObject({
+        kind: 'ambiguous',
+        status: 409,
+      });
+    } finally {
+      await lease.stop();
+    }
+
+    const issueMutationIndex = calls.findIndex((call) => {
+      const methodIndex = call.args.indexOf('--method');
+      const method = methodIndex === -1 ? 'GET' : call.args[methodIndex + 1];
+      return call.args[0] === 'api'
+        && call.args[1] === `repos/${owner}/${repo}/issues`
+        && method === 'POST';
+    });
+    const postMutationLeaseReadIndex = calls.findIndex((call, index) =>
+      index > issueMutationIndex
+      && call.args[0] === 'api'
+      && call.args[1] === `repos/${owner}/${repo}/git/ref/heads/psyche-beads-project-sync-lock`
+    );
+    expect(issueMutationIndex).toBeGreaterThanOrEqual(0);
+    expect(postMutationLeaseReadIndex).toBeGreaterThan(issueMutationIndex);
+  });
+
   it('makes renewal transport failure terminal before the next reconciliation mutation', async () => {
     const backend = createApplyLockBackend();
     let currentTime = 2_000;

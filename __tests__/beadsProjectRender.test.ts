@@ -1016,6 +1016,65 @@ describe('Beads project renderers', () => {
     ).toBe('<textarea>[redacted-email]</textarea>');
   });
 
+  it('treats browser-visible form-control attributes as rendered text', () => {
+    expect(() =>
+      sanitizePublicText('<input value="alice"><span>&#64;example.com</span>')
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<div><input placeholder="alice"><span>&#64;example.com</span></div>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<div><input type="submit" value="alice"><span>&#64;example.com</span></div>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<div><select><option label="alice" selected></option></select><span>&#64;example.com</span></div>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<select><option label="alice" selected>safe:</option></select><span>&#64;example.com</span>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<select><option label="alice">safe:</option><option></option></select><span>&#64;example.com</span>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<select size="2"><optgroup label="alice"></optgroup></select><span>&#64;example.com</span>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<input type="image" alt="alice"><span>&#64;example.com</span>',
+      )
+    ).toThrow(/email/i);
+    expect(() =>
+      sanitizePublicText(
+        '<div><input value="/Users"><span>/alice/private/plan.md</span></div>',
+      )
+    ).toThrow(/local path/i);
+  });
+
+  it('ignores non-visible form-control attributes in rendered text projection', () => {
+    const hidden =
+      '<input type="hidden" value="alice"><span>&#64;example.com</span>';
+    const password =
+      '<input type="password" value="alice"><span>&#64;example.com</span>';
+    const ariaLabel =
+      '<input aria-label="alice"><span>&#64;example.com</span>';
+
+    expect(sanitizePublicText(hidden)).toBe(hidden);
+    expect(sanitizePublicText(password)).toBe(password);
+    expect(sanitizePublicText(ariaLabel)).toBe(ariaLabel);
+  });
+
   it('keeps safe Markdown code examples literal while validating adjacent raw HTML', () => {
     const safe = [
       '`<span>release</span>&#58;public-value`',

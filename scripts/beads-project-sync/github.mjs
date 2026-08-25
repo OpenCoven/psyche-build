@@ -517,6 +517,7 @@ query DiscoverManagedProjectItems($projectId: ID!, $cursor: String) {
  *   failure: () => GhClientError | null,
  *   release: () => Promise<void>,
  *   renewNow: () => Promise<ApplyLockHandle>,
+ *   settleManagedMutation: (description: string, error?: unknown) => Promise<void>,
  *   stop: () => Promise<void>,
  * }} ApplyLockLeaseController
  */
@@ -1603,6 +1604,40 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  function mutationMayHaveApplied(error) {
+    return (
+      error == null
+      || isTransportFailure(error)
+      || (!isDefiniteRateLimit(error) && isRetryable(error))
+      || (error instanceof GhClientError && error.kind === 'response')
+    );
+  }
+
+  /**
+   * @template TValue
+   * @param {string} description
+   * @param {() => Promise<TValue>} action
+   * @returns {Promise<TValue>}
+   */
+  async function runLeaseManagedMutation(description, action) {
+    await trustedActorLogin();
+    await assertManagedMutationLease();
+    try {
+      const result = await action();
+      await activeApplyLockLease?.settleManagedMutation(description);
+      return result;
+    } catch (error) {
+      if (mutationMayHaveApplied(error)) {
+        await activeApplyLockLease?.settleManagedMutation(description, error);
+      }
+      throw error;
+    }
+  }
+
+  /**
    * @param {readonly string[]} args
    * @param {string | undefined} stdin
    * @returns {Promise<GhRunResult>}
@@ -1649,9 +1684,10 @@ export function createGhClient(options) {
    * @returns {Promise<GhRunResult>}
    */
   async function runManagedGhOnce(args, stdin) {
-    await trustedActorLogin();
-    await assertManagedMutationLease();
-    return runGhOnce(args, stdin);
+    const description = args[0] === 'api'
+      ? `GitHub API mutation ${args[1]}`
+      : `GitHub mutation ${args.slice(0, 2).join(' ')}`;
+    return runLeaseManagedMutation(description, () => runGhOnce(args, stdin));
   }
 
   /**
@@ -1764,6 +1800,9 @@ export function createGhClient(options) {
       if (!isRetryable(error) && !isTransportFailure(error) && kind !== 'ambiguous') {
         throw toClientError(error);
       }
+      if (isApplyLeaseMutationQuarantined(error)) {
+        throw toClientError(error);
+      }
 
       try {
         if (await reread() == null) {
@@ -1845,9 +1884,11 @@ export function createGhClient(options) {
    * @returns {Promise<Record<string, unknown>>}
    */
   async function managedGraphqlOnce(query, variables) {
-    await trustedActorLogin();
-    await assertManagedMutationLease();
-    return graphqlOnce(query, variables);
+    const operation = query.match(/\bmutation\s+([A-Za-z0-9_]+)/u)?.[1] ?? 'anonymous';
+    return runLeaseManagedMutation(
+      `GitHub GraphQL mutation ${operation}`,
+      () => graphqlOnce(query, variables),
+    );
   }
 
   /**
@@ -2123,6 +2164,48 @@ export function createGhClient(options) {
       'lease-lost',
       `GitHub apply lease lost: ${errorDetail(error)}`,
       errorStatus(error),
+    );
+  }
+
+  /**
+   * @param {string} description
+   * @param {unknown} error
+   * @returns {GhClientError}
+   */
+  function applyLeaseMutationAmbiguousError(description, error) {
+    if (isApplyLeaseMutationQuarantined(error)) {
+      return /** @type {GhClientError} */ (error);
+    }
+    const ambiguous = new GhClientError(
+      'ambiguous',
+      `${description} may have succeeded after the apply lease expired or ownership was lost; `
+        + `further writes are quarantined and manual recovery is required: ${errorDetail(error)}`,
+      errorStatus(error) ?? 409,
+    );
+    Object.defineProperty(ambiguous, 'applyLeaseQuarantined', {
+      configurable: false,
+      enumerable: false,
+      value: true,
+      writable: false,
+    });
+    Object.defineProperty(ambiguous, 'cause', {
+      configurable: false,
+      enumerable: false,
+      value: error,
+      writable: false,
+    });
+    return ambiguous;
+  }
+
+  /**
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  function isApplyLeaseMutationQuarantined(error) {
+    return (
+      error instanceof GhClientError
+      && error.kind === 'ambiguous'
+      && /** @type {{applyLeaseQuarantined?: unknown}} */ (error).applyLeaseQuarantined === true
     );
   }
 
@@ -2564,9 +2647,14 @@ export function createGhClient(options) {
      * @returns {GhClientError}
      */
     function lose(error) {
-      terminalFailure ??= applyLeaseLostError(error);
+      const nextFailure = isApplyLeaseMutationQuarantined(error)
+        ? /** @type {GhClientError} */ (error)
+        : applyLeaseLostError(error);
+      if (terminalFailure == null || isApplyLeaseMutationQuarantined(error)) {
+        terminalFailure = nextFailure;
+      }
       clearHeartbeat();
-      return terminalFailure;
+      return terminalFailure ?? nextFailure;
     }
 
     function scheduleHeartbeat() {
@@ -2683,6 +2771,47 @@ export function createGhClient(options) {
       }
     }
 
+    /**
+     * @param {string} description
+     * @param {unknown} [error]
+     * @returns {Promise<void>}
+     */
+    async function settleManagedMutation(description, error) {
+      if (verification) {
+        await verification.catch(() => undefined);
+      }
+      if (renewal) {
+        await renewal.catch(() => undefined);
+      }
+      if (!mutationMayHaveApplied(error)) {
+        return;
+      }
+      if (terminalFailure) {
+        throw lose(applyLeaseMutationAmbiguousError(description, terminalFailure));
+      }
+      if (stopped || released) {
+        throw lose(applyLeaseMutationAmbiguousError(
+          description,
+          new GhClientError('lease-lost', 'GitHub apply lease is no longer active', 409),
+        ));
+      }
+      if (currentHandle.expiresAt <= now()) {
+        throw lose(applyLeaseMutationAmbiguousError(
+          description,
+          new GhClientError(
+            'lease-lost',
+            'GitHub apply lease expired before the mutation outcome could be fenced',
+            409,
+          ),
+        ));
+      }
+      try {
+        await assertOwned();
+      } catch (leaseError) {
+        throw lose(applyLeaseMutationAmbiguousError(description, leaseError));
+      }
+    }
+
     async function release() {
       if (released) {
         return;
@@ -2703,6 +2832,7 @@ export function createGhClient(options) {
       failure: () => terminalFailure,
       release,
       renewNow,
+      settleManagedMutation,
       stop,
     }));
     activeApplyLockLease = controller;

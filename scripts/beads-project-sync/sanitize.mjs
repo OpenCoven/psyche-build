@@ -269,6 +269,36 @@ const RAW_HTML_HIDDEN_TEXT_ELEMENTS = new Set([
   'template',
   'xmp',
 ]);
+const RAW_HTML_INPUT_VISIBLE_VALUE_TYPES = new Set([
+  'button',
+  'email',
+  'number',
+  'reset',
+  'search',
+  'submit',
+  'tel',
+  'text',
+  'url',
+]);
+const RAW_HTML_INPUT_VISIBLE_PLACEHOLDER_TYPES = new Set([
+  'email',
+  'number',
+  'password',
+  'search',
+  'tel',
+  'text',
+  'url',
+]);
+const RAW_HTML_OPTION_LABEL_IMPLICIT_CLOSE_TAGS = new Set([
+  'option',
+  'optgroup',
+]);
+const RAW_HTML_OPTION_LABEL_EXPLICIT_CLOSE_TAGS = new Set([
+  'option',
+  'optgroup',
+  'select',
+  'datalist',
+]);
 const MARKDOWN_BLOCK_NODES = new Set([
   'blockquote',
   'code',
@@ -2959,6 +2989,123 @@ function parsedHtmlAttributeLocation(element, qualifiedName) {
 }
 
 /**
+ * @param {ParsedHtmlElement} element
+ * @param {string} qualifiedName
+ * @returns {string | null}
+ */
+function parsedHtmlAttributeValue(element, qualifiedName) {
+  for (const attribute of element.attrs) {
+    if (parsedHtmlAttributeName(element, attribute) === qualifiedName) {
+      return attribute.value;
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {ParsedHtmlNode} root
+ * @returns {boolean}
+ */
+function parsedHtmlHasTextContent(root) {
+  const pending = [...parsedHtmlChildren(root)];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node == null) {
+      continue;
+    }
+    if (node.nodeName === '#text' && 'value' in node && node.value.length > 0) {
+      return true;
+    }
+    pending.push(...parsedHtmlChildren(node));
+  }
+  return false;
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @returns {boolean}
+ */
+function parsedHtmlOptionLabelSuppressesDescendants(element) {
+  return element.tagName.toLowerCase() === 'option'
+    && (parsedHtmlAttributeValue(element, 'label')?.length ?? 0) > 0;
+}
+
+/**
+ * @param {ParsedHtmlElement} element
+ * @returns {string | null}
+ */
+function parsedHtmlVisibleControlText(element) {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === 'input') {
+    const type = parsedHtmlAttributeValue(element, 'type')?.trim().toLowerCase() || 'text';
+    const alt = parsedHtmlAttributeValue(element, 'alt');
+    if (type === 'image' && alt) {
+      return alt;
+    }
+    const value = parsedHtmlAttributeValue(element, 'value');
+    if (value && RAW_HTML_INPUT_VISIBLE_VALUE_TYPES.has(type)) {
+      return value;
+    }
+    const placeholder = parsedHtmlAttributeValue(element, 'placeholder');
+    if (
+      placeholder
+      && (!value || value.length === 0)
+      && RAW_HTML_INPUT_VISIBLE_PLACEHOLDER_TYPES.has(type)
+    ) {
+      return placeholder;
+    }
+    return null;
+  }
+  if (tagName === 'textarea') {
+    const placeholder = parsedHtmlAttributeValue(element, 'placeholder');
+    return placeholder && !parsedHtmlHasTextContent(element)
+      ? placeholder
+      : null;
+  }
+  if (tagName === 'option') {
+    const label = parsedHtmlAttributeValue(element, 'label');
+    return label && label.length > 0 ? label : null;
+  }
+  if (tagName === 'optgroup') {
+    const label = parsedHtmlAttributeValue(element, 'label');
+    return label && label.length > 0 ? label : null;
+  }
+  return null;
+}
+
+/**
+ * @param {string} value
+ * @returns {ParsedHtmlElement | null}
+ */
+function standaloneRawHtmlOpeningElement(value) {
+  const fragment = parsePublicHtmlFragment(value);
+  if (fragment.childNodes.length !== 1) {
+    return null;
+  }
+  const [child] = fragment.childNodes;
+  if (
+    child == null
+    || !isParsedHtmlElement(child)
+    || child.sourceCodeLocation == null
+    || child.sourceCodeLocation.startOffset !== 0
+    || child.sourceCodeLocation.endOffset !== value.length
+    || child.sourceCodeLocation.endTag != null
+  ) {
+    return null;
+  }
+  return child;
+}
+
+/**
+ * @param {string} value
+ * @returns {string | null}
+ */
+function standaloneRawHtmlClosingTagName(value) {
+  const match = /^\s*<\/\s*([A-Za-z][A-Za-z0-9:-]*)\s*>\s*$/u.exec(value);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+/**
  * @param {string} value
  * @param {SanitizePublicTextConfig | null | undefined} config
  * @param {number} depth
@@ -5121,6 +5268,16 @@ function buildRenderedMarkdownProjection(value) {
   let lastCharacter = '';
   let markdownNodeCount = 0;
   let htmlNodeCount = 0;
+  let sourceNodeIdCounter = 0;
+  let suppressedOptionLabelDepth = 0;
+
+  /**
+   * @returns {number}
+   */
+  function nextSourceNodeId() {
+    sourceNodeIdCounter += 1;
+    return sourceNodeIdCounter;
+  }
 
   /**
    * @param {string} visibleText
@@ -5149,9 +5306,8 @@ function buildRenderedMarkdownProjection(value) {
 
   /**
    * @param {string} html
-   * @param {number} sourceNodeId
    */
-  function appendRenderedHtml(html, sourceNodeId) {
+  function appendRenderedHtml(html) {
     const fragment = parsePublicHtmlFragment(html);
     /** @type {{node: ParsedHtmlNode, depth: number, exit: boolean}[]} */
     const pending = [];
@@ -5186,7 +5342,7 @@ function buildRenderedMarkdownProjection(value) {
         fail('Rendered Markdown HTML exceeds the parsed depth limit');
       }
       if (node.nodeName === '#text' && 'value' in node) {
-        appendVisibleText(node.value, sourceNodeId);
+        appendVisibleText(node.value, nextSourceNodeId());
         continue;
       }
       if (!isParsedHtmlElement(node)) {
@@ -5203,13 +5359,20 @@ function buildRenderedMarkdownProjection(value) {
           attribute.name.toLowerCase() === 'alt'
         )?.value;
         if (alt) {
-          appendVisibleText(alt, sourceNodeId);
+          appendVisibleText(alt, nextSourceNodeId());
         }
+      }
+      const visibleControlText = parsedHtmlVisibleControlText(node);
+      if (visibleControlText) {
+        appendVisibleText(visibleControlText, nextSourceNodeId());
       }
       if (RAW_HTML_HIDDEN_TEXT_ELEMENTS.has(tagName)) {
         if (isBoundary) {
           appendBoundary();
         }
+        continue;
+      }
+      if (parsedHtmlOptionLabelSuppressesDescendants(node)) {
         continue;
       }
 
@@ -5262,7 +5425,6 @@ function buildRenderedMarkdownProjection(value) {
     if (depth > MAX_RENDERED_MARKDOWN_DEPTH) {
       fail('Rendered Markdown exceeds the AST depth limit');
     }
-    const nodeId = markdownNodeCount;
     if (isBlock) {
       appendBoundary();
     }
@@ -5271,14 +5433,45 @@ function buildRenderedMarkdownProjection(value) {
       (node.type === 'text' || node.type === 'inlineCode' || node.type === 'code')
       && typeof node.value === 'string'
     ) {
-      appendVisibleText(node.value, nodeId);
+      if (suppressedOptionLabelDepth === 0) {
+        appendVisibleText(node.value, nextSourceNodeId());
+      }
     } else if (
       (node.type === 'image' || node.type === 'imageReference')
       && typeof node.alt === 'string'
     ) {
-      appendVisibleText(node.alt, nodeId);
+      if (suppressedOptionLabelDepth === 0) {
+        appendVisibleText(node.alt, nextSourceNodeId());
+      }
     } else if (node.type === 'html' && typeof node.value === 'string') {
-      appendRenderedHtml(node.value, nodeId);
+      const closingTagName = standaloneRawHtmlClosingTagName(node.value);
+      if (
+        closingTagName != null
+        && RAW_HTML_OPTION_LABEL_EXPLICIT_CLOSE_TAGS.has(closingTagName)
+        && suppressedOptionLabelDepth > 0
+      ) {
+        suppressedOptionLabelDepth -= 1;
+      }
+
+      const openingElement = standaloneRawHtmlOpeningElement(node.value);
+      if (
+        openingElement != null
+        && RAW_HTML_OPTION_LABEL_IMPLICIT_CLOSE_TAGS.has(openingElement.tagName.toLowerCase())
+        && suppressedOptionLabelDepth > 0
+      ) {
+        suppressedOptionLabelDepth -= 1;
+      }
+
+      if (suppressedOptionLabelDepth === 0) {
+        appendRenderedHtml(node.value);
+      }
+
+      if (
+        openingElement != null
+        && parsedHtmlOptionLabelSuppressesDescendants(openingElement)
+      ) {
+        suppressedOptionLabelDepth += 1;
+      }
     } else if (node.type === 'break') {
       appendBoundary();
     }

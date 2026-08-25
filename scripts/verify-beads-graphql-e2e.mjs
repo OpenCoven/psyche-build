@@ -21,8 +21,12 @@ const ALLOWED_OPERATION_NAMES = new Set([
   ...REQUIRED_OPERATIONS,
   'DiscoverLinkedProjectRepositories',
 ]);
-const MAX_GRAPHQL_REQUESTS = 200;
 const MAX_PAGES_PER_OPERATION = 100;
+const MAX_ATTEMPTS_PER_REQUEST = 4;
+const MAX_GRAPHQL_REQUESTS =
+  ALLOWED_OPERATION_NAMES.size
+  * MAX_PAGES_PER_OPERATION
+  * MAX_ATTEMPTS_PER_REQUEST;
 
 /**
  * @returns {{
@@ -140,6 +144,7 @@ export async function runBeadsGraphqlE2e(options = {}) {
    *   cursorKey: string,
    * }[]} */ ([]);
   const signatures = new Set();
+  const attemptsBySignature = new Map();
   const cursorsByOperation = new Map(
     [...ALLOWED_OPERATION_NAMES].map((name) => [name, new Set()]),
   );
@@ -167,6 +172,14 @@ export async function runBeadsGraphqlE2e(options = {}) {
       if (signatures.has(operation.signature)) {
         throw new Error(`Duplicate GraphQL request detected for "${operation.name}"`);
       }
+      const requestAttempts = attemptsBySignature.get(operation.signature) ?? 0;
+      if (requestAttempts >= MAX_ATTEMPTS_PER_REQUEST) {
+        throw new Error(
+          `GraphQL retry attempt ceiling exceeded for "${operation.name}": `
+            + `${requestAttempts + 1} > ${MAX_ATTEMPTS_PER_REQUEST}`,
+        );
+      }
+      attemptsBySignature.set(operation.signature, requestAttempts + 1);
       const cursors = cursorsByOperation.get(operation.name);
       if (!cursors) {
         throw new Error(`Unexpected GraphQL operation "${operation.name}" during read-only E2E`);
