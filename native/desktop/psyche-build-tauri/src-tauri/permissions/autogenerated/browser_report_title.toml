@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-report-title"
+description = "Enables the browser_report_title command without any pre-configured scope."
+commands.allow = ["browser_report_title"]
+
+[[permission]]
+identifier = "deny-browser-report-title"
+description = "Denies the browser_report_title command without any pre-configured scope."
+commands.deny = ["browser_report_title"]

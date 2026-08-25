@@ -176,10 +176,10 @@ public actor URLSessionControlTransport: PsycheTransport {
         guard generation == connectionGeneration else { return }
         generation &+= 1
         let rejectedPin = pinDelegate?.didRejectPin == true
-        await clearConnection()
         if rejectedPin {
             storedLastFailure = .certificatePinRejected
         }
+        await clearConnection()
     }
 
     private func clearConnection() async {

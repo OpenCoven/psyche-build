@@ -39,6 +39,59 @@ function workflowJobSource(workflow: string, jobName: string): string {
   return nextJob < 0 ? workflow.slice(start) : workflow.slice(start, start + marker.length + nextJob);
 }
 
+function workflowNamedStepSource(job: string, stepName: string): string {
+  const marker = `      - name: ${stepName}\n`;
+  const start = job.indexOf(marker);
+  if (start < 0) throw new Error(`Unable to find workflow step ${stepName}`);
+  const remaining = job.slice(start + marker.length);
+  const nextStep = remaining.search(/^      - (?:name:|uses:)/m);
+  return nextStep < 0 ? job.slice(start) : job.slice(start, start + marker.length + nextStep);
+}
+
+function workflowStepCondition(step: string): string | undefined {
+  return step.match(/^        if:\s*(.+)$/m)?.[1].trim();
+}
+
+function shouldRunNonDesktopStep(condition: string | undefined, desktopOnly: boolean): boolean {
+  if (!condition) return true;
+  expect(condition).toBe("steps.release.outputs.desktop_only != 'true'");
+  return !desktopOnly;
+}
+
+function workflowJobCondition(job: string): string {
+  const match = job.match(/^    if: >-\n((?:      .+\n)+)/m);
+  if (!match) throw new Error('Unable to find folded workflow job condition');
+  return match[1].replace(/^ {6}/gm, '').replace(/\s+/g, ' ').trim();
+}
+
+function shouldPublishRelease(condition: string, input: {
+  verify: 'success' | 'failure' | 'cancelled';
+  macos: 'success' | 'failure' | 'cancelled';
+  ios: 'success' | 'failure' | 'cancelled' | 'skipped';
+  desktopOnly: boolean;
+}): boolean {
+  const hasExplicitAlwaysStatusCheck = /\balways\(\)/.test(condition);
+  if (
+    !hasExplicitAlwaysStatusCheck &&
+    [input.verify, input.macos, input.ios].some((result) => result !== 'success')
+  ) {
+    return false;
+  }
+  const resolved = condition
+    .replace(/always\(\)/g, 'true')
+    .replace(/needs\.verify\.result/g, JSON.stringify(input.verify))
+    .replace(/needs\.build-macos\.result/g, JSON.stringify(input.macos))
+    .replace(/needs\.upload-ios\.result/g, JSON.stringify(input.ios))
+    .replace(
+      /needs\.verify\.outputs\.desktop_only/g,
+      JSON.stringify(input.desktopOnly ? 'true' : 'false'),
+    );
+  if (!/^[\s()&|=!"'a-z-]+$/.test(resolved)) {
+    throw new Error(`Unsupported publish condition: ${condition}`);
+  }
+  return Function(`"use strict"; return Boolean(${resolved});`)() as boolean;
+}
+
 describe('macOS release workflow contract', () => {
   it('does not persist checkout credentials or restore mutable dependency caches', () => {
     const workflow = workflowSource();
@@ -105,6 +158,47 @@ describe('macOS release workflow contract', () => {
     expect(verifyJob).toContain('echo "desktop_only=$DESKTOP_ONLY" >> "$GITHUB_OUTPUT"');
   });
 
+  it('runs every iOS-only verification step in full mode and skips it in desktop-only mode', () => {
+    const verifyJob = workflowJobSource(workflowSource(), 'verify');
+    const iosOnlySteps = [
+      'Set up XcodeGen for iOS verification',
+      'Require iOS 26.2 iPhone 16 Pro simulator',
+      'Verify generated iOS project, Core, app, and UI tests',
+    ].map((name) => workflowNamedStepSource(verifyJob, name));
+
+    for (const step of iosOnlySteps) {
+      const condition = workflowStepCondition(step);
+      expect(shouldRunNonDesktopStep(condition, false)).toBe(true);
+      expect(shouldRunNonDesktopStep(condition, true)).toBe(false);
+    }
+  });
+
+  it('keeps shared protocol, schema, TypeScript, and package validation mandatory in both modes', () => {
+    const verifyJob = workflowJobSource(workflowSource(), 'verify');
+    const sharedStep = workflowNamedStepSource(
+      verifyJob,
+      'Verify shared TypeScript, protocol, and package surfaces',
+    );
+
+    expect(workflowStepCondition(sharedStep)).toBeUndefined();
+    expect(sharedStep).toContain('pnpm test');
+    expect(sharedStep).toContain('pnpm typecheck');
+    expect(sharedStep).toContain('pnpm build');
+  });
+
+  it('builds the production docs site exactly once before the root release build', () => {
+    const verifyJob = workflowJobSource(workflowSource(), 'verify');
+
+    expect(verifyJob).toContain('pnpm docs:focus:check');
+    expect(verifyJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
+    expect(verifyJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
+      verifyJob.indexOf('pnpm --dir docs build'),
+    );
+    expect(verifyJob.indexOf('pnpm --dir docs build')).toBeLessThan(
+      verifyJob.indexOf('pnpm build'),
+    );
+  });
+
   it('skips TestFlight only for verified desktop-only dispatches', () => {
     const workflow = workflowSource();
     const iosJob = workflowJobSource(workflow, 'upload-ios');
@@ -117,6 +211,83 @@ describe('macOS release workflow contract', () => {
     expect(publishJob).toContain("needs.upload-ios.result == 'success'");
     expect(publishJob).toContain("needs.verify.outputs.desktop_only == 'true'");
     expect(publishJob).toContain("needs.upload-ios.result == 'skipped'");
+  });
+
+  it.each([
+    ['tag push', false, true],
+    ['manual full release', false, true],
+    ['manual desktop-only release', true, false],
+  ] as const)('%s retains the expected iOS validation and upload gates', (_name, desktopOnly, iosRuns) => {
+    const workflow = workflowSource();
+    const verifyJob = workflowJobSource(workflow, 'verify');
+    const simulatorStep = workflowNamedStepSource(
+      verifyJob,
+      'Require iOS 26.2 iPhone 16 Pro simulator',
+    );
+    const uploadCondition = workflowJobSource(workflow, 'upload-ios').match(
+      /^    if:\s*(.+)$/m,
+    )?.[1];
+
+    expect(shouldRunNonDesktopStep(workflowStepCondition(simulatorStep), desktopOnly)).toBe(iosRuns);
+    expect(uploadCondition).toBe("needs.verify.outputs.desktop_only != 'true'");
+    expect(!desktopOnly).toBe(iosRuns);
+  });
+
+  it.each([
+    ['full success', 'success', 'success', 'success', false, true],
+    ['desktop-only skips iOS', 'success', 'success', 'skipped', true, true],
+    ['full release cannot skip iOS', 'success', 'success', 'skipped', false, false],
+    ['failed iOS upload', 'success', 'success', 'failure', false, false],
+    ['cancelled iOS upload', 'success', 'success', 'cancelled', false, false],
+    ['failed shared validation', 'failure', 'success', 'skipped', true, false],
+    ['failed macOS build', 'success', 'failure', 'skipped', true, false],
+    ['cancelled macOS build', 'success', 'cancelled', 'skipped', true, false],
+  ] as const)(
+    'models publish gating for %s',
+    (_name, verify, macos, ios, desktopOnly, expected) => {
+      const condition = workflowJobCondition(workflowJobSource(workflowSource(), 'publish'));
+      expect(shouldPublishRelease(condition, { verify, macos, ios, desktopOnly })).toBe(expected);
+    },
+  );
+
+  it('requires always() to schedule desktop-only publish after upload-ios is skipped', () => {
+    const condition = workflowJobCondition(workflowJobSource(workflowSource(), 'publish'));
+    const skippedUpload = {
+      verify: 'success',
+      macos: 'success',
+      ios: 'skipped',
+      desktopOnly: true,
+    } as const;
+
+    expect(condition).toMatch(/^always\(\)\s*&&/);
+    expect(shouldPublishRelease(condition, skippedUpload)).toBe(true);
+    expect(
+      shouldPublishRelease(condition.replace(/^always\(\)\s*&&\s*/, ''), skippedUpload),
+    ).toBe(false);
+    expect(
+      shouldPublishRelease(condition.replace(/^always\(\)/, 'true'), skippedUpload),
+    ).toBe(false);
+  });
+
+  it('isolates iOS distribution credentials to the upload job skipped by desktop-only mode', () => {
+    const workflow = workflowSource();
+    const uploadJob = workflowJobSource(workflow, 'upload-ios');
+    const nonUploadJobs = ['verify', 'build-macos', 'publish', 'notify-homebrew']
+      .map((jobName) => workflowJobSource(workflow, jobName))
+      .join('\n');
+    const iosSecrets = [
+      'APPLE_DISTRIBUTION_CERTIFICATE',
+      'APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD',
+      'APP_STORE_CONNECT_KEY_ID',
+      'APP_STORE_CONNECT_ISSUER_ID',
+      'APP_STORE_CONNECT_PRIVATE_KEY',
+    ];
+
+    expect(uploadJob).toContain("if: needs.verify.outputs.desktop_only != 'true'");
+    for (const secret of iosSecrets) {
+      expect(uploadJob).toContain(`secrets.${secret}`);
+      expect(nonUploadJobs).not.toContain(`secrets.${secret}`);
+    }
   });
 
   it('requires Apple signing and notarization before an artifact is accepted', () => {
@@ -138,7 +309,15 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
     expect(workflow).toContain('codesign --verify --deep --strict');
     expect(workflow).toContain('spctl --assess --type execute');
+    expect(workflow).toContain('xcrun notarytool submit "$DMG_PATH"');
+    expect(workflow).toContain('xcrun stapler staple "$DMG_PATH"');
     expect(workflow).toContain('xcrun stapler validate');
+    expect(workflow.indexOf('xcrun notarytool submit "$DMG_PATH"')).toBeLessThan(
+      workflow.indexOf('xcrun stapler staple "$DMG_PATH"'),
+    );
+    expect(workflow.indexOf('xcrun stapler staple "$DMG_PATH"')).toBeLessThan(
+      workflow.indexOf('xcrun stapler validate "$DMG_PATH"'),
+    );
     expect(workflow).not.toMatch(/continue-on-error:\s*true/);
     expect(workflowJobSource(workflow, 'build-macos')).toContain('if: always()');
     expect(workflowJobSource(workflow, 'build-macos')).toContain(
@@ -218,6 +397,9 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('Published release assets and notes match the verified build output');
     expect(workflow).toContain('notify-homebrew:');
     expect(workflow).toContain('needs: publish');
+    expect(workflowJobSource(workflow, 'notify-homebrew')).toMatch(
+      /if:\s*always\(\)\s*&&\s*needs\.publish\.result\s*==\s*['"]success['"]/,
+    );
     expect(workflow).toContain('event_type: "psyche-build-release"');
     expect(workflow).toContain('secrets.HOMEBREW_TAP_TOKEN');
     expect(workflow).toContain('Missing required release environment secret HOMEBREW_TAP_TOKEN');

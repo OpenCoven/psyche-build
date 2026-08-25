@@ -4,6 +4,13 @@ import { describe, expect, it } from 'vitest';
 
 const workflowPath = path.resolve('.github/workflows/ci.yml');
 const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
+const beadsProjectSyncWorkflowPath = path.resolve(
+  '.github/workflows/beads-project-sync.yml',
+);
+const beadsProjectSyncConfigPath = path.resolve('.github/beads-project-sync.json');
+const beadsConfigPath = path.resolve('.beads/config.yaml');
+const beadsReadmePath = path.resolve('.beads/README.md');
+const contributingPath = path.resolve('CONTRIBUTING.md');
 const packageJsonPath = path.resolve('package.json');
 
 function workflowSource(): string {
@@ -23,6 +30,15 @@ function workflowJobSource(source: string, name: string): string {
   return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
 }
 
+function workflowStepSource(source: string, name: string): string {
+  const marker = `      - name: ${name}\n`;
+  const start = source.indexOf(marker);
+  expect(start, `${name} step`).toBeGreaterThanOrEqual(0);
+  const remainder = source.slice(start + marker.length);
+  const nextStep = remainder.search(/^      - name: /m);
+  return nextStep === -1 ? remainder : remainder.slice(0, nextStep);
+}
+
 describe('pull request CI workflow contract', () => {
   it('runs read-only checks for pull requests and pushes to main with stable job names', () => {
     const workflow = workflowSource();
@@ -37,19 +53,44 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('name: TypeScript and Rust');
     expect(workflow).toContain('name: iOS');
-    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(3);
+    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(2);
   });
 
-  it('gives the desktop runtime matrix the same 60 minute timeout contract as adjacent jobs', () => {
+  it('does not trigger CI, release, or Project sync workflows for the apply lock branch', () => {
     const workflow = workflowSource();
-    const job = workflowJobSource(workflow, 'desktop-runtime');
+    const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8');
+    const beadsProjectSyncWorkflow = readFileSync(
+      beadsProjectSyncWorkflowPath,
+      'utf8',
+    );
+    const lockBranch = 'psyche-beads-project-sync-lock';
 
-    expect(job).toContain('timeout-minutes: 60');
+    expect(workflow).toMatch(
+      /push:\s*\n\s+branches: \[main, feat\/gpu-accelerated-ade\]/,
+    );
+    expect(releaseWorkflow).toContain('tags: ["v*"]');
+    expect(beadsProjectSyncWorkflow).toContain(
+      "if: github.ref == 'refs/heads/main'",
+    );
+    for (const source of [workflow, releaseWorkflow, beadsProjectSyncWorkflow]) {
+      expect(source).not.toContain(lockBranch);
+    }
+  });
+
+  it('bounds the split desktop check matrix independently', () => {
+    const workflow = workflowSource();
+    const job = workflowJobSource(workflow, 'desktop-check');
+
+    expect(job).toContain('timeout-minutes: 45');
   });
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
     const workflow = workflowSource();
     const releaseWorkflow = readFileSync(releaseWorkflowPath, 'utf8');
+    const beadsProjectSyncWorkflow = readFileSync(
+      beadsProjectSyncWorkflowPath,
+      'utf8',
+    );
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
       packageManager?: string;
     };
@@ -57,7 +98,7 @@ describe('pull request CI workflow contract', () => {
 
     expect(workflow).toContain('node-version: 24');
     expect(packageJson.packageManager).toMatch(/^pnpm@\d+\.\d+\.\d+$/);
-    for (const source of [workflow, releaseWorkflow]) {
+    for (const source of [workflow, releaseWorkflow, beadsProjectSyncWorkflow]) {
       expect(source).not.toMatch(/pnpm\/action-setup@[^\n]+\n\s+with:\n\s+version:/);
     }
     expect(workflow).toContain('toolchain: 1.95.0');
@@ -68,8 +109,11 @@ describe('pull request CI workflow contract', () => {
     expect(checkoutCount).toBeGreaterThan(0);
     expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
 
-    const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
-      ([, action]) => action,
+    const actionUses = [workflow, releaseWorkflow, beadsProjectSyncWorkflow].flatMap(
+      (source) =>
+        [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
+          ([, action]) => action,
+        ),
     );
     expect(actionUses.length).toBeGreaterThan(0);
     for (const action of actionUses) {
@@ -81,8 +125,92 @@ describe('pull request CI workflow contract', () => {
     }
   });
 
+  it('keeps workflow concurrency and documents the shared local/Actions apply lock', () => {
+    const workflow = readFileSync(beadsProjectSyncWorkflowPath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    expect(workflow).toContain('group: beads-project-sync');
+    expect(workflow).toContain('cancel-in-progress: false');
+    expect(contributing).toMatch(/GitHub-backed.*apply lock/i);
+    expect(contributing).toMatch(/local.*Actions/i);
+  });
+
+  it('defines the tiered workflow topology and job contracts', () => {
+    const workflow = workflowSource();
+
+    for (const job of [
+      'changes',
+      'quality',
+      'desktop-web',
+      'rust-test',
+      'desktop-check',
+      'typescript-rust',
+      'ios-core',
+      'ios-app',
+      'ios',
+    ]) {
+      expect(workflow).toContain(`  ${job}:`);
+    }
+
+    const changes = workflowJobSource(workflow, 'changes');
+    const quality = workflowJobSource(workflow, 'quality');
+    const desktopWeb = workflowJobSource(workflow, 'desktop-web');
+    const rustTest = workflowJobSource(workflow, 'rust-test');
+    const desktopCheck = workflowJobSource(workflow, 'desktop-check');
+    const typescriptRust = workflowJobSource(workflow, 'typescript-rust');
+    const iosCore = workflowJobSource(workflow, 'ios-core');
+    const iosApp = workflowJobSource(workflow, 'ios-app');
+    const ios = workflowJobSource(workflow, 'ios');
+
+    expect(changes).toContain('classifier');
+    expect(quality).not.toContain('needs: changes');
+    for (const job of [desktopWeb, rustTest, desktopCheck, iosCore, iosApp]) {
+      expect(job).toContain('needs: changes');
+    }
+    for (const job of [desktopWeb, rustTest, desktopCheck]) {
+      expect(job).toContain(
+        "if: needs.changes.result == 'success' && needs.changes.outputs.desktop == 'true'",
+      );
+    }
+    for (const job of [iosCore, iosApp]) {
+      expect(job).toContain(
+        "if: needs.changes.result == 'success' && needs.changes.outputs.ios == 'true'",
+      );
+    }
+    expect(typescriptRust).toContain(
+      'needs: [changes, quality, desktop-web, rust-test, desktop-check]',
+    );
+    expect(typescriptRust).toContain('QUALITY_RESULT');
+    expect(typescriptRust).toContain('DESKTOP_WEB_RESULT');
+    expect(typescriptRust).toContain('RUST_TEST_RESULT');
+    expect(typescriptRust).toContain('DESKTOP_CHECK_RESULT');
+    expect(typescriptRust).toContain('success|skipped');
+    expect(ios).toContain('needs: [changes, ios-core, ios-app]');
+    expect(ios).toContain('IOS_CORE_RESULT');
+    expect(ios).toContain('IOS_APP_RESULT');
+    expect(ios).toContain('success|skipped');
+    expect(ios).toContain('runs-on: ubuntu-24.04');
+    expect(workflow).not.toContain('  desktop-runtime:');
+    expect(desktopWeb.match(/build:web/g) ?? []).toHaveLength(1);
+    expect(rustTest.match(/cargo fmt/g) ?? []).toHaveLength(1);
+    expect(rustTest).toContain('cargo test');
+    expect(desktopCheck).toContain('cargo check');
+    expect(desktopCheck).not.toContain('pnpm vitest');
+    expect(desktopCheck).not.toContain('build:web');
+    expect(desktopCheck).toContain('shell: bash');
+    expect(workflow).toContain('smoke:pack');
+    expect(workflow).toContain('PsycheApp');
+    expect(workflow).toContain('cargo test');
+    expect(workflow).toContain('if: always()');
+    expect(workflow).toContain('CHANGES_RESULT');
+    expect(workflow).toContain('Acquire::Retries=3');
+    expect(workflow).toContain('DEBIAN_FRONTEND=noninteractive');
+    expect(workflow).toContain('timeout-minutes: 10');
+  });
+
   it('runs the complete non-secret TypeScript, package, Rust, and frontend gates', () => {
     const workflow = workflowSource();
+    const typescriptJob = workflowJobSource(workflow, 'typescript-rust');
 
     expect(workflow).toContain('runs-on: macos-15');
     expect(workflow).toContain('- name: Install tmux');
@@ -90,6 +218,8 @@ describe('pull request CI workflow contract', () => {
     expect(workflow.indexOf('brew install tmux')).toBeLessThan(workflow.indexOf('pnpm test'));
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
+      'pnpm docs:focus:check',
+      'pnpm --dir docs build',
       'pnpm test',
       'pnpm typecheck',
       'pnpm build',
@@ -101,6 +231,13 @@ describe('pull request CI workflow contract', () => {
     ]) {
       expect(workflow).toContain(command);
     }
+    expect(typescriptJob.match(/pnpm --dir docs build/g)).toHaveLength(1);
+    expect(typescriptJob.indexOf('pnpm docs:focus:check')).toBeLessThan(
+      typescriptJob.indexOf('pnpm --dir docs build'),
+    );
+    expect(typescriptJob.indexOf('pnpm --dir docs build')).toBeLessThan(
+      typescriptJob.indexOf('pnpm build'),
+    );
     expect(workflow).not.toContain('secrets.');
   });
 
@@ -124,5 +261,211 @@ describe('pull request CI workflow contract', () => {
       .toHaveLength(3);
     expect(workflow).toContain('test');
     expect(workflow).toContain('build');
+  });
+});
+
+describe('Beads Project sync workflow contract', () => {
+  function beadsWorkflowSource(): string {
+    return readFileSync(beadsProjectSyncWorkflowPath, 'utf8');
+  }
+
+  it('schedules serialized applies and exposes guarded manual controls', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow).toContain('name: Beads Project Sync');
+    expect(workflow).toContain('- cron: "17 3 * * *"');
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toMatch(
+      /dry_run:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
+    );
+    expect(workflow).toMatch(
+      /allow_mass_close:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
+    );
+    expect(workflow).toContain('contents: read');
+    expect(workflow).toContain('group: beads-project-sync');
+    expect(workflow).toContain('cancel-in-progress: false');
+    expect(workflow).toContain('runs-on: ubuntu-24.04');
+    expect(workflow).toContain(
+      "if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')",
+    );
+    expect(workflow).toContain(
+      "environment: ${{ github.event_name == 'schedule' && 'beads-project-sync-automation' || 'beads-project-sync' }}",
+    );
+    expect(workflow).toContain('args=(--apply)');
+    expect(workflow).toContain('args=(--dry-run)');
+    expect(workflow).toContain('args+=(--allow-mass-close)');
+    expect(workflow).toContain('"${args[@]}"');
+    expect(workflow).toContain(
+      "github.event_name == 'workflow_dispatch' && inputs.dry_run",
+    );
+    expect(workflow).toContain(
+      "github.event_name == 'workflow_dispatch' && inputs.allow_mass_close",
+    );
+  });
+
+  it('uses pinned setup and a checksum-verified Beads 1.2.2 binary', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow).toContain(
+      'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
+    );
+    expect(workflow).toContain(
+      'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1',
+    );
+    expect(workflow).toContain(
+      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+    );
+    expect(workflow).toContain('node-version: 24');
+    expect(workflow).toContain('version="1.2.2"');
+    expect(workflow).toContain(
+      'checksum="8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"',
+    );
+    expect(workflow).toContain('sha256sum --check --strict');
+    expect(workflow).not.toMatch(/curl[^\n]*\|\s*(?:ba)?sh/u);
+    expect(workflow).toContain('pnpm install --frozen-lockfile');
+  });
+
+  it('bootstraps only manual Actions dry-runs from the authoritative Beads remote', () => {
+    const workflow = beadsWorkflowSource();
+    const beadsConfig = readFileSync(beadsConfigPath, 'utf8');
+    const bootstrap = workflowStepSource(
+      workflow,
+      'Bootstrap Beads for manual dry-run',
+    );
+
+    expect(bootstrap).toContain('id: beads_bootstrap');
+    expect(bootstrap).toContain(
+      "if: github.event_name == 'workflow_dispatch' && inputs.dry_run",
+    );
+    expect(bootstrap).toMatch(
+      /shell: bash\n\s+run: \|\n\s+set -euo pipefail\n\s+bd bootstrap --yes\s*$/u,
+    );
+    expect(bootstrap).not.toMatch(
+      /BEADS_PROJECT_TOKEN|GITHUB_TOKEN|GH_TOKEN|secrets\./u,
+    );
+    expect(workflow.match(/bd bootstrap --yes/g) ?? []).toHaveLength(1);
+    expect(workflow.indexOf('- name: Install Beads CLI 1.2.2')).toBeLessThan(
+      workflow.indexOf('- name: Bootstrap Beads for manual dry-run'),
+    );
+    expect(workflow.indexOf('- name: Bootstrap Beads for manual dry-run')).toBeLessThan(
+      workflow.indexOf('- name: Sync Beads to the public Project'),
+    );
+    expect(beadsConfig).toContain(
+      'sync.remote: "git+https://github.com/OpenCoven/psyche-build.git"',
+    );
+  });
+
+  it('initializes failure artifacts before checkout and finalizes the failed phase', () => {
+    const workflow = beadsWorkflowSource();
+    const initializeArtifacts = workflow.indexOf('- name: Initialize sync artifacts');
+    const checkout = workflow.indexOf('- name: Checkout repository');
+
+    expect(initializeArtifacts).toBeGreaterThanOrEqual(0);
+    expect(checkout).toBeGreaterThan(initializeArtifacts);
+    expect(workflow).toContain('"phase":"checkout"');
+    expect(workflow).toContain('"outcome":"pending"');
+    expect(workflow).toContain('- name: Finalize sync artifacts');
+    expect(workflow).toContain('CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}');
+    expect(workflow).toContain(
+      'BEADS_BOOTSTRAP_OUTCOME: ${{ steps.beads_bootstrap.outcome }}',
+    );
+    expect(workflow).toContain('DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}');
+    expect(workflow).toContain('SYNC_OUTCOME: ${{ steps.sync_beads.outcome }}');
+    expect(workflow).toContain(
+      "('beads-bootstrap', os.environ.get('BEADS_BOOTSTRAP_OUTCOME', 'unknown'))",
+    );
+    expect(workflow).toContain("summary['phase'] = phase");
+    expect(workflow).toContain("summary['outcome'] = outcome");
+    expect(workflow).toContain("summary['stepOutcomes'] = step_outcomes");
+    const upload = workflowStepSource(workflow, 'Upload sync summary');
+    expect(upload).toContain('if: always()');
+    expect(upload).toContain('path: ${{ runner.temp }}/beads-project-sync');
+  });
+
+  it('normalizes cancellation during sync to cancelled status and outcome', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow).toMatch(
+      /if outcome == 'cancelled':\n\s+summary\['status'\] = 'cancelled'\n\s+summary\['outcome'\] = 'cancelled'/,
+    );
+  });
+
+  it('documents the immutable Project binding and manual private-visibility remediation', () => {
+    const workflow = beadsWorkflowSource();
+    const config = JSON.parse(readFileSync(beadsProjectSyncConfigPath, 'utf8')) as {
+      projectNodeId?: unknown;
+    };
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    expect(workflow).not.toContain('--provision');
+    expect(config.projectNodeId).toBe('PVT_kwDOECXnmc4BhMIA');
+    expect(beadsReadme).toMatch(/immutable.*Project.*node ID/is);
+    expect(beadsReadme).toContain('PVT_kwDOECXnmc4BhMIA');
+    expect(beadsReadme).toMatch(/private[\s\S]*maintainer must manually[\s\S]*visibility/is);
+    expect(contributing).toMatch(
+      /immutable.*Project.*node ID[\s\S]*private[\s\S]*manual.*visibility/is,
+    );
+  });
+
+  it('scopes the token to sync and always uploads sanitized JSON diagnostics', () => {
+    const workflow = beadsWorkflowSource();
+
+    expect(workflow.match(/^\s+BEADS_PROJECT_TOKEN:/gm) ?? []).toHaveLength(1);
+    expect(workflow.match(/secrets\.BEADS_PROJECT_TOKEN/g) ?? []).toHaveLength(1);
+    expect(workflow).toContain('Sync command did not emit a valid JSON summary');
+    expect(workflow).toContain("JSON.parse(rawSummary)");
+    expect(workflow).toContain("split(token).join('<redacted>')");
+    expect(workflow).toContain('summary.json');
+    expect(workflow).toContain('diagnostics.log');
+    expect(workflow).toContain('if: always()');
+    expect(workflow).toContain(
+      'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+    );
+    expect(workflow).toContain('if-no-files-found: warn');
+    expect(workflow).not.toContain('if-no-files-found: error');
+  });
+
+  it('documents both protected environment secrets and their deployment rules', () => {
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    for (const document of [beadsReadme, contributing]) {
+      expect(document).toMatch(/`?beads-project-sync`?\s+environment/i);
+      expect(document).toMatch(/`?beads-project-sync-automation`?\s+environment/i);
+      expect(document).toMatch(/environment secret.*BEADS_PROJECT_TOKEN/is);
+      expect(document).toMatch(/required reviewers?/i);
+      expect(document).toMatch(/no required\s+reviewers?/i);
+      expect(document).toMatch(/main branch/i);
+      expect(document).toMatch(/BEADS_PROJECT_TOKEN.*both environments?/is);
+    }
+    expect(beadsReadme).not.toMatch(/repository Actions secret\s+named `BEADS_PROJECT_TOKEN`/i);
+  });
+
+  it('documents the complete fine-grained token permission contract', () => {
+    const workflow = beadsWorkflowSource();
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    for (const document of [beadsReadme, contributing, workflow]) {
+      expect(document).toMatch(/Contents:\s*read and write/i);
+      expect(document).toMatch(/Issues:\s*read and write/i);
+      expect(document).toMatch(/Metadata:\s*read/i);
+      expect(document).toMatch(/Projects:\s*read and write/i);
+    }
+  });
+
+  it('documents ephemeral Actions dry-run bootstrap without weakening local dry-run safety', () => {
+    const beadsReadme = readFileSync(beadsReadmePath, 'utf8');
+    const contributing = readFileSync(contributingPath, 'utf8');
+
+    for (const document of [beadsReadme, contributing]) {
+      expect(document).toMatch(
+        /Actions.*dry[- ]run.*bootstrap.*ephemeral.*runner.*database/is,
+      );
+      expect(document).toMatch(
+        /local.*dry[- ]run.*read-only.*(?:does not|never).*bootstrap/is,
+      );
+    }
   });
 });

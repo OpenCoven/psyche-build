@@ -14,6 +14,7 @@ import {
   type OrchestrationTaskPlan,
   type OrchestrationTaskRequest,
 } from './types.js';
+import { normalizeOrchestrationOperationId } from './operationIdentity.js';
 
 const MAX_ORCHESTRATION_CONCURRENCY = 4;
 const SUPPORTED_LANE_MODES = new Set<string>(ORCHESTRATION_LANE_MODES);
@@ -27,6 +28,7 @@ const SUPPORTED_PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set([
 interface NormalizedTaskFields {
   taskId: string;
   traceId: string;
+  operationId: string;
   projectRoot: string;
   cwd: string;
   prompt: string;
@@ -40,6 +42,7 @@ export function planOrchestrationTask(
 ): OrchestrationTaskPlan {
   const taskId = normalizeRequiredString(request?.taskId, 'taskId');
   const traceId = normalizeRequestTraceId(request?.traceId, taskId);
+  const operationId = normalizeOrchestrationOperationId(request?.operationId);
   const projectRoot = normalizeProjectRoot(request?.projectRoot);
   const cwd = resolveScopedCwd(projectRoot, request?.cwd);
   const prompt = normalizeRequiredString(request?.prompt, 'prompt');
@@ -64,6 +67,7 @@ export function planOrchestrationTask(
   const taskFields: NormalizedTaskFields = {
     taskId,
     traceId,
+    operationId,
     projectRoot,
     cwd,
     prompt,
@@ -88,6 +92,7 @@ export function planOrchestrationTask(
   return {
     taskId,
     traceId,
+    operationId,
     projectRoot,
     cwd,
     concurrency: normalizeConcurrency(request?.concurrency, lanes.length),

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed
+
+- The Coven launcher now opens the bare Coven CLI (`coven`) across the TUI,
+  daemon, conflict-resolution, and native desktop paths instead of entering
+  `coven code`. The stable internal configuration ID remains `coven-code`.
+- The native Coven theme now uses graphite surfaces with restrained violet
+  focus accents, and performance diagnostics consistently show a dropped-frame
+  value when frame timing is available.
+
+### Fixed
+
+- Files-pane toolbar controls no longer transfer focus to the pane canvas
+  before their button action runs.
+
+## [0.0.1] - 2026-08-23
+
 ### Performance
 
 - The direct-distributed macOS desktop app now opts its Tauri WKWebViews into
@@ -76,8 +92,6 @@
 
 - Added [Bridge and daemon security model](./docs/BRIDGE-SECURITY.md).
 
-## [0.0.1] - 2026-08-03
-
 ### Orchestration
 
 - Run parallel coding agents in isolated git worktrees and tmux lanes, with clear orchestration for review, handoff, and completion.
@@ -94,11 +108,12 @@
 ### iOS Cockpit
 
 - iOS cockpit foundation for protocol and connection work, with compact navigation for smaller screens.
-- The current iOS experience is demo-first while the remote-control workflow matures.
+- The current iOS experience is demo-first while the remote-control workflow matures; source and simulator behavior do not establish live TestFlight availability.
 
-### Release Integrity
+### Distribution targets
 
-- Signed and notarized dual-architecture macOS DMGs with checksums, internal TestFlight distribution, and Homebrew availability.
+- The public macOS release consists of signed and notarized dual-architecture DMGs, checksums, and a Homebrew Cask that points to those exact verified assets.
+- The planned iOS delivery is an independently gated internal TestFlight companion for authorized OpenCoven testers.
 
 ### TestFlight: What to Test
 
@@ -114,5 +129,5 @@
 
 ### Known Limitations
 
-- iOS builds are distributed internally through TestFlight only.
+- This repository does not currently claim a live TestFlight build; internal distribution remains pending #200.
 - There is no Windows or Linux application in this release.

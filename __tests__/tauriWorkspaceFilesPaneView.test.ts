@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri/web');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
@@ -26,10 +27,14 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
+  const resolvedDependencies = withFilesScopeSelectionHelper(
+    extractFunctionSource,
+    dependencies,
+  );
   return Function(
-    ...Object.keys(dependencies),
+    ...Object.keys(resolvedDependencies),
     `"use strict"; return (${source});`,
-  )(...Object.values(dependencies)) as T;
+  )(...Object.values(resolvedDependencies)) as T;
 }
 
 class FakeElement {
@@ -46,7 +51,7 @@ class FakeElement {
   attributes = new Map<string, string>();
   children: FakeElement[] = [];
   parentElement: FakeElement | null = null;
-  listeners = new Map<string, Array<(...args: never[]) => unknown>>();
+  listeners = new Map<string, Array<(event: Record<string, unknown>) => unknown>>();
 
   appendChild(child: FakeElement) {
     child.parentElement = this;
@@ -58,7 +63,7 @@ class FakeElement {
     this.attributes.set(name, value);
   }
 
-  addEventListener(name: string, listener: (...args: never[]) => unknown) {
+  addEventListener(name: string, listener: (event: Record<string, unknown>) => unknown) {
     this.listeners.set(name, [...(this.listeners.get(name) || []), listener]);
   }
 
@@ -161,6 +166,109 @@ describe('native Files pane view', () => {
     expect(source).toMatch(/closeFilesPane\(filesPane\)/);
   });
 
+  it('does not rerender Files on header-control pointerdown before click', () => {
+    const calls: string[] = [];
+    let focusCalls = 0;
+    const hide = new FakeElement();
+    hide.addEventListener('click', () => { calls.push('hide'); });
+    const mountFilesPane = compileFunction<(surface: Record<string, unknown>) => FakeElement>(
+      extractFunctionSource('mountFilesPane'),
+      {
+        document: {
+          createElement: (tagName: string) => Object.assign(new FakeElement(), { tagName }),
+        },
+        fileViewEl: new FakeElement(),
+        createPaneHideButton: () => hide,
+        togglePaneMaximize: () => { calls.push('maximize'); },
+        closeFilesPane: () => { calls.push('close'); },
+        focusCanvasSurface: () => { focusCalls += 1; },
+        filesPaneHasCanvasFocus: () => false,
+        startPaneReposition: () => undefined,
+      },
+    );
+    const pane = mountFilesPane({
+      id: 'files-a', workspaceRoot: '/worktree', kind: 'files',
+    });
+    const header = pane.children[0];
+    const controls = header.children.slice(-3);
+    const pointerdown = pane.listeners.get('pointerdown')?.[0];
+    const focusin = pane.listeners.get('focusin')?.[0];
+
+    expect(pointerdown).toBeTypeOf('function');
+    expect(focusin).toBeTypeOf('function');
+    for (const control of controls) {
+      const event = {
+        target: {
+          closest: (selector: string) => selector === 'button' ? control : null,
+        },
+      };
+      pointerdown?.(event);
+      focusin?.(event);
+    }
+    expect(focusCalls).toBe(0);
+
+    controls.forEach((control) => {
+      control.listeners.get('click')?.[0]?.({ stopPropagation: () => undefined });
+    });
+    expect(calls).toEqual(['hide', 'maximize', 'close']);
+  });
+
+  it('repositions and maximizes Files from non-button header gestures', () => {
+    const fileView = new FakeElement();
+    const calls: Array<unknown> = [];
+    const mountFilesPane = compileFunction<(surface: Record<string, unknown>) => FakeElement>(
+      extractFunctionSource('mountFilesPane'),
+      {
+        document: {
+          createElement: (tagName: string) => Object.assign(new FakeElement(), { tagName }),
+        },
+        fileViewEl: fileView,
+        createPaneHideButton: () => new FakeElement(),
+        startPaneReposition: (surface: unknown, event: unknown) => calls.push(['reposition', surface, event]),
+        togglePaneMaximize: (surface: unknown) => calls.push(['maximize', surface]),
+        closeFilesPane: () => undefined,
+        focusCanvasSurface: () => undefined,
+      },
+    );
+    const surface = { id: 'files-a', workspaceRoot: '/worktree', kind: 'files' };
+    const pane = mountFilesPane(surface);
+    const header = pane.children[0];
+    const pointerdown = header.listeners.get('pointerdown')?.[0];
+    const dblclick = header.listeners.get('dblclick')?.[0];
+    const pointerEvent = {
+      target: { closest: () => null },
+    };
+    const buttonEvent = {
+      preventDefault: () => {
+        throw new Error('preventDefault should not run for button targets');
+      },
+      target: { closest: () => ({}) },
+    };
+    let prevented = 0;
+    const dblclickEvent = {
+      preventDefault: () => { prevented += 1; },
+      target: { closest: () => null },
+    };
+
+    expect(pointerdown).toBeTypeOf('function');
+    expect(dblclick).toBeTypeOf('function');
+
+    pointerdown?.(pointerEvent);
+    dblclick?.(dblclickEvent);
+    expect(prevented).toBe(1);
+    expect(calls).toEqual([
+      ['reposition', surface, pointerEvent],
+      ['maximize', surface],
+    ]);
+
+    calls.length = 0;
+    prevented = 0;
+    pointerdown?.(buttonEvent);
+    dblclick?.(buttonEvent);
+    expect(prevented).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
   it('hides Files non-destructively and restores it when a file is selected', () => {
     const filesPaneFactory = extractFunctionSource('ensureFilesPane');
     const hide = extractFunctionSource('hideFilesPane');
@@ -219,11 +327,17 @@ describe('native Files pane view', () => {
       },
     };
     let terminalFocuses = 0;
+    let filesScopeInvalidations = 0;
+    const project = { id: 'project-a', selectedWorktreePath: '' };
     const focusCanvasSurface = compileFunction<(surface: typeof surfaces['files-a']) => boolean>(
       extractFunctionSource('focusCanvasSurface'),
       {
         focusThread: () => { terminalFocuses += 1; },
-        findProject: () => ({ id: 'project-a', selectedWorktreePath: '' }),
+        findProject: () => project,
+        invalidateFilesPanelRender: () => {
+          filesScopeInvalidations += 1;
+          return filesScopeInvalidations;
+        },
         state,
         paneLayoutFor: () => layout,
         PsychePanes: {
@@ -243,6 +357,8 @@ describe('native Files pane view', () => {
     expect(state.activeThreadId).toBeNull();
     expect(toggles).toEqual({ terminal: false, files: true });
     expect(terminalFocuses).toBe(0);
+    expect(project.selectedWorktreePath).toBe('/worktree');
+    expect(filesScopeInvalidations).toBe(1);
   });
 
   it('distinguishes an open file from Files owning canvas focus', () => {

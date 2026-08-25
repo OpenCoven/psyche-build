@@ -44,6 +44,52 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   )(...Object.values(resolvedDependencies)) as T;
 }
 
+function compileScopedPaneRoot() {
+  return compileFunction<(layout: { root: unknown; activeSetId?: string | null }) => unknown>(
+    extractFunctionSource('scopedPaneRoot'),
+    {
+      findFocusSet: () => null,
+      canvasSurfaceById: () => null,
+      PsychePanes,
+    },
+  );
+}
+
+function compilePaneFocusEligible() {
+  return compileFunction<(layout: { root: unknown; activeSetId?: string | null }, threadId: string) => boolean>(
+    extractFunctionSource('paneFocusEligible'),
+    {
+      scopedPaneRoot: compileScopedPaneRoot(),
+      PsychePanes,
+    },
+  );
+}
+
+function compilePaneSurfaceFocusEligible() {
+  return compileFunction<(
+    layout: { root?: unknown; activeSetId?: string | null } | null,
+    surface: { id: string; kind?: string; hidden?: boolean; closing?: boolean; closeStarted?: boolean } | null,
+  ) => boolean>(extractFunctionSource('paneSurfaceFocusEligible'), {
+    browserPaneIsClosing: () => false,
+    paneFocusEligible: compilePaneFocusEligible(),
+  });
+}
+
+function compileResolvePaneFocusSuccessor(
+  canvasSurfaceById: (id: string) => { id: string; kind?: string; hidden?: boolean; closing?: boolean; closeStarted?: boolean } | null,
+) {
+  return compileFunction<(
+    layout: { root?: unknown; activeSetId?: string | null } | null,
+    preferredId: string | null,
+    threadsOnly?: boolean,
+  ) => string | null>(extractFunctionSource('resolvePaneFocusSuccessor'), {
+    canvasSurfaceById,
+    paneSurfaceFocusEligible: compilePaneSurfaceFocusEligible(),
+    scopedPaneRoot: compileScopedPaneRoot(),
+    PsychePanes,
+  });
+}
+
 describe('native Files pane layout contract', () => {
   it('keys Files panes through the shared project and workspace layout key', () => {
     const calls: unknown[][] = [];
@@ -80,12 +126,19 @@ describe('native Files pane layout contract', () => {
     const filesPane = {
       id: 'files-pane', projectId: 'project-a', workspaceRoot: '/worktree', kind: 'files',
     };
+    const threadSurface = { id: 'thread-a', kind: 'shell', closing: false, closeStarted: false };
+    const resolvePaneFocusSuccessor = compileResolvePaneFocusSuccessor((id: string) => {
+      if (id === filesPane.id) return filesPane;
+      if (id === threadSurface.id) return threadSurface;
+      return null;
+    });
     const detachPane = compileFunction<(surface: { id: string }) => string | null>(
       extractFunctionSource('detachThreadPane'),
       {
         canvasSurfaceById: () => filesPane,
         paneLayoutKey: (projectId: string, rootPath: string) => `${projectId}\0${rootPath}`,
         paneLayouts,
+        resolvePaneFocusSuccessor,
         PsychePanes,
       },
     );
@@ -233,18 +286,38 @@ describe('native Files pane layout contract', () => {
     const filesPane = {
       id: 'files-pane', kind: 'files', projectId: 'project-a', workspaceRoot: '/worktree',
     };
-    const layout = { focusedLeafId: 'terminal-leaf' };
+    const terminalLeaf = PsychePanes.createLeaf('terminal-leaf', thread.id);
+    const filesLeaf = PsychePanes.createLeaf('files-pane', filesPane.id);
+    const layout = {
+      root: PsychePanes.insertRelative(
+        terminalLeaf, terminalLeaf.id, filesLeaf, 'split-a', 'right',
+      ),
+      focusedLeafId: terminalLeaf.id,
+    };
     const state = {
       threads: [thread], activeThreadId: thread.id as string | null, activeFileId: null,
     };
     let renders = 0;
     let threadFocuses = 0;
+    const paneSurfaceFocusEligible = compilePaneSurfaceFocusEligible();
+    const resolvePaneFocusSuccessor = compileResolvePaneFocusSuccessor((id: string) => {
+      if (id === filesPane.id) return filesPane;
+      if (id === thread.id) return thread;
+      return null;
+    });
     const closeThread = compileFunction<(id: string) => Promise<boolean>>(
       extractFunctionSource('closeThread'),
       {
         findThread: (id: string) => state.threads.find((item) => item.id === id) || null,
-        canvasSurfaceById: (id: string) => id === filesPane.id ? filesPane : null,
+        canvasSurfaceById: (id: string) => {
+          if (id === filesPane.id) return filesPane;
+          if (id === thread.id) return thread;
+          return null;
+        },
         canvasThreadIds: () => [],
+        paneLayoutForThread: () => layout,
+        paneFocusEligible: () => true,
+        paneSurfaceFocusEligible,
         forgetThreadInSets: () => undefined,
         detachThreadPane: () => { layout.focusedLeafId = filesPane.id; return filesPane.id; },
         retainFileFocusAfterThreadRemoval: () => false,
@@ -257,6 +330,8 @@ describe('native Files pane layout contract', () => {
         refreshSidebar: () => undefined,
         refreshTabs: () => undefined,
         focusThread: () => { threadFocuses += 1; },
+        resolvePaneFocusSuccessor,
+        PsychePanes,
       },
     );
 

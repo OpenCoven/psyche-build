@@ -10,7 +10,11 @@ import { createHostControlPlane } from '../../src/control/host.js';
 import { canonicalizeProjectRoot } from '../../src/control/projectIdentity.js';
 import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
-import { TmuxControl } from '../../src/services/tmuxControl.js';
+import {
+  TmuxControl,
+  tmuxSessionExists,
+  tmuxSessionNameForRoot,
+} from '../../src/services/tmuxControl.js';
 import type { CovenClient } from '../../src/daemon/bridge.js';
 import type { CovenSessionSummary } from '../../src/daemon/protocol.js';
 
@@ -101,7 +105,12 @@ async function startMountedDaemon(): Promise<{
     createCovenClient: () => covenClient,
   });
 
-  const host = await createHostControlPlane(canonicalRoot, { handlers });
+  const host = await createHostControlPlane(canonicalRoot, {
+    handlers,
+    // This fixture mocks every tmux effect boundary. Bootstrapping a real
+    // durable session here leaks one detached shell per test case.
+    bootstrap: async () => undefined,
+  });
   cleanups.push(() => host.close());
 
   const credentials = await createControlCredentialStore({
@@ -140,6 +149,12 @@ afterEach(async () => {
 });
 
 describe('mounted control socket end-to-end', () => {
+  it('does not create a durable tmux session for the test fixture', async () => {
+    const daemon = await startMountedDaemon();
+
+    expect(tmuxSessionExists(tmuxSessionNameForRoot(daemon.projectRoot))).toBe(false);
+  });
+
   it('drives a pane mutation through the mounted socket', async () => {
     const daemon = await startMountedDaemon();
     const client = await ControlClient.connect({

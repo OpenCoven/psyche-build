@@ -2,6 +2,7 @@ import type { AgentName, PermissionMode } from './utils/agentLaunch.js';
 import type { NotificationSoundId } from './utils/notificationSounds.js';
 import type { OrchestrationLaneMode } from './orchestration/types.js';
 import type { TmuxServerIdentity } from './services/TmuxServerIdentity.js';
+import type { DurableEffectWarning } from './utils/durableEffectWarnings.js';
 
 export type PsycheThemeName =
   | 'red'
@@ -115,11 +116,14 @@ export interface PsychePane {
     reason: string;
   }>;
   agent?: AgentName;
+  /** Stable daemon request identity used to reconcile retries without relaunching. */
+  launchRequestId?: string;
   agentSession?: AgentSessionReference;
   orchestration?: {
     taskId: string;
     laneId: string;
     traceId: string;
+    operationId: string;
     mode: OrchestrationLaneMode;
   };
   permissionMode?: PermissionMode;
@@ -140,6 +144,7 @@ export interface PsychePane {
   analyzerError?: string;
   // Merge ancestry for sub-worktrees; first entry is the immediate parent target.
   mergeTargetChain?: MergeTargetReference[];
+  recoveryWarnings?: readonly DurableEffectWarning[];
 }
 
 export type SavePanes = (

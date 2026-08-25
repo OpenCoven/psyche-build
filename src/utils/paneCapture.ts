@@ -39,8 +39,12 @@ function trimTrailingBlanks(content: string): { trimmed: string; contentLineCoun
 export async function capturePaneContentAsync(
   paneId: string,
   lines: number = 50,
-  maxAttempts: number = 5
+  maxAttempts: number = 5,
+  options: { silent?: boolean } = {}
 ): Promise<string> {
+  // Callers that need to tell "pane is gone" from "pane is empty" pass
+  // silent: false and handle the rejection.
+  const { silent = true } = options;
   try {
     let currentLines = lines;
 
@@ -48,7 +52,7 @@ export async function capturePaneContentAsync(
       const content = await execAsync(
         // Join wrapped lines so width-only pane resizes do not look like new content.
         `tmux capture-pane -t '${paneId}' -p -J -S -${currentLines}`,
-        { silent: true, timeout: 5000 }
+        { silent, timeout: 5000 }
       );
 
       if (!content) {
@@ -78,12 +82,13 @@ export async function capturePaneContentAsync(
     // After max attempts, return whatever we have
     const finalContent = await execAsync(
       `tmux capture-pane -t '${paneId}' -p -J -S -${currentLines}`,
-      { silent: true, timeout: 5000 }
+      { silent, timeout: 5000 }
     );
 
     const { trimmed } = trimTrailingBlanks(finalContent);
     return trimmed;
-  } catch {
+  } catch (error) {
+    if (!silent) throw error;
     return '';
   }
 }

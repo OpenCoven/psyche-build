@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
 import type { PaneSummary } from './protocol.js';
 import { assertTmuxPaneId } from '../utils/tmuxTarget.js';
+import { EXEC_BULK_MAX_BYTES, isExecBufferOverflow } from '../utils/execBuffers.js';
 import {
   getCurrentTmuxServerIdentity,
   isTmuxServerIdentity,
@@ -121,20 +122,42 @@ async function readPaneRecords(projectRoot: string): Promise<Array<Record<string
   return config.panes;
 }
 
+/** Lines to fall back to when a pane's full scrollback exceeds the ceiling. */
+const CAPTURE_FALLBACK_LINES = 5000;
+
+type CaptureRunner = (command: string, maxBuffer: number) => Buffer;
+
+const defaultCaptureRunner: CaptureRunner = (command, maxBuffer) =>
+  execSync(command, { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer });
+
 /**
  * One-shot capture of a tmux pane's current visible buffer + scrollback.
  *
  * Returns ANSI-escaped bytes suitable for piping into xterm.js. Used on
  * attach to seed the client's terminal before the live stream takes over.
  *
+ * A pane too large even for the ceiling falls back to a bounded window rather
+ * than an empty buffer: a truncated terminal is recoverable, a blank one just
+ * looks broken.
+ *
  * TODO(step-2): swap the polling attach path for `tmux -C` control mode
  * so we get `%output` events instead of re-capturing on a timer.
  */
-export function capturePaneSync(tmuxPaneId: string): Buffer {
+export function capturePaneSync(
+  tmuxPaneId: string,
+  run: CaptureRunner = defaultCaptureRunner,
+): Buffer {
+  const target = shellQuote(tmuxPaneId);
   try {
-    return execSync(
-      `tmux capture-pane -p -e -J -S - -t ${shellQuote(tmuxPaneId)}`,
-      { stdio: ['ignore', 'pipe', 'ignore'] },
+    return run(`tmux capture-pane -p -e -J -S - -t ${target}`, EXEC_BULK_MAX_BYTES);
+  } catch (error) {
+    if (!isExecBufferOverflow(error)) return Buffer.alloc(0);
+  }
+
+  try {
+    return run(
+      `tmux capture-pane -p -e -J -S -${CAPTURE_FALLBACK_LINES} -t ${target}`,
+      EXEC_BULK_MAX_BYTES,
     );
   } catch {
     return Buffer.alloc(0);

@@ -1,11 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { ControlRuntime, type ControlHandlers, type RuntimeJournal } from '../src/control/runtime.js';
 import { ApprovalStore } from '../src/control/approvals.js';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
 import type { ControlTaskCredentialReference } from '../src/control/credentials.js';
+import { COMPACTED_OUTCOME_CODE, ControlJournal, exactCommandOutcomeDigest } from '../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
 import type { ControlCommand } from '../src/control/types.js';
+import { Orchestrator } from '../src/orchestration/orchestrator.js';
+import { createDeferred } from './utils/deferred.js';
 
 const handlers: ControlHandlers = {
   executeOrchestration: vi.fn(),
@@ -33,6 +39,11 @@ const handlers: ControlHandlers = {
   runBrowserScript: vi.fn(),
 };
 
+const roots: string[] = [];
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
 function command(overrides: Record<string, unknown> = {}) {
   return {
     id: 'cmd-1',
@@ -45,6 +56,38 @@ function command(overrides: Record<string, unknown> = {}) {
     payload: { paneId: '%3' },
     ...overrides,
   } as const;
+}
+
+function openTerminalCommand(idempotencyKey: string, id = `cmd-${idempotencyKey}`): ControlCommand {
+  return command({
+    id,
+    idempotencyKey,
+    kind: 'pane.terminal.open',
+    payload: { cwd: '/repo', title: 'durable-idempotency-test' },
+  }) as ControlCommand;
+}
+
+async function newJournalRoot(prefix: string): Promise<string> {
+  const root = path.join(process.cwd(), '.test-artifacts', `${prefix}-${randomUUID()}`);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  roots.push(root);
+  return root;
+}
+
+async function appendCompactionPressure(journal: ControlJournal, prefix: string): Promise<void> {
+  for (let index = 0; index < 1_001; index += 1) {
+    await journal.append('unrelated.event', { id: `${prefix}-${index}` });
+  }
+}
+
+function storedOutcomePath(root: string, idempotencyKey: string): string {
+  return path.join(
+    root,
+    '.psyche',
+    'runtime',
+    'outcomes',
+    createHash('sha256').update(idempotencyKey, 'utf8').digest('hex'),
+  );
 }
 
 function createMemoryJournal() {
@@ -62,6 +105,39 @@ function createMemoryJournal() {
       async (): Promise<Array<{ sequence: number; kind: string; payload: Record<string, unknown> }>> => [],
     ),
   };
+}
+
+function providerUpsertCommand(idempotencyKey: string): ControlCommand {
+  return command({
+    id: `provider-${idempotencyKey}`,
+    idempotencyKey,
+    kind: 'provider.resource.upsert',
+    ownerEpoch: 7,
+    actor: { id: 'human-1', kind: 'human' },
+    payload: {
+      resource: {
+        id: 'provider-tab',
+        projectRoot: '/repo',
+        worktreeRoot: '/repo',
+        providerId: 'provider',
+        webviewLabel: 'Provider Tab',
+        url: 'https://example.test',
+        title: 'Example',
+        loading: false,
+        viewport: { width: 800, height: 600 },
+      },
+    },
+  }) as ControlCommand;
+}
+
+function ritualLaunchCommand(idempotencyKey: string, id = `ritual-${idempotencyKey}`): ControlCommand {
+  return command({
+    id,
+    idempotencyKey,
+    kind: 'ritual.launch',
+    ownerEpoch: 4,
+    payload: { projectId: 'project-1', ritualId: idempotencyKey, params: {} },
+  }) as ControlCommand;
 }
 
 async function submit(runtime: ControlRuntime, input: ControlCommand) {
@@ -86,7 +162,7 @@ async function submit(runtime: ControlRuntime, input: ControlCommand) {
   return runtime.submit({ ...input, payload: { requestId } });
 }
 
-async function createBrowserActionHarness(options: {
+type BrowserActionHarnessOptions = {
   resolver?: (input: { snapshotId: string; elementRef: string }) => ReturnType<typeof createCanonicalElementSemantics>;
   actOnBrowser?: ControlHandlers['actOnBrowser'];
   runBrowserScript?: ControlHandlers['runBrowserScript'];
@@ -95,8 +171,37 @@ async function createBrowserActionHarness(options: {
   clock?: () => Date;
   leaseTtlMs?: number;
   readActiveTaskCredential?: (taskId: string) => Promise<ControlTaskCredentialReference | null>;
-} = {}) {
-  const journal = createMemoryJournal();
+};
+
+type MemoryRuntimeJournal = ReturnType<typeof createMemoryJournal>;
+type BrowserActionHarness<TJournal extends RuntimeJournal> = {
+  runtime: ControlRuntime;
+  journal: TJournal;
+  surfaces: SurfaceRegistry;
+  capabilityLeases: CapabilityLeaseStore;
+  approvals: ApprovalStore;
+  tab: ReturnType<SurfaceRegistry['upsertBrowserTab']>;
+  lease: { id: string; revision: number };
+  actorId: string;
+  taskId: string;
+};
+
+async function createBrowserActionHarness(
+  options?: BrowserActionHarnessOptions,
+): Promise<BrowserActionHarness<MemoryRuntimeJournal>>;
+async function createBrowserActionHarness<TJournal extends RuntimeJournal>(
+  options: BrowserActionHarnessOptions & { journal: TJournal },
+): Promise<BrowserActionHarness<TJournal>>;
+async function createBrowserActionHarness<TJournal extends RuntimeJournal>(
+  options: BrowserActionHarnessOptions & { journal?: TJournal } = {},
+) {
+  return createBrowserActionHarnessWithJournal(options);
+}
+
+async function createBrowserActionHarnessWithJournal<TJournal extends RuntimeJournal>(
+  options: BrowserActionHarnessOptions & { journal?: TJournal } = {},
+) {
+  const journal = (options.journal ?? createMemoryJournal()) as TJournal | MemoryRuntimeJournal;
   const surfaces = new SurfaceRegistry();
   const actorId = options.actorId ?? 'agent-review';
   const taskId = options.taskId ?? 'task-review';
@@ -178,6 +283,758 @@ describe('ControlRuntime', () => {
     expect(second).toEqual(first);
     expect(runtime.events().filter((event) => event.kind === 'command.requested'))
       .toHaveLength(1);
+  });
+
+  it('deduplicates an evicted hot-cache key without changing journal sequence', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    const first = await submit(runtime, openTerminalCommand('idem-old', 'old-1'));
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-old');
+
+    const sequenceBefore = journal.sequence;
+    const callsBefore = invocations;
+    const replayed = await submit(runtime, openTerminalCommand('idem-old', 'old-2'));
+
+    expect(replayed).toEqual(first);
+    expect(invocations).toBe(callsBefore);
+    expect(journal.sequence).toBe(sequenceBefore);
+  }, 90_000);
+
+  it('replays a raw b389 exact sidecar without journal migration or re-execution', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'idem-b389-sidecar';
+    const outcome = {
+      status: 'succeeded',
+      value: { paneId: '%legacy' },
+    } as const;
+    const outcomePath = storedOutcomePath(root, idempotencyKey);
+    await mkdir(path.dirname(outcomePath), { recursive: true, mode: 0o700 });
+    await writeFile(outcomePath, JSON.stringify({ idempotencyKey, outcome }), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    handlers.openTerminal = vi.fn(async () => ({ paneId: '%should-not-run' }));
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    expect(journal.sequence).toBe(0);
+    await expect(submit(runtime, openTerminalCommand(idempotencyKey, 'b389-retry'))).resolves.toEqual(outcome);
+    expect(journal.sequence).toBe(0);
+    expect(handlers.openTerminal).not.toHaveBeenCalled();
+  });
+
+  it('replays an evicted durable key even when fresh execution capacity is full', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let terminalInvocations = 0;
+    let releaseExecutions!: () => void;
+    const executionGate = new Promise<void>((resolve) => { releaseExecutions = resolve; });
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++terminalInvocations}` }));
+    handlers.launchRitual = vi.fn(async () => {
+      await executionGate;
+      return undefined;
+    });
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+
+    const first = await submit(runtime, openTerminalCommand('idem-durable', 'durable-1'));
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-durable');
+
+    const covered = journal.sequence;
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: covered,
+      outcomes: {},
+      receiptRecords: [],
+    });
+    await journal.compact(covered);
+
+    const reopened = await ControlJournal.open(root, 8);
+    const originalLoadOutcome = reopened.loadOutcome.bind(reopened);
+    vi.spyOn(reopened, 'loadOutcome').mockImplementation(async (idempotencyKey) => (
+      idempotencyKey.startsWith('pending-') ? undefined : originalLoadOutcome(idempotencyKey)
+    ));
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const occupiedExecutions = Array.from(
+      { length: 256 },
+      (_, index) => restarted.submit(command({
+        id: `pending-${index}`,
+        idempotencyKey: `pending-${index}`,
+        kind: 'ritual.launch',
+        ownerEpoch: 8,
+        payload: { projectId: 'project-1', ritualId: `ritual-${index}`, params: {} },
+      })),
+    );
+
+    try {
+      await vi.waitFor(() => expect((restarted as unknown as {
+        activeFreshExecutions?: Set<string>;
+      }).activeFreshExecutions?.size ?? 0).toBe(256));
+
+      const durableEventsBefore = reopened.read(0).filter((event) => (
+        event.payload.idempotencyKey === 'idem-durable'
+      )).length;
+      const callsBefore = terminalInvocations;
+      const replayed = await submit(restarted, openTerminalCommand('idem-durable', 'durable-2'));
+
+      expect(replayed).toEqual(first);
+      expect(terminalInvocations).toBe(callsBefore);
+      expect(reopened.read(0).filter((event) => (
+        event.payload.idempotencyKey === 'idem-durable'
+      ))).toHaveLength(durableEventsBefore);
+    } finally {
+      releaseExecutions();
+      await Promise.allSettled(occupiedExecutions);
+    }
+  }, 90_000);
+
+  it('installs one pending promise before an async cold-miss lookup', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 4);
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const loadOutcome = vi.spyOn(journal, 'loadOutcome').mockImplementation(async () => {
+      await lookupGate;
+      return undefined;
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    const first = submit(runtime, openTerminalCommand('idem-race', 'race-1'));
+    const second = submit(runtime, openTerminalCommand('idem-race', 'race-2'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(loadOutcome).toHaveBeenCalledTimes(1);
+
+    releaseLookup();
+    const [left, right] = await Promise.all([first, second]);
+
+    expect(left).toEqual(right);
+    expect(handlers.openTerminal).toHaveBeenCalledTimes(1);
+    expect(journal.read(0).filter((event) => (
+      event.kind === 'command.requested' && event.payload.idempotencyKey === 'idem-race'
+    ))).toHaveLength(1);
+  });
+
+  it('returns the exact completed outcome when sidecar persistence fails and deduplicates dirty retries', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === 'idem-dirty' && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    await expect(submit(runtime, openTerminalCommand('idem-dirty', 'dirty-1')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    const terminal = journal.findByIdempotencyKey('idem-dirty');
+    expect(terminal?.kind).toBe('command.succeeded');
+    const sequenceBefore = journal.sequence;
+    await expect(submit(runtime, openTerminalCommand('idem-dirty', 'dirty-2')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    expect(journal.sequence).toBe(sequenceBefore);
+    expect(invocations).toBe(1);
+    expect(await journal.loadOutcome('idem-dirty')).toBeUndefined();
+    expect((runtime as any).dirtyTerminalOutcomes.get('idem-dirty')).toMatchObject({
+      outcome: { status: 'succeeded', value: { paneId: 'pane-1' } },
+    });
+    expect(error.mock.calls.some(([message]) => (
+      String(message).includes('durable outcome persistence failed')
+    ))).toBe(true);
+
+    failDirty = false;
+  });
+
+  it('blocks fresh cold misses after compaction is deferred until durability is repaired', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === 'idem-blocked-dirty' && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    const first = await submit(runtime, openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-1'));
+    expect(first).toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    const terminal = journal.findByIdempotencyKey('idem-blocked-dirty');
+    expect(terminal?.sequence).toBeDefined();
+
+    await appendCompactionPressure(journal, 'blocked-later');
+
+    await (runtime as any).compactJournal(journal);
+    expect((runtime as any).compactionBlockedByDurability).toBe(true);
+    expect(journal.firstSequence).toBeLessThanOrEqual(terminal?.sequence ?? 0);
+    expect(journal.read(0).filter((event) => (
+      event.kind === 'command.succeeded' && event.payload.idempotencyKey === 'idem-blocked-dirty'
+    ))).toHaveLength(1);
+
+    const blockedSequenceBefore = journal.sequence;
+    const blockedCallsBefore = invocations;
+    await expect(submit(runtime, openTerminalCommand('idem-blocked-fresh', 'blocked-fresh-1')))
+      .resolves.toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    expect(journal.sequence).toBe(blockedSequenceBefore);
+    expect(invocations).toBe(blockedCallsBefore);
+
+    (runtime as any).outcomesByIdempotencyKey.delete('idem-blocked-dirty');
+    const retrySequenceBefore = journal.sequence;
+    await expect(submit(runtime, openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-2')))
+      .resolves.toEqual(first);
+    expect(journal.sequence).toBe(retrySequenceBefore);
+    expect(invocations).toBe(1);
+
+    failDirty = false;
+    await expect(submit(runtime, openTerminalCommand('idem-blocked-repaired', 'blocked-repaired-1')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-2' } });
+    expect((runtime as any).compactionBlockedByDurability).toBe(false);
+    expect(journal.firstSequence).toBeGreaterThan(terminal?.sequence ?? 0);
+    await expect(journal.loadOutcome('idem-blocked-dirty')).resolves.toMatchObject({
+      status: 'unknown',
+      code: COMPACTED_OUTCOME_CODE,
+    });
+    expect(invocations).toBe(2);
+    const reopened = await ControlJournal.open(root, 5);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: reopened });
+    const sequenceBeforeRestartRetry = reopened.sequence;
+    await expect(submit(restarted, {
+      ...openTerminalCommand('idem-blocked-dirty', 'blocked-dirty-restart'), ownerEpoch: 5,
+    })).resolves.toMatchObject({ status: 'unknown', code: COMPACTED_OUTCOME_CODE });
+    expect(reopened.sequence).toBe(sequenceBeforeRestartRetry);
+    expect(invocations).toBe(2);
+  }, 90_000);
+
+  it('bounds dirty durability failures without blocking retries and reopens fresh capacity after a flush', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey.startsWith('idem-backlog-') && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    for (let index = 0; index < 256; index += 1) {
+      await expect(submit(runtime, openTerminalCommand(`idem-backlog-${index}`, `cmd-backlog-${index}`)))
+        .resolves.toEqual({ status: 'succeeded', value: { paneId: `pane-${index + 1}` } });
+    }
+
+    const retrySequenceBefore = journal.sequence;
+    const retryCallsBefore = invocations;
+    await expect(submit(runtime, openTerminalCommand('idem-backlog-0', 'cmd-backlog-retry')))
+      .resolves.toMatchObject({ status: 'succeeded', value: { paneId: 'pane-1' } });
+    expect(journal.sequence).toBe(retrySequenceBefore);
+    expect(invocations).toBe(retryCallsBefore);
+
+    const blockedSequenceBefore = journal.sequence;
+    const blockedCallsBefore = invocations;
+    await expect(submit(runtime, openTerminalCommand('idem-backlog-overflow', 'cmd-backlog-overflow')))
+      .resolves.toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    expect(journal.sequence).toBe(blockedSequenceBefore);
+    expect(invocations).toBe(blockedCallsBefore);
+
+    failDirty = false;
+    await expect(submit(runtime, openTerminalCommand('idem-backlog-recovered', 'cmd-backlog-recovered')))
+      .resolves.toMatchObject({ status: 'succeeded', value: { paneId: 'pane-257' } });
+    expect(await journal.loadOutcome('idem-backlog-255')).toMatchObject({
+      status: 'succeeded',
+      value: { paneId: 'pane-256' },
+    });
+    expect((runtime as any).dirtyTerminalOutcomes.size).toBe(0);
+  }, 90_000);
+
+  it('shares the 256 durability budget between dirty outcomes and active fresh executions', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const persist = journal.storeOutcome.bind(journal);
+    let failDirty = true;
+    const holdExecution = { release: undefined as (() => void) | undefined };
+    const heldStarted = new Promise<void>((resolve) => {
+      holdExecution.release = resolve;
+    });
+    let startedHeld = false;
+    let invocations = 0;
+    handlers.launchRitual = vi.fn(async ({ ritualId }) => {
+      invocations += 1;
+      if (ritualId === 'idem-shared-budget-held') {
+        startedHeld = true;
+        await heldStarted;
+      }
+      return undefined;
+    });
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey.startsWith('idem-shared-budget-') && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await persist(idempotencyKey, outcome);
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    for (let index = 0; index < 255; index += 1) {
+      await expect(submit(runtime, ritualLaunchCommand(`idem-shared-budget-${index}`, `seed-${index}`)))
+        .resolves.toEqual({ status: 'succeeded' });
+    }
+    expect((runtime as any).dirtyTerminalOutcomes.size).toBe(255);
+
+    const held = submit(runtime, ritualLaunchCommand('idem-shared-budget-held', 'held'));
+    await vi.waitFor(() => expect(startedHeld).toBe(true));
+    expect((runtime as any).activeFreshExecutions.size).toBe(1);
+
+    const blockedCallsBefore = invocations;
+    const blockedSequenceBefore = journal.sequence;
+    await expect(submit(runtime, ritualLaunchCommand('idem-shared-budget-overflow', 'overflow')))
+      .resolves.toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    expect(invocations).toBe(blockedCallsBefore);
+    expect(journal.sequence).toBe(blockedSequenceBefore);
+
+    holdExecution.release?.();
+    await expect(held).resolves.toEqual({ status: 'succeeded' });
+    expect((runtime as any).dirtyTerminalOutcomes.size).toBe(256);
+
+    const replayCallsBefore = invocations;
+    await expect(submit(runtime, ritualLaunchCommand('idem-shared-budget-0', 'retry-seed')))
+      .resolves.toEqual({ status: 'succeeded' });
+    await expect(submit(runtime, ritualLaunchCommand('idem-shared-budget-held', 'retry-held')))
+      .resolves.toEqual({ status: 'succeeded' });
+    expect(invocations).toBe(replayCallsBefore);
+
+    failDirty = false;
+  }, 90_000);
+
+  it('atomically reserves the last shared durability slot for one cold miss', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    const dirtyTerminalOutcomes = (runtime as unknown as {
+      dirtyTerminalOutcomes: Map<string, { sequence: number; outcome?: { status: 'succeeded' } }>;
+    }).dirtyTerminalOutcomes;
+    for (let index = 0; index < 255; index += 1) {
+      dirtyTerminalOutcomes.set(`seed-dirty-${index}`, {
+        sequence: index + 1,
+        outcome: { status: 'succeeded' },
+      });
+    }
+
+    const coldLookupsReady = createDeferred<void>();
+    const releaseColdLookups = createDeferred<void>();
+    let waitingLookups = 0;
+    const originalLoadOutcome = journal.loadOutcome.bind(journal);
+    vi.spyOn(journal, 'loadOutcome').mockImplementation(async (idempotencyKey) => {
+      if (!idempotencyKey.startsWith('idem-atomic-slot-')) return originalLoadOutcome(idempotencyKey);
+      waitingLookups += 1;
+      if (waitingLookups === 2) coldLookupsReady.resolve();
+      await releaseColdLookups.promise;
+      return undefined;
+    });
+
+    const releaseEffect = createDeferred<void>();
+    handlers.launchRitual = vi.fn(async () => {
+      await releaseEffect.promise;
+      return undefined;
+    });
+
+    const first = submit(runtime, ritualLaunchCommand('idem-atomic-slot-a', 'atomic-a'));
+    const second = submit(runtime, ritualLaunchCommand('idem-atomic-slot-b', 'atomic-b'));
+    await coldLookupsReady.promise;
+    releaseColdLookups.resolve();
+
+    const early = await Promise.race([
+      first.then((value) => ({ key: 'a' as const, value })),
+      second.then((value) => ({ key: 'b' as const, value })),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('expected a durability rejection before fresh execution completed')), 5_000);
+      }),
+    ]);
+
+    expect(early.value).toMatchObject({ status: 'rejected', code: 'durability_unavailable' });
+    const rejectedKey = early.key === 'a' ? 'idem-atomic-slot-a' : 'idem-atomic-slot-b';
+    const admittedKey = early.key === 'a' ? 'idem-atomic-slot-b' : 'idem-atomic-slot-a';
+    await vi.waitFor(() => expect(handlers.launchRitual).toHaveBeenCalledTimes(1));
+    expect(journal.findByIdempotencyKey(rejectedKey)).toBeUndefined();
+    expect(journal.findByIdempotencyKey(admittedKey)?.kind).toBe('command.requested');
+
+    releaseEffect.resolve();
+    const outcomes = await Promise.all([first, second]);
+    expect(outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'succeeded' }),
+      expect.objectContaining({ status: 'rejected', code: 'durability_unavailable' }),
+    ]));
+    expect(journal.read(0).filter((event) => (
+      event.payload.idempotencyKey === 'idem-atomic-slot-a'
+      || event.payload.idempotencyKey === 'idem-atomic-slot-b'
+    ))).toHaveLength(2);
+  });
+
+  it('persists a recovery-generated unknown outcome to the durable sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    await journal.append('command.requested', {
+      commandId: 'cmd-crash',
+      idempotencyKey: 'idem-crash-recovered',
+      kind: 'pane.takeover',
+      ownerEpoch: 4,
+    });
+    await journal.append('command.accepted', {
+      commandId: 'cmd-crash',
+      idempotencyKey: 'idem-crash-recovered',
+    });
+
+    await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    await expect(journal.loadOutcome('idem-crash-recovered')).resolves.toEqual({
+      status: 'unknown',
+      code: 'recovered-nonterminal',
+      message: 'command outcome is unknown',
+    });
+  });
+
+  it('replays a recovered surface crash as an exact unknown without re-executing it', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const command = providerUpsertCommand('surface-crash-recovered') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    await journal.append('command.requested', {
+      commandId: command.id,
+      idempotencyKey: command.idempotencyKey,
+      kind: command.kind,
+      ownerEpoch: command.ownerEpoch,
+    });
+
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+    expect(runtime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+    await expect(journal.loadOutcome(command.idempotencyKey)).resolves.toEqual({
+      status: 'unknown',
+      code: 'recovered-nonterminal',
+      message: 'command outcome is unknown',
+    });
+
+    const sequenceBefore = journal.sequence;
+    await expect(submit(runtime, { ...command, id: 'provider-surface-crash-recovered-retry' }))
+      .resolves.toEqual({
+        status: 'unknown',
+        code: 'recovered-nonterminal',
+        message: 'command outcome is unknown',
+      });
+    expect(journal.sequence).toBe(sequenceBefore);
+    expect(runtime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+  });
+
+  it('keeps a recovered surface unknown replayable across restarts while sidecar persistence is unavailable', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const command = providerUpsertCommand('surface-crash-recovered-dirty') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    const openJournal = async (ownerEpoch: number) => ControlJournal.open(root, ownerEpoch);
+    let failDirty = true;
+
+    {
+      const journal = await openJournal(4);
+      await journal.append('command.requested', {
+        commandId: command.id,
+        idempotencyKey: command.idempotencyKey,
+        kind: command.kind,
+        ownerEpoch: command.ownerEpoch,
+      });
+    }
+
+    const firstJournal = await openJournal(4);
+    const firstPersist = firstJournal.storeOutcome.bind(firstJournal);
+    vi.spyOn(firstJournal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === command.idempotencyKey && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await firstPersist(idempotencyKey, outcome);
+    });
+    const firstRuntime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal: firstJournal });
+    const expectedUnknown = {
+      status: 'unknown',
+      code: 'recovered-nonterminal',
+      message: 'command outcome is unknown',
+    } as const;
+
+    expect(firstRuntime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+    expect(await firstJournal.loadOutcome(command.idempotencyKey)).toBeUndefined();
+    await expect(submit(firstRuntime, { ...command, id: 'surface-crash-recovered-dirty-retry-1' }))
+      .resolves.toEqual(expectedUnknown);
+
+    const secondJournal = await openJournal(5);
+    const secondPersist = secondJournal.storeOutcome.bind(secondJournal);
+    vi.spyOn(secondJournal, 'storeOutcome').mockImplementation(async (idempotencyKey, outcome) => {
+      if (idempotencyKey === command.idempotencyKey && failDirty) {
+        throw new Error('sidecar write failed');
+      }
+      await secondPersist(idempotencyKey, outcome);
+    });
+    const secondRuntime = await ControlRuntime.create({ ownerEpoch: 5, handlers, journal: secondJournal });
+    const secondSequenceBefore = secondJournal.sequence;
+    await expect(submit(secondRuntime, { ...command, id: 'surface-crash-recovered-dirty-retry-2' }))
+      .resolves.toEqual(expectedUnknown);
+    expect(secondJournal.sequence).toBe(secondSequenceBefore);
+    expect(secondRuntime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+    expect((secondRuntime as any).dirtyTerminalOutcomes.get(command.idempotencyKey)).toMatchObject({
+      outcome: expectedUnknown,
+    });
+
+    failDirty = false;
+    const recoveredJournal = await openJournal(6);
+    const recoveredRuntime = await ControlRuntime.create({ ownerEpoch: 6, handlers, journal: recoveredJournal });
+    await expect(recoveredJournal.loadOutcome(command.idempotencyKey)).resolves.toEqual(expectedUnknown);
+    const recoveredSequenceBefore = recoveredJournal.sequence;
+    await expect(submit(recoveredRuntime, { ...command, id: 'surface-crash-recovered-dirty-retry-3' }))
+      .resolves.toEqual(expectedUnknown);
+    expect(recoveredJournal.sequence).toBe(recoveredSequenceBefore);
+    expect(recoveredRuntime.surfaces.get(command.payload.resource.id)).toBeUndefined();
+  });
+
+  it('reconstructs a retained non-surface terminal when its exact sidecar is missing', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const first = await submit(runtime, openTerminalCommand('non-surface-missing-sidecar'));
+    await rm(storedOutcomePath(root, 'non-surface-missing-sidecar'), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    expect(await reopened.loadOutcome('non-surface-missing-sidecar')).toEqual(first);
+    const sequenceBefore = reopened.sequence;
+    const callsBefore = invocations;
+
+    await expect(submit(restarted, openTerminalCommand('non-surface-missing-sidecar', 'non-surface-retry')))
+      .resolves.toEqual(first);
+    expect(invocations).toBe(callsBefore);
+    expect(reopened.sequence).toBe(sequenceBefore);
+  });
+
+  it('fails closed on startup when a retained surface terminal event has no exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    await submit(runtime, providerUpsertCommand('surface-missing-sidecar'));
+    await rm(storedOutcomePath(root, 'surface-missing-sidecar'), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const sequenceBefore = reopened.sequence;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    await expect(reopened.loadOutcome('surface-missing-sidecar')).resolves.toBeUndefined();
+  });
+
+  it('fails closed when compaction retained only a surface terminal event without its exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'surface-request-compacted';
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    await submit(runtime, providerUpsertCommand(idempotencyKey));
+    const requested = journal.read(0).find((event) => (
+      event.kind === 'command.requested' && event.payload.idempotencyKey === idempotencyKey
+    ));
+    expect(requested).toBeDefined();
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: requested!.sequence,
+      outcomes: {},
+      receiptRecords: [],
+    });
+    await journal.compact(requested!.sequence);
+    await rm(storedOutcomePath(root, idempotencyKey), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const retained = reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey);
+    expect(retained.map((event) => event.kind)).toEqual(['command.succeeded']);
+    const sequenceBefore = reopened.sequence;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
+  });
+
+  it('fails closed when a legacy snapshot seeds a retained surface terminal without its exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'surface-legacy-snapshot-fallback';
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const first = await submit(runtime, providerUpsertCommand(idempotencyKey));
+    const requested = journal.read(0).find((event) => (
+      event.kind === 'command.requested' && event.payload.idempotencyKey === idempotencyKey
+    ));
+    expect(requested).toBeDefined();
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: requested!.sequence,
+      outcomes: { [idempotencyKey]: first },
+      receiptRecords: [],
+    });
+    await journal.compact(requested!.sequence);
+    await rm(storedOutcomePath(root, idempotencyKey), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const retained = reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey);
+    expect(retained.map((event) => event.kind)).toEqual(['command.succeeded']);
+    const sequenceBefore = reopened.sequence;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
+  });
+
+  it('fails closed when a legacy snapshot outcome exists without retained evidence or an exact sidecar', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const idempotencyKey = 'legacy-snapshot-sidecar-missing';
+    const first = await submit(runtime, openTerminalCommand(idempotencyKey));
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: journal.sequence,
+      outcomes: { [idempotencyKey]: first },
+      receiptRecords: [],
+    });
+    await journal.compact(journal.sequence);
+    await rm(storedOutcomePath(root, idempotencyKey), { force: true });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const sequenceBefore = reopened.sequence;
+    const callsBefore = invocations;
+
+    await expect(submit(restarted, openTerminalCommand(idempotencyKey, 'legacy-snapshot-sidecar-missing-retry')))
+      .rejects.toThrow('durable outcome sidecar is required for compacted snapshot outcomes');
+    expect(reopened.sequence).toBe(sequenceBefore);
+    expect(invocations).toBe(callsBefore);
+  });
+
+  it('replays a compacted legacy snapshot key from the exact sidecar rather than snapshot hot cache data', async () => {
+    const root = await newJournalRoot('control-runtime');
+    let invocations = 0;
+    handlers.openTerminal = vi.fn(async () => ({ paneId: `pane-${++invocations}` }));
+    const journal = await ControlJournal.open(root, 7);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+    const idempotencyKey = 'legacy-snapshot-sidecar-present';
+    const first = await submit(runtime, openTerminalCommand(idempotencyKey));
+
+    await journal.writeSnapshot({
+      snapshot: runtime.snapshot(),
+      coveredSequence: journal.sequence,
+      outcomes: { [idempotencyKey]: { status: 'succeeded', value: { paneId: '%stale-snapshot' } } },
+      receiptRecords: [],
+    });
+    await journal.compact(journal.sequence);
+
+    const reopened = await ControlJournal.open(root, 8);
+    const restarted = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened });
+    const sequenceBefore = reopened.sequence;
+    const callsBefore = invocations;
+
+    await expect(submit(restarted, openTerminalCommand(idempotencyKey, 'legacy-snapshot-sidecar-present-retry')))
+      .resolves.toEqual(first);
+    expect(reopened.sequence).toBe(sequenceBefore);
+    expect(invocations).toBe(callsBefore);
+  });
+
+  it('matches retained replay kinds by commandId and idempotencyKey for non-surface reconstruction', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 7);
+    const nonSurfaceOutcome = { status: 'succeeded', value: { paneId: '%retained' } } as const;
+    const surfaceCommand = providerUpsertCommand('surface-keep') as Extract<ControlCommand, { kind: 'provider.resource.upsert' }>;
+    const surfaceOutcome = {
+      status: 'succeeded',
+      value: { resource: surfaceCommand.payload.resource },
+    } as const;
+
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey: 'non-surface-reused-id',
+      kind: 'pane.terminal.open',
+      ownerEpoch: 7,
+    });
+    await journal.append('command.succeeded', {
+      commandId: 'shared-command',
+      idempotencyKey: 'non-surface-reused-id',
+      status: 'succeeded',
+      value: nonSurfaceOutcome.value,
+    });
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey: 'surface-keep',
+      kind: 'provider.resource.upsert',
+      ownerEpoch: 7,
+    });
+    await journal.append('command.succeeded', {
+      commandId: 'shared-command',
+      idempotencyKey: 'surface-keep',
+      status: 'succeeded',
+      outcomeDigest: exactCommandOutcomeDigest(surfaceOutcome),
+    });
+    await journal.storeOutcome('surface-keep', surfaceOutcome);
+
+    const restartedJournal = await ControlJournal.open(root, 8);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 8, handlers, journal: restartedJournal });
+
+    await expect(restartedJournal.loadOutcome('non-surface-reused-id')).resolves.toEqual(nonSurfaceOutcome);
+    const sequenceBefore = restartedJournal.sequence;
+    await expect(submit(runtime, openTerminalCommand('non-surface-reused-id', 'retry-non-surface-reused-id')))
+      .resolves.toEqual(nonSurfaceOutcome);
+    expect(restartedJournal.sequence).toBe(sequenceBefore);
+  });
+
+  it('fails closed for a retained surface terminal even when a reused command id has a non-surface request', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const idempotencyKey = 'surface-reused-command-id';
+    const journal = await ControlJournal.open(root, 7);
+
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey,
+      kind: 'provider.resource.upsert',
+      ownerEpoch: 7,
+    });
+    await journal.append('command.succeeded', {
+      commandId: 'shared-command',
+      idempotencyKey,
+      status: 'succeeded',
+    });
+    await journal.append('command.requested', {
+      commandId: 'shared-command',
+      idempotencyKey: 'later-non-surface',
+      kind: 'pane.terminal.open',
+      ownerEpoch: 7,
+    });
+
+    const reopened = await ControlJournal.open(root, 8);
+    const surfaceEventsBefore = reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey).length;
+
+    await expect(ControlRuntime.create({ ownerEpoch: 8, handlers, journal: reopened }))
+      .rejects.toThrow('durable outcome sidecar is required for retained surface or unknown terminal events');
+    expect(reopened.read(0).filter((event) => event.payload.idempotencyKey === idempotencyKey)).toHaveLength(surfaceEventsBefore);
+    await expect(reopened.loadOutcome(idempotencyKey)).resolves.toBeUndefined();
   });
 
   it('rejects a stale owner epoch before side effects', async () => {
@@ -1339,18 +2196,20 @@ describe('ControlRuntime', () => {
   });
 
   it('bounds pending commands before retaining another unresolved execution', async () => {
-    handlers.executeOrchestration = vi.fn(() => new Promise<never>(() => undefined));
+    handlers.launchRitual = vi.fn(() => new Promise<never>(() => undefined));
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
     for (let index = 0; index < 256; index += 1) {
       void runtime.submit(command({
         id: `pending-${index}`, idempotencyKey: `pending-${index}`,
-        kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+        kind: 'ritual.launch', ownerEpoch: 7,
+        payload: { projectId: 'project-1', ritualId: `ritual-${index}`, params: {} },
       }));
     }
 
     await expect(runtime.submit(command({
       id: 'pending-overflow', idempotencyKey: 'pending-overflow',
-      kind: 'orchestration.execute', ownerEpoch: 7, payload: { request: {} },
+      kind: 'ritual.launch', ownerEpoch: 7,
+      payload: { projectId: 'project-1', ritualId: 'ritual-overflow', params: {} },
     }))).resolves.toMatchObject({ status: 'rejected', code: 'runtime_busy' });
   });
 
@@ -1607,6 +2466,273 @@ describe('ControlRuntime', () => {
       payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision } })))
       .resolves.toMatchObject({ status: 'succeeded' });
     expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
+  });
+
+  it('derives orchestration authority from the control idempotency key, not caller names or trace ids', async () => {
+    const observed: Array<{ operationId: string | undefined; requestOperationId?: string }> = [];
+    handlers.executeOrchestration = vi.fn(async (payload, _authorize, operationId) => {
+      observed.push({
+        operationId,
+        requestOperationId: (payload.request as { operationId?: string }).operationId,
+      });
+      return { ok: true };
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+    });
+    const request = {
+      taskId: 'shared-task',
+      traceId: 'caller-trace',
+      operationId: 'caller-operation-must-not-win',
+      projectRoot: '/repo',
+      prompt: 'test',
+      lanes: [{ id: 'same-lane', mode: 'terminal' as const }],
+    };
+    const granted = await submit(runtime, command({
+      id: 'grant-operation-authority',
+      idempotencyKey: 'grant-operation-authority',
+      kind: 'lease.grant',
+      ownerEpoch: 7,
+      payload: {
+        requestId: 'request-operation-authority',
+        actorId: 'agent-1',
+        taskId: request.taskId,
+        ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: '/repo' }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    const execute = (id: string, idempotencyKey: string) => submit(runtime, command({
+      id,
+      idempotencyKey,
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        request,
+        taskId: request.taskId,
+        leaseId: lease.id,
+        leaseRevision: lease.revision,
+      },
+    }));
+
+    await expect(execute('control-operation-a', 'canonical-control-operation-a'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    await expect(execute('control-operation-a-retry', 'canonical-control-operation-a'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+    await expect(execute('control-operation-b', 'canonical-control-operation-b'))
+      .resolves.toMatchObject({ status: 'succeeded' });
+
+    expect(handlers.executeOrchestration).toHaveBeenCalledTimes(2);
+    expect(observed[0].operationId).toMatch(/^orch-op-v1-[0-9a-f]{64}$/);
+    expect(observed[0].requestOperationId).toBe(observed[0].operationId);
+    expect(observed[1].requestOperationId).toBe(observed[1].operationId);
+    expect(observed[1].operationId).not.toBe(observed[0].operationId);
+    expect(observed[0].operationId).not.toContain(request.taskId);
+    expect(observed[0].operationId).not.toContain(request.traceId);
+  });
+
+  it('revalidates lease revocation before each orchestration lane effect', async () => {
+    const projectRoot = process.cwd();
+    const capabilityLeases = new CapabilityLeaseStore(
+      () => new Date('2026-08-17T12:00:00.000Z'),
+      7,
+    );
+    const effects: string[] = [];
+    let leaseId = '';
+    handlers.executeOrchestration = vi.fn(async (payload, authorize) => {
+      const orchestrator = new Orchestrator({
+        executeLane: async (lane) => {
+          effects.push(lane.id);
+          if (lane.id === 'first') capabilityLeases.revoke(leaseId);
+          return { pane: { id: `pane-${lane.id}`, slug: lane.id } as never };
+        },
+      });
+      return orchestrator.execute(payload.request, { beforeLaneEffect: authorize });
+    });
+    const journal = createMemoryJournal();
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal,
+      capabilityLeases,
+    });
+    const request = { taskId: 'task-orchestration', projectRoot, prompt: 'test',
+      concurrency: 1, lanes: [
+        { id: 'first', mode: 'terminal' as const },
+        { id: 'second', mode: 'terminal' as const },
+      ] };
+    const granted = await submit(runtime, command({
+      id: 'grant-orchestration-revoke', idempotencyKey: 'grant-orchestration-revoke',
+      kind: 'lease.grant', projectRoot, ownerEpoch: 7, payload: {
+        requestId: 'request-orchestration-revoke', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+    leaseId = lease.id;
+
+    const orchestration = command({
+      id: 'orchestration-revoke', idempotencyKey: 'orchestration-revoke',
+      kind: 'orchestration.execute', projectRoot, ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision },
+    });
+    const firstOutcome = await submit(runtime, orchestration);
+    expect(firstOutcome).toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          {
+            id: 'first',
+            status: 'completed',
+            pane: { id: 'pane-first', slug: 'first' },
+          },
+          {
+            id: 'second',
+            status: 'failed',
+            error: { code: 'lease_missing' },
+          },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+
+    await expect(submit(runtime, {
+      ...orchestration,
+      id: 'orchestration-revoke-retry',
+    })).resolves.toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          { id: 'first', status: 'completed', pane: { id: 'pane-first' } },
+          { id: 'second', status: 'failed', error: { code: 'lease_missing' } },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+    expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
+
+    const recovered = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal,
+    });
+    await expect(submit(recovered, {
+      ...orchestration,
+      id: 'orchestration-revoke-restart-retry',
+    })).resolves.toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          { id: 'first', status: 'completed', pane: { id: 'pane-first' } },
+          { id: 'second', status: 'failed', error: { code: 'lease_missing' } },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+    expect(handlers.executeOrchestration).toHaveBeenCalledOnce();
+  });
+
+  it('revalidates lease expiry before each orchestration lane effect', async () => {
+    const projectRoot = process.cwd();
+    let now = new Date('2026-08-17T12:00:00.000Z');
+    const capabilityLeases = new CapabilityLeaseStore(() => now, 7);
+    const effects: string[] = [];
+    handlers.executeOrchestration = vi.fn(async (payload, authorize) => {
+      const orchestrator = new Orchestrator({
+        executeLane: async (lane) => {
+          effects.push(lane.id);
+          if (lane.id === 'first') {
+            now = new Date('2026-08-17T12:01:01.000Z');
+          }
+          return { pane: { id: `pane-${lane.id}`, slug: lane.id } as never };
+        },
+      });
+      return orchestrator.execute(payload.request, { beforeLaneEffect: authorize });
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7,
+      handlers,
+      journal: createMemoryJournal(),
+      capabilityLeases,
+    });
+    const request = { taskId: 'task-orchestration', projectRoot, prompt: 'test',
+      concurrency: 1, lanes: [
+        { id: 'first', mode: 'terminal' as const },
+        { id: 'second', mode: 'terminal' as const },
+      ] };
+    const granted = await submit(runtime, command({
+      id: 'grant-orchestration-expiry', idempotencyKey: 'grant-orchestration-expiry',
+      kind: 'lease.grant', projectRoot, ownerEpoch: 7, payload: {
+        requestId: 'request-orchestration-expiry', actorId: 'agent-1',
+        taskId: request.taskId, ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
+      },
+    }));
+    const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
+
+    await expect(submit(runtime, command({
+      id: 'orchestration-expiry', idempotencyKey: 'orchestration-expiry',
+      kind: 'orchestration.execute', projectRoot, ownerEpoch: 7, actor: { id: 'agent-1', kind: 'psyche' },
+      payload: { request, taskId: request.taskId, leaseId: lease.id, leaseRevision: lease.revision },
+    }))).resolves.toMatchObject({
+      status: 'succeeded',
+      value: {
+        status: 'partial',
+        lanes: [
+          { id: 'first', status: 'completed', pane: { id: 'pane-first' } },
+          { id: 'second', status: 'failed', error: { code: 'lease_expired' } },
+        ],
+      },
+    });
+    expect(effects).toEqual(['first']);
+  });
+
+  it('reconciles recovered orchestration ambiguity without replay', async () => {
+    const journal = createMemoryJournal();
+    await journal.append('command.requested', {
+      commandId: 'orchestration-before-drop',
+      idempotencyKey: 'stable-operation',
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+    });
+    journal.recoverNonterminalCommands = vi.fn(async () => [
+      await journal.append('command.unknown', {
+        commandId: 'orchestration-before-drop',
+        idempotencyKey: 'stable-operation',
+        reason: 'recovered-nonterminal',
+      }),
+    ]);
+    handlers.executeOrchestration = vi.fn(async () => {
+      throw new Error('must not replay');
+    });
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal });
+
+    await expect(runtime.submit(command({
+      id: 'orchestration-retry',
+      idempotencyKey: 'stable-operation',
+      kind: 'orchestration.execute',
+      ownerEpoch: 7,
+      actor: { id: 'agent-1', kind: 'psyche' },
+      payload: {
+        taskId: 'task-orchestration',
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        request: {
+          taskId: 'task-orchestration',
+          projectRoot: '/repo',
+          prompt: 'test',
+          lanes: [{ id: 'one', mode: 'terminal' }],
+        },
+      },
+    }))).resolves.toMatchObject({ status: 'unknown', code: 'recovered-nonterminal' });
+    expect(handlers.executeOrchestration).not.toHaveBeenCalled();
   });
 
   it('revalidates lease expiry before an approved effect', async () => {
@@ -2135,8 +3261,15 @@ describe('ControlRuntime', () => {
   });
 
   it('invalidates restart-pending approval receipts once and rehydrates the terminal status', async () => {
-    const harness = await createBrowserActionHarness();
-    await requestReviewApproval(harness);
+    const root = await newJournalRoot('psyche-approval-durability');
+    const journal = await ControlJournal.open(root, 7);
+    const harness = await createBrowserActionHarness({ journal });
+    const approval = await requestReviewApproval(harness);
+
+    await expect(journal.loadOutcome('approval-action')).resolves.toMatchObject({
+      status: 'succeeded',
+      value: { state: 'approval_required', approvalId: approval.approvalId },
+    });
 
     const restarted = await ControlRuntime.create({
       ownerEpoch: 8,
@@ -2166,6 +3299,10 @@ describe('ControlRuntime', () => {
       actionId: 'approval-action',
       state: 'approval_required',
     }));
+    await expect(journal.loadOutcome('approval-action')).resolves.toMatchObject({
+      status: 'failed',
+      code: 'action_invalidated',
+    });
     await expect(restarted.submit(command({
       id: 'approval-action-retry',
       idempotencyKey: 'approval-action',
@@ -2183,20 +3320,80 @@ describe('ControlRuntime', () => {
       },
     }))).resolves.toMatchObject({ status: 'failed', code: 'action_invalidated' });
 
-    const invalidations = harness.journal.read().filter((event) => (
+    const invalidations = journal.read(0).filter((event) => (
       event.kind === 'command.failed'
       && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.actionId === 'approval-action'
       && (event.payload.receipt as { actionId?: string; code?: string } | undefined)?.code === 'action_invalidated'
     ));
     expect(invalidations).toHaveLength(1);
 
-    const eventsAfterFirstRestart = harness.journal.read().length;
+    const eventsAfterFirstRestart = journal.read(0).length;
     const restartedAgain = await ControlRuntime.create({ ownerEpoch: 9, handlers, journal: harness.journal });
-    expect(harness.journal.read()).toHaveLength(eventsAfterFirstRestart);
+    expect(journal.read(0)).toHaveLength(eventsAfterFirstRestart);
     expect(restartedAgain.snapshot().receipts).toContainEqual(expect.objectContaining({
       actionId: 'approval-action',
       state: 'failed',
       code: 'action_invalidated',
     }));
+    await expect(journal.loadOutcome('approval-action')).resolves.toMatchObject({
+      status: 'failed',
+      code: 'action_invalidated',
+    });
+  });
+});
+
+describe('ControlRuntime pane barrier retention', () => {
+  /** Seeds a takeover barrier for a pane without going through a command. */
+  function seedBarrier(runtime: ControlRuntime, paneId: string, generation = 1) {
+    (runtime as any).paneBarrierGenerations.set(paneId, generation);
+  }
+
+  function barriers(runtime: ControlRuntime): Map<string, number> {
+    return (runtime as any).paneBarrierGenerations;
+  }
+
+  function prune(runtime: ControlRuntime) {
+    (runtime as any).pruneInactiveResourceQueues();
+  }
+
+  it('releases the barrier of a pane with no surface and no queue', async () => {
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces: new SurfaceRegistry(),
+    });
+    seedBarrier(runtime, '%9');
+
+    prune(runtime);
+
+    expect(barriers(runtime).has('%9')).toBe(false);
+  });
+
+  it('keeps the barrier of a pane that still has a surface', async () => {
+    const surfaces = new SurfaceRegistry();
+    surfaces.upsertPane({
+      id: '%9', projectRoot: '/repo', worktreeRoot: '/repo', tmuxPaneId: '%9',
+      writable: true, outputSequence: 0,
+    });
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces,
+    });
+    seedBarrier(runtime, '%9', 3);
+
+    prune(runtime);
+
+    expect(barriers(runtime).get('%9')).toBe(3);
+  });
+
+  it('keeps the barrier of a surfaceless pane that still has a queue', async () => {
+    const runtime = await ControlRuntime.create({
+      ownerEpoch: 7, handlers, journal: createMemoryJournal(), surfaces: new SurfaceRegistry(),
+    });
+    seedBarrier(runtime, '%9', 2);
+    // A queue created while the pane had a surface keeps that generation in its
+    // key, so pruning must match on pane id rather than rebuilding the key.
+    (runtime as any).queueForResource({ kind: 'pane', id: '%9', generation: 5 });
+
+    prune(runtime);
+
+    expect(barriers(runtime).get('%9')).toBe(2);
   });
 });

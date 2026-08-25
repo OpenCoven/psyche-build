@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
@@ -11,6 +11,58 @@ import { SurfaceRegistry } from '../../src/control/surfaces.js';
 import { ControlRuntime } from '../../src/control/runtime.js';
 import { CapabilityLeaseStore } from '../../src/control/capabilityLeases.js';
 import { ApprovalStore } from '../../src/control/approvals.js';
+import { Orchestrator } from '../../src/orchestration/orchestrator.js';
+
+describe('createDaemonControlHandlers executeOrchestration', () => {
+  it('uses the authorized task and daemon root while preserving validated claimed cwd', async () => {
+    const projectRoot = await realpath(process.cwd());
+    const completed = {
+      taskId: 'authorized-task',
+      traceId: 'trace-1',
+      status: 'completed' as const,
+      startedAt: '2026-08-17T12:00:00.000Z',
+      completedAt: '2026-08-17T12:00:01.000Z',
+      lanes: [],
+    };
+    const execute = vi.fn(async () => completed);
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-test'),
+      projectRoot,
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      orchestrator: { execute },
+    });
+
+    const authorizeEffect = vi.fn(async () => undefined);
+    const result = await handlers.executeOrchestration(
+      {
+        taskId: 'authorized-task',
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        request: {
+          taskId: 'caller-task',
+          projectRoot: path.join(projectRoot, 'src'),
+          cwd: 'daemon',
+          prompt: 'test',
+          lanes: [{ id: 'one', mode: 'terminal' }],
+        },
+      },
+      authorizeEffect,
+      'control-operation-authority',
+    );
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'authorized-task',
+        operationId: 'control-operation-authority',
+        projectRoot,
+        cwd: path.join(projectRoot, 'src', 'daemon'),
+      }),
+      { beforeLaneEffect: authorizeEffect },
+    );
+    expect(result).toEqual(completed);
+  });
+});
 
 function handlersWithCovenClient(
   sendInput: (sessionId: string, input: string) => Promise<void>,
@@ -189,6 +241,46 @@ describe('createDaemonControlHandlers updatePaneMeta', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('createDaemonControlHandlers executeOrchestration', () => {
+  it('executes the canonical task through the configured orchestrator', async () => {
+    const executeLane = vi.fn(async () => ({}));
+    const orchestrator = new Orchestrator({ executeLane });
+    const handlers = createDaemonControlHandlers({
+      tmux: new TmuxControl('psyche-test'),
+      projectRoot: process.cwd(),
+      sessionName: 'psyche-test',
+      capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+      orchestrator,
+    } as any);
+
+    const result = await handlers.executeOrchestration(
+      {
+        taskId: 'task-1',
+        leaseId: 'lease-1',
+        leaseRevision: 1,
+        request: {
+          taskId: 'task-1',
+          projectRoot: process.cwd(),
+          prompt: 'Fix tests',
+          lanes: [{ id: 'terminal', mode: 'terminal' }],
+        },
+      },
+      async () => undefined,
+      'control-operation-1',
+    );
+
+    expect(executeLane).toHaveBeenCalledOnce();
+    expect(executeLane).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: 'control-operation-1',
+    }));
+    expect(result).toMatchObject({
+      taskId: 'task-1',
+      status: 'completed',
+      lanes: [{ id: 'terminal', status: 'completed' }],
+    });
   });
 });
 

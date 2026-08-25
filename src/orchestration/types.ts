@@ -1,5 +1,6 @@
 import type { PsychePane, MergeTargetReference } from '../types.js';
 import type { AgentName, PermissionMode } from '../utils/agentLaunch.js';
+import type { DurableEffectWarning } from '../utils/durableEffectWarnings.js';
 
 export const ORCHESTRATION_LANE_MODES = [
   'isolated-worktree',
@@ -28,6 +29,7 @@ export interface OrchestrationLaneRequest {
 export interface OrchestrationTaskRequest {
   taskId: string;
   traceId?: string;
+  operationId: string;
   projectRoot: string;
   cwd?: string;
   prompt: string;
@@ -38,9 +40,14 @@ export interface OrchestrationTaskRequest {
   lanes: OrchestrationLaneRequest[];
 }
 
+export type OrchestrationTaskSubmission =
+  Omit<OrchestrationTaskRequest, 'operationId'>
+  & { operationId?: string };
+
 export interface OrchestrationLanePlan extends OrchestrationLaneRequest {
   taskId: string;
   traceId: string;
+  operationId: string;
   index: number;
   projectRoot: string;
   cwd: string;
@@ -53,6 +60,7 @@ export interface OrchestrationLanePlan extends OrchestrationLaneRequest {
 export interface OrchestrationTaskPlan {
   taskId: string;
   traceId: string;
+  operationId: string;
   projectRoot: string;
   cwd: string;
   concurrency: number;
@@ -65,10 +73,20 @@ export interface OrchestrationLaneResultBase {
   completedAt: string;
 }
 
+export interface OrchestrationPersistenceWarning {
+  code: 'orchestration_persistence_failed';
+  message: string;
+}
+
+export type OrchestrationWarning =
+  | OrchestrationPersistenceWarning
+  | DurableEffectWarning;
+
 export interface OrchestrationLaneSuccess extends OrchestrationLaneResultBase {
   status: 'completed';
   pane?: PsychePane;
   sessionId?: string;
+  warnings?: readonly OrchestrationWarning[];
 }
 
 export interface OrchestrationLaneFailure extends OrchestrationLaneResultBase {
@@ -100,6 +118,10 @@ export const ORCHESTRATION_ERROR_CODES = [
   'capability_not_supported',
   'capability_contract_violation',
   'lane_execution_failed',
+  'lease_missing',
+  'lease_expired',
+  'lease_revision_mismatch',
+  'effect_unknown',
   'orchestration_persistence_failed',
 ] as const;
 

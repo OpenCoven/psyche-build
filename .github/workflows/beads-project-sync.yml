@@ -1,0 +1,348 @@
+name: Beads Project Sync
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan the sync without writing to GitHub"
+        required: false
+        type: boolean
+        default: false
+      allow_mass_close:
+        description: "Override the managed-issue mass-close safety limit"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beads-project-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync public Beads Project
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+    environment: ${{ github.event_name == 'schedule' && 'beads-project-sync-automation' || 'beads-project-sync' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Initialize sync artifacts
+        env:
+          MANUAL_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$RUNNER_TEMP/beads-project-sync"
+          mode="apply"
+          if [[ "$MANUAL_DRY_RUN" == "true" ]]; then
+            mode="dry-run"
+          fi
+
+          mkdir -p "$artifact_dir"
+          printf '{"schemaVersion":1,"mode":"%s","status":"pending","phase":"checkout","outcome":"pending","failure":{"cause":"Workflow did not complete checkout or reach the Beads sync step."}}\n' \
+            "$mode" >"$artifact_dir/summary.json"
+          printf 'Fallback diagnostics initialized before checkout.\n' \
+            >"$artifact_dir/diagnostics.log"
+
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        id: pnpm_setup
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Set up Node.js
+        id: node_setup
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Beads CLI 1.2.2
+        id: beads
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.2.2"
+          archive="beads_${version}_linux_amd64.tar.gz"
+          archive_path="$RUNNER_TEMP/$archive"
+          install_dir="$RUNNER_TEMP/beads-$version"
+          checksum="8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
+
+          curl --fail --location --silent --show-error \
+            "https://github.com/gastownhall/beads/releases/download/v${version}/${archive}" \
+            --output "$archive_path"
+          printf '%s  %s\n' "$checksum" "$archive_path" | sha256sum --check --strict
+          mkdir -p "$install_dir" "$HOME/.local/bin"
+          tar -xzf "$archive_path" -C "$install_dir"
+          install -m 0755 "$install_dir/bd" "$HOME/.local/bin/bd"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version | grep -E '^bd version v?1\.2\.2([[:space:]]|$)'
+
+      - name: Bootstrap Beads for manual dry-run
+        id: beads_bootstrap
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        shell: bash
+        run: |
+          set -euo pipefail
+          bd bootstrap --yes
+
+      - name: Install locked dependencies
+        id: dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync Beads to the public Project
+        id: sync_beads
+        # Fine-grained BEADS_PROJECT_TOKEN: repository Contents: read and write,
+        # Issues: read and write, Metadata: read; organization Projects: read and write.
+        env:
+          BEADS_PROJECT_TOKEN: ${{ secrets.BEADS_PROJECT_TOKEN }}
+          MANUAL_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          MANUAL_ALLOW_MASS_CLOSE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_mass_close }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$RUNNER_TEMP/beads-project-sync"
+          raw_summary="$RUNNER_TEMP/beads-project-summary.raw"
+          raw_diagnostics="$RUNNER_TEMP/beads-project-diagnostics.raw"
+          summary_path="$artifact_dir/summary.json"
+          diagnostics_path="$artifact_dir/diagnostics.log"
+          mkdir -p "$artifact_dir"
+
+          args=(--apply)
+          mode="apply"
+          if [[ "$MANUAL_DRY_RUN" == "true" ]]; then
+            args=(--dry-run)
+            mode="dry-run"
+          fi
+          if [[ "$MANUAL_ALLOW_MASS_CLOSE" == "true" ]]; then
+            args+=(--allow-mass-close)
+          fi
+
+          printf '{"schemaVersion":1,"mode":"%s","status":"failed","phase":"sync","outcome":"failure","exitCode":1,"failure":{"cause":"Sync step ended before structured results were finalized."}}\n' \
+            "$mode" >"$summary_path"
+          printf 'Sync step ended before diagnostics were finalized.\n' >"$diagnostics_path"
+
+          if node scripts/sync-beads-project.mjs "${args[@]}" \
+            >"$raw_summary" 2>"$raw_diagnostics"; then
+            sync_exit_code=0
+          else
+            sync_exit_code=$?
+          fi
+
+          if SYNC_MODE="$mode" \
+            SYNC_EXIT_CODE="$sync_exit_code" \
+            RAW_SUMMARY_PATH="$raw_summary" \
+            RAW_DIAGNOSTICS_PATH="$raw_diagnostics" \
+            SUMMARY_PATH="$summary_path" \
+            DIAGNOSTICS_PATH="$diagnostics_path" \
+            node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+
+          const token = process.env.BEADS_PROJECT_TOKEN ?? '';
+          const exitCode = Number.parseInt(process.env.SYNC_EXIT_CODE ?? '1', 10);
+          const redact = (value) => {
+            let sanitized = value;
+            if (token) {
+              sanitized = sanitized.split(token).join('<redacted>');
+            }
+            return sanitized
+              .replace(/\b(?:github_pat|gh[pousr])_[A-Za-z0-9_]+\b/gu, '<redacted>')
+              .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/giu, 'Bearer <redacted>');
+          };
+          const sanitizeValue = (value) => {
+            if (typeof value === 'string') {
+              return redact(value);
+            }
+            if (Array.isArray(value)) {
+              return value.map(sanitizeValue);
+            }
+            if (value && typeof value === 'object') {
+              return Object.fromEntries(
+                Object.entries(value).map(([key, item]) => [key, sanitizeValue(item)]),
+              );
+            }
+            return value;
+          };
+
+          const rawSummary = readFileSync(process.env.RAW_SUMMARY_PATH, 'utf8').trim();
+          let summary;
+          let validSummary = true;
+          try {
+            summary = JSON.parse(rawSummary);
+            if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
+              throw new Error('Summary must be a JSON object');
+            }
+          } catch {
+            validSummary = false;
+            summary = {
+              mode: process.env.SYNC_MODE,
+              status: exitCode === 0 ? 'invalid-summary' : 'failed',
+              exitCode,
+              failure: {
+                cause: 'Sync command did not emit a valid JSON summary; see diagnostics.log.',
+              },
+            };
+          }
+          summary.phase = 'sync';
+          summary.outcome = exitCode === 0 ? 'success' : 'failure';
+          summary.status ??= exitCode === 0 ? 'succeeded' : 'failed';
+
+          const diagnostics = redact(
+            readFileSync(process.env.RAW_DIAGNOSTICS_PATH, 'utf8'),
+          ).trim();
+          writeFileSync(
+            process.env.SUMMARY_PATH,
+            `${JSON.stringify(sanitizeValue(summary), null, 2)}\n`,
+          );
+          writeFileSync(
+            process.env.DIAGNOSTICS_PATH,
+            `${diagnostics || 'No diagnostics were emitted.'}\n`,
+          );
+
+          if (!validSummary && exitCode === 0) {
+            process.exitCode = 2;
+          }
+          NODE
+          then
+            summary_exit_code=0
+          else
+            summary_exit_code=$?
+          fi
+
+          rm -f "$raw_summary" "$raw_diagnostics"
+          cat "$diagnostics_path" >&2
+
+          if (( sync_exit_code != 0 )); then
+            exit "$sync_exit_code"
+          fi
+          exit "$summary_exit_code"
+
+      - name: Finalize sync artifacts
+        if: always()
+        env:
+          MANUAL_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          PNPM_SETUP_OUTCOME: ${{ steps.pnpm_setup.outcome }}
+          NODE_SETUP_OUTCOME: ${{ steps.node_setup.outcome }}
+          BEADS_OUTCOME: ${{ steps.beads.outcome }}
+          BEADS_BOOTSTRAP_OUTCOME: ${{ steps.beads_bootstrap.outcome }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SYNC_OUTCOME: ${{ steps.sync_beads.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$RUNNER_TEMP/beads-project-sync"
+          mkdir -p "$artifact_dir"
+          ARTIFACT_DIR="$artifact_dir" python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          artifact_dir = Path(os.environ['ARTIFACT_DIR'])
+          summary_path = artifact_dir / 'summary.json'
+          diagnostics_path = artifact_dir / 'diagnostics.log'
+          mode = 'dry-run' if os.environ.get('MANUAL_DRY_RUN') == 'true' else 'apply'
+          steps = [
+              ('checkout', os.environ.get('CHECKOUT_OUTCOME', 'unknown')),
+              ('pnpm-setup', os.environ.get('PNPM_SETUP_OUTCOME', 'unknown')),
+              ('node-setup', os.environ.get('NODE_SETUP_OUTCOME', 'unknown')),
+              ('beads-install', os.environ.get('BEADS_OUTCOME', 'unknown')),
+              ('beads-bootstrap', os.environ.get('BEADS_BOOTSTRAP_OUTCOME', 'unknown')),
+              ('dependency-install', os.environ.get('DEPENDENCIES_OUTCOME', 'unknown')),
+              ('sync', os.environ.get('SYNC_OUTCOME', 'unknown')),
+          ]
+          step_outcomes = dict(steps)
+
+          failed_step = next(
+              ((step, step_outcome) for step, step_outcome in steps
+               if step_outcome in {'failure', 'cancelled'}),
+              None,
+          )
+          if failed_step is not None:
+              phase, outcome = failed_step
+          elif step_outcomes['sync'] == 'success':
+              phase, outcome = 'sync', 'success'
+          else:
+              phase, outcome = next(
+                  ((step, step_outcome) for step, step_outcome in steps
+                   if step_outcome != 'success'),
+                  ('workflow', 'unknown'),
+              )
+
+          try:
+              summary = json.loads(summary_path.read_text())
+              if not isinstance(summary, dict):
+                  raise ValueError('summary must be an object')
+          except (OSError, ValueError, json.JSONDecodeError):
+              summary = {}
+
+          sync_outcome = step_outcomes['sync']
+          if not summary or summary.get('status') == 'pending' or sync_outcome in {'skipped', 'unknown', ''}:
+              status = 'cancelled' if outcome == 'cancelled' else 'failed'
+              summary = {
+                  'schemaVersion': 1,
+                  'mode': mode,
+                  'status': status,
+                  'phase': phase,
+                  'outcome': outcome,
+                  'failure': {
+                      'cause': (
+                          f'Workflow stopped during {phase} before the Beads sync '
+                          'command completed.'
+                      ),
+                  },
+              }
+          else:
+              summary.setdefault('schemaVersion', 1)
+              summary.setdefault(
+                  'status',
+                  'succeeded' if outcome == 'success' else 'failed',
+              )
+
+          summary['phase'] = phase
+          if outcome == 'cancelled':
+              summary['status'] = 'cancelled'
+              summary['outcome'] = 'cancelled'
+          else:
+              summary['outcome'] = outcome
+          summary['stepOutcomes'] = step_outcomes
+          summary_path.write_text(
+              f'{json.dumps(summary, indent=2, sort_keys=True)}\n',
+          )
+
+          if sync_outcome in {'success', 'failure'}:
+              try:
+                  diagnostics = diagnostics_path.read_text().rstrip()
+              except OSError:
+                  diagnostics = ''
+              suffix = f'Workflow phase: {phase}; outcome: {outcome}.'
+              diagnostics_path.write_text(
+                  f'{diagnostics + chr(10) if diagnostics else ""}{suffix}\n',
+              )
+          else:
+              diagnostics_path.write_text(
+                  f'Workflow stopped during {phase} with outcome {outcome} '
+                  'before the Beads sync command completed.\n',
+              )
+          PY
+
+      - name: Upload sync summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beads-project-sync-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/beads-project-sync
+          if-no-files-found: warn
+          retention-days: 14

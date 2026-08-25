@@ -6,15 +6,18 @@ import {
 } from '../control/resources/coven.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
+import { orchestrationLaneResultKey } from './operationIdentity.js';
 
 export interface CovenSessionBackendOptions {
   /** Injectable for tests; defaults to the local Coven daemon. */
   client?: CovenClient;
+  /** Defaults to true for callers that inspect sessions(). */
+  retainResults?: boolean;
 }
 
 export interface CovenSessionBackend {
   execute: LaneBackend;
-  /** Sessions launched by this task, keyed by lane id. */
+  /** Sessions keyed by bounded operation/lane identity. */
   sessions: () => Map<string, CovenSessionSummary>;
 }
 
@@ -77,7 +80,9 @@ export function createCovenSessionBackend(
       );
     }
 
-    sessions.set(lane.id, session);
+    if (options.retainResults !== false) {
+      sessions.set(orchestrationLaneResultKey(lane.operationId, lane.id), session);
+    }
     return { sessionId: session.id };
   };
 

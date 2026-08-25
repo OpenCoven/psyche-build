@@ -48,6 +48,16 @@ describe("PaneStreamHub", () => {
     expect(a).toBe(b);
   });
 
+  it("bufferedPaneIds reports the panes currently holding a buffer", () => {
+    const fake = new FakeTmux();
+    const hub = new PaneStreamHub("test", fake as any);
+    fake.emit("output", "%1", Buffer.from("hi"));
+    fake.emit("output", "%2", Buffer.from("yo"));
+    expect(hub.bufferedPaneIds().sort()).toEqual(["%1", "%2"]);
+    hub.forgetPane("%1");
+    expect(hub.bufferedPaneIds()).toEqual(["%2"]);
+  });
+
   it("forgetPane drops the buffer (next bufferFor creates fresh)", () => {
     const fake = new FakeTmux();
     const hub = new PaneStreamHub("test", fake as any);

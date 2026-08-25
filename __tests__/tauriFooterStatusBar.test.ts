@@ -302,7 +302,7 @@ describe('Tauri footer status bar shell', () => {
       /\.status-detail-head\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;[^}]*height:\s*34px;/s
     );
     expect(stylesCss).toMatch(
-      /\.status-more-menu\s*\{[^}]*bottom:\s*calc\(var\(--status-h\)\s*\+\s*8px\);[^}]*width:\s*260px;[^}]*max-width:\s*min\(320px,\s*calc\(100vw - 16px\)\);/s
+      /\.status-more-menu\s*\{[^}]*bottom:\s*calc\(var\(--status-h\)\s*\+\s*8px\);[^}]*width:\s*320px;[^}]*max-width:\s*calc\(100vw - 16px\);/s
     );
   });
 
@@ -486,6 +486,57 @@ describe('Tauri footer status bar shell', () => {
     }
   });
 
+  it('styles the More menu as a ruled four-column matrix with compact controls', () => {
+    const section = footerSection(stylesCss);
+
+    expect(section).toMatch(
+      /\.status-more-columns\s*\{[^}]*grid-template-columns:\s*minmax\([^;]+\)\s+minmax\([^;]+\)\s+44px\s+52px;/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+44px\s+52px;[^}]*border-bottom:\s*1px solid var\(--border\);/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-open\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\([^;]+\)\s+minmax\([^;]+\);/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-open-value\s*\{[^}]*color:\s*var\(--text\);[^}]*font-weight:\s*500;[^}]*font-variant-numeric:\s*tabular-nums;/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-row\[data-metric-kind="telemetry"\]\s+\.status-more-open-value\s*\{[^}]*font-weight:\s*600;/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-toggle-label\s*\{[^}]*position:\s*absolute;[^}]*clip-path:\s*inset\(50%\);/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-toggle input\s*\{[^}]*appearance:\s*none;[^}]*width:\s*26px;[^}]*border-radius:\s*999px;/s,
+    );
+    expect(section).toContain('.status-more-toggle input:checked');
+    expect(section).toContain('.status-more-toggle input:disabled');
+    expect(section).toMatch(
+      /\.status-more-move\s*\{[^}]*width:\s*22px;[^}]*height:\s*22px;[^}]*padding:\s*0;/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-move:disabled\s*\{[^}]*opacity:\s*0\.45;[^}]*cursor:\s*not-allowed;/s,
+    );
+  });
+
+  it('limits More menu warning colors to readings and connection indicators', () => {
+    const section = footerSection(stylesCss);
+
+    expect(section).toMatch(
+      /\.status-more-open\[data-severity="warn"\]\s+\.status-more-open-value\s*\{[^}]*color:\s*var\(--warn\);/s,
+    );
+    expect(section).toMatch(
+      /\.status-more-open\[data-severity="danger"\]\s+\.status-more-open-value\s*\{[^}]*color:\s*var\(--error\);/s,
+    );
+    expect(section).not.toMatch(
+      /\.status-more-item\[data-severity="(?:warn|danger)"\]\s*\{[^}]*color:/s,
+    );
+    expect(section).not.toMatch(
+      /\.status-more-row\[data-severity="(?:warn|danger)"\]\s*\{[^}]*color:/s,
+    );
+  });
+
   it('renames invokeNative and preserves invoke success/failure instrumentation without swallowing rejections', async () => {
     expect(mainJs).toContain('var invokeNative = window.__TAURI__.core.invoke;');
     expect(mainJs).not.toMatch(/var invoke = window\.__TAURI__\.core\.invoke;/);
@@ -587,7 +638,7 @@ describe('Tauri footer status bar shell', () => {
         {
           id: 'agent',
           name: 'Agent',
-          kind: 'coven-chat',
+          kind: 'coven-code',
           status: 'running',
           launch: { covenSessionId: 'live' },
           needsAttention: true,
@@ -737,7 +788,7 @@ describe('Tauri footer status bar shell', () => {
         {
           id: 'agent',
           name: 'Agent',
-          kind: 'coven-chat',
+          kind: 'coven-code',
           status: 'running',
           covenSessionId: 'live',
           processBacked: true,

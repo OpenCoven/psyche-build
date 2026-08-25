@@ -1,6 +1,8 @@
 const SAFE_WORKSPACE_SESSION_ID = /^[A-Za-z0-9._:-]{1,96}$/;
 const SAFE_COVEN_ATTACHMENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const ALLOWED_KINDS = new Set(['shell', 'psyche', 'coven-chat', 'coven-attach']);
+const CANONICAL_COVEN_KIND = 'coven-code';
+const LEGACY_COVEN_KIND = 'coven-chat';
+const ALLOWED_KINDS = new Set(['shell', 'psyche', CANONICAL_COVEN_KIND, 'coven-attach']);
 const COLUMN = 'column';
 const ROW = 'row';
 
@@ -27,8 +29,23 @@ function safeCovenAttachmentId(value) {
 }
 
 function normalizeKind(value) {
+  if (value === LEGACY_COVEN_KIND) return CANONICAL_COVEN_KIND;
   const kind = safeString(value);
   return kind && ALLOWED_KINDS.has(kind) ? kind : null;
+}
+
+function isPaddedLegacyKind(value) {
+  return typeof value === 'string' && safeString(value) === LEGACY_COVEN_KIND && value !== LEGACY_COVEN_KIND;
+}
+
+function migrateCovenCodeName(name, kind, launchKind) {
+  if (
+    name === 'Coven Code' &&
+    (kind === CANONICAL_COVEN_KIND || launchKind === CANONICAL_COVEN_KIND)
+  ) {
+    return 'Coven CLI';
+  }
+  return name;
 }
 
 function normalizeRatio(value) {
@@ -165,9 +182,18 @@ export function sanitizeSessionDescriptor(saved) {
   const id = safeId(saved.id);
   const projectId = safeId(saved.projectId);
   const worktreePath = safeString(saved.worktreePath);
-  const launchKind = normalizeKind(saved.launchKind);
 
-  if (!id || !projectId || !worktreePath || !launchKind) return null;
+  if (isPaddedLegacyKind(saved.kind) || isPaddedLegacyKind(saved.launchKind)) {
+    return null;
+  }
+
+  const launchKind = normalizeKind(saved.launchKind);
+  const kind =
+    saved.kind === undefined || saved.kind === null
+      ? launchKind
+      : normalizeKind(saved.kind);
+
+  if (!id || !projectId || !worktreePath || !launchKind || !kind) return null;
 
   const descriptor = {
     id,
@@ -175,13 +201,17 @@ export function sanitizeSessionDescriptor(saved) {
     worktreePath,
     hidden: saved.hidden === true,
     launchKind,
-    kind: normalizeKind(saved.kind) || launchKind,
+    kind,
   };
 
-  const name = safeString(saved.name, 256);
+  const name = migrateCovenCodeName(
+    safeString(saved.name, 256),
+    kind,
+    launchKind
+  );
   if (name) descriptor.name = name;
 
-  if (launchKind === 'coven-attach' || launchKind === 'coven-chat') {
+  if (launchKind === 'coven-attach') {
     const covenSessionId = safeCovenAttachmentId(saved.covenSessionId);
     if (!covenSessionId) return null;
     descriptor.covenSessionId = covenSessionId;

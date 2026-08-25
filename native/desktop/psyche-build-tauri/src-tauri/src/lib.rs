@@ -42,7 +42,18 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
-
+#[cfg(target_os = "linux")]
+use webkit2gtk::{
+    glib::{self, translate::ToGlibPtr},
+    LoadEvent, WebViewExt,
+};
+#[cfg(target_os = "windows")]
+use webview2_com::{
+    take_pwstr, CoTaskMemPWSTR, NavigationCompletedEventHandler, NavigationStartingEventHandler,
+};
+#[cfg(target_os = "windows")]
+use windows::core::{Interface, PWSTR};
+mod browser_focus;
 mod control_provider;
 mod coven_sessions;
 mod metrics;
@@ -51,7 +62,15 @@ mod native_workspace;
 mod pane_metrics;
 mod platform;
 pub mod pty_transport;
+mod runtime_diagnostics;
 mod workspace_contract;
+#[cfg(test)]
+use browser_focus::refresh_browser_focus_identity_document_url;
+use browser_focus::{
+    browser_focus_identity, detach_browser_native_focus_callback, install_browser_focus_identity,
+    install_browser_native_focus_callback, retire_browser_focus_label,
+    retire_matching_browser_focus_identity, BrowserFocusIdentity,
+};
 use control_provider::{
     control_operator_submit, control_provider_complete, control_provider_remove,
     control_provider_shutdown, control_provider_start, control_provider_stop,
@@ -75,6 +94,7 @@ use pty_transport::{
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
+use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
@@ -90,7 +110,6 @@ const MAX_BROWSER_SCRIPT_RESULT_BYTES: usize = 256 * 1024;
 const BROWSER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_SCRIPT_CONTEXT_WORLD_NAME: &str = "com.opencoven.psyche.browser-script-context";
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
-const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
 #[cfg(test)]
 std::thread_local! {
@@ -98,6 +117,7 @@ std::thread_local! {
         RefCell::new(Vec::new());
     static TEST_GIT_FILTER_SCOPE_QUERIES: RefCell<Vec<String>> = RefCell::new(Vec::new());
     static TEST_GIT_COMMAND_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    static TEST_GIT_METADATA_READ_LIMITS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 fn safe_browser_label(label: Option<String>) -> String {
@@ -1549,11 +1569,6 @@ fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedP
     Ok((pending_start, resolved_cwd))
 }
 
-fn has_exact_psyche_source(env: Option<&HashMap<String, String>>) -> bool {
-    matches!(env, Some(values) if values.len() == 1
-        && values.get(COVEN_SESSION_SOURCE).map(String::as_str) == Some(PSYCHE_SESSION_SOURCE))
-}
-
 fn has_no_launch_env(env: Option<&HashMap<String, String>>) -> bool {
     env.map_or(true, HashMap::is_empty)
 }
@@ -1565,7 +1580,7 @@ fn validate_coven_launch_with(
     let Some(launch_kind) = options.launch_kind.as_deref() else {
         return Ok(());
     };
-    if !matches!(launch_kind, "coven-chat" | "coven-attach") {
+    if !matches!(launch_kind, "coven-code" | "coven-attach") {
         return Err(format!("unsupported launch kind: {launch_kind}"));
     }
 
@@ -1575,29 +1590,16 @@ fn validate_coven_launch_with(
     }
 
     match launch_kind {
-        "coven-chat" => {
-            if !has_exact_psyche_source(options.env.as_ref()) {
-                return Err(
-                    "coven-chat requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string(),
-                );
+        "coven-code" => {
+            if !has_no_launch_env(options.env.as_ref()) {
+                return Err("coven-code does not accept launch environment entries".to_string());
             }
-            let session_id = options
-                .coven_session_id
-                .as_deref()
-                .ok_or_else(|| "coven-chat requires a session id".to_string())?;
-            if !is_safe_session_id(session_id) {
-                return Err("coven-chat session id is unsafe".to_string());
+            if options.coven_session_id.is_some() {
+                return Err("coven-code does not accept a session id".to_string());
             }
             match options.args.as_deref() {
-                Some([verb, flag, argument])
-                    if verb == "code" && flag == "--session-id" && argument == session_id =>
-                {
-                    Ok(())
-                }
-                _ => Err(
-                    "coven-chat requires exactly 'code --session-id' and the validated session id"
-                        .to_string(),
-                ),
+                None | Some([]) => Ok(()),
+                _ => Err("coven-code does not accept launch arguments".to_string()),
             }
         }
         "coven-attach" => {
@@ -1644,7 +1646,7 @@ fn apply_launch_env(
             }
         }
     }
-    if launch_kind == Some("coven-attach") {
+    if matches!(launch_kind, Some("coven-code" | "coven-attach")) {
         cmd.env_remove(COVEN_SESSION_SOURCE);
     }
 }
@@ -1705,9 +1707,220 @@ struct BrowserNavigationResult {
 }
 
 struct BrowserNavigationWaiter {
+    generation: u64,
     token: String,
-    navigation_identity: Option<usize>,
+    requested_url: String,
+    native_view: Option<usize>,
+    navigation_identity: Option<u64>,
     completion: Option<tokio::sync::oneshot::Sender<Result<BrowserNavigationResult, String>>>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrowserNavigationKey {
+    label: String,
+    generation: u64,
+    token: String,
+    native_view: usize,
+    navigation_identity: u64,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BrowserLinuxNavigationPhase {
+    AwaitingStart,
+    Started,
+    Redirected(String),
+    Committed(String),
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserLinuxNavigationEvent {
+    Started,
+    Redirected,
+    Committed,
+    Finished,
+    Failed,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BrowserLinuxNavigationDecision {
+    Pending,
+    Complete(String),
+    Reject(String),
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+fn browser_navigation_urls_equivalent(left: &str, right: &str) -> bool {
+    fn is_unreserved(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+    }
+
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn canonical_component(value: &str) -> String {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let input = value.as_bytes();
+        let mut output = Vec::with_capacity(input.len());
+        let mut index = 0;
+        while index < input.len() {
+            if input[index] == b'%' && index + 2 < input.len() {
+                if let (Some(high), Some(low)) =
+                    (hex_value(input[index + 1]), hex_value(input[index + 2]))
+                {
+                    let decoded = (high << 4) | low;
+                    if is_unreserved(decoded) {
+                        output.push(decoded);
+                    } else {
+                        output.extend_from_slice(&[
+                            b'%',
+                            HEX[(decoded >> 4) as usize],
+                            HEX[(decoded & 0x0f) as usize],
+                        ]);
+                    }
+                    index += 3;
+                    continue;
+                }
+            }
+            output.push(input[index]);
+            index += 1;
+        }
+        String::from_utf8(output).unwrap_or_else(|_| value.to_string())
+    }
+
+    let (Ok(left), Ok(right)) = (Url::parse(left), Url::parse(right)) else {
+        return left == right;
+    };
+    left.scheme() == right.scheme()
+        && canonical_component(left.username()) == canonical_component(right.username())
+        && left.password().map(canonical_component) == right.password().map(canonical_component)
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+        && canonical_component(left.path()) == canonical_component(right.path())
+        && left.query().map(canonical_component) == right.query().map(canonical_component)
+        && left.fragment().map(canonical_component) == right.fragment().map(canonical_component)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn advance_browser_linux_navigation(
+    phase: &mut BrowserLinuxNavigationPhase,
+    event: BrowserLinuxNavigationEvent,
+    observed_url: &str,
+    requested_url: &str,
+) -> BrowserLinuxNavigationDecision {
+    const REPLACED: &str = "browser navigation was replaced before completion";
+    const FAILED: &str = "browser navigation failed";
+    const AMBIGUOUS: &str = "browser navigation signal order was ambiguous";
+
+    match (phase.clone(), event) {
+        (BrowserLinuxNavigationPhase::AwaitingStart, BrowserLinuxNavigationEvent::Started) => {
+            if !browser_navigation_urls_equivalent(observed_url, requested_url) {
+                BrowserLinuxNavigationDecision::Reject(REPLACED.to_string())
+            } else {
+                *phase = BrowserLinuxNavigationPhase::Started;
+                BrowserLinuxNavigationDecision::Pending
+            }
+        }
+        (
+            BrowserLinuxNavigationPhase::AwaitingStart,
+            BrowserLinuxNavigationEvent::Redirected
+            | BrowserLinuxNavigationEvent::Committed
+            | BrowserLinuxNavigationEvent::Finished
+            | BrowserLinuxNavigationEvent::Failed,
+        ) => BrowserLinuxNavigationDecision::Pending,
+        (
+            BrowserLinuxNavigationPhase::Started | BrowserLinuxNavigationPhase::Redirected(_),
+            BrowserLinuxNavigationEvent::Redirected,
+        ) if !observed_url.is_empty() => {
+            *phase = BrowserLinuxNavigationPhase::Redirected(observed_url.to_string());
+            BrowserLinuxNavigationDecision::Pending
+        }
+        (BrowserLinuxNavigationPhase::Started, BrowserLinuxNavigationEvent::Committed) => {
+            if browser_navigation_urls_equivalent(observed_url, requested_url) {
+                *phase = BrowserLinuxNavigationPhase::Committed(observed_url.to_string());
+                BrowserLinuxNavigationDecision::Pending
+            } else {
+                BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
+            }
+        }
+        (
+            BrowserLinuxNavigationPhase::Redirected(ref redirected_url),
+            BrowserLinuxNavigationEvent::Committed,
+        ) => {
+            if browser_navigation_urls_equivalent(observed_url, redirected_url) {
+                *phase = BrowserLinuxNavigationPhase::Committed(observed_url.to_string());
+                BrowserLinuxNavigationDecision::Pending
+            } else {
+                BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
+            }
+        }
+        (
+            BrowserLinuxNavigationPhase::Committed(ref committed_url),
+            BrowserLinuxNavigationEvent::Finished,
+        ) => {
+            if browser_navigation_urls_equivalent(observed_url, committed_url) {
+                BrowserLinuxNavigationDecision::Complete(observed_url.to_string())
+            } else {
+                BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string())
+            }
+        }
+        (_, BrowserLinuxNavigationEvent::Started) => {
+            BrowserLinuxNavigationDecision::Reject(REPLACED.to_string())
+        }
+        (_, BrowserLinuxNavigationEvent::Failed) => {
+            BrowserLinuxNavigationDecision::Reject(FAILED.to_string())
+        }
+        _ => BrowserLinuxNavigationDecision::Reject(AMBIGUOUS.to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct BrowserWindowsNavigationRegistration {
+    native_view: usize,
+    generation: u64,
+    token: String,
+    requested_url: String,
+    starting_token: i64,
+    completed_token: i64,
+    navigation_id: Option<u64>,
+    armed: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn browser_windows_completion_matches(expected: Option<u64>, observed: u64) -> bool {
+    expected == Some(observed)
+}
+
+#[cfg(target_os = "linux")]
+struct BrowserLinuxNavigationRegistration {
+    native_view: usize,
+    generation: u64,
+    token: String,
+    sequence: u64,
+    requested_url: String,
+    load_changed_handler: libc::c_ulong,
+    load_failed_handler: libc::c_ulong,
+    load_failed_tls_handler: libc::c_ulong,
+    phase: BrowserLinuxNavigationPhase,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTitleEvent {
+    pub label: String,
+    pub title: String,
+    pub url: String,
+    pub generation: u64,
+    pub navigation_token: String,
 }
 
 struct BrowserNavigationWaiterGuard {
@@ -1730,30 +1943,227 @@ impl Drop for BrowserNavigationWaiterGuard {
 static BROWSER_NAVIGATION_WAITERS: Lazy<Mutex<HashMap<String, BrowserNavigationWaiter>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn complete_browser_navigation(navigation_identity: usize, terminal_url: &str) -> bool {
-    let completion = {
-        let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
-        let label = waiters.iter().find_map(|(label, waiter)| {
-            (waiter.navigation_identity == Some(navigation_identity)).then(|| label.clone())
-        });
-        label.and_then(|label| {
-            waiters
-                .remove(&label)
-                .and_then(|mut waiter| waiter.completion.take())
-        })
+fn browser_documents_match_exact(left: &str, right: &str) -> bool {
+    let Ok(left) = Url::parse(left) else {
+        return false;
     };
-    if let Some(completion) = completion {
-        let result = if terminal_url.is_empty() {
+    let Ok(right) = Url::parse(right) else {
+        return false;
+    };
+    matches!(left.scheme(), "http" | "https" | "about") && left == right
+}
+
+fn retire_browser_authority_for_page_load(label: &str, current_url: &str) -> bool {
+    let _ = current_url;
+    if BROWSER_NAVIGATION_WAITERS.lock().contains_key(label) {
+        return false;
+    }
+    let Some(identity) = browser_focus_identity(label) else {
+        return false;
+    };
+    retire_matching_browser_focus_identity(label, &identity);
+    true
+}
+
+fn ensure_live_browser_document_authority(
+    label: &str,
+    current_url: &str,
+) -> Result<BrowserFocusIdentity, String> {
+    let identity = browser_focus_identity(label)
+        .ok_or_else(|| "browser document authority is unavailable".to_string())?;
+    if !browser_documents_match_exact(&identity.document_url, current_url) {
+        retire_matching_browser_focus_identity(label, &identity);
+        return Err("browser document authority was replaced".to_string());
+    }
+    Ok(identity)
+}
+
+fn browser_document_authority_unchanged(
+    expected_url: &str,
+    expected_identity: &BrowserFocusIdentity,
+    observed_url: &str,
+    observed_identity: Option<&BrowserFocusIdentity>,
+) -> bool {
+    browser_documents_match_exact(expected_url, observed_url)
+        && observed_identity == Some(expected_identity)
+}
+
+fn browser_title_identity(label: &str) -> Option<BrowserFocusIdentity> {
+    {
+        let waiters = BROWSER_NAVIGATION_WAITERS.lock();
+        if let Some(waiter) = waiters.get(label) {
+            return (waiter.native_view.is_some() && waiter.navigation_identity.is_some()).then(
+                || BrowserFocusIdentity {
+                    generation: waiter.generation,
+                    navigation_token: waiter.token.clone(),
+                    document_url: waiter.requested_url.clone(),
+                },
+            );
+        }
+    }
+    browser_focus_identity(label)
+}
+
+#[cfg(target_os = "windows")]
+static BROWSER_WINDOWS_NAVIGATIONS: Lazy<
+    Mutex<HashMap<String, BrowserWindowsNavigationRegistration>>,
+> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(target_os = "linux")]
+static BROWSER_LINUX_NAVIGATIONS: Lazy<Mutex<HashMap<String, BrowserLinuxNavigationRegistration>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(target_os = "linux")]
+static NEXT_BROWSER_LINUX_NAVIGATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn bind_browser_navigation_identity(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+    navigation_identity: u64,
+) -> bool {
+    let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+    let Some(waiter) = waiters.get_mut(label) else {
+        return false;
+    };
+    if waiter.generation != generation
+        || waiter.token != token
+        || waiter
+            .native_view
+            .is_some_and(|identity| identity != native_view)
+        || waiter
+            .navigation_identity
+            .is_some_and(|identity| identity != navigation_identity)
+    {
+        return false;
+    }
+    waiter.native_view = Some(native_view);
+    waiter.navigation_identity = Some(navigation_identity);
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn bind_browser_navigation_native_view(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+) -> bool {
+    let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+    let Some(waiter) = waiters.get_mut(label) else {
+        return false;
+    };
+    if waiter.generation != generation
+        || waiter.token != token
+        || waiter
+            .native_view
+            .is_some_and(|identity| identity != native_view)
+    {
+        return false;
+    }
+    waiter.native_view = Some(native_view);
+    true
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn browser_navigation_key_for_native_identity(
+    native_view: usize,
+    navigation_identity: u64,
+) -> Option<BrowserNavigationKey> {
+    BROWSER_NAVIGATION_WAITERS
+        .lock()
+        .iter()
+        .find_map(|(label, waiter)| {
+            (waiter.native_view == Some(native_view)
+                && waiter.navigation_identity == Some(navigation_identity))
+            .then(|| BrowserNavigationKey {
+                label: label.clone(),
+                generation: waiter.generation,
+                token: waiter.token.clone(),
+                native_view,
+                navigation_identity,
+            })
+        })
+}
+
+fn take_browser_navigation_waiter(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+    navigation_identity: Option<u64>,
+) -> Option<BrowserNavigationWaiter> {
+    let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
+    let matches = waiters.get(label).is_some_and(|waiter| {
+        waiter.generation == generation
+            && waiter.token == token
+            && waiter.native_view == Some(native_view)
+            && navigation_identity
+                .is_none_or(|identity| waiter.navigation_identity == Some(identity))
+    });
+    matches.then(|| waiters.remove(label)).flatten()
+}
+
+fn send_browser_navigation_result(
+    label: &str,
+    mut waiter: BrowserNavigationWaiter,
+    result: Result<String, String>,
+) -> bool {
+    let Some(completion) = waiter.completion.take() else {
+        return false;
+    };
+    let result = result.and_then(|terminal_url| {
+        if terminal_url.is_empty() {
             Err("browser navigation terminal URL is unavailable".to_string())
         } else {
-            Ok(BrowserNavigationResult {
-                terminal_url: terminal_url.to_string(),
-            })
-        };
-        let _ = completion.send(result);
-        return true;
+            Ok(BrowserNavigationResult { terminal_url })
+        }
+    });
+    let focus_identity = result.as_ref().ok().map(|result| BrowserFocusIdentity {
+        generation: waiter.generation,
+        navigation_token: waiter.token.clone(),
+        document_url: result.terminal_url.clone(),
+    });
+    if let Some(identity) = focus_identity.as_ref() {
+        install_browser_focus_identity(label.to_string(), identity.clone());
     }
-    false
+    if completion.send(result).is_err() {
+        if let Some(identity) = focus_identity.as_ref() {
+            retire_matching_browser_focus_identity(label, identity);
+        }
+    }
+    true
+}
+
+fn resolve_browser_navigation(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+    navigation_identity: u64,
+    result: Result<String, String>,
+) -> bool {
+    take_browser_navigation_waiter(
+        label,
+        generation,
+        token,
+        native_view,
+        Some(navigation_identity),
+    )
+    .is_some_and(|waiter| send_browser_navigation_result(label, waiter, result))
+}
+
+#[cfg(target_os = "windows")]
+fn reject_pending_browser_navigation(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+    error: String,
+) -> bool {
+    take_browser_navigation_waiter(label, generation, token, native_view, None)
+        .is_some_and(|waiter| send_browser_navigation_result(label, waiter, Err(error)))
 }
 
 #[cfg(target_os = "macos")]
@@ -1775,12 +2185,23 @@ unsafe extern "C-unwind" fn browser_did_finish_navigation(
             unsafe { std::mem::transmute(original) };
         unsafe { original(delegate, selector, webview, navigation) };
     }
-    let navigation_identity = navigation as *const WKNavigation as usize;
+    let native_view = webview as *const WKWebView as usize;
+    let navigation_identity = navigation as *const WKNavigation as u64;
     let terminal_url = unsafe { webview.URL() }
         .and_then(|url| url.absoluteString())
         .map(|url| url.to_string())
         .unwrap_or_default();
-    complete_browser_navigation(navigation_identity, &terminal_url);
+    if let Some(key) = browser_navigation_key_for_native_identity(native_view, navigation_identity)
+    {
+        resolve_browser_navigation(
+            &key.label,
+            key.generation,
+            &key.token,
+            key.native_view,
+            key.navigation_identity,
+            Ok(terminal_url),
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3255,6 +3676,64 @@ fn browser_automation_result(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn browser_report_title(webview: tauri::Webview, title: String) -> Result<(), String> {
+    if !webview.label().starts_with(BROWSER_LABEL_PREFIX) {
+        return Err("browser title caller is not an embedded browser webview".to_string());
+    }
+    let title = title.trim();
+    if title.is_empty() || title.len() > 4096 {
+        return Err("browser title is invalid".to_string());
+    }
+    let url = webview
+        .url()
+        .map_err(|error| error.to_string())?
+        .to_string();
+    let identity = browser_title_identity(webview.label())
+        .ok_or_else(|| "browser title has no live native navigation identity".to_string())?;
+    webview
+        .app_handle()
+        .emit_to(
+            "main",
+            "browser:title",
+            BrowserTitleEvent {
+                label: webview.label().to_string(),
+                title: title.to_string(),
+                url,
+                generation: identity.generation,
+                navigation_token: identity.navigation_token,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn browser_title_initialization_script() -> String {
+    r#"(function() {
+          try {
+            if (window.top !== window) return;
+            var core = window.__TAURI__ && window.__TAURI__.core;
+            if (!core || typeof core.invoke !== "function") return;
+            var invoke = core.invoke;
+            var reflectApply = Reflect.apply;
+            var reportTitle = function() {
+              try {
+                var title = document.title || location.hostname || location.href;
+                reflectApply(invoke, core, [
+                  "browser_report_title",
+                  { title: title }
+                ]);
+              } catch (_) {}
+            };
+            if (document.readyState === "loading") {
+              document.addEventListener("DOMContentLoaded", reportTitle, { once: true });
+            } else {
+              reportTitle();
+            }
+          } catch (_) {}
+        })();"#
+        .to_string()
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -3262,7 +3741,7 @@ fn ensure_browser(
     y: f64,
     w: f64,
     h: f64,
-    url: &str,
+    _url: &str,
     automation_source: &str,
 ) -> Result<bool, String> {
     if app.webviews().keys().any(|existing| existing == label) {
@@ -3273,17 +3752,19 @@ fn ensure_browser(
         .get_window("main")
         .ok_or_else(|| "main window missing".to_string())?;
 
-    let parsed_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let initial_url = Url::parse("about:blank").map_err(|e| e.to_string())?;
     let initial_secret = random_browser_shortcut_secret()?;
     let shortcut_script = browser_shortcut_initialization_script(&initial_secret)?;
+    let title_script = browser_title_initialization_script();
     app.state::<BrowserShortcutAuthorizations>()
         .install(label, initial_secret.clone());
     let browser_label = label.to_string();
     let app_for_load = app.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed_url))
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_url))
         .initialization_script(shortcut_script)
+        .initialization_script(title_script)
         .initialization_script(automation_source)
-        .on_page_load(move |webview, payload| {
+        .on_page_load(move |_webview, payload| {
             if matches!(payload.event(), PageLoadEvent::Started) {
                 app_for_load
                     .state::<BrowserShortcutAuthorizations>()
@@ -3291,14 +3772,14 @@ fn ensure_browser(
                 app_for_load
                     .state::<BrowserAutomationAuthorizations>()
                     .remove(&browser_label);
+                retire_browser_authority_for_page_load(&browser_label, payload.url().as_str());
             }
             let phase = match payload.event() {
                 PageLoadEvent::Started => "started",
                 PageLoadEvent::Finished => "finished",
             };
-            // Wry's page-load callback omits WKNavigation identity. Controlled
-            // navigation therefore never attaches its token here; completion
-            // is resolved only by the exact native WKNavigation hook below.
+            // Wry's page-load callback omits native navigation identity.
+            // Controlled navigation therefore never attaches its token here.
             let navigation_token = None;
             let _ = app_for_load.emit(
                 "browser:page-load",
@@ -3309,33 +3790,6 @@ fn ensure_browser(
                     navigation_token,
                 },
             );
-            if matches!(payload.event(), PageLoadEvent::Finished) {
-                let label_json = serde_json::to_string(&browser_label).unwrap_or_else(|_| "null".to_string());
-                let script = format!(
-                    r#"(function(browserLabel) {{
-                      try {{
-                        var emit = function(name, payload) {{
-                          if (window.__TAURI__ && window.__TAURI__.event) {{
-                            window.__TAURI__.event.emit(name, payload);
-                          }}
-                        }};
-                        var title = document.title || location.hostname || location.href;
-                        emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__PSYCHE_BROWSER_FOCUS_INSTALLED__) {{
-                          window.__PSYCHE_BROWSER_FOCUS_INSTALLED__ = true;
-                          window.addEventListener("pointerdown", function() {{
-                            emit("browser:focus", {{ label: browserLabel, url: location.href }});
-                          }}, true);
-                          window.addEventListener("focusin", function() {{
-                            emit("browser:focus", {{ label: browserLabel, url: location.href }});
-                          }}, true);
-                        }}
-                      }} catch (_) {{}}
-                    }})({});"#,
-                    label_json
-                );
-                let _ = webview.eval(&script);
-            }
         });
 
     if let Err(error) = main.add_child(
@@ -3369,14 +3823,151 @@ fn cleanup_created_browser_after_setup_failure(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn take_windows_browser_navigation(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+) -> Option<BrowserWindowsNavigationRegistration> {
+    let mut registrations = BROWSER_WINDOWS_NAVIGATIONS.lock();
+    let matches = registrations.get(label).is_some_and(|registration| {
+        registration.generation == generation
+            && registration.token == token
+            && registration.native_view == native_view
+    });
+    matches.then(|| registrations.remove(label)).flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn disconnect_windows_browser_navigation_handlers(
+    webview: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    registration: &BrowserWindowsNavigationRegistration,
+) {
+    let _ = unsafe { webview.remove_NavigationStarting(registration.starting_token) };
+    let _ = unsafe { webview.remove_NavigationCompleted(registration.completed_token) };
+}
+
+#[cfg(target_os = "windows")]
+fn detach_browser_navigation_callbacks(webview: &tauri::Webview, label: &str) {
+    let registration = BROWSER_WINDOWS_NAVIGATIONS.lock().remove(label);
+    let Some(registration) = registration else {
+        return;
+    };
+    let _ = webview.with_webview(move |platform_webview| {
+        let controller = platform_webview.controller();
+        if let Ok(native_webview) = unsafe { controller.CoreWebView2() } {
+            if native_webview.as_raw() as usize == registration.native_view {
+                disconnect_windows_browser_navigation_handlers(&native_webview, &registration);
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn take_linux_browser_navigation(
+    label: &str,
+    generation: u64,
+    token: &str,
+    native_view: usize,
+) -> Option<BrowserLinuxNavigationRegistration> {
+    let mut registrations = BROWSER_LINUX_NAVIGATIONS.lock();
+    let matches = registrations.get(label).is_some_and(|registration| {
+        registration.generation == generation
+            && registration.token == token
+            && registration.native_view == native_view
+    });
+    matches.then(|| registrations.remove(label)).flatten()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_browser_webview_pointer(
+    webview: &webkit2gtk::WebView,
+) -> *mut webkit2gtk::ffi::WebKitWebView {
+    <webkit2gtk::WebView as ToGlibPtr<'_, *mut webkit2gtk::ffi::WebKitWebView>>::to_glib_none(
+        webview,
+    )
+    .0
+}
+
+#[cfg(target_os = "linux")]
+fn linux_browser_webview_identity(webview: &webkit2gtk::WebView) -> usize {
+    linux_browser_webview_pointer(webview) as usize
+}
+
+#[cfg(target_os = "linux")]
+fn disconnect_linux_browser_navigation_signals(
+    webview: &webkit2gtk::WebView,
+    registration: &BrowserLinuxNavigationRegistration,
+) {
+    let pointer = linux_browser_webview_pointer(webview);
+    let object = pointer.cast::<glib::gobject_ffi::GObject>();
+    for handler in [
+        registration.load_changed_handler,
+        registration.load_failed_handler,
+        registration.load_failed_tls_handler,
+    ] {
+        unsafe {
+            glib::gobject_ffi::g_signal_handler_disconnect(object, handler);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detach_browser_navigation_callbacks(webview: &tauri::Webview, label: &str) {
+    let registration = BROWSER_LINUX_NAVIGATIONS.lock().remove(label);
+    let Some(registration) = registration else {
+        return;
+    };
+    let _ = webview.with_webview(move |platform_webview| {
+        let native_webview = platform_webview.inner();
+        if linux_browser_webview_identity(&native_webview) == registration.native_view {
+            disconnect_linux_browser_navigation_signals(&native_webview, &registration);
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn detach_browser_navigation_callbacks(_webview: &tauri::Webview, _label: &str) {}
+
+fn close_browser_webview_transactionally(
+    close: impl FnOnce() -> Result<(), String>,
+    retire: impl FnOnce(),
+) -> Result<(), String> {
+    close()?;
+    retire();
+    Ok(())
+}
+
+fn retire_browser_webview_for_navigation(app: &AppHandle, label: &str) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(label) {
+        close_browser_webview_transactionally(
+            || webview.close().map_err(|error| error.to_string()),
+            || {
+                detach_browser_navigation_callbacks(&webview, label);
+                detach_browser_native_focus_callback(&webview);
+                retire_browser_focus_label(label);
+            },
+        )?;
+    } else {
+        retire_browser_focus_label(label);
+    }
+    app.state::<BrowserShortcutAuthorizations>().remove(label);
+    app.state::<BrowserAutomationAuthorizations>().remove(label);
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 async fn start_browser_navigation(
     webview: &tauri::Webview,
     label: &str,
     url: &str,
+    generation: u64,
+    token: &str,
 ) -> Result<(), String> {
     let label = label.to_string();
     let url = url.to_string();
+    let token = token.to_string();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     webview
         .with_webview(move |platform_webview| unsafe {
@@ -3394,12 +3985,17 @@ async fn start_browser_navigation(
                 let navigation = wk_webview
                     .loadRequest(&request)
                     .ok_or_else(|| "browser navigation did not start".to_string())?;
-                let navigation_identity = (&*navigation) as *const WKNavigation as usize;
-                let mut waiters = BROWSER_NAVIGATION_WAITERS.lock();
-                let waiter = waiters
-                    .get_mut(&label)
-                    .ok_or_else(|| "browser navigation waiter is missing".to_string())?;
-                waiter.navigation_identity = Some(navigation_identity);
+                let native_view = wk_webview as *const WKWebView as usize;
+                let navigation_identity = (&*navigation) as *const WKNavigation as u64;
+                if !bind_browser_navigation_identity(
+                    &label,
+                    generation,
+                    &token,
+                    native_view,
+                    navigation_identity,
+                ) {
+                    return Err("browser navigation waiter was replaced".to_string());
+                }
                 Ok(())
             })();
             let _ = sender.send(result);
@@ -3410,13 +4006,492 @@ async fn start_browser_navigation(
         .map_err(|_| "browser navigation setup was cancelled".to_string())?
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 async fn start_browser_navigation(
-    _webview: &tauri::Webview,
-    _label: &str,
-    _url: &str,
+    webview: &tauri::Webview,
+    label: &str,
+    url: &str,
+    generation: u64,
+    token: &str,
 ) -> Result<(), String> {
-    Err("backend_unavailable: exact browser navigation identity is unsupported".to_string())
+    let label = label.to_string();
+    let url = url.to_string();
+    let token = token.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            let result = (|| {
+                let controller = platform_webview.controller();
+                let native_webview =
+                    unsafe { controller.CoreWebView2() }.map_err(|error| error.to_string())?;
+                let native_view = native_webview.as_raw() as usize;
+                if !bind_browser_navigation_native_view(&label, generation, &token, native_view) {
+                    return Err("browser navigation waiter was replaced".to_string());
+                }
+
+                let starting_label = label.clone();
+                let starting_token = token.clone();
+                let starting = NavigationStartingEventHandler::create(Box::new(
+                    move |callback_webview, args| {
+                        let Some(callback_webview) = callback_webview else {
+                            return Ok(());
+                        };
+                        let callback_view = callback_webview.as_raw() as usize;
+                        if callback_view != native_view {
+                            return Ok(());
+                        }
+                        let event = (|| {
+                            let args = args.ok_or_else(|| {
+                                "browser navigation starting arguments are unavailable".to_string()
+                            })?;
+                            let mut uri = PWSTR::null();
+                            unsafe { args.Uri(&mut uri) }.map_err(|error| error.to_string())?;
+                            let uri = take_pwstr(uri);
+                            let mut navigation_id = 0;
+                            unsafe { args.NavigationId(&mut navigation_id) }
+                                .map_err(|error| error.to_string())?;
+                            let mut redirected = Default::default();
+                            unsafe { args.IsRedirected(&mut redirected) }
+                                .map_err(|error| error.to_string())?;
+                            Ok::<_, String>((uri, navigation_id, redirected.as_bool()))
+                        })();
+
+                        let mut rejection = None;
+                        let mut claimed_navigation = None;
+                        match event {
+                            Ok((uri, navigation_id, redirected)) => {
+                                let mut registrations = BROWSER_WINDOWS_NAVIGATIONS.lock();
+                                let Some(registration) = registrations.get_mut(&starting_label)
+                                else {
+                                    return Ok(());
+                                };
+                                if registration.generation != generation
+                                    || registration.token != starting_token
+                                    || registration.native_view != callback_view
+                                    || !registration.armed
+                                {
+                                    return Ok(());
+                                }
+                                if let Some(expected_id) = registration.navigation_id {
+                                    if expected_id != navigation_id {
+                                        rejection = Some(
+                                            "browser navigation was replaced before completion"
+                                                .to_string(),
+                                        );
+                                    }
+                                } else if redirected {
+                                    rejection = Some(
+                                        "browser navigation redirect identity was ambiguous"
+                                            .to_string(),
+                                    );
+                                } else if !browser_navigation_urls_equivalent(
+                                    &uri,
+                                    &registration.requested_url,
+                                ) {
+                                    rejection = Some(
+                                        "browser navigation was replaced before completion"
+                                            .to_string(),
+                                    );
+                                } else {
+                                    registration.navigation_id = Some(navigation_id);
+                                    claimed_navigation = Some(navigation_id);
+                                }
+                            }
+                            Err(error) => rejection = Some(error),
+                        }
+
+                        if let Some(navigation_id) = claimed_navigation {
+                            if !bind_browser_navigation_identity(
+                                &starting_label,
+                                generation,
+                                &starting_token,
+                                callback_view,
+                                navigation_id,
+                            ) {
+                                rejection =
+                                    Some("browser navigation waiter was replaced".to_string());
+                            }
+                        }
+                        if let Some(error) = rejection {
+                            if let Some(registration) = take_windows_browser_navigation(
+                                &starting_label,
+                                generation,
+                                &starting_token,
+                                callback_view,
+                            ) {
+                                disconnect_windows_browser_navigation_handlers(
+                                    &callback_webview,
+                                    &registration,
+                                );
+                            }
+                            reject_pending_browser_navigation(
+                                &starting_label,
+                                generation,
+                                &starting_token,
+                                callback_view,
+                                error,
+                            );
+                        }
+                        Ok(())
+                    },
+                ));
+
+                let completed_label = label.clone();
+                let completed_navigation_token = token.clone();
+                let completed = NavigationCompletedEventHandler::create(Box::new(
+                    move |callback_webview, args| {
+                        let Some(callback_webview) = callback_webview else {
+                            return Ok(());
+                        };
+                        let callback_view = callback_webview.as_raw() as usize;
+                        if callback_view != native_view {
+                            return Ok(());
+                        }
+                        let Some(args) = args else {
+                            return Ok(());
+                        };
+                        let mut navigation_id = 0;
+                        if unsafe { args.NavigationId(&mut navigation_id) }.is_err() {
+                            return Ok(());
+                        }
+                        let event = (|| {
+                            let mut succeeded = Default::default();
+                            unsafe { args.IsSuccess(&mut succeeded) }
+                                .map_err(|error| error.to_string())?;
+                            let mut web_error_status = Default::default();
+                            unsafe { args.WebErrorStatus(&mut web_error_status) }
+                                .map_err(|error| error.to_string())?;
+                            let mut source = PWSTR::null();
+                            unsafe { callback_webview.Source(&mut source) }
+                                .map_err(|error| error.to_string())?;
+                            Ok::<_, String>((
+                                succeeded.as_bool(),
+                                web_error_status.0,
+                                take_pwstr(source),
+                            ))
+                        })();
+
+                        let expected_navigation_id = BROWSER_WINDOWS_NAVIGATIONS
+                            .lock()
+                            .get(&completed_label)
+                            .filter(|registration| {
+                                registration.generation == generation
+                                    && registration.token == completed_navigation_token
+                                    && registration.native_view == callback_view
+                                    && registration.armed
+                            })
+                            .and_then(|registration| registration.navigation_id);
+                        if !browser_windows_completion_matches(
+                            expected_navigation_id,
+                            navigation_id,
+                        ) {
+                            return Ok(());
+                        }
+                        let Some(registration) = take_windows_browser_navigation(
+                            &completed_label,
+                            generation,
+                            &completed_navigation_token,
+                            callback_view,
+                        ) else {
+                            return Ok(());
+                        };
+                        disconnect_windows_browser_navigation_handlers(
+                            &callback_webview,
+                            &registration,
+                        );
+
+                        match event {
+                            Ok((succeeded, status, terminal_url)) => {
+                                let result = if succeeded {
+                                    Ok(terminal_url)
+                                } else {
+                                    Err(format!(
+                                        "browser navigation failed with WebView2 status {status}"
+                                    ))
+                                };
+                                resolve_browser_navigation(
+                                    &completed_label,
+                                    generation,
+                                    &completed_navigation_token,
+                                    callback_view,
+                                    navigation_id,
+                                    result,
+                                );
+                            }
+                            Err(error) => {
+                                reject_pending_browser_navigation(
+                                    &completed_label,
+                                    generation,
+                                    &completed_navigation_token,
+                                    callback_view,
+                                    error,
+                                );
+                            }
+                        }
+                        Ok(())
+                    },
+                ));
+
+                let mut starting_registration_token = 0;
+                unsafe {
+                    native_webview
+                        .add_NavigationStarting(&starting, &mut starting_registration_token)
+                }
+                .map_err(|error| error.to_string())?;
+                let mut completed_registration_token = 0;
+                if let Err(error) = unsafe {
+                    native_webview
+                        .add_NavigationCompleted(&completed, &mut completed_registration_token)
+                } {
+                    let _ = unsafe {
+                        native_webview.remove_NavigationStarting(starting_registration_token)
+                    };
+                    return Err(error.to_string());
+                }
+
+                BROWSER_WINDOWS_NAVIGATIONS.lock().insert(
+                    label.clone(),
+                    BrowserWindowsNavigationRegistration {
+                        native_view,
+                        generation,
+                        token: token.clone(),
+                        requested_url: url.clone(),
+                        starting_token: starting_registration_token,
+                        completed_token: completed_registration_token,
+                        navigation_id: None,
+                        armed: true,
+                    },
+                );
+                let native_url = CoTaskMemPWSTR::from(url.as_str());
+                if let Err(error) =
+                    unsafe { native_webview.Navigate(*native_url.as_ref().as_pcwstr()) }
+                {
+                    if let Some(registration) =
+                        take_windows_browser_navigation(&label, generation, &token, native_view)
+                    {
+                        disconnect_windows_browser_navigation_handlers(
+                            &native_webview,
+                            &registration,
+                        );
+                    }
+                    return Err(error.to_string());
+                }
+                Ok(())
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "browser navigation setup was cancelled".to_string())?
+}
+
+#[cfg(target_os = "linux")]
+async fn start_browser_navigation(
+    webview: &tauri::Webview,
+    label: &str,
+    url: &str,
+    generation: u64,
+    token: &str,
+) -> Result<(), String> {
+    let label = label.to_string();
+    let url = url.to_string();
+    let token = token.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            let native_webview = platform_webview.inner();
+            let native_view = linux_browser_webview_identity(&native_webview);
+            let sequence = NEXT_BROWSER_LINUX_NAVIGATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            if !bind_browser_navigation_identity(&label, generation, &token, native_view, sequence)
+            {
+                let _ = sender.send(Err("browser navigation waiter was replaced".to_string()));
+                return;
+            }
+
+            let changed_label = label.clone();
+            let changed_token = token.clone();
+            let load_changed_handler =
+                native_webview.connect_load_changed(move |callback_webview, load_event| {
+                    let callback_view = linux_browser_webview_identity(callback_webview);
+                    let observed_url = callback_webview
+                        .uri()
+                        .map(|uri| uri.to_string())
+                        .unwrap_or_default();
+                    let event = match load_event {
+                        LoadEvent::Started => BrowserLinuxNavigationEvent::Started,
+                        LoadEvent::Redirected => BrowserLinuxNavigationEvent::Redirected,
+                        LoadEvent::Committed => BrowserLinuxNavigationEvent::Committed,
+                        LoadEvent::Finished => BrowserLinuxNavigationEvent::Finished,
+                        _ => BrowserLinuxNavigationEvent::Failed,
+                    };
+                    let decision = {
+                        let mut registrations = BROWSER_LINUX_NAVIGATIONS.lock();
+                        let Some(registration) = registrations.get_mut(&changed_label) else {
+                            return;
+                        };
+                        if registration.generation != generation
+                            || registration.token != changed_token
+                            || registration.native_view != callback_view
+                            || registration.sequence != sequence
+                        {
+                            return;
+                        }
+                        advance_browser_linux_navigation(
+                            &mut registration.phase,
+                            event,
+                            &observed_url,
+                            &registration.requested_url,
+                        )
+                    };
+                    match decision {
+                        BrowserLinuxNavigationDecision::Pending => {}
+                        BrowserLinuxNavigationDecision::Complete(terminal_url) => {
+                            if let Some(registration) = take_linux_browser_navigation(
+                                &changed_label,
+                                generation,
+                                &changed_token,
+                                callback_view,
+                            ) {
+                                disconnect_linux_browser_navigation_signals(
+                                    callback_webview,
+                                    &registration,
+                                );
+                                resolve_browser_navigation(
+                                    &changed_label,
+                                    generation,
+                                    &changed_token,
+                                    callback_view,
+                                    registration.sequence,
+                                    Ok(terminal_url),
+                                );
+                            }
+                        }
+                        BrowserLinuxNavigationDecision::Reject(error) => {
+                            if let Some(registration) = take_linux_browser_navigation(
+                                &changed_label,
+                                generation,
+                                &changed_token,
+                                callback_view,
+                            ) {
+                                disconnect_linux_browser_navigation_signals(
+                                    callback_webview,
+                                    &registration,
+                                );
+                                resolve_browser_navigation(
+                                    &changed_label,
+                                    generation,
+                                    &changed_token,
+                                    callback_view,
+                                    registration.sequence,
+                                    Err(error),
+                                );
+                            }
+                        }
+                    }
+                });
+
+            let failed_label = label.clone();
+            let failed_token = token.clone();
+            let load_failed_handler = native_webview.connect_load_failed(
+                move |callback_webview, _load_event, failing_uri, _error| {
+                    let callback_view = linux_browser_webview_identity(callback_webview);
+                    let decision = {
+                        let mut registrations = BROWSER_LINUX_NAVIGATIONS.lock();
+                        let Some(registration) = registrations.get_mut(&failed_label) else {
+                            return false;
+                        };
+                        if registration.generation != generation
+                            || registration.token != failed_token
+                            || registration.native_view != callback_view
+                            || registration.sequence != sequence
+                        {
+                            return false;
+                        }
+                        advance_browser_linux_navigation(
+                            &mut registration.phase,
+                            BrowserLinuxNavigationEvent::Failed,
+                            failing_uri,
+                            &registration.requested_url,
+                        )
+                    };
+                    if let BrowserLinuxNavigationDecision::Reject(error) = decision {
+                        if let Some(registration) = take_linux_browser_navigation(
+                            &failed_label,
+                            generation,
+                            &failed_token,
+                            callback_view,
+                        ) {
+                            disconnect_linux_browser_navigation_signals(
+                                callback_webview,
+                                &registration,
+                            );
+                            resolve_browser_navigation(
+                                &failed_label,
+                                generation,
+                                &failed_token,
+                                callback_view,
+                                registration.sequence,
+                                Err(error),
+                            );
+                        }
+                    }
+                    false
+                },
+            );
+
+            let tls_label = label.clone();
+            let tls_token = token.clone();
+            let load_failed_tls_handler = native_webview.connect_load_failed_with_tls_errors(
+                move |callback_webview, failing_uri, _certificate, _errors| {
+                    let callback_view = linux_browser_webview_identity(callback_webview);
+                    let registration = take_linux_browser_navigation(
+                        &tls_label,
+                        generation,
+                        &tls_token,
+                        callback_view,
+                    );
+                    if let Some(registration) = registration {
+                        disconnect_linux_browser_navigation_signals(
+                            callback_webview,
+                            &registration,
+                        );
+                        resolve_browser_navigation(
+                            &tls_label,
+                            generation,
+                            &tls_token,
+                            callback_view,
+                            registration.sequence,
+                            Err(format!(
+                                "browser navigation failed TLS validation for {failing_uri}"
+                            )),
+                        );
+                    }
+                    false
+                },
+            );
+
+            BROWSER_LINUX_NAVIGATIONS.lock().insert(
+                label.clone(),
+                BrowserLinuxNavigationRegistration {
+                    native_view,
+                    generation,
+                    token: token.clone(),
+                    sequence,
+                    requested_url: url.clone(),
+                    load_changed_handler: unsafe { load_changed_handler.as_raw() },
+                    load_failed_handler: unsafe { load_failed_handler.as_raw() },
+                    load_failed_tls_handler: unsafe { load_failed_tls_handler.as_raw() },
+                    phase: BrowserLinuxNavigationPhase::AwaitingStart,
+                },
+            );
+            native_webview.load_uri(&url);
+            let _ = sender.send(Ok(()));
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "browser navigation setup was cancelled".to_string())?
 }
 
 #[tauri::command]
@@ -3429,10 +4504,14 @@ async fn browser_navigate(
     y: f64,
     w: f64,
     h: f64,
+    generation: u64,
     navigation_token: String,
     automation_source: String,
 ) -> Result<BrowserNavigationResult, String> {
     ensure_trusted_browser_caller(webview.label())?;
+    if generation == 0 {
+        return Err("browser navigation generation is invalid".to_string());
+    }
     if navigation_token.is_empty() || navigation_token.len() > 128 {
         return Err("browser navigation token is invalid".to_string());
     }
@@ -3450,7 +4529,10 @@ async fn browser_navigate(
         waiters.insert(
             label.clone(),
             BrowserNavigationWaiter {
+                generation,
                 token: navigation_token.clone(),
+                requested_url: url.clone(),
+                native_view: None,
                 navigation_identity: None,
                 completion: Some(completion),
             },
@@ -3460,6 +4542,7 @@ async fn browser_navigate(
         label: label.clone(),
         token: navigation_token.clone(),
     };
+    retire_browser_webview_for_navigation(&app, &label)?;
     let created = ensure_browser(&app, &label, x, y, w, h, &url, &automation_source)?;
     let webview = app
         .get_webview(&label)
@@ -3472,21 +4555,40 @@ async fn browser_navigate(
             .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
             .map_err(|e| e.to_string())?;
     }
-    if let Err(error) = start_browser_navigation(&webview, &label, &url).await {
+    if let Err(error) = install_browser_native_focus_callback(&webview, &label).await {
         cleanup_created_browser_after_setup_failure(created, || {
-            webview
-                .close()
-                .map_err(|close_error| close_error.to_string())
+            retire_browser_webview_for_navigation(&app, &label)
+        });
+        return Err(error);
+    }
+    if let Err(error) =
+        start_browser_navigation(&webview, &label, &url, generation, &navigation_token).await
+    {
+        cleanup_created_browser_after_setup_failure(created, || {
+            retire_browser_webview_for_navigation(&app, &label)
         });
         return Err(error);
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok(Ok(result))) => {
+            let live_focus_identity = browser_focus_identity(&label)
+                .ok_or_else(|| "browser focus identity is unavailable".to_string())?;
+            if live_focus_identity.generation != generation
+                || live_focus_identity.navigation_token != navigation_token
+            {
+                return Err(
+                    "browser focus identity does not match completed navigation".to_string()
+                );
+            }
+            Ok(result)
+        }
+        Ok(Ok(Err(error))) => {
+            let _ = retire_browser_webview_for_navigation(&app, &label);
+            Err(error)
+        }
         Ok(Err(_)) => Err("browser navigation was cancelled".to_string()),
         Err(_) => {
-            if let Some(webview) = app.get_webview(&label) {
-                let _ = webview.close();
-            }
+            let _ = retire_browser_webview_for_navigation(&app, &label);
             Err("browser navigation timed out".to_string())
         }
     }
@@ -3548,9 +4650,19 @@ fn browser_hide_all_except(
 
 fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
-    BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
     if let Some(webview) = app.get_webview(&label) {
-        webview.close().map_err(|error| error.to_string())?;
+        close_browser_webview_transactionally(
+            || webview.close().map_err(|error| error.to_string()),
+            || {
+                BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+                detach_browser_navigation_callbacks(&webview, &label);
+                detach_browser_native_focus_callback(&webview);
+                retire_browser_focus_label(&label);
+            },
+        )?;
+    } else {
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        retire_browser_focus_label(&label);
     }
     app.state::<BrowserShortcutAuthorizations>().remove(&label);
     app.state::<BrowserAutomationAuthorizations>()
@@ -3605,6 +4717,24 @@ fn browser_destroy_many(
 }
 
 #[tauri::command]
+fn browser_current_url(
+    webview: tauri::Webview,
+    app: AppHandle,
+    label: Option<String>,
+) -> Result<String, String> {
+    ensure_trusted_browser_caller(webview.label())?;
+    let label = safe_browser_label(label);
+    let browser = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser webview missing".to_string())?;
+    let url = browser.url().map_err(|error| error.to_string())?;
+    match url.scheme() {
+        "http" | "https" | "about" => Ok(url.to_string()),
+        _ => Err("browser document URL is unsupported".to_string()),
+    }
+}
+
+#[tauri::command]
 fn browser_reload(
     webview: tauri::Webview,
     app: AppHandle,
@@ -3629,6 +4759,8 @@ fn browser_eval(
     ensure_trusted_browser_caller(webview.label())?;
     let label = safe_browser_label(label);
     if let Some(webview) = app.get_webview(&label) {
+        let current_url = webview.url().map_err(|error| error.to_string())?;
+        ensure_live_browser_document_authority(&label, current_url.as_str())?;
         if let Some(correlation) = automation_receipt {
             let authorizations = app.state::<BrowserAutomationAuthorizations>();
             authorizations.install(&label, correlation.clone());
@@ -3780,6 +4912,8 @@ async fn browser_script(
     let before_url = browser
         .url()
         .map_err(|_| "target_unavailable".to_string())?;
+    ensure_live_browser_document_authority(&label, before_url.as_str())
+        .map_err(|_| "target_unavailable".to_string())?;
     let document_token = evaluate_browser_script_document_token(&browser)
         .await
         .map_err(|_| "effect_unknown".to_string())?;
@@ -3894,6 +5028,11 @@ async fn browser_snapshot(
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser webview missing".to_string())?;
+    let current_url = webview.url().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    let document_authority = ensure_live_browser_document_authority(&label, current_url.as_str())?;
+    #[cfg(not(target_os = "macos"))]
+    ensure_live_browser_document_authority(&label, current_url.as_str())?;
     let size = webview.size().map_err(|error| error.to_string())?;
     validate_browser_snapshot_dimensions(size.width, size.height)?;
     #[cfg(not(target_os = "macos"))]
@@ -3957,10 +5096,22 @@ async fn browser_snapshot(
                 wk_webview.takeSnapshotWithConfiguration_completionHandler(None, &completion);
             })
             .map_err(|error| error.to_string())?;
-        tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(15), receiver)
             .await
             .map_err(|_| "browser snapshot timed out".to_string())?
-            .map_err(|_| "browser snapshot callback was dropped".to_string())?
+            .map_err(|_| "browser snapshot callback was dropped".to_string())??;
+        let observed_url = webview.url().map_err(|error| error.to_string())?;
+        let observed_identity =
+            ensure_live_browser_document_authority(&label, observed_url.as_str()).ok();
+        if !browser_document_authority_unchanged(
+            current_url.as_str(),
+            &document_authority,
+            observed_url.as_str(),
+            observed_identity.as_ref(),
+        ) {
+            return Err("browser document authority was replaced".to_string());
+        }
+        Ok(snapshot)
     }
 }
 
@@ -4051,19 +5202,12 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
                     .psyche_entry
                     .ok_or_else(|| "Psyche entrypoint is unavailable".to_string())?],
             ),
-            NativeLaunchKind::CovenChat => {
-                let id = request
-                    .coven_session_id
-                    .clone()
-                    .filter(|id| is_safe_session_id(id))
-                    .ok_or_else(|| "Coven session id is unsafe".to_string())?;
-                (
-                    environment
-                        .coven_path
-                        .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
-                    vec!["code".to_string(), "--session-id".to_string(), id],
-                )
-            }
+            NativeLaunchKind::CovenCode => (
+                environment
+                    .coven_path
+                    .ok_or_else(|| "Coven CLI is unavailable".to_string())?,
+                Vec::new(),
+            ),
             NativeLaunchKind::CovenAttach => {
                 let id = request
                     .coven_session_id
@@ -4093,8 +5237,12 @@ fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<S
             "PSYCHE_TAURI=1".to_string(),
             "PSYCHE_NATIVE_CONTAINER=1".to_string(),
         ];
-        if matches!(request.launch_kind, NativeLaunchKind::CovenChat) {
-            args.push(format!("{COVEN_SESSION_SOURCE}={PSYCHE_SESSION_SOURCE}"));
+        if matches!(
+            request.launch_kind,
+            NativeLaunchKind::CovenCode | NativeLaunchKind::CovenAttach
+        ) {
+            args.push("-u".to_string());
+            args.push(COVEN_SESSION_SOURCE.to_string());
         }
         if matches!(request.launch_kind, NativeLaunchKind::Psyche) {
             let home = environment
@@ -4658,7 +5806,12 @@ struct FileState {
 #[cfg(unix)]
 fn file_state(file: &std::fs::File) -> Result<FileState, String> {
     let metadata = file.metadata().map_err(|e| e.to_string())?;
-    Ok(FileState {
+    Ok(metadata_file_state(&metadata))
+}
+
+#[cfg(unix)]
+fn metadata_file_state(metadata: &std::fs::Metadata) -> FileState {
+    FileState {
         dev: metadata.dev(),
         ino: metadata.ino(),
         mode: metadata.mode(),
@@ -4669,7 +5822,7 @@ fn file_state(file: &std::fs::File) -> Result<FileState, String> {
         mtime_nsec: metadata.mtime_nsec(),
         ctime: metadata.ctime(),
         ctime_nsec: metadata.ctime_nsec(),
-    })
+    }
 }
 
 #[cfg(unix)]
@@ -4999,20 +6152,25 @@ fn git_repository_config_available(root: &str) -> Result<bool, String> {
     Ok(out.status.success())
 }
 
+#[cfg(any(windows, test))]
+fn has_windows_verbatim_disk_prefix(encoded: &[u16]) -> bool {
+    const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+
+    encoded.starts_with(&VERBATIM_PREFIX)
+        && encoded.get(4).is_some_and(|unit| {
+            (b'A' as u16..=b'Z' as u16).contains(unit) || (b'a' as u16..=b'z' as u16).contains(unit)
+        })
+        && encoded.get(5) == Some(&(b':' as u16))
+        && encoded.get(6) == Some(&(b'\\' as u16))
+}
+
 fn git_subprocess_root(root: &Path) -> Cow<'_, Path> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-        const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
         let encoded = root.as_os_str().encode_wide().collect::<Vec<_>>();
-        let is_verbatim_disk = encoded.starts_with(&VERBATIM_PREFIX)
-            && encoded
-                .get(4)
-                .is_some_and(|unit| (*unit as u8).is_ascii_alphabetic())
-            && encoded.get(5) == Some(&(b':' as u16))
-            && encoded.get(6) == Some(&(b'\\' as u16));
-        if is_verbatim_disk {
+        if has_windows_verbatim_disk_prefix(&encoded) {
             return Cow::Owned(PathBuf::from(OsString::from_wide(&encoded[4..])));
         }
     }
@@ -5530,6 +6688,25 @@ fn snapshot_git_refs(
 
 const MAX_GIT_SHALLOW_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GIT_INFO_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GIT_REFTABLE_LIST_BYTES: u64 = 1024 * 1024;
+const MAX_GIT_REFTABLE_TABLES: usize = 4096;
+const MAX_GIT_REFTABLE_TABLE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GIT_REFTABLE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct GitReftableSnapshotLimits {
+    list_bytes: u64,
+    tables: usize,
+    table_bytes: u64,
+    total_bytes: u64,
+}
+
+const GIT_REFTABLE_SNAPSHOT_LIMITS: GitReftableSnapshotLimits = GitReftableSnapshotLimits {
+    list_bytes: MAX_GIT_REFTABLE_LIST_BYTES,
+    tables: MAX_GIT_REFTABLE_TABLES,
+    table_bytes: MAX_GIT_REFTABLE_TABLE_BYTES,
+    total_bytes: MAX_GIT_REFTABLE_TOTAL_BYTES,
+};
 
 fn validate_git_shallow(bytes: &[u8], object_format: Option<&str>) -> Result<(), String> {
     let text = std::str::from_utf8(bytes)
@@ -5626,7 +6803,10 @@ fn snapshot_git_shallow(
         .map_err(|e| format!("snapshot Git shallow boundary: {e}"))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+
+#[cfg(any(windows, test))]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 #[cfg(windows)]
@@ -5641,6 +6821,600 @@ fn metadata_is_reparse_like(_metadata: &std::fs::Metadata) -> bool {
 
 fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink() || metadata_is_reparse_like(metadata)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowsGitMetadataState {
+    volume_serial_number: u32,
+    file_index: u64,
+    file_attributes: u32,
+    file_size: u64,
+    last_write_time: u64,
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_same_identity(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    before.volume_serial_number == after.volume_serial_number
+        && before.file_index == after.file_index
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_file_state_matches(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    windows_git_metadata_same_identity(before, after)
+        && before.file_attributes == after.file_attributes
+        && before.file_size == after.file_size
+        && before.last_write_time == after.last_write_time
+}
+
+#[cfg(any(windows, test))]
+fn windows_git_metadata_directory_state_matches(
+    before: WindowsGitMetadataState,
+    after: WindowsGitMetadataState,
+) -> bool {
+    windows_git_metadata_same_identity(before, after)
+        && before.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            == after.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OtherGitMetadataState {
+    length: u64,
+    modified: SystemTime,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileTime {
+    low_date_time: u32,
+    high_date_time: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsByHandleFileInformation {
+    file_attributes: u32,
+    creation_time: WindowsFileTime,
+    last_access_time: WindowsFileTime,
+    last_write_time: WindowsFileTime,
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsObjectAttributes {
+    length: u32,
+    root_directory: *mut std::ffi::c_void,
+    object_name: *mut WindowsUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsIoStatusBlock {
+    status: isize,
+    information: usize,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFileInformationByHandle(
+        file: *mut std::ffi::c_void,
+        information: *mut WindowsByHandleFileInformation,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut *mut std::ffi::c_void,
+        desired_access: u32,
+        object_attributes: *mut WindowsObjectAttributes,
+        io_status_block: *mut WindowsIoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn other_git_metadata_state(
+    metadata: &std::fs::Metadata,
+    label: &str,
+) -> Result<OtherGitMetadataState, String> {
+    Ok(OtherGitMetadataState {
+        length: metadata.len(),
+        modified: metadata
+            .modified()
+            .map_err(|error| format!("inspect {label} modification time: {error}"))?,
+    })
+}
+
+#[cfg(windows)]
+fn windows_git_metadata_handle_state(
+    file: &std::fs::File,
+    label: &str,
+) -> Result<WindowsGitMetadataState, String> {
+    use std::os::windows::io::AsRawHandle;
+
+    let mut information = std::mem::MaybeUninit::<WindowsByHandleFileInformation>::uninit();
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(format!(
+            "inspect open {label}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let information = unsafe { information.assume_init() };
+    Ok(WindowsGitMetadataState {
+        volume_serial_number: information.volume_serial_number,
+        file_index: (u64::from(information.file_index_high) << 32)
+            | u64::from(information.file_index_low),
+        file_attributes: information.file_attributes,
+        file_size: (u64::from(information.file_size_high) << 32)
+            | u64::from(information.file_size_low),
+        last_write_time: (u64::from(information.last_write_time.high_date_time) << 32)
+            | u64::from(information.last_write_time.low_date_time),
+    })
+}
+
+#[cfg(any(test, windows))]
+fn windows_git_metadata_child_share_mode() -> u32 {
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+
+    FILE_SHARE_READ | FILE_SHARE_DELETE
+}
+
+#[cfg(any(test, windows))]
+fn windows_git_metadata_open_error(label: &str, error: u32) -> String {
+    const ERROR_SHARING_VIOLATION: u32 = 32;
+
+    if error == ERROR_SHARING_VIOLATION {
+        format!("{label} changed while being read")
+    } else {
+        format!(
+            "open {label}: {}",
+            std::io::Error::from_raw_os_error(error as i32)
+        )
+    }
+}
+
+#[cfg(windows)]
+fn windows_open_directory_no_follow(path: &Path, label: &str) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_LIST_DIRECTORY: u32 = 0x0001;
+    const FILE_TRAVERSE: u32 = 0x0020;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_WRITE: u32 = 0x0002;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    options
+        .open(path)
+        .map_err(|error| format!("open {label} '{}': {error}", path.display()))
+}
+
+#[cfg(windows)]
+fn windows_open_relative_no_follow(
+    directory: &std::fs::File,
+    name: &str,
+    label: &str,
+) -> Result<std::fs::File, String> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    const FILE_GENERIC_READ: u32 = 0x0012_0089;
+    const FILE_OPEN: u32 = 0x0001;
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
+    const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
+    const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const OBJ_CASE_INSENSITIVE: u32 = 0x0040;
+
+    let mut name = name.encode_utf16().collect::<Vec<_>>();
+    if name.iter().any(|unit| *unit == 0) {
+        return Err(format!("{label} has an invalid file name"));
+    }
+    let byte_length = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| format!("{label} has an invalid file name"))?;
+    let mut unicode_name = WindowsUnicodeString {
+        length: byte_length,
+        maximum_length: byte_length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut object_attributes = WindowsObjectAttributes {
+        length: u32::try_from(std::mem::size_of::<WindowsObjectAttributes>())
+            .expect("Windows object attributes size fits u32"),
+        root_directory: directory.as_raw_handle(),
+        object_name: &mut unicode_name,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut io_status = WindowsIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_GENERIC_READ,
+            &mut object_attributes,
+            &mut io_status,
+            std::ptr::null_mut(),
+            0,
+            windows_git_metadata_child_share_mode(),
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(windows_git_metadata_open_error(label, error));
+    }
+    if handle.is_null() {
+        return Err(format!("open {label}: Windows returned an invalid handle"));
+    }
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum GitMetadataReadError {
+    TooLarge,
+    Other(String),
+}
+
+impl From<String> for GitMetadataReadError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl GitMetadataReadError {
+    fn into_message(self, label: &str) -> String {
+        match self {
+            Self::TooLarge => format!("{label} is too large"),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn read_bounded_git_metadata_file(
+    path: &Path,
+    label: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, GitMetadataReadError> {
+    let before =
+        std::fs::symlink_metadata(path).map_err(|error| format!("inspect {label}: {error}"))?;
+    if metadata_is_link_like(&before) || !before.is_file() {
+        return Err(format!("{label} is not a regular file").into());
+    }
+    if before.len() > max_bytes {
+        return Err(GitMetadataReadError::TooLarge);
+    }
+    let path_before_state = other_git_metadata_state(&before, label)?;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("open {label}: {error}"))?;
+    let handle_before_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect open {label}: {error}"))?;
+    if metadata_is_link_like(&handle_before_metadata) || !handle_before_metadata.is_file() {
+        return Err(format!("{label} is not a regular file").into());
+    }
+    if handle_before_metadata.len() > max_bytes {
+        return Err(GitMetadataReadError::TooLarge);
+    }
+    let handle_before_state = other_git_metadata_state(&handle_before_metadata, label)?;
+    if path_before_state != handle_before_state {
+        return Err(format!("{label} changed while being opened").into());
+    }
+
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| format!("{label} byte limit is invalid"))?;
+    let initial_capacity = usize::try_from(handle_before_metadata.len())
+        .map_err(|_| GitMetadataReadError::TooLarge)?;
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    std::io::Read::by_ref(&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {label}: {error}"))?;
+
+    let handle_after_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
+    if metadata_is_link_like(&handle_after_metadata) || !handle_after_metadata.is_file() {
+        return Err(format!("{label} changed while being read").into());
+    }
+    let handle_after_state = other_git_metadata_state(&handle_after_metadata, label)?;
+    if handle_before_state != handle_after_state {
+        return Err(format!("{label} changed while being read").into());
+    }
+    let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
+    if bytes_read > max_bytes {
+        return Err(GitMetadataReadError::TooLarge);
+    }
+
+    let after = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect {label} after reading: {error}"))?;
+    if metadata_is_link_like(&after) || !after.is_file() {
+        return Err(format!("{label} changed while being read").into());
+    }
+    let path_after_state = other_git_metadata_state(&after, label)?;
+    if path_before_state != path_after_state || path_after_state != handle_after_state {
+        return Err(format!("{label} changed while being read").into());
+    }
+    Ok(bytes)
+}
+
+fn validate_git_metadata_child_name(name: &str, label: &str) -> Result<(), String> {
+    if name.is_empty() || Path::new(name).file_name().and_then(OsStr::to_str) != Some(name) {
+        return Err(format!("{label} has an invalid file name"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn record_git_metadata_read_limit(max_bytes: u64) {
+    TEST_GIT_METADATA_READ_LIMITS.with(|limits| limits.borrow_mut().push(max_bytes));
+}
+
+#[cfg(not(test))]
+fn record_git_metadata_read_limit(_max_bytes: u64) {}
+
+#[cfg(unix)]
+struct GitMetadataDirectory {
+    directory: std::fs::File,
+    state: FileState,
+}
+
+#[cfg(unix)]
+impl GitMetadataDirectory {
+    fn open(path: &Path, label: &str) -> Result<Self, String> {
+        let directory = open_directory_no_follow(path, label)?;
+        let state =
+            file_state(&directory).map_err(|error| format!("inspect open {label}: {error}"))?;
+        if state.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
+            return Err(format!("{label} is not a real directory"));
+        }
+        Ok(Self { directory, state })
+    }
+
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
+        validate_git_metadata_child_name(name, label)?;
+        let name = CString::new(name).map_err(|_| format!("{label} has an invalid file name"))?;
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                return Err(format!("{label} is not a regular file").into());
+            }
+            return Err(format!("open {label}: {error}").into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let before = file_state(&file).map_err(|error| format!("inspect open {label}: {error}"))?;
+        if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
+            return Err(format!("{label} is not a regular file").into());
+        }
+        if before.size > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} byte limit is invalid"))?;
+        let initial_capacity =
+            usize::try_from(before.size).map_err(|_| GitMetadataReadError::TooLarge)?;
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        std::io::Read::by_ref(&mut file)
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read {label}: {error}"))?;
+
+        let after = file_state(&file)
+            .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
+        if before != after {
+            return Err(format!("{label} changed while being read").into());
+        }
+        let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
+        if bytes_read > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    fn validate(&self, label: &str) -> Result<(), String> {
+        let after = file_state(&self.directory)
+            .map_err(|error| format!("inspect open {label} after reading: {error}"))?;
+        if !same_identity(self.state, after)
+            || after.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR)
+        {
+            return Err(format!("{label} changed while being read"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct GitMetadataDirectory {
+    directory: std::fs::File,
+    state: WindowsGitMetadataState,
+}
+
+#[cfg(windows)]
+impl GitMetadataDirectory {
+    fn open(path: &Path, label: &str) -> Result<Self, String> {
+        let directory = windows_open_directory_no_follow(path, label)?;
+        let state = windows_git_metadata_handle_state(&directory, label)?;
+        if state.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || state.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        {
+            return Err(format!("{label} is not a real directory"));
+        }
+        Ok(Self { directory, state })
+    }
+
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
+
+        validate_git_metadata_child_name(name, label)?;
+        let mut file = windows_open_relative_no_follow(&self.directory, name, label)?;
+        let before = windows_git_metadata_handle_state(&file, label)?;
+        if before.file_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            return Err(format!("{label} is not a regular file").into());
+        }
+        if before.file_size > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+
+        let read_limit = max_bytes
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} byte limit is invalid"))?;
+        let initial_capacity =
+            usize::try_from(before.file_size).map_err(|_| GitMetadataReadError::TooLarge)?;
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        std::io::Read::by_ref(&mut file)
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read {label}: {error}"))?;
+
+        let after = windows_git_metadata_handle_state(&file, label)?;
+        if !windows_git_metadata_file_state_matches(before, after)
+            || after.file_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)
+                != 0
+        {
+            return Err(format!("{label} changed while being read").into());
+        }
+        let bytes_read = u64::try_from(bytes.len()).map_err(|_| GitMetadataReadError::TooLarge)?;
+        if bytes_read > max_bytes {
+            return Err(GitMetadataReadError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    fn validate(&self, label: &str) -> Result<(), String> {
+        let after = windows_git_metadata_handle_state(&self.directory, label)?;
+        if !windows_git_metadata_directory_state_matches(self.state, after)
+            || after.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || after.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        {
+            return Err(format!("{label} changed while being read"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+struct GitMetadataDirectory {
+    path: PathBuf,
+    state: OtherGitMetadataState,
+}
+
+#[cfg(all(not(unix), not(windows)))]
+impl GitMetadataDirectory {
+    fn open(path: &Path, label: &str) -> Result<Self, String> {
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|error| format!("inspect {label}: {error}"))?;
+        if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+            return Err(format!("{label} is not a real directory"));
+        }
+        let state = other_git_metadata_state(&metadata, label)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            state,
+        })
+    }
+
+    fn read_file(
+        &self,
+        name: &str,
+        label: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, GitMetadataReadError> {
+        record_git_metadata_read_limit(max_bytes);
+        validate_git_metadata_child_name(name, label)?;
+        read_bounded_git_metadata_file(&self.path.join(name), label, max_bytes)
+    }
+
+    fn validate(&self, label: &str) -> Result<(), String> {
+        let metadata = std::fs::symlink_metadata(&self.path)
+            .map_err(|error| format!("inspect {label} after reading: {error}"))?;
+        if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+            return Err(format!("{label} changed while being read"));
+        }
+        let after = other_git_metadata_state(&metadata, label)?;
+        if self.state != after {
+            return Err(format!("{label} changed while being read"));
+        }
+        Ok(())
+    }
 }
 
 fn inspect_real_git_info_directory(git_dir: &Path) -> Result<Option<PathBuf>, String> {
@@ -5767,20 +7541,135 @@ fn resolve_git_ref(refs: &HashMap<String, GitRefValue>, name: &str) -> Option<St
     None
 }
 
-fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
-    let tables = std::fs::read_to_string(source.join("tables.list"))
-        .map_err(|e| format!("read Git reftable table list: {e}"))?;
-    std::fs::create_dir_all(destination)
-        .map_err(|e| format!("create isolated Git reftable directory: {e}"))?;
+fn is_valid_git_reftable_table_name(name: &str) -> bool {
+    fn is_windows_device_alias(stem: &str) -> bool {
+        let stem = stem.trim_end_matches(|character| character == ' ' || character == '.');
+        if ["CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"]
+            .iter()
+            .any(|alias| stem.eq_ignore_ascii_case(alias))
+        {
+            return true;
+        }
+
+        let bytes = stem.as_bytes();
+        let Some(prefix) = bytes.get(..3) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(b"COM") && !prefix.eq_ignore_ascii_case(b"LPT") {
+            return false;
+        }
+
+        matches!(
+            &stem[3..],
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    }
+
+    if name.ends_with([' ', '.'])
+        || name.chars().any(|character| {
+            character.is_ascii_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+    {
+        return false;
+    }
+
+    let Some(stem) = name
+        .strip_suffix(".ref")
+        .or_else(|| name.strip_suffix(".log"))
+    else {
+        return false;
+    };
+
+    !stem.is_empty() && !is_windows_device_alias(name.split('.').next().unwrap_or_default())
+}
+
+fn snapshot_git_reftable_with_limits_and_hook<F, G>(
+    source: &Path,
+    destination: &Path,
+    limits: GitReftableSnapshotLimits,
+    after_directory_open: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> G,
+{
+    let directory = GitMetadataDirectory::open(source, "Git reftable directory")?;
+    let hook_guard = after_directory_open();
+
+    let list_label = "Git reftable table list";
+    let list_bytes = directory
+        .read_file("tables.list", list_label, limits.list_bytes)
+        .map_err(|error| error.into_message(list_label))?;
+    let tables = std::str::from_utf8(&list_bytes)
+        .map_err(|_| "Git reftable table list is not UTF-8".to_string())?;
+    let mut names = Vec::new();
     for table in tables.lines().filter(|table| !table.is_empty()) {
+        if names.len() >= limits.tables {
+            return Err("Git reftable table list contains too many tables".to_string());
+        }
         if Path::new(table).file_name().and_then(OsStr::to_str) != Some(table) {
             return Err("Git reftable table list contains an invalid path".to_string());
         }
-        std::fs::copy(source.join(table), destination.join(table))
-            .map_err(|e| format!("snapshot Git reftable table {table}: {e}"))?;
+        if !is_valid_git_reftable_table_name(table) {
+            return Err("Git reftable table list contains an invalid table name".to_string());
+        }
+        names.push(table);
     }
-    std::fs::write(destination.join("tables.list"), tables)
-        .map_err(|e| format!("snapshot Git reftable table list: {e}"))
+
+    let mut snapshots = Vec::with_capacity(names.len());
+    let mut total_bytes = 0_u64;
+    for table in names {
+        let remaining_bytes = limits
+            .total_bytes
+            .checked_sub(total_bytes)
+            .ok_or_else(|| "Git reftable aggregate size is too large".to_string())?;
+        let read_limit = limits.table_bytes.min(remaining_bytes);
+        let aggregate_limited = remaining_bytes < limits.table_bytes;
+        let label = format!("Git reftable table {table}");
+        let bytes = match directory.read_file(table, &label, read_limit) {
+            Ok(bytes) => bytes,
+            Err(GitMetadataReadError::TooLarge) if aggregate_limited => {
+                return Err("Git reftable aggregate size is too large".to_string());
+            }
+            Err(error) => return Err(error.into_message(&label)),
+        };
+        let table_bytes = u64::try_from(bytes.len())
+            .map_err(|_| "Git reftable aggregate size overflowed".to_string())?;
+        total_bytes = total_bytes
+            .checked_add(table_bytes)
+            .ok_or_else(|| "Git reftable aggregate size overflowed".to_string())?;
+        if total_bytes > limits.total_bytes {
+            return Err("Git reftable aggregate size is too large".to_string());
+        }
+        snapshots.push((table.to_string(), bytes));
+    }
+
+    drop(hook_guard);
+    directory.validate("Git reftable directory")?;
+
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("create isolated Git reftable directory: {error}"))?;
+    for (table, bytes) in snapshots {
+        std::fs::write(destination.join(&table), bytes)
+            .map_err(|error| format!("snapshot Git reftable table {table}: {error}"))?;
+    }
+    std::fs::write(destination.join("tables.list"), list_bytes)
+        .map_err(|error| format!("snapshot Git reftable table list: {error}"))
+}
+
+fn snapshot_git_reftable_with_limits(
+    source: &Path,
+    destination: &Path,
+    limits: GitReftableSnapshotLimits,
+) -> Result<(), String> {
+    snapshot_git_reftable_with_limits_and_hook(source, destination, limits, || ())
+}
+
+fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
+    snapshot_git_reftable_with_limits(source, destination, GIT_REFTABLE_SNAPSHOT_LIMITS)
 }
 
 fn isolated_git_metadata_command(root: &str, git_dir: &Path) -> std::process::Command {
@@ -5915,9 +7804,15 @@ fn git_inspection_line_ending_config(root: &str) -> Result<Vec<(String, String)>
     Ok(values.into_iter().collect())
 }
 
+fn git_inspection_config_is_multi_valued(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("remote.") && (key.ends_with(".url") || key.ends_with(".fetch"))
+}
+
 fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>, String> {
     const SAFE_CONFIG_PATTERN: &str = r"^(core\.(repositoryformatversion|filemode|ignorecase|symlinks|precomposeunicode)|extensions\.(objectformat|refstorage)|branch\..*\.(remote|merge)|remote\..*\.(url|fetch))$";
-    let mut values = HashMap::new();
+    let mut scalar_values = HashMap::new();
+    let mut multi_values = Vec::new();
     let mut scopes = vec!["--local"];
     if git_worktree_config_enabled(root)? {
         scopes.push("--worktree");
@@ -5950,10 +7845,16 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
                 .position(|byte| *byte == b'\n')
                 .ok_or_else(|| "git config query returned malformed output".to_string())?;
             let key = std::str::from_utf8(&record[..separator])
-                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?;
+                .map_err(|_| "git config query returned invalid UTF-8 keys".to_string())?
+                .to_string();
             let value = std::str::from_utf8(&record[separator + 1..])
-                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?;
-            values.insert(key.to_string(), value.to_string());
+                .map_err(|_| format!("git config {key} returned invalid UTF-8"))?
+                .to_string();
+            if git_inspection_config_is_multi_valued(&key) {
+                multi_values.push((key, value));
+            } else {
+                scalar_values.insert(key, value);
+            }
         }
     }
     // Preserve only validated, non-executable EOL conversion semantics from
@@ -5961,8 +7862,12 @@ fn git_inspection_repository_config(root: &str) -> Result<Vec<(String, String)>,
     // because it governs diagnostics for the same irreversible conversions.
     // Encoding conversion policy remains outside this deliberately narrow
     // contract.
-    values.extend(git_inspection_line_ending_config(root)?);
-    Ok(values.into_iter().collect())
+    for (key, value) in git_inspection_line_ending_config(root)? {
+        scalar_values.insert(key, value);
+    }
+    let mut values = scalar_values.into_iter().collect::<Vec<_>>();
+    values.extend(multi_values);
+    Ok(values)
 }
 
 struct GitInspectionRepository {
@@ -6287,6 +8192,22 @@ impl<'a> GitInspection<'a> {
             .iter()
             .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
     }
+
+    fn first_non_empty_config_value_after_last_empty_reset(&self, key: &str) -> Option<&str> {
+        let last_reset = self
+            .repository
+            .config
+            .iter()
+            .rposition(|(candidate, value)| candidate == key && value.is_empty());
+        let Some(last_reset) = last_reset else {
+            return self.config_value(key).filter(|value| !value.is_empty());
+        };
+        self.repository.config[last_reset + 1..]
+            .iter()
+            .find_map(|(candidate, value)| {
+                (candidate == key && !value.is_empty()).then_some(value.as_str())
+            })
+    }
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
@@ -6520,8 +8441,7 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     }
 
     let remote_url = inspection
-        .config_value("remote.origin.url")
-        .filter(|url| !url.is_empty())
+        .first_non_empty_config_value_after_last_empty_reset("remote.origin.url")
         .map(|_| {
             // `git remote get-url` ignores command-scope `-c remote.*` values,
             // but `ls-remote --get-url` resolves the same fetch URL without
@@ -6682,6 +8602,7 @@ fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
 pub fn run() {
     env_logger::init();
 
+    let runtime_diagnostics_state = RuntimeDiagnosticsState::from_startup();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -6693,6 +8614,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(runtime_diagnostics_state)
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
         .manage(BrowserShortcutAuthorizations::default())
@@ -6710,6 +8632,7 @@ pub fn run() {
             pty_list,
             pty_transport_metrics,
             browser_app_shortcut,
+            browser_report_title,
             browser_automation_result,
             browser_navigate,
             browser_set_bounds,
@@ -6717,6 +8640,7 @@ pub fn run() {
             browser_hide_all_except,
             browser_destroy,
             browser_destroy_many,
+            browser_current_url,
             browser_reload,
             browser_eval,
             browser_script,
@@ -6747,6 +8671,8 @@ pub fn run() {
             control_provider_shutdown,
             control_operator_submit,
             control_state,
+            runtime_diagnostics,
+            runtime_process_metrics,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -6756,6 +8682,66 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_command_tests {
+    use crate::runtime_diagnostics::{stress_authorized_for, NativeRuntimeReport, ProcessMetrics};
+
+    #[test]
+    fn runtime_diagnostics_omits_unavailable_engine_version_and_metrics() {
+        let report = NativeRuntimeReport::from_parts(
+            "linux",
+            "x86_64",
+            "WebKitGTK",
+            None,
+            None,
+            true,
+            false,
+        );
+        let json = serde_json::to_value(report).unwrap();
+        assert!(json.get("engineVersion").is_none());
+        assert!(json.get("process").is_none());
+    }
+
+    #[test]
+    fn runtime_diagnostics_production_never_authorizes_the_stress_harness() {
+        assert!(!stress_authorized_for(false, Some("1")));
+        assert!(stress_authorized_for(true, Some("1")));
+        assert!(!stress_authorized_for(true, Some("0")));
+        assert!(!stress_authorized_for(true, Some("true")));
+    }
+
+    #[test]
+    fn runtime_diagnostics_uses_stable_camel_case_process_fields() {
+        let report = NativeRuntimeReport::from_parts(
+            "macos",
+            "aarch64",
+            "WKWebView",
+            Some("17.6".to_string()),
+            Some(ProcessMetrics {
+                cpu_percent: Some(12.5),
+                rss_bytes: Some(4096),
+            }),
+            true,
+            true,
+        );
+
+        let json = serde_json::to_value(report).unwrap();
+
+        assert!(json.get("engineVersion").is_some());
+        assert!(json.get("debugBuild").is_some());
+        assert!(json.get("stressAuthorized").is_some());
+        assert!(json.get("engine_version").is_none());
+        assert!(json.get("debug_build").is_none());
+        assert!(json.get("stress_authorized").is_none());
+
+        let process = json.get("process").unwrap();
+        assert!(process.get("cpuPercent").is_some());
+        assert!(process.get("rssBytes").is_some());
+        assert!(process.get("cpu_percent").is_none());
+        assert!(process.get("rss_bytes").is_none());
+    }
 }
 
 #[cfg(test)]
@@ -7073,6 +9059,104 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
+    fn browser_snapshot_completion_requires_unchanged_document_authority() {
+        let identity = BrowserFocusIdentity {
+            generation: 70,
+            navigation_token: "approved-document".to_string(),
+            document_url: "https://old.example/account".to_string(),
+        };
+        let replacement = BrowserFocusIdentity {
+            generation: 71,
+            navigation_token: "replacement-document".to_string(),
+            document_url: "https://new.example/dashboard".to_string(),
+        };
+
+        assert!(browser_document_authority_unchanged(
+            "https://old.example/account",
+            &identity,
+            "https://old.example/account",
+            Some(&identity),
+        ));
+        assert!(!browser_document_authority_unchanged(
+            "https://old.example/account",
+            &identity,
+            "https://new.example/dashboard",
+            Some(&replacement),
+        ));
+        assert!(!browser_document_authority_unchanged(
+            "https://old.example/account",
+            &identity,
+            "https://old.example/account",
+            None,
+        ));
+    }
+
+    #[test]
+    fn page_initiated_page_load_retires_exact_native_authority() {
+        let label = "psyche-browser-page-load-retirement".to_string();
+        let identity = BrowserFocusIdentity {
+            generation: 71,
+            navigation_token: "old-document".to_string(),
+            document_url: "https://old.example/account".to_string(),
+        };
+        install_browser_focus_identity(label.clone(), identity.clone());
+
+        assert!(retire_browser_authority_for_page_load(
+            &label,
+            "https://new.example/dashboard",
+        ));
+        assert_eq!(browser_focus_identity(&label), None);
+
+        install_browser_focus_identity(label.clone(), identity.clone());
+        assert!(retire_browser_authority_for_page_load(
+            &label,
+            "https://old.example/settings",
+        ));
+        assert_eq!(browser_focus_identity(&label), None);
+
+        install_browser_focus_identity(label.clone(), identity);
+        assert!(retire_browser_authority_for_page_load(
+            &label,
+            "https://old.example/account",
+        ));
+        assert_eq!(browser_focus_identity(&label), None);
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn exact_document_authority_rejects_same_origin_replacement_but_accepts_route_updates() {
+        let label = "psyche-browser-exact-document-authority".to_string();
+        let identity = BrowserFocusIdentity {
+            generation: 72,
+            navigation_token: "live-document".to_string(),
+            document_url: "https://old.example/account".to_string(),
+        };
+        install_browser_focus_identity(label.clone(), identity.clone());
+
+        assert_eq!(
+            ensure_live_browser_document_authority(&label, "https://old.example/settings")
+                .unwrap_err(),
+            "browser document authority was replaced"
+        );
+        assert_eq!(browser_focus_identity(&label), None);
+
+        install_browser_focus_identity(label.clone(), identity.clone());
+        assert!(refresh_browser_focus_identity_document_url(
+            &label,
+            identity.generation,
+            &identity.navigation_token,
+            "https://old.example/settings",
+        ));
+        assert_eq!(
+            ensure_live_browser_document_authority(&label, "https://old.example/settings")
+                .unwrap()
+                .document_url,
+            "https://old.example/settings".to_string()
+        );
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
     fn browser_script_execution_uses_the_document_context_world() {
         assert_eq!(
             browser_script_execution_world_name(),
@@ -7191,10 +9275,13 @@ mod pty_runtime_tests {
         assert!(validate_browser_snapshot_dimensions(8192, 8192).is_err());
     }
 
-    fn browser_navigation_waiter(_url: &str) -> BrowserNavigationWaiter {
+    fn browser_navigation_waiter(url: &str) -> BrowserNavigationWaiter {
         let (completion, _receiver) = tokio::sync::oneshot::channel();
         BrowserNavigationWaiter {
+            generation: 1,
             token: "requested-token".to_string(),
+            requested_url: url.to_string(),
+            native_view: None,
             navigation_identity: None,
             completion: Some(completion),
         }
@@ -7209,7 +9296,10 @@ mod pty_runtime_tests {
         BROWSER_NAVIGATION_WAITERS.lock().insert(
             requested_label.clone(),
             BrowserNavigationWaiter {
+                generation: 41,
                 token: "requested".to_string(),
+                requested_url: "https://requested.example".to_string(),
+                native_view: Some(410),
                 navigation_identity: Some(41),
                 completion: Some(requested_sender),
             },
@@ -7217,22 +9307,373 @@ mod pty_runtime_tests {
         BROWSER_NAVIGATION_WAITERS.lock().insert(
             unrelated_label.clone(),
             BrowserNavigationWaiter {
+                generation: 42,
                 token: "unrelated".to_string(),
+                requested_url: "https://unrelated.example".to_string(),
+                native_view: Some(420),
                 navigation_identity: Some(42),
                 completion: Some(unrelated_sender),
             },
         );
 
-        assert!(!complete_browser_navigation(99, "https://user.example"));
+        assert!(!resolve_browser_navigation(
+            &requested_label,
+            41,
+            "requested",
+            410,
+            99,
+            Ok("https://user.example".to_string()),
+        ));
         assert!(requested_receiver.try_recv().is_err());
         assert!(unrelated_receiver.try_recv().is_err());
-        assert!(complete_browser_navigation(41, "https://terminal.example"));
+        assert!(!resolve_browser_navigation(
+            &requested_label,
+            99,
+            "requested",
+            410,
+            41,
+            Ok("https://wrong-generation.example".to_string()),
+        ));
+        assert!(!resolve_browser_navigation(
+            &requested_label,
+            41,
+            "wrong-token",
+            410,
+            41,
+            Ok("https://wrong-token.example".to_string()),
+        ));
+        assert!(!resolve_browser_navigation(
+            &requested_label,
+            41,
+            "requested",
+            999,
+            41,
+            Ok("https://wrong-view.example".to_string()),
+        ));
+        assert!(resolve_browser_navigation(
+            &requested_label,
+            41,
+            "requested",
+            410,
+            41,
+            Ok("https://terminal.example".to_string()),
+        ));
+        let requested_result = requested_receiver.try_recv().unwrap().unwrap();
+        assert_eq!(requested_result.terminal_url, "https://terminal.example");
         assert_eq!(
-            requested_receiver.try_recv().unwrap().unwrap().terminal_url,
-            "https://terminal.example"
+            browser_focus_identity(&requested_label),
+            Some(BrowserFocusIdentity {
+                generation: 41,
+                navigation_token: "requested".to_string(),
+                document_url: "https://terminal.example".to_string(),
+            })
         );
+        assert_eq!(browser_focus_identity(&unrelated_label), None);
         assert!(unrelated_receiver.try_recv().is_err());
+        retire_browser_focus_label(&requested_label);
         BROWSER_NAVIGATION_WAITERS.lock().remove(&unrelated_label);
+    }
+
+    #[test]
+    fn browser_navigation_failure_does_not_publish_a_focus_identity() {
+        let label = "browser-native-failure".to_string();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            label.clone(),
+            BrowserNavigationWaiter {
+                generation: 51,
+                token: "failure".to_string(),
+                requested_url: "https://failure.example".to_string(),
+                native_view: Some(510),
+                navigation_identity: Some(52),
+                completion: Some(sender),
+            },
+        );
+
+        assert!(resolve_browser_navigation(
+            &label,
+            51,
+            "failure",
+            510,
+            52,
+            Err("browser navigation failed".to_string()),
+        ));
+        assert_eq!(
+            receiver.try_recv().unwrap().unwrap_err(),
+            "browser navigation failed"
+        );
+        assert_eq!(browser_focus_identity(&label), None);
+    }
+
+    #[test]
+    fn browser_title_identity_tracks_pending_then_live_native_navigation() {
+        let label = "browser-native-title".to_string();
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        BROWSER_NAVIGATION_WAITERS.lock().insert(
+            label.clone(),
+            BrowserNavigationWaiter {
+                generation: 61,
+                token: "pending-title".to_string(),
+                requested_url: "https://pending-title.example".to_string(),
+                native_view: Some(610),
+                navigation_identity: Some(62),
+                completion: Some(sender),
+            },
+        );
+
+        assert_eq!(
+            browser_title_identity(&label),
+            Some(BrowserFocusIdentity {
+                generation: 61,
+                navigation_token: "pending-title".to_string(),
+                document_url: "https://pending-title.example".to_string(),
+            })
+        );
+        BROWSER_NAVIGATION_WAITERS.lock().remove(&label);
+        install_browser_focus_identity(
+            label.clone(),
+            BrowserFocusIdentity {
+                generation: 63,
+                navigation_token: "live-title".to_string(),
+                document_url: "https://live-title.example".to_string(),
+            },
+        );
+        assert_eq!(
+            browser_title_identity(&label),
+            Some(BrowserFocusIdentity {
+                generation: 63,
+                navigation_token: "live-title".to_string(),
+                document_url: "https://live-title.example".to_string(),
+            })
+        );
+        retire_browser_focus_label(&label);
+    }
+
+    #[test]
+    fn linux_navigation_state_completes_only_after_finished() {
+        let requested = "https://example.test/path";
+        let mut phase = BrowserLinuxNavigationPhase::AwaitingStart;
+
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut phase,
+                BrowserLinuxNavigationEvent::Started,
+                requested,
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Pending
+        );
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut phase,
+                BrowserLinuxNavigationEvent::Committed,
+                requested,
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Pending
+        );
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut phase,
+                BrowserLinuxNavigationEvent::Finished,
+                requested,
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Complete(requested.to_string())
+        );
+    }
+
+    #[test]
+    fn linux_navigation_state_accepts_owned_redirect_chains() {
+        let requested = "http://example.test/login";
+        let mut phase = BrowserLinuxNavigationPhase::AwaitingStart;
+
+        for (event, url) in [
+            (BrowserLinuxNavigationEvent::Started, requested),
+            (
+                BrowserLinuxNavigationEvent::Redirected,
+                "https://example.test/login",
+            ),
+            (
+                BrowserLinuxNavigationEvent::Redirected,
+                "https://auth.example.test/authorize",
+            ),
+            (
+                BrowserLinuxNavigationEvent::Redirected,
+                "https://example.test/callback",
+            ),
+            (
+                BrowserLinuxNavigationEvent::Committed,
+                "https://example.test/callback",
+            ),
+        ] {
+            assert_eq!(
+                advance_browser_linux_navigation(&mut phase, event, url, requested),
+                BrowserLinuxNavigationDecision::Pending
+            );
+        }
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut phase,
+                BrowserLinuxNavigationEvent::Finished,
+                "https://example.test/callback",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Complete("https://example.test/callback".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_navigation_url_equivalence_accepts_common_webview_canonicalization() {
+        for (requested, observed) in [
+            ("https://example.test", "https://example.test/"),
+            ("https://example.test:443/docs", "https://example.test/docs"),
+            (
+                "http://EXAMPLE.test:80/%7euser",
+                "http://example.test/~user",
+            ),
+            (
+                "https://example.test/a%2fb?value=%7e#%61",
+                "https://example.test/a%2Fb?value=~#a",
+            ),
+        ] {
+            assert!(
+                browser_navigation_urls_equivalent(requested, observed),
+                "{requested} should be equivalent to {observed}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_navigation_url_equivalence_preserves_navigation_distinctions() {
+        for (left, right) in [
+            ("http://example.test/path", "https://example.test/path"),
+            ("https://a.example.test/path", "https://b.example.test/path"),
+            ("https://example.test:444/path", "https://example.test/path"),
+            ("https://example.test/path", "https://example.test/path/"),
+            ("https://example.test/a%2Fb", "https://example.test/a/b"),
+            (
+                "https://example.test/path?a=1",
+                "https://example.test/path?a=2",
+            ),
+            ("https://example.test/path#a", "https://example.test/path#b"),
+        ] {
+            assert!(
+                !browser_navigation_urls_equivalent(left, right),
+                "{left} should remain distinct from {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_navigation_state_accepts_direct_canonicalization_without_weakening_redirect_policy() {
+        let requested = "https://example.test/%7euser";
+        let mut direct = BrowserLinuxNavigationPhase::AwaitingStart;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut direct,
+                BrowserLinuxNavigationEvent::Started,
+                "https://example.test/~user",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Pending
+        );
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut direct,
+                BrowserLinuxNavigationEvent::Committed,
+                "https://example.test:443/~user",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Pending
+        );
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut direct,
+                BrowserLinuxNavigationEvent::Finished,
+                "https://example.test/~user",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Complete("https://example.test/~user".to_string())
+        );
+
+        let mut replacement = BrowserLinuxNavigationPhase::AwaitingStart;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut replacement,
+                BrowserLinuxNavigationEvent::Started,
+                "https://example.test/replaced",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Reject(
+                "browser navigation was replaced before completion".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn linux_navigation_state_rejects_replacement_ambiguous_evolution_and_failure() {
+        let requested = "https://example.test/path";
+
+        let mut replacement = BrowserLinuxNavigationPhase::Started;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut replacement,
+                BrowserLinuxNavigationEvent::Started,
+                requested,
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Reject(
+                "browser navigation was replaced before completion".to_string()
+            )
+        );
+
+        let mut ambiguous = BrowserLinuxNavigationPhase::Started;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut ambiguous,
+                BrowserLinuxNavigationEvent::Committed,
+                "https://redirected.example",
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Reject(
+                "browser navigation signal order was ambiguous".to_string()
+            )
+        );
+
+        let mut failure = BrowserLinuxNavigationPhase::Started;
+        assert_eq!(
+            advance_browser_linux_navigation(
+                &mut failure,
+                BrowserLinuxNavigationEvent::Failed,
+                requested,
+                requested,
+            ),
+            BrowserLinuxNavigationDecision::Reject("browser navigation failed".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_navigation_completion_ignores_unrelated_native_ids() {
+        assert!(!browser_windows_completion_matches(None, 7));
+        assert!(!browser_windows_completion_matches(Some(41), 7));
+        assert!(browser_windows_completion_matches(Some(41), 41));
+    }
+
+    #[test]
+    fn browser_close_failure_preserves_live_authority() {
+        let retired = std::cell::Cell::new(false);
+        assert_eq!(
+            close_browser_webview_transactionally(
+                || Err("close failed".to_string()),
+                || retired.set(true),
+            ),
+            Err("close failed".to_string())
+        );
+        assert!(!retired.get());
+
+        close_browser_webview_transactionally(|| Ok(()), || retired.set(true)).unwrap();
+        assert!(retired.get());
     }
 
     #[test]
@@ -8495,6 +10936,18 @@ mod workspace_panel_tests {
         path.to_str().expect("test paths must be UTF-8")
     }
 
+    #[test]
+    fn git_subprocess_root_requires_ascii_drive_letters() {
+        let prefix = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        let mut ascii_drive = prefix.to_vec();
+        ascii_drive.extend([b'C' as u16, b':' as u16, b'\\' as u16]);
+        let mut non_ascii_drive = prefix.to_vec();
+        non_ascii_drive.extend([0x0141, b':' as u16, b'\\' as u16]);
+
+        assert!(has_windows_verbatim_disk_prefix(&ascii_drive));
+        assert!(!has_windows_verbatim_disk_prefix(&non_ascii_drive));
+    }
+
     #[cfg(windows)]
     #[test]
     fn git_subprocess_root_removes_only_verbatim_disk_prefixes() {
@@ -9243,29 +11696,19 @@ mod workspace_panel_tests {
         }
     }
 
-    fn native_chat_options(
+    fn native_code_options(
         session_id: Option<&str>,
         command: Option<&str>,
         args: Option<&[&str]>,
     ) -> StartOptions {
-        launch_options_with_env(
-            Some("coven-chat"),
-            session_id,
-            command,
-            args,
-            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
-        )
+        launch_options_with_env(Some("coven-code"), session_id, command, args, None)
     }
 
     #[test]
-    fn accepts_exact_native_coven_chat_and_attach_launches() {
+    fn accepts_exact_native_coven_code_and_attach_launches() {
         let coven = "/canonical/bin/coven";
         let session_id = "12345678-1234-4abc-8def-1234567890ab";
-        let chat = native_chat_options(
-            Some(session_id),
-            Some(coven),
-            Some(&["code", "--session-id", session_id]),
-        );
+        let code = native_code_options(None, Some(coven), Some(&[]));
         let attach = launch_options(
             Some("coven-attach"),
             Some(session_id),
@@ -9273,33 +11716,56 @@ mod workspace_panel_tests {
             Some(&["attach", session_id]),
         );
 
-        assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
+        assert_eq!(validate_coven_launch_with(&code, Some(coven)), Ok(()));
         assert_eq!(validate_coven_launch_with(&attach, Some(coven)), Ok(()));
+    }
+
+    #[test]
+    fn rejects_legacy_native_coven_chat_launch_kind_after_workspace_migration() {
+        let legacy = launch_options_with_env(
+            Some("coven-chat"),
+            None,
+            Some("/canonical/bin/coven"),
+            None,
+            Some(&[]),
+        );
+
+        assert_eq!(
+            validate_coven_launch_with(&legacy, Some("/canonical/bin/coven")),
+            Err("unsupported launch kind: coven-chat".to_string())
+        );
     }
 
     #[test]
     fn rejects_invalid_native_coven_launch_environments() {
         let coven = "/canonical/bin/coven";
-        let chat_envs = [
-            None,
-            Some(&[][..]),
-            Some(&[("COVEN_SESSION_SOURCE", "other")][..]),
-            Some(&[("OTHER", "psyche-build")][..]),
+        let code_envs = [
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
+            Some(&[("OTHER", "value")][..]),
             Some(&[("COVEN_SESSION_SOURCE", "psyche-build"), ("OTHER", "value")][..]),
         ];
-        for env in chat_envs {
-            let chat = launch_options_with_env(
-                Some("coven-chat"),
-                None,
-                Some(coven),
-                Some(&["chat"]),
-                env,
-            );
+        for env in code_envs {
+            let code =
+                launch_options_with_env(Some("coven-code"), None, Some(coven), Some(&[]), env);
             assert_eq!(
-                validate_coven_launch_with(&chat, Some(coven)),
-                Err("coven-chat requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string())
+                validate_coven_launch_with(&code, Some(coven)),
+                Err("coven-code does not accept launch environment entries".to_string())
             );
         }
+
+        let no_env_code =
+            launch_options_with_env(Some("coven-code"), None, Some(coven), None, None);
+        assert_eq!(
+            validate_coven_launch_with(&no_env_code, Some(coven)),
+            Ok(())
+        );
+
+        let empty_env_code =
+            launch_options_with_env(Some("coven-code"), None, Some(coven), Some(&[]), Some(&[]));
+        assert_eq!(
+            validate_coven_launch_with(&empty_env_code, Some(coven)),
+            Ok(())
+        );
 
         for env in [
             Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
@@ -9332,15 +11798,29 @@ mod workspace_panel_tests {
     }
 
     #[test]
-    fn applies_effective_launch_environment_without_relabeling_attachments() {
+    fn scrubs_inherited_coven_source_from_native_coven_launches() {
+        let mut code_without_env = CommandBuilder::new("/bin/coven");
+        code_without_env.env(COVEN_SESSION_SOURCE, "psyche-build");
+        apply_launch_env(&mut code_without_env, None, Some("coven-code"));
+        assert_eq!(code_without_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let empty_env = HashMap::new();
+        let mut code_with_empty_env = CommandBuilder::new("/bin/coven");
+        code_with_empty_env.env(COVEN_SESSION_SOURCE, "psyche-build");
+        apply_launch_env(
+            &mut code_with_empty_env,
+            Some(&empty_env),
+            Some("coven-code"),
+        );
+        assert_eq!(code_with_empty_env.get_env(COVEN_SESSION_SOURCE), None);
+
         let mut attach_without_env = CommandBuilder::new("/bin/coven");
-        attach_without_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        attach_without_env.env(COVEN_SESSION_SOURCE, "psyche-build");
         apply_launch_env(&mut attach_without_env, None, Some("coven-attach"));
         assert_eq!(attach_without_env.get_env(COVEN_SESSION_SOURCE), None);
 
-        let empty_env = HashMap::new();
         let mut attach_with_empty_env = CommandBuilder::new("/bin/coven");
-        attach_with_empty_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        attach_with_empty_env.env(COVEN_SESSION_SOURCE, "psyche-build");
         apply_launch_env(
             &mut attach_with_empty_env,
             Some(&empty_env),
@@ -9354,18 +11834,6 @@ mod workspace_panel_tests {
         assert_eq!(
             legacy.get_env(COVEN_SESSION_SOURCE),
             Some(std::ffi::OsStr::new("inherited"))
-        );
-
-        let chat_env = HashMap::from([(
-            COVEN_SESSION_SOURCE.to_string(),
-            PSYCHE_SESSION_SOURCE.to_string(),
-        )]);
-        let mut chat = CommandBuilder::new("/bin/coven");
-        chat.env(COVEN_SESSION_SOURCE, "inherited");
-        apply_launch_env(&mut chat, Some(&chat_env), Some("coven-chat"));
-        assert_eq!(
-            chat.get_env(COVEN_SESSION_SOURCE),
-            Some(std::ffi::OsStr::new(PSYCHE_SESSION_SOURCE))
         );
     }
 
@@ -9398,19 +11866,19 @@ mod workspace_panel_tests {
         let session_id = "12345678-1234-4abc-8def-1234567890ab";
         let invalid = [
             (
-                native_chat_options(Some(session_id), Some(coven), None),
-                "coven-chat requires exactly 'code --session-id' and the validated session id",
+                native_code_options(Some(session_id), Some(coven), None),
+                "coven-code does not accept a session id",
             ),
             (
-                native_chat_options(
+                native_code_options(
                     None,
                     Some(coven),
                     Some(&["code", "--session-id", session_id]),
                 ),
-                "coven-chat requires a session id",
+                "coven-code does not accept launch arguments",
             ),
             (
-                native_chat_options(
+                native_code_options(
                     Some(session_id),
                     Some(coven),
                     Some(&[
@@ -9419,35 +11887,27 @@ mod workspace_panel_tests {
                         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                     ]),
                 ),
-                "coven-chat requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept a session id",
             ),
             (
-                native_chat_options(
-                    Some("../unsafe"),
-                    Some(coven),
-                    Some(&["code", "--session-id", "../unsafe"]),
-                ),
-                "coven-chat session id is unsafe",
+                native_code_options(Some("../unsafe"), Some(coven), None),
+                "coven-code does not accept a session id",
             ),
             (
-                native_chat_options(
-                    Some(session_id),
-                    Some("/wrong/coven"),
-                    Some(&["code", "--session-id", session_id]),
-                ),
+                native_code_options(None, Some("/wrong/coven"), Some(&[])),
                 "Coven launch command does not match the resolved executable",
             ),
             (
-                native_chat_options(Some(session_id), Some(coven), Some(&["code", session_id])),
-                "coven-chat requires exactly 'code --session-id' and the validated session id",
+                native_code_options(None, Some(coven), Some(&["code", session_id])),
+                "coven-code does not accept launch arguments",
             ),
             (
-                native_chat_options(
-                    Some(session_id),
+                native_code_options(
+                    None,
                     Some(coven),
                     Some(&["code", "--session-id", session_id, "extra"]),
                 ),
-                "coven-chat requires exactly 'code --session-id' and the validated session id",
+                "coven-code does not accept launch arguments",
             ),
             (
                 launch_options(
@@ -9497,13 +11957,9 @@ mod workspace_panel_tests {
                 Err(expected.to_string())
             );
         }
-        let chat = native_chat_options(
-            Some(session_id),
-            Some(coven),
-            Some(&["code", "--session-id", session_id]),
-        );
+        let code = native_code_options(None, Some(coven), Some(&[]));
         assert_eq!(
-            validate_coven_launch_with(&chat, None),
+            validate_coven_launch_with(&code, None),
             Err("Coven executable not found".to_string())
         );
     }
@@ -10150,6 +12606,195 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn git_inspection_preserves_ordered_remote_urls_and_fetch_refspecs() {
+        let tree = TempTree::new("git-remote-multivalue");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://second.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/release:refs/remotes/origin/release",
+            ],
+        );
+
+        let config = git_inspection_repository_config(path_text(&tree.root)).unwrap();
+        let urls = config
+            .iter()
+            .filter(|(key, _)| key == "remote.origin.url")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        let fetch = config
+            .iter()
+            .filter(|(key, _)| key == "remote.origin.fetch")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://first.invalid/repo.git",
+                "https://second.invalid/repo.git",
+            ]
+        );
+        assert_eq!(
+            fetch,
+            vec![
+                "+refs/heads/main:refs/remotes/origin/main",
+                "+refs/heads/release:refs/remotes/origin/release",
+            ]
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://first.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_status_uses_first_origin_url_after_empty_reset() {
+        let tree = TempTree::new("git-remote-url-after-reset");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "--add", "remote.origin.url", ""]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://later.invalid/repo.git",
+            ],
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://later.invalid/repo.git")
+        );
+    }
+
+    #[test]
+    fn git_status_omits_origin_url_after_trailing_empty_reset() {
+        let tree = TempTree::new("git-remote-url-trailing-reset");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://first.invalid/repo.git",
+            ],
+        );
+        run_test_git(&tree.root, &["config", "--add", "remote.origin.url", ""]);
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+
+        assert_eq!(status.remote_url, None);
+        assert_eq!(status.web_url, None);
+    }
+
+    #[test]
+    fn git_inspection_preserves_remote_subsection_case() {
+        let tree = TempTree::new("git-remote-subsection-case");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.Origin.url",
+                "https://uppercase.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://lowercase-first.invalid/repo.git",
+            ],
+        );
+        run_test_git(
+            &tree.root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://lowercase-second.invalid/repo.git",
+            ],
+        );
+
+        let config = git_inspection_repository_config(path_text(&tree.root)).unwrap();
+        let urls = config
+            .iter()
+            .filter(|(key, _)| key.ends_with(".url"))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                ("remote.Origin.url", "https://uppercase.invalid/repo.git",),
+                (
+                    "remote.origin.url",
+                    "https://lowercase-first.invalid/repo.git",
+                ),
+                (
+                    "remote.origin.url",
+                    "https://lowercase-second.invalid/repo.git",
+                ),
+            ]
+        );
+
+        let status = git_status(path_text(&tree.root).to_string()).unwrap();
+        assert_eq!(
+            status.remote_url.as_deref(),
+            Some("https://lowercase-first.invalid/repo.git")
+        );
+    }
+
+    #[test]
     fn git_inspection_preserves_a_loose_remote_head_symbolic_ref() {
         let tree = TempTree::new("git-symbolic-remote-head");
         run_test_git(&tree.root, &["init", "-q"]);
@@ -10668,6 +13313,495 @@ mod workspace_panel_tests {
         };
 
         assert!(error.contains("invalid Git shallow boundary"));
+    }
+
+    fn tiny_git_reftable_snapshot_limits() -> GitReftableSnapshotLimits {
+        GitReftableSnapshotLimits {
+            list_bytes: 32,
+            tables: 2,
+            table_bytes: 8,
+            total_bytes: 12,
+        }
+    }
+
+    const TEST_REFTABLE_TABLE_ONE: &str = "table-alpha.ref";
+    const TEST_REFTABLE_TABLE_TWO: &str = "table-beta.log";
+    const TEST_REFTABLE_TABLE_THREE: &str = "table-gamma.ref";
+    const REPRESENTATIVE_GIT_REFTABLE_TABLE: &str = "0x000000000001-0x000000000002-3b8de075.ref";
+    const SPEC_GIT_REFTABLE_LOG: &str = "00000001-00000001-RANDOM1.log";
+    const SAFE_ARBITRARY_GIT_REFTABLE_TABLE: &str = "réftable-随机-7Kp9.ref";
+    const SAFE_DECOMPOSED_GIT_REFTABLE_TABLE: &str = "re\u{301}ftable.ref";
+
+    fn write_test_reftable_table_list(source: &Path, names: &[&str]) {
+        let mut list = names.join("\n");
+        list.push('\n');
+        std::fs::write(source.join("tables.list"), list).unwrap();
+    }
+
+    fn invalid_git_reftable_table_names() -> Vec<String> {
+        let mut names = [
+            "NUL.ref",
+            "COM1.ref",
+            "COM1.any.ref",
+            "cOm\u{00b9}.ref",
+            "COM\u{00b2}.any.ref",
+            "com\u{00b3}.log",
+            "nul.any.log",
+            "CLOCK$.ref",
+            "CONIN$.log",
+            "CONOUT$.any.ref",
+            "LPT9.log",
+            "LpT\u{00b9}.log",
+            "LPT\u{00b2}.any.log",
+            "lpt\u{00b3}.ref",
+            "NUL .ref",
+            "safe.ref.",
+            "safe.ref ",
+            "missing-extension",
+            "uppercase.REF",
+            "uppercase.LOG",
+            "other.txt",
+            ".ref",
+            ".log",
+            "nested/name.ref",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        for forbidden in ['<', '>', ':', '"', '/', '\\', '|', '?', '*'] {
+            names.push(format!("bad{forbidden}name.ref"));
+        }
+        for control in ['\0', '\u{0001}', '\u{001f}', '\u{007f}'] {
+            names.push(format!("bad{control}name.log"));
+        }
+        names
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_accepts_safe_git_names() {
+        for name in [
+            REPRESENTATIVE_GIT_REFTABLE_TABLE,
+            SPEC_GIT_REFTABLE_LOG,
+            SAFE_ARBITRARY_GIT_REFTABLE_TABLE,
+            SAFE_DECOMPOSED_GIT_REFTABLE_TABLE,
+        ] {
+            assert!(
+                is_valid_git_reftable_table_name(name),
+                "unexpectedly rejected {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_reftable_table_name_validation_rejects_unsafe_names() {
+        for name in invalid_git_reftable_table_names() {
+            assert!(
+                !is_valid_git_reftable_table_name(&name),
+                "unexpectedly accepted {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_invalid_table_names_without_publication() {
+        for name in invalid_git_reftable_table_names() {
+            let tree = TempTree::new("git-reftable-invalid-table-name");
+            let source = tree.root.join("source");
+            let destination = tree.root.join("destination");
+            std::fs::create_dir_all(&source).unwrap();
+            write_test_reftable_table_list(&source, &[&name]);
+
+            let error = snapshot_git_reftable_with_limits(
+                &source,
+                &destination,
+                tiny_git_reftable_snapshot_limits(),
+            )
+            .unwrap_err();
+
+            assert!(
+                error.contains("invalid table name") || error.contains("invalid path"),
+                "{name}: {error}"
+            );
+            assert!(!destination.exists(), "{name} must not be published");
+        }
+    }
+
+    #[test]
+    fn git_reftable_windows_child_share_mode_allows_read_and_delete_but_not_write() {
+        let share_mode = windows_git_metadata_child_share_mode();
+
+        assert_ne!(share_mode & 0x0001, 0, "read sharing must remain enabled");
+        assert_eq!(share_mode & 0x0002, 0, "write sharing must be disabled");
+        assert_ne!(share_mode & 0x0004, 0, "delete sharing must remain enabled");
+    }
+
+    #[test]
+    fn git_reftable_windows_sharing_violation_reports_change() {
+        assert_eq!(
+            windows_git_metadata_open_error("Git reftable table list", 32),
+            "Git reftable table list changed while being read"
+        );
+    }
+
+    #[test]
+    fn git_metadata_windows_directory_state_ignores_mutable_size_and_time() {
+        let before = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            file_size: 23,
+            last_write_time: 29,
+        };
+        let after = WindowsGitMetadataState {
+            file_size: 31,
+            last_write_time: 37,
+            ..before
+        };
+
+        assert!(windows_git_metadata_directory_state_matches(before, after));
+    }
+
+    #[test]
+    fn git_metadata_windows_directory_state_rejects_identity_reparse_and_type_changes() {
+        let directory = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            file_size: 23,
+            last_write_time: 29,
+        };
+
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                volume_serial_number: 13,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_index: 17,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_attributes: FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                ..directory
+            }
+        ));
+        assert!(!windows_git_metadata_directory_state_matches(
+            directory,
+            WindowsGitMetadataState {
+                file_attributes: 0,
+                ..directory
+            }
+        ));
+    }
+
+    #[test]
+    fn git_metadata_windows_file_state_compares_size_and_time() {
+        let file = WindowsGitMetadataState {
+            volume_serial_number: 7,
+            file_index: 11,
+            file_attributes: 0,
+            file_size: 23,
+            last_write_time: 29,
+        };
+
+        assert!(windows_git_metadata_file_state_matches(file, file));
+        assert!(!windows_git_metadata_file_state_matches(
+            file,
+            WindowsGitMetadataState {
+                file_size: 31,
+                ..file
+            }
+        ));
+        assert!(!windows_git_metadata_file_state_matches(
+            file,
+            WindowsGitMetadataState {
+                last_write_time: 37,
+                ..file
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    struct ReftableSourceSwapGuard {
+        source: PathBuf,
+        parked: PathBuf,
+        replacement: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReftableSourceSwapGuard {
+        fn drop(&mut self) {
+            std::fs::rename(&self.source, &self.replacement).unwrap();
+            std::fs::rename(&self.parked, &self.source).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_reftable_snapshot_anchors_children_to_open_directory() {
+        let tree = TempTree::new("git-reftable-anchored-directory");
+        let source = tree.root.join("source");
+        let parked = tree.root.join("parked");
+        let replacement = tree.root.join("replacement");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"orig").unwrap();
+        write_test_reftable_table_list(&replacement, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(replacement.join(TEST_REFTABLE_TABLE_ONE), b"evil").unwrap();
+
+        snapshot_git_reftable_with_limits_and_hook(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+            || {
+                std::fs::rename(&source, &parked).unwrap();
+                std::fs::rename(&replacement, &source).unwrap();
+                ReftableSourceSwapGuard {
+                    source: source.clone(),
+                    parked: parked.clone(),
+                    replacement: replacement.clone(),
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join(TEST_REFTABLE_TABLE_ONE)).unwrap(),
+            b"orig"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_reftable_snapshot_rejects_fifo_table_promptly() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let tree = TempTree::new("git-reftable-fifo-table");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        let fifo = source.join(TEST_REFTABLE_TABLE_ONE);
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        let fifo_path = c_path(&fifo).unwrap();
+        let created = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
+        assert_eq!(
+            created,
+            0,
+            "create test FIFO: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let result = snapshot_git_reftable_with_limits(
+                &source,
+                &destination,
+                tiny_git_reftable_snapshot_limits(),
+            );
+            sender.send(result).unwrap();
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let unblock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo)
+                    .unwrap();
+                let _ = receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("FIFO reader must unblock for test cleanup");
+                drop(unblock);
+                worker.join().unwrap();
+                panic!("Git reftable FIFO open blocked instead of failing promptly");
+            }
+            Err(error) => panic!("Git reftable FIFO worker disconnected: {error}"),
+        };
+        worker.join().unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.contains("not a regular file"));
+    }
+
+    #[test]
+    fn git_reftable_snapshot_copies_valid_bounded_files() {
+        let tree = TempTree::new("git-reftable-valid-snapshot");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"table").unwrap();
+
+        snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join(TEST_REFTABLE_TABLE_ONE)).unwrap(),
+            b"table"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("tables.list")).unwrap(),
+            format!("{TEST_REFTABLE_TABLE_ONE}\n").as_bytes()
+        );
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_oversized_table_list() {
+        let tree = TempTree::new("git-reftable-large-list");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("tables.list"), vec![b'x'; 33]).unwrap();
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("table list is too large"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_excessive_table_count() {
+        let tree = TempTree::new("git-reftable-table-count");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[
+                TEST_REFTABLE_TABLE_ONE,
+                TEST_REFTABLE_TABLE_TWO,
+                TEST_REFTABLE_TABLE_THREE,
+            ],
+        );
+        let limits = GitReftableSnapshotLimits {
+            list_bytes: 64,
+            ..tiny_git_reftable_snapshot_limits()
+        };
+
+        let error = snapshot_git_reftable_with_limits(&source, &destination, limits).unwrap_err();
+
+        assert!(error.contains("too many tables"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_oversized_table() {
+        let tree = TempTree::new("git-reftable-large-table");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"123456789").unwrap();
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains(&format!("table {TEST_REFTABLE_TABLE_ONE} is too large")));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_aggregate_overflow() {
+        let tree = TempTree::new("git-reftable-aggregate-size");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[TEST_REFTABLE_TABLE_ONE, TEST_REFTABLE_TABLE_TWO],
+        );
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"12345678").unwrap();
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_TWO), b"12345678").unwrap();
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("aggregate size"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_caps_reads_to_remaining_aggregate_budget() {
+        let tree = TempTree::new("git-reftable-remaining-budget");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(
+            &source,
+            &[TEST_REFTABLE_TABLE_ONE, TEST_REFTABLE_TABLE_TWO],
+        );
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_ONE), b"12345678").unwrap();
+        std::fs::write(source.join(TEST_REFTABLE_TABLE_TWO), b"12345").unwrap();
+        TEST_GIT_METADATA_READ_LIMITS.with(|limits| limits.borrow_mut().clear());
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        let read_limits =
+            TEST_GIT_METADATA_READ_LIMITS.with(|limits| std::mem::take(&mut *limits.borrow_mut()));
+        assert_eq!(read_limits, vec![32, 8, 4]);
+        assert_eq!(error, "Git reftable aggregate size is too large");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_reftable_snapshot_rejects_linked_tables_when_supported() {
+        let tree = TempTree::new("git-reftable-linked-table");
+        let source = tree.root.join("source");
+        let destination = tree.root.join("destination");
+        let linked = tree.root.join("linked.ref");
+        std::fs::create_dir_all(&source).unwrap();
+        write_test_reftable_table_list(&source, &[TEST_REFTABLE_TABLE_ONE]);
+        std::fs::write(&linked, b"linked").unwrap();
+        if !create_test_symlink(
+            TestSymlinkKind::File,
+            &linked,
+            &source.join(TEST_REFTABLE_TABLE_ONE),
+        ) {
+            return;
+        }
+
+        let error = snapshot_git_reftable_with_limits(
+            &source,
+            &destination,
+            tiny_git_reftable_snapshot_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("not a regular file"));
+        assert!(!destination.exists());
     }
 
     #[test]

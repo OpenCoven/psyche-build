@@ -3,7 +3,17 @@ export const meta = { title: 'Core Concepts' };
 export function render() {
   return `
     <h1>Core Concepts</h1>
-    <p class="lead">psyche is built around three core concepts: projects, panes, and worktrees. Understanding how they interact will help you get the most out of parallel development.</p>
+    <p class="lead">psyche is built around three implementation primitives — projects, panes, and worktrees — organized by one public model: tasks, lanes, isolation modes, and integration. Understanding how they interact will help you get the most out of parallel development.</p>
+
+    <h2>The Public Model</h2>
+    <p>Every psyche guide uses the same four definitions:</p>
+    <ul>
+      <li><strong>Task</strong> — one requested outcome.</li>
+      <li><strong>Lane</strong> — one agent or terminal working on that task.</li>
+      <li><strong>Isolation mode</strong> — an isolated worktree, a shared worktree, a plain terminal, or an optional provider-managed session.</li>
+      <li><strong>Integration</strong> — inspect, compare, merge, create a PR, archive, or clean up.</li>
+    </ul>
+    <p>The concepts below — projects, panes, and worktrees — are how psyche implements that model. A pane is the concrete surface a lane runs in; a worktree is the most common isolation mode.</p>
 
     <h2>Projects</h2>
     <p>A <strong>project</strong> in psyche corresponds to a git repository. When you run <code>psyche</code> inside a repo, it creates a stable, project-scoped tmux session named like <code>psyche-your-project-a1b2c3d4</code>.</p>

@@ -213,6 +213,7 @@ export default function useActionSystem({
   const context: ActionContext = useMemo(() => ({
     panes,
     sessionName,
+    sessionProjectRoot: defaultProjectRoot,
     projectName,
     savePanes,
     removePaneFromConfig,
@@ -225,6 +226,7 @@ export default function useActionSystem({
   }), [
     panes,
     sessionName,
+    defaultProjectRoot,
     projectName,
     savePanes,
     removePaneFromConfig,

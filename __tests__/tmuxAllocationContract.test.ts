@@ -9,9 +9,13 @@ import { describe, expect, it } from 'vitest';
  */
 const allocationSites = [
   ['worktree pane creation', 'src/utils/paneCreation.ts', "captureTmuxGeneration(\n    tmuxService,\n    'pane allocation'"],
-  ['attached agent pane', 'src/utils/attachAgent.ts', "captureTmuxGeneration(\n        tmuxService,\n        'attached pane allocation'"],
-  ['reopened worktree pane', 'src/utils/reopenWorktree.ts', "captureTmuxGeneration(\n    tmuxService,\n    'reopened pane allocation'"],
-  ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', "captureTmuxGeneration(\n    tmuxService,\n    'conflict pane allocation'"],
+  // attachAgent.ts no longer allocates tmux panes directly; it delegates
+  // to createPane (worktree pane creation above) via the shared-worktree
+  // existingWorktree flow.
+  // Reopen and conflict flows delegate generation capture and settlement to
+  // createTransactionalPane.
+  ['reopened worktree pane', 'src/utils/reopenWorktree.ts', "operation: 'reopen-worktree'"],
+  ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', "operation: 'conflict-resolution-pane'"],
   ['startup restoration pane', 'src/hooks/usePaneLoading.ts', 'getServerIdentity?.(newPaneId)'],
   ['detected shell pane', 'src/utils/shellPaneDetection.ts', 'getServerIdentity?.(paneId)'],
   ['background test/dev window', 'src/hooks/usePaneRunner.ts', 'getTmuxServerIdentity: () => tmuxService.getServerIdentity?.()'],
@@ -19,8 +23,8 @@ const allocationSites = [
   ['desktop-use input flow', 'src/hooks/useInputHandling.ts', 'operation: "desktop-use-pane"'],
   ['browser input flow', 'src/hooks/useInputHandling.ts', 'operation: "file-browser-pane"'],
   ['ritual terminal flow', 'src/PsycheApp.tsx', 'operation: "ritual-terminal-pane"'],
-  ['bridge/MCP worktree pane', 'src/daemon/bridge.ts', 'operation: \'bridge-pane-generation\''],
-  ['Coven open pane', 'src/daemon/bridge.ts', '\'coven-session-open\''],
+  ['bridge/MCP worktree pane', 'src/daemon/bridge.ts', "operation: 'daemon-new-worktree-pane'"],
+  ['Coven open pane', 'src/daemon/bridge.ts', "operation: 'daemon-coven-session-pane'"],
 ] as const;
 
 describe('tmux allocation ownership contract', () => {

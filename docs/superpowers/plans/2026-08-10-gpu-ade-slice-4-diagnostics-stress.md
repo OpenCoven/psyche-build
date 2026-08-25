@@ -30,7 +30,7 @@ Prerequisite: Slices 1–3 are green.
 - Create: `src-tauri/src/runtime_diagnostics.rs`
 - Modify: `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml`
 
-- [ ] **Step 1: Write failing native diagnostics tests**
+- [x] **Step 1: Write failing native diagnostics tests**
 
 ```rust
 #[test]
@@ -53,13 +53,13 @@ fn production_never_authorizes_the_stress_harness() {
 
 Also test bounded CPU/memory sampling, no environment-map serialization, and stable camelCase JSON.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml runtime_diagnostics --locked`
 
 Expected: compile failure because the module is absent.
 
-- [ ] **Step 3: Implement the native report**
+- [x] **Step 3: Implement the native report**
 
 Use `tauri::webview_version().ok()` and the Slice 1 platform engine identity. Add target-neutral `sysinfo` with only the current process refreshed at a controlled cadence. Serialize optional fields with `skip_serializing_if`.
 
@@ -73,7 +73,7 @@ fn runtime_process_metrics(state: State<RuntimeDiagnosticsState>) -> Option<Proc
 
 The report contains OS, architecture, engine, optional version, debug-build flag, stress authorization, and optional CPU/RSS. It never claims graphics acceleration; that requires the frontend probe.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run Rust fmt/test/check, then commit as `Add native runtime diagnostics`.
 

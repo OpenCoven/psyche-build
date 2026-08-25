@@ -92,6 +92,7 @@ export class BridgeDaemon {
   private readonly mobileGateway?: MobileControlGateway;
   private workspaceSequence = 0;
   private lastBroadcastWorkspaceRevision: number | undefined;
+  private closedPaneBufferCandidates = new Set<string>();
   private workspaceOperationQueue: Promise<void> = Promise.resolve();
   private workspaceBroadcastInFlight = false;
   private workspaceBroadcastPending = false;
@@ -446,7 +447,54 @@ export class BridgeDaemon {
           session.send(message);
         }
       }
+
+      this.reclaimClosedPaneBuffers(workspace);
     });
+  }
+
+  /**
+   * Release the output buffer of any pane the workspace no longer publishes.
+   *
+   * tmux pane ids are monotonic and never reused, and control mode has no
+   * per-pane close event to hang this on, so without a sweep the hub retains a
+   * buffer for every pane the session has ever opened. The workspace snapshot
+   * is the authority on which panes still exist, and it is already computed
+   * here for the broadcast.
+   *
+   * A pane a client is still streaming keeps its buffer even if the workspace
+   * has dropped it: the subscription outlives the pane by design, and its
+   * teardown path (onSessionClose / detachPaneStream) reclaims it instead.
+   */
+  private reclaimClosedPaneBuffers(workspace: ReadonlyWorkspaceSnapshot): void {
+    if (!this.hub) return;
+    for (const paneId of this.hub.bufferedPaneIds()) {
+      if (hasPublishedTmuxBackedPane(workspace, paneId)) {
+        this.closedPaneBufferCandidates.delete(paneId);
+        continue;
+      }
+      this.closedPaneBufferCandidates.add(paneId);
+      this.reclaimDetachedPaneBuffer(paneId);
+    }
+  }
+
+  private reclaimDetachedPaneBuffer(paneId: string): void {
+    if (!this.hub || !this.closedPaneBufferCandidates.has(paneId)) return;
+    if (this.isPaneStreamed(paneId)) return;
+    this.hub.forgetPane(paneId);
+    this.paneSubscribers.delete(paneId);
+    this.closedPaneBufferCandidates.delete(paneId);
+  }
+
+  /** True while any session holds a subscription or terminal stream on a pane. */
+  private isPaneStreamed(paneId: string): boolean {
+    if ((this.paneSubscribers.get(paneId)?.size ?? 0) > 0) return true;
+    if (!this.listener) return false;
+    for (const session of this.listener.activeSessions) {
+      for (const stream of session.controlStreams.values()) {
+        if (stream.paneId === paneId) return true;
+      }
+    }
+    return false;
   }
 
   private async drainWorkspaceBroadcastNotifications(): Promise<void> {
@@ -685,6 +733,7 @@ export class BridgeDaemon {
     if (!await this.isPublishedPane(paneId)) {
       throw new MobileControlGatewayError("unknown_pane", "pane is not published by this host");
     }
+    this.closedPaneBufferCandidates.delete(paneId);
 
     const session = this.sessionForConnection(context.connectionId);
     // The client caps itself at two live terminals, but the host must not
@@ -745,6 +794,7 @@ export class BridgeDaemon {
     const { session, stream } = this.controlStream(connectionId, streamId);
     stream.teardown();
     session.controlStreams.delete(streamId);
+    this.reclaimDetachedPaneBuffer(stream.paneId);
   }
 
   private async sendPaneStreamInput(
@@ -778,11 +828,18 @@ export class BridgeDaemon {
    */
   private onSessionClose(s: Session): void {
     this.mobileGateway?.clearOwner(this.ownerIdForSession(s));
+    const paneIds = new Set([
+      ...[...s.controlStreams.values()].map((stream) => stream.paneId),
+      ...s.subscribedPaneIds,
+    ]);
     for (const stream of s.controlStreams.values()) stream.teardown();
     s.controlStreams.clear();
     for (const teardown of s.subscriptionTeardowns.values()) teardown();
     s.subscriptionTeardowns.clear();
-    for (const subs of this.paneSubscribers.values()) subs.delete(s);
+    for (const paneId of [...this.paneSubscribers.keys()]) {
+      this.dropPaneSubscriber(paneId, s);
+    }
+    for (const paneId of paneIds) this.reclaimDetachedPaneBuffer(paneId);
   }
 
   private ownerIdForSession(s: Session): string {
@@ -794,7 +851,7 @@ export class BridgeDaemon {
 
   private subscribePane(s: Session, paneId: string, sinceSeq: number | null) {
     const buffer = this.hub!.bufferFor(paneId);
-    this.unsubscribePane(s, paneId);
+    this.unsubscribePane(s, paneId, false);
 
     let subs = this.paneSubscribers.get(paneId);
     if (!subs) { subs = new Set(); this.paneSubscribers.set(paneId, subs); }
@@ -827,10 +884,19 @@ export class BridgeDaemon {
     }
   }
 
-  private unsubscribePane(s: Session, paneId: string) {
+  private unsubscribePane(s: Session, paneId: string, reclaim = true) {
     s.subscriptionTeardowns.get(paneId)?.();
     s.subscriptionTeardowns.delete(paneId);
-    this.paneSubscribers.get(paneId)?.delete(s);
+    this.dropPaneSubscriber(paneId, s);
     s.subscribedPaneIds.delete(paneId);
+    if (reclaim) this.reclaimDetachedPaneBuffer(paneId);
+  }
+
+  /** Drops a subscriber, and the pane's entry once it holds no subscribers. */
+  private dropPaneSubscriber(paneId: string, s: Session): void {
+    const subs = this.paneSubscribers.get(paneId);
+    if (!subs) return;
+    subs.delete(s);
+    if (subs.size === 0) this.paneSubscribers.delete(paneId);
   }
 }

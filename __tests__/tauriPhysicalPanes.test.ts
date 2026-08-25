@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { FrameScheduler } from '../native/desktop/psyche-build-tauri/web/runtime/frame-scheduler';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -75,15 +76,31 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     saveWorkspaceSoon: () => undefined,
     saveWorkspaceNow: async () => true,
     scheduleBrowserBounds: () => undefined,
+    mountedSplitBranches: new Map(),
+    applyProjectedSplitRatios: () => false,
+    schedulePaneTreeLayout: () => undefined,
     isPersistentThread: (thread: Record<string, any>) =>
-      ['shell', 'psyche', 'coven-chat', 'coven-attach'].includes(thread?.launch?.launchKind),
+      ['shell', 'psyche', 'coven-code', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
     invoke: async () => [],
     attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
+    paneLayoutFor: () => null,
+    paneLayoutForThread: () => null,
+    paneFocusEligible: () => true,
+    paneSurfaceFocusEligible: () => true,
+    resolvePaneFocusSuccessor: (
+      _layout: PaneFocusLayout | null,
+      preferredId: string | null,
+      _threadsOnly?: boolean,
+    ) => preferredId,
     ...dependencies,
   };
-  const names = Object.keys(resolvedDependencies);
-  const values = Object.values(resolvedDependencies);
+  const dependenciesWithFilesScope = withFilesScopeSelectionHelper(
+    functionSource,
+    resolvedDependencies,
+  );
+  const names = Object.keys(dependenciesWithFilesScope);
+  const values = Object.values(dependenciesWithFilesScope);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -144,6 +161,61 @@ class FakeEventTarget {
   }
 }
 
+class FakeMinimapElement extends FakeEventTarget {
+  readonly tagName: string;
+  type = '';
+  textContent = '';
+  children: FakeMinimapElement[] = [];
+  parentNode: FakeMinimapElement | null = null;
+
+  constructor(tagName: string) {
+    super();
+    this.tagName = tagName.toUpperCase();
+  }
+
+  appendChild(child: FakeMinimapElement) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+
+  replaceChildren(...children: FakeMinimapElement[]) {
+    this.children.forEach((child) => { child.parentNode = null; });
+    this.children = [];
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  querySelector(selector: string): FakeMinimapElement | null {
+    if (!selector.startsWith('.')) throw new Error(`unsupported selector ${selector}`);
+    const className = selector.slice(1);
+    const visit = (element: FakeMinimapElement): FakeMinimapElement | null => {
+      if (element.className.split(/\s+/).includes(className)) return element;
+      for (const child of element.children) {
+        const match = visit(child);
+        if (match) return match;
+      }
+      return null;
+    };
+    for (const child of this.children) {
+      const match = visit(child);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+    this.parentNode = null;
+  }
+
+  async emit(name: string, event: Record<string, unknown> = {}) {
+    for (const listener of this.listeners.get(name) ?? []) {
+      await listener(event);
+    }
+  }
+}
+
 type FocusReportPolicy = 'suppress' | 'allow';
 type FocusReportToken = {
   report: string;
@@ -171,6 +243,53 @@ type PaneFocusThread = {
   } | null;
   internalFocusReportTokens?: FocusReportToken[];
 };
+
+type PaneFocusLayout = {
+  root: Record<string, unknown>;
+  focusedLeafId: string | null;
+  maximizedLeafId?: string | null;
+  activeSetId?: string | null;
+};
+
+function compilePaneFocusEligible(
+  focusSets: Array<{ id: string; threadIds: string[] }>,
+) {
+  const findFocusSet = compileFunction<
+    (id: string) => { id: string; threadIds: string[] } | null
+  >(functionSource('findFocusSet'), { focusSets });
+  const scopedPaneRoot = compileFunction<
+    (layout: PaneFocusLayout) => Record<string, unknown> | null
+  >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+  return compileFunction<
+    (layout: PaneFocusLayout | null, threadId: string) => boolean
+  >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+}
+
+function compilePaneFocusSuccessor(
+  focusSets: Array<{ id: string; threadIds: string[] }>,
+  canvasSurfaceById: (id: string) => PaneFocusThread | null,
+  paneSurfaceFocusEligible: (
+    layout: PaneFocusLayout | null,
+    surface: PaneFocusThread | null,
+  ) => boolean,
+) {
+  const findFocusSet = compileFunction<
+    (id: string) => { id: string; threadIds: string[] } | null
+  >(functionSource('findFocusSet'), { focusSets });
+  const scopedPaneRoot = compileFunction<
+    (layout: PaneFocusLayout) => Record<string, unknown> | null
+  >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+  return compileFunction<(
+    layout: PaneFocusLayout | null,
+    preferredId: string | null,
+    threadsOnly?: boolean,
+  ) => string | null>(functionSource('resolvePaneFocusSuccessor'), {
+    canvasSurfaceById,
+    paneSurfaceFocusEligible,
+    scopedPaneRoot,
+    PsychePanes,
+  });
+}
 
 function compileFocusTokenRuntime() {
   const isTerminalFocusReport = compileFunction<(data: unknown) => boolean>(
@@ -224,6 +343,9 @@ function createPaneFocusHarness(
   threads: PaneFocusThread[],
   activeThreadId: string,
   activeElement: unknown = null,
+  layout: PaneFocusLayout | null = null,
+  paneFocusEligible: (layout: PaneFocusLayout | null, threadId: string) => boolean =
+    () => true,
 ) {
   threads.forEach((thread) => {
     if (thread.terminalController) return;
@@ -261,6 +383,24 @@ function createPaneFocusHarness(
     queued.push(callback);
     return queued.length;
   };
+  const browserPaneLifecycleStates = new WeakMap<object, { tearingDown: boolean }>();
+  const browserPaneLifecycle = compileFunction<
+    (thread: PaneFocusThread | null) => { tearingDown: boolean }
+  >(functionSource('browserPaneLifecycle'), {
+    browserPaneLifecycleStates,
+  });
+  const browserPaneIsClosing = compileFunction<
+    (thread: PaneFocusThread | null) => boolean
+  >(functionSource('browserPaneIsClosing'), {
+    browserPaneLifecycle,
+  });
+  const paneSurfaceFocusEligible = compileFunction<(
+    layout: PaneFocusLayout | null,
+    surface: PaneFocusThread | null,
+  ) => boolean>(functionSource('paneSurfaceFocusEligible'), {
+    browserPaneIsClosing,
+    paneFocusEligible,
+  });
   const isLiveThread = (thread: PaneFocusThread | null) => (
     Boolean(thread) && !thread?.closing && state.threads.includes(thread as PaneFocusThread)
   );
@@ -301,17 +441,21 @@ function createPaneFocusHarness(
   });
   const focusThread = compileFunction<(
     id: string,
-    options?: { refreshStatus?: boolean },
+    options?: { preserveFullscreenLeafId?: string; refreshStatus?: boolean },
   ) => Promise<boolean>>(functionSource('focusThread'), {
     findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    browserPaneIsClosing,
     showTerminalView: async () => true,
     focusedTerminalThreadForRender,
     markActiveSurface: () => undefined,
     state,
     findProject: (id: string) => id === project.id ? project : null,
     activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
-    paneLayoutFor: () => null,
-    PsychePanes: { findLeafByThreadId: () => null },
+    paneLayoutFor: () => layout,
+    paneLayoutForThread: () => layout,
+    paneFocusEligible,
+    paneSurfaceFocusEligible,
+    PsychePanes,
     withTerminalFocusReportToken: tokens.withTerminalFocusReportToken,
     renderPaneWorkspace,
     renderGitSurface: () => false,
@@ -329,14 +473,296 @@ function createPaneFocusHarness(
   return {
     ...tokens,
     attachedPanes,
+    browserPaneLifecycle,
     documentRef,
     focusThread,
     focusedTerminalThreadForRender,
+    paneSurfaceFocusEligible,
     project,
     queued,
     renderPaneWorkspace,
     state,
     terminalHost,
+  };
+}
+
+function createScopedFullscreenFocusHarness() {
+  const member: PaneFocusThread = {
+    id: 'thread-member',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-member' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const excluded: PaneFocusThread = {
+    id: 'thread-excluded',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-excluded' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const layout: PaneFocusLayout = {
+    root: PsychePanes.insertBelow(
+      PsychePanes.createLeaf('leaf-excluded', excluded.id),
+      'leaf-excluded',
+      PsychePanes.createLeaf('leaf-member', member.id),
+      'split-member',
+    ),
+    focusedLeafId: 'leaf-member',
+    maximizedLeafId: 'leaf-member',
+    activeSetId: 'set-1',
+  };
+  const paneFocusEligible = compilePaneFocusEligible([{
+    id: 'set-1',
+    threadIds: [member.id],
+  }]);
+  const harness = createPaneFocusHarness(
+    [member, excluded],
+    member.id,
+    null,
+    layout,
+    paneFocusEligible,
+  );
+  return { excluded, harness, layout, member, paneFocusEligible };
+}
+
+function createMinimapFocusHarness(targetKind: 'shell' | 'web') {
+  const source: PaneFocusThread = {
+    id: 'thread-source',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-source' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const target: PaneFocusThread = {
+    id: 'thread-target',
+    kind: targetKind,
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    pane: { id: 'pane-target' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const layout: PaneFocusLayout = {
+    root: PsychePanes.insertBelow(
+      PsychePanes.createLeaf('leaf-source', source.id),
+      'leaf-source',
+      PsychePanes.createLeaf('leaf-target', target.id),
+      'split-target',
+    ),
+    focusedLeafId: 'leaf-source',
+    maximizedLeafId: 'leaf-source',
+  };
+  const focusHarness = createPaneFocusHarness([source, target], source.id, null, layout);
+  const terminalArea = new FakeMinimapElement('section');
+  const renderPaneMinimap = compileFunction<
+    (paneLayout: PaneFocusLayout, activeFile: unknown) => void
+  >(functionSource('renderPaneMinimap'), {
+    terminalArea,
+    document: {
+      createElement: (tagName: string) => new FakeMinimapElement(tagName),
+    },
+    paneMinimapItems: () => [{
+      kind: 'pane',
+      id: target.id,
+      label: 'Target',
+      detail: 'running',
+      current: false,
+      thread: target,
+    }],
+    paneGlyphFor: () => '❯_',
+    sessionStatusClass: () => 'running',
+    PsychePanes,
+    filesPaneHasCanvasFocus: () => false,
+    returnFromFileFocus: async () => false,
+    focusThread: focusHarness.focusThread,
+    restoreFileEditorFocus: () => undefined,
+  });
+  renderPaneMinimap(layout, null);
+  const entry = terminalArea.querySelector('.minimap-pane');
+  if (!entry) throw new Error('missing minimap pane');
+  return { ...focusHarness, entry, layout, source, target };
+}
+
+function createPaneRemovalLifecycleHarness(
+  includeHealthySuccessor: boolean,
+  staleDuringStop: 'tearing-down' | 'hidden' | null = null,
+) {
+  const source: PaneFocusThread = {
+    id: 'thread-remove-source',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    closing: false,
+    closeStarted: false,
+    hidden: false,
+    metricsGeneration: 0,
+    metricsRefreshTimer: 0,
+    startInFlight: false,
+    pane: { id: 'pane-remove-source' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const tearingBrowser: PaneFocusThread = {
+    id: 'thread-remove-browser',
+    kind: 'web',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    hidden: false,
+    pane: { id: 'pane-remove-browser' },
+    host: { contains: () => false },
+    term: null,
+  };
+  const healthy: PaneFocusThread = {
+    id: 'thread-remove-healthy',
+    kind: 'shell',
+    projectId: 'project-a',
+    worktreePath: '/repo',
+    status: 'running',
+    hidden: false,
+    pane: { id: 'pane-remove-healthy' },
+    host: { contains: () => false },
+    term: null,
+  };
+  let root = PsychePanes.insertBelow(
+    PsychePanes.createLeaf('leaf-remove-source', source.id),
+    'leaf-remove-source',
+    PsychePanes.createLeaf('leaf-remove-browser', tearingBrowser.id),
+    'split-remove-browser',
+  );
+  if (includeHealthySuccessor) {
+    root = PsychePanes.insertBelow(
+      root,
+      'leaf-remove-browser',
+      PsychePanes.createLeaf('leaf-remove-healthy', healthy.id),
+      'split-remove-healthy',
+    );
+  }
+  const layout: PaneFocusLayout = {
+    root,
+    focusedLeafId: 'leaf-remove-source',
+    maximizedLeafId: 'leaf-remove-browser',
+    activeSetId: 'set-remove',
+  };
+  const threads = includeHealthySuccessor
+    ? [source, tearingBrowser, healthy]
+    : [source, tearingBrowser];
+  const focusSets = [{
+    id: 'set-remove',
+    threadIds: threads.map((thread) => thread.id),
+  }];
+  const paneFocusEligible = compilePaneFocusEligible(focusSets);
+  const harness = createPaneFocusHarness(
+    threads,
+    source.id,
+    null,
+    layout,
+    paneFocusEligible,
+  );
+  if (!staleDuringStop) {
+    harness.browserPaneLifecycle(tearingBrowser).tearingDown = true;
+  }
+  const canvasSurfaceById = (id: string) => (
+    harness.state.threads.find((thread) => thread.id === id) || null
+  );
+  const resolvePaneFocusSuccessor = compilePaneFocusSuccessor(
+    focusSets,
+    canvasSurfaceById,
+    harness.paneSurfaceFocusEligible,
+  );
+  const key = 'project-a\0/repo';
+  const paneLayouts = new Map([[key, layout]]);
+  const detachThreadPaneImpl = compileFunction<(
+    thread: PaneFocusThread,
+  ) => string | null>(functionSource('detachThreadPane'), {
+    canvasSurfaceById,
+    focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
+    withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
+    paneLayoutKey: () => key,
+    paneLayouts,
+    paneFocusEligible,
+    paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+    resolvePaneFocusSuccessor,
+    PsychePanes,
+  });
+  const detachThreadPane = (thread: PaneFocusThread) => {
+    const nextThreadId = detachThreadPaneImpl(thread);
+    if (thread.pane) harness.attachedPanes.delete(thread.pane);
+    return nextThreadId;
+  };
+  const renderOptions: Array<{ preserveTerminalFocus?: boolean } | undefined> = [];
+  const sharedDependencies = {
+    findThread: (id: string) => (
+      harness.state.threads.find((thread) => thread.id === id) || null
+    ),
+    detachThreadPane,
+    retainFileFocusAfterThreadRemoval: () => false,
+    state: harness.state,
+    focusThread: harness.focusThread,
+    canvasSurfaceById,
+    paneLayoutForThread: () => layout,
+    paneFocusEligible,
+    paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+    resolvePaneFocusSuccessor,
+    PsychePanes,
+    renderPaneWorkspace: (options?: { preserveTerminalFocus?: boolean }) => {
+      renderOptions.push(options);
+      harness.renderPaneWorkspace(options);
+    },
+    refreshSidebar: () => undefined,
+    refreshTabs: () => undefined,
+  };
+
+  async function remove(action: 'close' | 'hide') {
+    if (action === 'close') {
+      const closeThread = compileFunction<(id: string) => Promise<boolean>>(
+        functionSource('closeThread'),
+        {
+          ...sharedDependencies,
+          forgetThreadInSets: () => undefined,
+          stopThreadPty: () => Promise.resolve().then(() => {
+            if (staleDuringStop === 'tearing-down') {
+              harness.browserPaneLifecycle(tearingBrowser).tearingDown = true;
+            } else if (staleDuringStop === 'hidden') {
+              tearingBrowser.hidden = true;
+            }
+            return true;
+          }),
+          setProjectStatus: () => undefined,
+          findProject: () => harness.project,
+        },
+      );
+      await expect(closeThread(source.id)).resolves.toBe(true);
+    } else {
+      const hideThread = compileFunction<(id: string) => boolean>(
+        functionSource('hideThread'),
+        sharedDependencies,
+      );
+      expect(hideThread(source.id)).toBe(true);
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  return {
+    harness,
+    healthy,
+    layout,
+    remove,
+    renderOptions,
+    tearingBrowser,
   };
 }
 
@@ -538,6 +964,169 @@ describe('Tauri physical terminal panes', () => {
     expect(saveWorkspaceSoon).toHaveBeenCalledTimes(1);
   });
 
+  type PaneLayout = { root: any; focusedLeafId: string };
+
+  function splitBranchHarness(hostWidth: number, hostHeight: number) {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout: PaneLayout = {
+      root: PsychePanes.insertRelative(leafA, 'leaf-a', leafB, 'split-a', 'right'),
+      focusedLeafId: 'leaf-a',
+    };
+    const branches = {
+      first: { style: { flexGrow: '0.5' } },
+      second: { style: { flexGrow: '0.5' } },
+      divider: new FakeEventTarget(),
+    };
+    const scheduleTerminalPaneFits = vi.fn();
+    const scheduleBrowserBounds = vi.fn();
+    const applyProjectedSplitRatios = compileFunction<(
+      layout: PaneLayout,
+    ) => boolean>(functionSource('applyProjectedSplitRatios'), {
+      terminalHost: {},
+      mountedSplitBranches: new Map([['split-a', branches]]),
+      effectivePaneRoot: (candidate: PaneLayout) => candidate.root,
+      measuredTerminalHost: () => ({ x: 0, y: 0, width: hostWidth, height: hostHeight }),
+      PANE_MINIMUMS: { width: 200, height: 137, separator: 6 },
+      PsychePanes,
+      scheduleTerminalPaneFits,
+      scheduleBrowserBounds,
+    });
+    return {
+      layout,
+      branches,
+      applyProjectedSplitRatios,
+      scheduleTerminalPaneFits,
+      scheduleBrowserBounds,
+    };
+  }
+
+  it('restyles the mounted branches with the same ratios a full render would project', () => {
+    const harness = splitBranchHarness(1000, 600);
+    harness.layout.root = PsychePanes.resizeSplit(harness.layout.root, 'split-a', 0.7);
+    const expected = PsychePanes.layoutRects(
+      harness.layout.root,
+      { x: 0, y: 0, width: 1000, height: 600 },
+      { width: 200, height: 137, separator: 6 },
+    ).splits[0].ratio;
+
+    expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(true);
+    expect(harness.branches.first.style.flexGrow).toBe(String(expected));
+    expect(harness.branches.second.style.flexGrow).toBe(String(1 - expected));
+    expect(harness.branches.divider.attributes.get('aria-valuenow'))
+      .toBe(String(Math.round(expected * 100)));
+    expect(harness.scheduleTerminalPaneFits).toHaveBeenCalledOnce();
+    expect(harness.scheduleBrowserBounds).toHaveBeenCalledOnce();
+  });
+
+  it('clamps a live divider drag to the pane minimums instead of collapsing a branch', () => {
+    const harness = splitBranchHarness(1000, 600);
+    harness.layout.root = PsychePanes.resizeSplit(harness.layout.root, 'split-a', 0.01);
+
+    expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(true);
+    // 200px minimum over the 994px the separator leaves behind.
+    expect(Number(harness.branches.first.style.flexGrow)).toBeCloseTo(200 / 994, 6);
+  });
+
+  it('defers to a full render when the mounted tree no longer matches the model', () => {
+    const harness = splitBranchHarness(1000, 600);
+    const nested = PsychePanes.insertRelative(
+      harness.layout.root, 'leaf-b', PsychePanes.createLeaf('leaf-c', 'thread-c'), 'split-b', 'right',
+    );
+    harness.layout.root = nested;
+
+    // The registry still only knows split-a, so the restyle cannot be complete.
+    expect(harness.applyProjectedSplitRatios(harness.layout)).toBe(false);
+    expect(harness.scheduleTerminalPaneFits).not.toHaveBeenCalled();
+    expect(harness.scheduleBrowserBounds).not.toHaveBeenCalled();
+  });
+
+  it('resizes a divider drag in place and commits exactly one render when it ends', () => {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout: PaneLayout = {
+      root: PsychePanes.insertRelative(leafA, 'leaf-a', leafB, 'split-a', 'right'),
+      focusedLeafId: 'leaf-a',
+    };
+    const applyProjectedSplitRatios = vi.fn(() => true);
+    const schedulePaneTreeLayout = vi.fn();
+    const updateActiveSplit = compileFunction<(
+      splitId: string,
+      ratio: number,
+      expectedLayout?: PaneLayout,
+      restoreFocus?: boolean,
+      live?: boolean,
+    ) => boolean>(functionSource('updateActiveSplit'), {
+      activePaneLayout: () => layout,
+      PsychePanes,
+      schedulePaneTreeLayout,
+      applyProjectedSplitRatios,
+    });
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const captures: number[] = [];
+    const releases: number[] = [];
+    (divider as unknown as Record<string, unknown>).setPointerCapture =
+      (pointerId: number) => { captures.push(pointerId); };
+    (divider as unknown as Record<string, unknown>).releasePointerCapture =
+      (pointerId: number) => { releases.push(pointerId); };
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ left: 0, width: 1000 }),
+    };
+    const createPaneDivider = compileFunction<(
+      node: PaneLayout['root'], ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      activePaneLayout: () => layout,
+      updateActiveSplit,
+      schedulePaneTreeLayout,
+    });
+    createPaneDivider(layout.root, 0.5);
+
+    divider.dispatch('pointerdown', { pointerId: 4, preventDefault: () => undefined });
+    expect(captures).toEqual([4]);
+
+    windowTarget.dispatch('pointermove', { pointerId: 4, clientX: 600 });
+    windowTarget.dispatch('pointermove', { pointerId: 4, clientX: 640 });
+    windowTarget.dispatch('pointermove', { pointerId: 4, clientX: 700 });
+
+    expect(layout.root.ratio).toBeCloseTo(0.7);
+    expect(applyProjectedSplitRatios).toHaveBeenCalledTimes(3);
+    // The point of the whole change: no pane-tree rebuild while the pointer moves.
+    expect(schedulePaneTreeLayout).not.toHaveBeenCalled();
+
+    windowTarget.dispatch('pointerup', { pointerId: 4 });
+    expect(releases).toEqual([4]);
+    expect(schedulePaneTreeLayout).toHaveBeenCalledTimes(1);
+    expect(schedulePaneTreeLayout).toHaveBeenCalledWith(null);
+  });
+
+  it('does not commit a render when a divider is pressed without moving', () => {
+    const layout = { root: { type: 'split', id: 'split-a', orientation: 'row', ratio: 0.5 } };
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const schedulePaneTreeLayout = vi.fn();
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ left: 0, width: 1000 }),
+    };
+    const createPaneDivider = compileFunction<(
+      node: { id: string }, ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      activePaneLayout: () => layout,
+      updateActiveSplit: () => false,
+      schedulePaneTreeLayout,
+    });
+    createPaneDivider({ id: 'split-a' }, 0.5);
+
+    divider.dispatch('pointerdown', { pointerId: 9, preventDefault: () => undefined });
+    windowTarget.dispatch('pointerup', { pointerId: 9 });
+
+    expect(schedulePaneTreeLayout).not.toHaveBeenCalled();
+  });
+
   it('ignores pointer resizing when the split has no measurable height', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();
@@ -646,6 +1235,118 @@ describe('Tauri physical terminal panes', () => {
     expect(renders).toBe(1);
     expect(otherDivider.focusCalls).toBe(0);
     expect(replacementDivider.focusCalls).toBe(1);
+  });
+
+  it('starts the shared Files pane reposition drag with one terminal beside it', () => {
+    const windowTarget = new FakeEventTarget();
+    const movePaneTo = vi.fn();
+    const layout = {
+      root: {
+        type: 'split',
+        id: 'split-files',
+        orientation: 'row',
+        ratio: 0.5,
+        first: { type: 'leaf', id: 'leaf-terminal', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-files', threadId: 'files-a' },
+      },
+      focusedLeafId: 'leaf-files',
+    };
+    const filesClasses = new Set<string>();
+    const terminal = {
+      id: 'thread-a',
+      kind: 'shell',
+      pane: {
+        getBoundingClientRect: () => ({
+          left: 0, right: 100, top: 0, bottom: 100, width: 100, height: 100,
+        }),
+      },
+    };
+    const filesPane = {
+      id: 'files-a',
+      kind: 'files',
+      pane: {
+        classList: {
+          add: (name: string) => { filesClasses.add(name); },
+          remove: (name: string) => { filesClasses.delete(name); },
+        },
+        getBoundingClientRect: () => ({
+          left: 100, right: 200, top: 0, bottom: 100, width: 100, height: 100,
+        }),
+      },
+    };
+    const findThread = (id: string) => (id === terminal.id ? terminal : null);
+    const canvasSurfaceById = (id: string) => {
+      if (id === terminal.id) return terminal;
+      if (id === filesPane.id) return filesPane;
+      return null;
+    };
+    const canvasThreadIds = compileFunction<() => string[]>(
+      functionSource('canvasThreadIds'),
+      {
+        activePaneLayout: () => layout,
+        PsychePanes,
+        findThread,
+      },
+    );
+    const paneRepositionSurfaceIds = compileFunction<() => string[]>(
+      functionSource('paneRepositionSurfaceIds'),
+      {
+        activePaneLayout: () => layout,
+        effectivePaneRoot: (value: typeof layout) => value.root,
+        PsychePanes,
+        canvasSurfaceById,
+      },
+    );
+    const paneElementAt = compileFunction<(
+      clientX: number,
+      clientY: number,
+    ) => { thread: typeof terminal | typeof filesPane; rect: Record<string, number> } | null>(
+      functionSource('paneElementAt'),
+      {
+        canvasThreadIds,
+        paneRepositionSurfaceIds,
+        canvasSurfaceById,
+        findThread,
+      },
+    );
+    const startPaneReposition = compileFunction<(
+      surface: typeof filesPane,
+      event: { button: number; pointerId: number; clientX: number; clientY: number },
+    ) => void>(functionSource('startPaneReposition'), {
+      terminalHost: {},
+      window: windowTarget,
+      document: { body: { classList: { add: () => undefined, remove: () => undefined } } },
+      PANE_DRAG_THRESHOLD: 5,
+      canvasThreadIds,
+      paneRepositionSurfaceIds,
+      paneElementAt,
+      paneDropZone: () => 'left',
+      showPaneDropIndicator: () => undefined,
+      clearPaneDropIndicator: () => undefined,
+      movePaneTo,
+    });
+
+    expect(canvasThreadIds()).toEqual([terminal.id]);
+    expect(paneRepositionSurfaceIds()).toEqual([terminal.id, filesPane.id]);
+
+    startPaneReposition(filesPane, {
+      button: 0,
+      pointerId: 9,
+      clientX: 150,
+      clientY: 50,
+    });
+    expect(windowTarget.listeners.get('pointermove')?.size || 0).toBe(1);
+
+    windowTarget.dispatch('pointermove', {
+      pointerId: 9,
+      clientX: 40,
+      clientY: 50,
+    });
+    windowTarget.dispatch('pointerup', { pointerId: 9 });
+
+    expect(movePaneTo).toHaveBeenCalledWith(filesPane.id, terminal.id, 'left');
+    expect(filesClasses.has('is-dragging')).toBe(false);
+    expect(windowTarget.listeners.get('pointermove')?.size || 0).toBe(0);
   });
 
   it('delegates visible pane fitting to each keyed controller', () => {
@@ -778,7 +1479,7 @@ describe('Tauri physical terminal panes', () => {
       createThread.indexOf('refreshSidebar()'),
     );
     expect(functionSource('removeProject')).toMatch(
-      /var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
+      /threadIds\.map\(function \(tid\) \{[\s\S]*var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
     );
   });
 
@@ -1173,6 +1874,384 @@ describe('Tauri physical terminal panes', () => {
     expect(target.internalFocusReportTokens).toBeUndefined();
   });
 
+  it('switches fullscreen selection to the target pane and leaves tiled layouts unchanged', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-target' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const sourceLeaf = PsychePanes.createLeaf('leaf-source', source.id);
+    const targetLeaf = PsychePanes.createLeaf('leaf-target', target.id);
+    const root = PsychePanes.insertBelow(sourceLeaf, 'leaf-source', targetLeaf, 'split-target');
+    const fullscreenLayout: PaneFocusLayout = {
+      root,
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const fullscreenHarness = createPaneFocusHarness(
+      [source, target],
+      source.id,
+      null,
+      fullscreenLayout,
+    );
+
+    await expect(fullscreenHarness.focusThread(target.id)).resolves.toBe(true);
+    expect(fullscreenHarness.state.activeThreadId).toBe(target.id);
+    expect(fullscreenLayout.focusedLeafId).toBe('leaf-target');
+    expect(fullscreenLayout.maximizedLeafId).toBe('leaf-target');
+    expect(PsychePanes.findLeafById(fullscreenLayout.root, fullscreenLayout.maximizedLeafId)?.threadId)
+      .toBe(target.id);
+
+    const tiledLayout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source-tiled', source.id),
+        'leaf-source-tiled',
+        PsychePanes.createLeaf('leaf-target-tiled', target.id),
+        'split-tiled',
+      ),
+      focusedLeafId: 'leaf-source-tiled',
+      maximizedLeafId: null,
+    };
+    const tiledHarness = createPaneFocusHarness([source, target], source.id, null, tiledLayout);
+
+    await expect(tiledHarness.focusThread(target.id)).resolves.toBe(true);
+    expect(tiledHarness.state.activeThreadId).toBe(target.id);
+    expect(tiledLayout.focusedLeafId).toBe('leaf-target-tiled');
+    expect(tiledLayout.maximizedLeafId).toBeNull();
+  });
+
+  it('rejects centralized focus outside the active focus set before mutating fullscreen state', async () => {
+    const { excluded, harness, layout, member } = createScopedFullscreenFocusHarness();
+
+    await expect(harness.focusThread(excluded.id)).resolves.toBe(false);
+
+    expect(harness.state.activeThreadId).toBe(member.id);
+    expect(harness.project.lastActiveThreadId).toBe(member.id);
+    expect(layout.focusedLeafId).toBe('leaf-member');
+    expect(layout.maximizedLeafId).toBe('leaf-member');
+    expect(harness.queued).toHaveLength(0);
+  });
+
+  it('keeps Ctrl-number focus inside the active fullscreen focus set', async () => {
+    const {
+      excluded, harness, layout, member, paneFocusEligible,
+    } = createScopedFullscreenFocusHarness();
+    const routeGlobalShortcut = compileFunction<
+      (event: Record<string, unknown>) => Promise<void>
+    >(functionSource('routeGlobalShortcut'), {
+      runNewShellCommand: async () => undefined,
+      runNewThreadCommand: async () => undefined,
+      routeAgentPickerModalKeydown: () => false,
+      routeGitPaneShortcut: () => false,
+      routeFilesShortcut: () => false,
+      canvasThreadIds: () => [excluded.id, member.id],
+      activePaneLayout: () => layout,
+      paneFocusEligible,
+      focusThread: harness.focusThread,
+    });
+    const event = {
+      key: '1',
+      code: 'Digit1',
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      target: null,
+      preventDefault: vi.fn(),
+    };
+
+    await routeGlobalShortcut(event);
+
+    expect(harness.state.activeThreadId).toBe(member.id);
+    expect(harness.project.lastActiveThreadId).toBe(member.id);
+    expect(layout.focusedLeafId).toBe('leaf-member');
+    expect(layout.maximizedLeafId).toBe('leaf-member');
+  });
+
+  it('rejects a tearing-down browser pane before centralized focus mutates state', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-browser',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-browser' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', source.id),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-browser', target.id),
+        'split-browser',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+    harness.browserPaneLifecycle(target).tearingDown = true;
+
+    await expect(harness.focusThread(target.id)).resolves.toBe(false);
+
+    expect(harness.state.activeThreadId).toBe(source.id);
+    expect(harness.project.lastActiveThreadId).toBe(source.id);
+    expect(layout.focusedLeafId).toBe('leaf-source');
+    expect(layout.maximizedLeafId).toBe('leaf-source');
+    expect(harness.queued).toHaveLength(0);
+  });
+
+  it.each(['closing', 'tearing-down'] as const)(
+    'does not mutate fullscreen when a minimap target becomes %s before activation',
+    async (staleState) => {
+      const harness = createMinimapFocusHarness(
+        staleState === 'tearing-down' ? 'web' : 'shell',
+      );
+      if (staleState === 'tearing-down') {
+        harness.browserPaneLifecycle(harness.target).tearingDown = true;
+      } else {
+        harness.target.closing = true;
+      }
+
+      await harness.entry.emit('click');
+
+      expect(harness.state.activeThreadId).toBe(harness.source.id);
+      expect(harness.project.lastActiveThreadId).toBe(harness.source.id);
+      expect(harness.layout.focusedLeafId).toBe('leaf-source');
+      expect(harness.layout.maximizedLeafId).toBe('leaf-source');
+      expect(harness.queued).toHaveLength(0);
+    },
+  );
+
+  it('switches fullscreen to Files when its minimap preview is activated', async () => {
+    const filesPane = {
+      id: 'files-project-repo',
+      kind: 'files',
+      activeFileId: 'file-a',
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', 'thread-source'),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-files', filesPane.id),
+        'split-files',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const terminalArea = new FakeMinimapElement('section');
+    const toggled: unknown[] = [];
+    let restoredEditorFocus = 0;
+    const renderPaneMinimap = compileFunction<
+      (paneLayout: PaneFocusLayout, activeFile: unknown) => void
+    >(functionSource('renderPaneMinimap'), {
+      terminalArea,
+      document: {
+        createElement: (tagName: string) => new FakeMinimapElement(tagName),
+      },
+      paneMinimapItems: () => [{
+        kind: 'file',
+        id: 'file-a',
+        label: 'Button.tsx',
+        detail: 'src/Button.tsx',
+        current: false,
+        thread: null,
+        surface: filesPane,
+      }],
+      paneGlyphFor: () => 'F',
+      sessionStatusClass: () => '',
+      PsychePanes,
+      filesPaneHasCanvasFocus: () => false,
+      returnFromFileFocus: async () => false,
+      focusThread: async () => false,
+      togglePaneMaximize: (surface: unknown) => { toggled.push(surface); },
+      restoreFileEditorFocus: () => { restoredEditorFocus += 1; },
+    });
+
+    renderPaneMinimap(layout, null);
+    const entry = terminalArea.querySelector('.minimap-pane');
+    if (!entry) throw new Error('missing Files minimap pane');
+    await entry.emit('click');
+
+    expect(toggled).toEqual([filesPane]);
+    expect(restoredEditorFocus).toBe(0);
+  });
+
+  it('does not mutate layout when maximizing an inactive tearing-down browser', () => {
+    const source: PaneFocusThread = {
+      id: 'thread-maximize-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-maximize-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-maximize-browser',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-maximize-browser' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-maximize-source', source.id),
+        'leaf-maximize-source',
+        PsychePanes.createLeaf('leaf-maximize-browser', target.id),
+        'split-maximize-browser',
+      ),
+      focusedLeafId: 'leaf-maximize-source',
+      maximizedLeafId: 'leaf-maximize-source',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+    harness.browserPaneLifecycle(target).tearingDown = true;
+    const focusThread = vi.fn(harness.focusThread);
+    const renderPaneWorkspace = vi.fn();
+    const togglePaneMaximize = compileFunction<
+      (surface: PaneFocusThread) => void
+    >(functionSource('togglePaneMaximize'), {
+      canvasSurfaceById: (id: string) => (
+        harness.state.threads.find((thread) => thread.id === id) || null
+      ),
+      paneLayoutForThread: () => layout,
+      paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+      findThread: (id: string) => (
+        harness.state.threads.find((thread) => thread.id === id) || null
+      ),
+      focusThread,
+      renderPaneWorkspace,
+      state: harness.state,
+      PsychePanes,
+    });
+
+    togglePaneMaximize(target);
+
+    expect(harness.state.activeThreadId).toBe(source.id);
+    expect(harness.project.lastActiveThreadId).toBe(source.id);
+    expect(layout.focusedLeafId).toBe('leaf-maximize-source');
+    expect(layout.maximizedLeafId).toBe('leaf-maximize-source');
+    expect(focusThread).not.toHaveBeenCalled();
+    expect(renderPaneWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('preserves fullscreen through focus-set activation for a siderail pane selection', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-target' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', source.id),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-target', target.id),
+        'split-target',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+    const focusThreadFromSidebar = compileFunction<
+      (thread: PaneFocusThread) => Promise<boolean>
+    >(functionSource('focusThreadFromSidebar'), {
+      paneLayoutForThread: () => layout,
+      applySetScopeForThread: () => {
+        layout.maximizedLeafId = null;
+        return true;
+      },
+      focusThread: harness.focusThread,
+    });
+
+    await expect(focusThreadFromSidebar(target)).resolves.toBe(true);
+    expect(harness.state.activeThreadId).toBe(target.id);
+    expect(layout.focusedLeafId).toBe('leaf-target');
+    expect(layout.maximizedLeafId).toBe('leaf-target');
+  });
+
+  it('restores tiling instead of transferring a stale maximized leaf', async () => {
+    const source: PaneFocusThread = {
+      id: 'thread-source',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-source' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const target: PaneFocusThread = {
+      id: 'thread-target',
+      kind: 'shell',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      status: 'running',
+      pane: { id: 'pane-target' },
+      host: { contains: () => false },
+      term: null,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', source.id),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-target', target.id),
+        'split-target',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-gone',
+    };
+    const harness = createPaneFocusHarness([source, target], source.id, null, layout);
+
+    await expect(harness.focusThread(target.id)).resolves.toBe(true);
+    expect(harness.state.activeThreadId).toBe(target.id);
+    expect(layout.focusedLeafId).toBe('leaf-target');
+    expect(layout.maximizedLeafId).toBeNull();
+  });
+
   it('allows explicit focus-out and focus-in when refocusing the current target', async () => {
     const activeElement = { id: 'same-target' };
     const thread: PaneFocusThread = {
@@ -1329,6 +2408,204 @@ describe('Tauri physical terminal panes', () => {
     expect(harness.state.activeThreadId).toBe(target.id);
     expect(source.internalFocusReportTokens).toBeUndefined();
     expect(target.internalFocusReportTokens).toBeUndefined();
+  });
+
+  it.each(['close', 'hide'] as const)(
+    'chooses the %s replacement from the active focus set while another member is fullscreen',
+    async (action) => {
+      const source: PaneFocusThread = {
+        id: 'thread-remove-source',
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        closing: false,
+        closeStarted: false,
+        hidden: false,
+        metricsGeneration: 0,
+        metricsRefreshTimer: 0,
+        startInFlight: false,
+        pane: { id: 'pane-remove-source' },
+        host: { contains: () => false },
+        term: null,
+      };
+      const excluded: PaneFocusThread = {
+        id: 'thread-remove-excluded',
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        pane: { id: 'pane-remove-excluded' },
+        host: { contains: () => false },
+        term: null,
+      };
+      const member: PaneFocusThread = {
+        id: 'thread-remove-member',
+        kind: 'shell',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        status: 'running',
+        pane: { id: 'pane-remove-member' },
+        host: { contains: () => false },
+        term: null,
+      };
+      const root = PsychePanes.insertBelow(
+        PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-remove-source', source.id),
+          'leaf-remove-source',
+          PsychePanes.createLeaf('leaf-remove-excluded', excluded.id),
+          'split-remove-excluded',
+        ),
+        'leaf-remove-excluded',
+        PsychePanes.createLeaf('leaf-remove-member', member.id),
+        'split-remove-member',
+      );
+      const layout: PaneFocusLayout = {
+        root,
+        focusedLeafId: 'leaf-remove-source',
+        maximizedLeafId: 'leaf-remove-member',
+        activeSetId: 'set-remove',
+      };
+      const focusSets = [{
+        id: 'set-remove',
+        threadIds: [source.id, member.id],
+      }];
+      const paneFocusEligible = compilePaneFocusEligible(focusSets);
+      const harness = createPaneFocusHarness(
+        [source, excluded, member],
+        source.id,
+        null,
+        layout,
+        paneFocusEligible,
+      );
+      const canvasSurfaceById = (id: string) => (
+        harness.state.threads.find((thread) => thread.id === id) || null
+      );
+      const resolvePaneFocusSuccessor = compilePaneFocusSuccessor(
+        focusSets,
+        canvasSurfaceById,
+        harness.paneSurfaceFocusEligible,
+      );
+      const key = 'project-a\0/repo';
+      const paneLayouts = new Map([[key, layout]]);
+      const detachThreadPaneImpl = compileFunction<(
+        thread: PaneFocusThread,
+      ) => string | null>(functionSource('detachThreadPane'), {
+        canvasSurfaceById,
+        focusedTerminalThreadForRender: harness.focusedTerminalThreadForRender,
+        withTerminalFocusReportToken: harness.withTerminalFocusReportToken,
+        paneLayoutKey: () => key,
+        paneLayouts,
+        paneFocusEligible,
+        paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+        resolvePaneFocusSuccessor,
+        PsychePanes,
+      });
+      const detachThreadPane = (thread: PaneFocusThread) => {
+        const nextThreadId = detachThreadPaneImpl(thread);
+        if (thread.pane) harness.attachedPanes.delete(thread.pane);
+        return nextThreadId;
+      };
+      const sharedDependencies = {
+        findThread: (id: string) => (
+          harness.state.threads.find((thread) => thread.id === id) || null
+        ),
+        detachThreadPane,
+        retainFileFocusAfterThreadRemoval: () => false,
+        state: harness.state,
+        focusThread: harness.focusThread,
+        canvasSurfaceById,
+        paneLayoutForThread: () => layout,
+        paneSurfaceFocusEligible: harness.paneSurfaceFocusEligible,
+        resolvePaneFocusSuccessor,
+        PsychePanes,
+        renderPaneWorkspace: harness.renderPaneWorkspace,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      };
+
+      if (action === 'close') {
+        const closeThread = compileFunction<(id: string) => Promise<boolean>>(
+          functionSource('closeThread'),
+          {
+            ...sharedDependencies,
+            forgetThreadInSets: () => undefined,
+            stopThreadPty: async () => true,
+            setProjectStatus: () => undefined,
+            findProject: () => harness.project,
+          },
+        );
+        await expect(closeThread(source.id)).resolves.toBe(true);
+      } else {
+        const hideThread = compileFunction<(id: string) => boolean>(
+          functionSource('hideThread'),
+          sharedDependencies,
+        );
+        expect(hideThread(source.id)).toBe(true);
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(harness.state.activeThreadId).toBe(member.id);
+      expect(harness.project.lastActiveThreadId).toBe(member.id);
+      expect(layout.focusedLeafId).toBe('leaf-remove-member');
+      expect(layout.maximizedLeafId).toBe('leaf-remove-member');
+    },
+  );
+
+  it.each(['close', 'hide'] as const)(
+    'skips a tearing-down browser when choosing the %s successor',
+    async (action) => {
+      const { harness, healthy, layout, remove } =
+        createPaneRemovalLifecycleHarness(true);
+
+      await remove(action);
+
+      expect(harness.state.activeThreadId).toBe(healthy.id);
+      expect(harness.project.lastActiveThreadId).toBe(healthy.id);
+      expect(layout.focusedLeafId).toBe('leaf-remove-healthy');
+      expect(layout.maximizedLeafId).toBe('leaf-remove-healthy');
+    },
+  );
+
+  it.each(['close', 'hide'] as const)(
+    'clears and renders after %s when only a tearing-down successor remains',
+    async (action) => {
+      const { harness, layout, remove, renderOptions } =
+        createPaneRemovalLifecycleHarness(false);
+
+      await remove(action);
+
+      expect(harness.state.activeThreadId).toBeNull();
+      expect(layout.focusedLeafId).toBeNull();
+      expect(renderOptions).toEqual([{ preserveTerminalFocus: false }]);
+    },
+  );
+
+  it.each(['tearing-down', 'hidden'] as const)(
+    'revalidates a successor that becomes %s during async close',
+    async (staleDuringStop) => {
+      const { harness, healthy, layout, remove } =
+        createPaneRemovalLifecycleHarness(true, staleDuringStop);
+
+      await remove('close');
+
+      expect(harness.state.activeThreadId).toBe(healthy.id);
+      expect(harness.project.lastActiveThreadId).toBe(healthy.id);
+      expect(layout.focusedLeafId).toBe('leaf-remove-healthy');
+      expect(layout.maximizedLeafId).toBe('leaf-remove-healthy');
+    },
+  );
+
+  it('clears and renders when the close successor becomes ineligible during async stop', async () => {
+    const { harness, layout, remove, renderOptions } =
+      createPaneRemovalLifecycleHarness(false, 'tearing-down');
+
+    await remove('close');
+
+    expect(harness.state.activeThreadId).toBeNull();
+    expect(layout.focusedLeafId).toBeNull();
+    expect(renderOptions).toEqual([{ preserveTerminalFocus: false }]);
   });
 
   it('allows focus-out when closing the active pane without a successor', async () => {
@@ -1504,7 +2781,7 @@ describe('Tauri physical terminal panes', () => {
     };
     const state = {
       activeProjectId: activeProject.id,
-      activeThreadId: 'active-thread',
+      activeThreadId: 'active-thread' as string | null,
       activeFileId: null as string | null,
       projects: [activeProject, removedProject],
       threads: [removedThread],
@@ -1552,6 +2829,149 @@ describe('Tauri physical terminal panes', () => {
     }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('refreshes the siderail after removing an inactive project with no local threads', async () => {
+    const activeProject = { id: 'active-project' };
+    const removedProject = { id: 'removed-project' };
+    const state = {
+      activeProjectId: activeProject.id,
+      activeThreadId: 'active-thread',
+      activeFileId: null as string | null,
+      projects: [activeProject, removedProject],
+      threads: [{
+        id: 'active-thread',
+        projectId: activeProject.id,
+      }],
+      openFiles: [] as Array<{ id: string; projectId: string }>,
+    };
+    const refreshSidebarProjects: Array<Array<string>> = [];
+    const refreshTabs = vi.fn();
+    const closeThread = vi.fn();
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (projectId: string) => (
+        state.projects.find((project) => project.id === projectId) || null
+      ),
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: {
+        invalidateCovenRequests: (value: unknown) => value,
+      },
+      closeThread,
+      fileViewEl: null,
+      terminalHost: null,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      setStatus: () => undefined,
+      refreshSidebar: () => {
+        refreshSidebarProjects.push(state.projects.map((project) => project.id));
+      },
+      refreshTabs,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    await expect(removeProject(removedProject.id)).resolves.toBe(true);
+    expect(closeThread).not.toHaveBeenCalled();
+    expect(state.projects).toEqual([activeProject]);
+    expect(refreshSidebarProjects).toEqual([[activeProject.id]]);
+    expect(refreshTabs).not.toHaveBeenCalled();
+    expect(state.activeProjectId).toBe(activeProject.id);
+    expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('hands off to a remaining project if an inactive removal target becomes active mid-guard', async () => {
+    const activeProject = { id: 'active-project' };
+    const removedProject = { id: 'removed-project' };
+    const guard = deferred<boolean>();
+    const state = {
+      activeProjectId: activeProject.id,
+      activeThreadId: 'active-thread' as string | null,
+      activeFileId: null as string | null,
+      projects: [activeProject, removedProject],
+      threads: [{
+        id: 'active-thread',
+        projectId: activeProject.id,
+      }],
+      openFiles: [{
+        id: 'removed-file',
+        projectId: removedProject.id,
+      }],
+    };
+    const refreshSidebarProjects: Array<Array<string>> = [];
+    const refreshCalls: string[] = [];
+    const refreshTabs = vi.fn(() => {
+      refreshCalls.push('tabs');
+    });
+    const closeThread = vi.fn();
+    const setActiveProjectCalls: string[] = [];
+    const activeProjectBeforeHandoff: Array<string | null> = [];
+    const refreshSidebar = vi.fn(() => {
+      refreshCalls.push('sidebar');
+      refreshSidebarProjects.push(state.projects.map((project) => project.id));
+    });
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (projectId: string) => (
+        state.projects.find((project) => project.id === projectId) || null
+      ),
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: () => guard.promise,
+      covenDiscovery: {},
+      PsycheSessions: {
+        invalidateCovenRequests: (value: unknown) => value,
+      },
+      closeThread,
+      fileViewEl: null,
+      terminalHost: null,
+      startCovenPolling: () => undefined,
+      setActiveProject: async (projectId: string) => {
+        activeProjectBeforeHandoff.push(state.activeProjectId);
+        setActiveProjectCalls.push(projectId);
+        state.activeProjectId = projectId;
+        state.activeThreadId = 'active-thread';
+        refreshSidebar();
+        return true;
+      },
+      renderPaneWorkspace: () => undefined,
+      setStatus: () => undefined,
+      refreshSidebar,
+      refreshTabs,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    const removing = removeProject(removedProject.id);
+    await Promise.resolve();
+    state.activeProjectId = removedProject.id;
+    state.activeThreadId = null;
+    guard.resolve(true);
+
+    await expect(removing).resolves.toBe(true);
+    expect(closeThread).not.toHaveBeenCalled();
+    expect(state.projects).toEqual([activeProject]);
+    expect(state.openFiles).toEqual([]);
+    expect(state.activeProjectId).toBe(activeProject.id);
+    expect(state.activeThreadId).toBe('active-thread');
+    expect(activeProjectBeforeHandoff).toEqual([null]);
+    expect(setActiveProjectCalls).toEqual([activeProject.id]);
+    expect(refreshSidebarProjects).toEqual([[activeProject.id]]);
+    expect(refreshSidebar).toHaveBeenCalledTimes(1);
+    expect(refreshTabs).toHaveBeenCalledTimes(1);
+    expect(refreshCalls).toEqual(['sidebar', 'tabs']);
   });
 
   it('skips explicit target focus while the terminal canvas is hidden before RAF', async () => {
@@ -2004,7 +3424,7 @@ describe('Tauri physical terminal panes', () => {
     const project = { id: 'project', worktrees: [{ path: '/repo' }] };
     const thread = {
       id: 'thread-a', projectId: project.id, worktreePath: '/repo',
-      kind: 'coven-chat', status: 'running', hidden: true, pane: { id: 'pane-a' },
+      kind: 'coven-code', status: 'running', hidden: true, pane: { id: 'pane-a' },
     };
     const state = { threads: [thread] };
     let focused = 0;
@@ -2562,6 +3982,7 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       focusThread: (id: string) => { focused.push(id); return true; },
+      resolvePaneFocusSuccessor: () => threadB.id,
     });
 
     await expect(closeThread(threadA.id)).resolves.toBe(true);
@@ -2600,6 +4021,7 @@ describe('Tauri physical terminal panes', () => {
       canvasThreadIds: () => [threadB.id],
       state,
       focusThread: (id: string) => { focused.push(id); return true; },
+      resolvePaneFocusSuccessor: () => threadB.id,
       renderPaneWorkspace: () => undefined,
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
@@ -2939,7 +4361,7 @@ describe('Tauri physical terminal panes', () => {
       threads: [
         {
           id: 'thread-chat',
-          kind: 'coven-chat',
+          kind: 'coven-code',
           projectId: project.id,
           worktreePath: '/target',
           hidden: false,
@@ -2992,6 +4414,173 @@ describe('Tauri physical terminal panes', () => {
     expect(sidebarCalls).toBe(1);
     expect(tabCalls).toBe(1);
     expect(syncCalls).toBe(2);
+  });
+
+  it('restores an eligible scoped pane when the remembered pane is outside the active set', async () => {
+    const project = {
+      id: 'project-b',
+      selectedWorktreePath: '/repo-b',
+      lastActiveThreadId: 'thread-excluded',
+    };
+    const excluded = {
+      id: 'thread-excluded',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: false,
+    };
+    const member = {
+      id: 'thread-member',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: false,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-excluded', excluded.id),
+        'leaf-excluded',
+        PsychePanes.createLeaf('leaf-member', member.id),
+        'split-b',
+      ),
+      focusedLeafId: 'leaf-excluded',
+      activeSetId: 'set-b',
+    };
+    const focusSets = [{ id: 'set-b', threadIds: [member.id] }];
+    const findFocusSet = compileFunction<
+      (id: string) => { id: string; threadIds: string[] } | null
+    >(functionSource('findFocusSet'), { focusSets });
+    const scopedPaneRoot = compileFunction<
+      (value: PaneFocusLayout) => Record<string, unknown> | null
+    >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+    const paneFocusEligible = compileFunction<
+      (value: PaneFocusLayout | null, threadId: string) => boolean
+    >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+    const state = {
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a' as string | null,
+      threads: [excluded, member],
+    };
+    const focusCalls: string[] = [];
+    const renderedThreadIds: Array<string | null> = [];
+    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('setActiveProject'), {
+        state,
+        showTerminalView: async () => true,
+        findProject: () => project,
+        clearPassiveCovenPaneFocus: () => undefined,
+        loadAgentSkills: () => undefined,
+        activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+        paneLayoutFor: () => layout,
+        scopedPaneRoot,
+        paneFocusEligible,
+        PsychePanes,
+        focusThread: async (id: string) => {
+          focusCalls.push(id);
+          if (!paneFocusEligible(layout, id)) return false;
+          state.activeThreadId = id;
+          project.lastActiveThreadId = id;
+          renderedThreadIds.push(id);
+          return true;
+        },
+        renderPaneWorkspace: () => { renderedThreadIds.push(state.activeThreadId); },
+        renderGitSurface: () => false,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+      },
+    );
+
+    await expect(setActiveProject(project.id)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBe(member.id);
+    expect(project.lastActiveThreadId).toBe(member.id);
+    expect(focusCalls).toEqual([member.id]);
+    expect(renderedThreadIds).toEqual([member.id]);
+  });
+
+  it('clears the previous project thread when the active set has no eligible live pane', async () => {
+    const project = {
+      id: 'project-b',
+      selectedWorktreePath: '/repo-b',
+      lastActiveThreadId: 'thread-excluded',
+    };
+    const excluded = {
+      id: 'thread-excluded',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: false,
+    };
+    const hiddenMember = {
+      id: 'thread-hidden',
+      projectId: project.id,
+      worktreePath: project.selectedWorktreePath,
+      hidden: true,
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-excluded', excluded.id),
+        'leaf-excluded',
+        PsychePanes.createLeaf('leaf-hidden', hiddenMember.id),
+        'split-b',
+      ),
+      focusedLeafId: 'leaf-excluded',
+      activeSetId: 'set-b',
+    };
+    const focusSets = [{ id: 'set-b', threadIds: [hiddenMember.id] }];
+    const findFocusSet = compileFunction<
+      (id: string) => { id: string; threadIds: string[] } | null
+    >(functionSource('findFocusSet'), { focusSets });
+    const scopedPaneRoot = compileFunction<
+      (value: PaneFocusLayout) => Record<string, unknown> | null
+    >(functionSource('scopedPaneRoot'), { findFocusSet, PsychePanes });
+    const paneFocusEligible = compileFunction<
+      (value: PaneFocusLayout | null, threadId: string) => boolean
+    >(functionSource('paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+    const state = {
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a' as string | null,
+      threads: [excluded, hiddenMember],
+    };
+    const focusCalls: string[] = [];
+    const renderCalls: Array<{ projectId: string; threadId: string | null }> = [];
+    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('setActiveProject'), {
+        state,
+        showTerminalView: async () => true,
+        findProject: () => project,
+        clearPassiveCovenPaneFocus: () => undefined,
+        loadAgentSkills: () => undefined,
+        activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+        paneLayoutFor: () => layout,
+        scopedPaneRoot,
+        paneFocusEligible,
+        PsychePanes,
+        focusThread: async (id: string) => {
+          focusCalls.push(id);
+          const thread = state.threads.find((candidate) => candidate.id === id);
+          if (!thread || thread.hidden || !paneFocusEligible(layout, id)) return false;
+          state.activeThreadId = id;
+          return true;
+        },
+        renderPaneWorkspace: () => {
+          renderCalls.push({
+            projectId: state.activeProjectId,
+            threadId: state.activeThreadId,
+          });
+        },
+        renderGitSurface: () => false,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+      },
+    );
+
+    await expect(setActiveProject(project.id)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(focusCalls).toEqual([]);
+    expect(renderCalls).toEqual([{ projectId: project.id, threadId: null }]);
   });
 
 
@@ -3247,7 +4836,7 @@ describe('Tauri physical terminal panes', () => {
   it('routes /new-thread through ensureProjectCoven(activeProject())', async () => {
     const project = { id: 'project', root: '/repo' };
     let ensured: typeof project | null = null;
-    const result = { kind: 'coven-chat' };
+    const result = { kind: 'coven-code' };
     const runNewThreadCommand = compileFunction<() => Promise<typeof result | null>>(
       functionSource('runNewThreadCommand'),
       {
@@ -3343,7 +4932,7 @@ describe('Tauri physical terminal panes', () => {
     ) {
       const factory = Function(
         'PsychePanes', 'activePaneLayout', 'paneLayoutFor', 'state',
-        'focusThread', 'renderPaneWorkspace', 'seedSets',
+        'focusThread', 'renderPaneWorkspace', 'paneSurfaceFocusEligible', 'seedSets',
         `"use strict";
          var SPAN_ORIENTATION = { column: "row", row: "column" };
          var focusSets = seedSets;
@@ -3365,6 +4954,7 @@ describe('Tauri physical terminal panes', () => {
         { activeThreadId: 'thread-a', ...(extras.state as object ?? {}) },
         extras.focusThread ?? (() => undefined),
         extras.renderPaneWorkspace ?? (() => undefined),
+        extras.paneSurfaceFocusEligible ?? (() => true),
         sets,
       ) as {
         effectivePaneRoot: (value: Layout) => Record<string, unknown> | null;
@@ -3445,6 +5035,7 @@ describe('Tauri physical terminal panes', () => {
         scopedPaneRoot: (value: Layout) => value.root,
         PsychePanes,
         findThread: (id: string) => threads.get(id) || null,
+        canvasSurfaceById: (id: string) => threads.get(id) || null,
         PsycheSessions: { attentionLabel: () => 'Waiting for you' },
       });
 
@@ -3476,6 +5067,66 @@ describe('Tauri physical terminal panes', () => {
           detail: 'running · Waiting for you',
           current: false,
           thread: threads.get('thread-b'),
+        },
+      ]);
+    });
+
+    it('keeps the Files pane in the minimap while another pane is maximized', () => {
+      const thread = { id: 'thread-a', name: 'Agent', status: 'running' };
+      const filesPane = {
+        id: 'files-project-repo',
+        kind: 'files',
+        name: 'Files',
+        activeFileId: 'file-a',
+        workspaceRoot: '/repo',
+      };
+      const file = {
+        id: 'file-a',
+        name: 'Button.tsx',
+        rel: 'src/Button.tsx',
+      };
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-a', thread.id),
+          'leaf-a',
+          PsychePanes.createLeaf('leaf-files', filesPane.id),
+          'split-files',
+        ),
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a',
+      };
+      const paneMinimapItems = compileFunction<
+        (value: Layout, activeFile: typeof file | null) => Array<unknown>
+      >(functionSource('paneMinimapItems'), {
+        scopedPaneRoot: (value: Layout) => value.root,
+        PsychePanes,
+        findThread: (id: string) => id === thread.id ? thread : null,
+        canvasSurfaceById: (id: string) => {
+          if (id === thread.id) return thread;
+          if (id === filesPane.id) return filesPane;
+          return null;
+        },
+        findOpenFile: (id: string) => id === file.id ? file : null,
+        PsycheSessions: { attentionLabel: () => '' },
+      });
+
+      expect(paneMinimapItems(layout, null)).toEqual([
+        {
+          kind: 'pane',
+          id: thread.id,
+          label: 'Agent',
+          detail: 'running',
+          current: true,
+          thread,
+        },
+        {
+          kind: 'file',
+          id: file.id,
+          label: 'Button.tsx',
+          detail: 'src/Button.tsx',
+          current: false,
+          thread: null,
+          surface: filesPane,
         },
       ]);
     });

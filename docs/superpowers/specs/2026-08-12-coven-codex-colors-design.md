@@ -2,6 +2,11 @@
 
 **Date:** 2026-08-12
 
+> **Superseded for Coven on 2026-08-24:** The saturated Coven Purple palette
+> below is historical. The current `coven-purple` slug maps to the canonical
+> graphite and restrained-violet tokens in `OpenCoven/ui/index.html`. The Codex
+> Blackish decision remains active.
+
 ## Goal
 
 Restore Coven Purple to its prior saturated violet appearance and refine Codex

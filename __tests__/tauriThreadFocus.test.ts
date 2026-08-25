@@ -1,11 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const mainJs = readFileSync(
   join(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
+const PsychePanes = await import(pathToFileURL(join(
+  process.cwd(),
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
+)).href);
 
 function functionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);
@@ -27,7 +33,10 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const resolvedDependencies = { saveWorkspaceSoon: () => undefined, ...dependencies };
+  const resolvedDependencies = withFilesScopeSelectionHelper(
+    (name) => functionSource(mainJs, name),
+    { saveWorkspaceSoon: () => undefined, ...dependencies },
+  );
   const names = Object.keys(resolvedDependencies);
   const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
@@ -37,6 +46,79 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => { resolve = settle; });
   return { promise, resolve };
+}
+
+function compilePaneFocusDependencies(
+  state: { threads: Array<{ id: string; projectId: string; worktreePath: string }> },
+) {
+  const paneLayoutKey = compileFunction<(projectId: string, worktreePath: string) => string>(
+    functionSource(mainJs, 'paneLayoutKey'),
+    {},
+  );
+  const paneLayouts = new Map<string, { root: unknown; focusedLeafId: string | null }>();
+  state.threads.forEach((thread) => {
+    const key = paneLayoutKey(thread.projectId, thread.worktreePath);
+    const leaf = PsychePanes.createLeaf(`leaf-${thread.id}`, thread.id);
+    const layout = paneLayouts.get(key);
+    if (!layout) {
+      paneLayouts.set(key, { root: leaf, focusedLeafId: leaf.id });
+      return;
+    }
+    layout.root = PsychePanes.insertBelow(
+      layout.root,
+      layout.focusedLeafId!,
+      leaf,
+      `split-${thread.id}`,
+    );
+  });
+  const paneLayoutFor = compileFunction<
+    (projectId: string, worktreePath: string) => { root: unknown } | null
+  >(functionSource(mainJs, 'paneLayoutFor'), { paneLayouts, paneLayoutKey });
+  const paneLayoutForThread = compileFunction<
+    (surface: { projectId: string; worktreePath: string } | null) => { root: unknown } | null
+  >(functionSource(mainJs, 'paneLayoutForThread'), { paneLayoutFor });
+  const findThread = (id: string) => state.threads.find((thread) => thread.id === id) ?? null;
+  const findFilesPaneBySurfaceId = compileFunction<(id: string) => null>(
+    functionSource(mainJs, 'findFilesPaneBySurfaceId'),
+    { filesPanes: new Map() },
+  );
+  const canvasSurfaceById = compileFunction<(id: string) => unknown>(
+    functionSource(mainJs, 'canvasSurfaceById'),
+    { findThread, findFilesPaneBySurfaceId },
+  );
+  const findFocusSet = compileFunction<(id: string) => null>(
+    functionSource(mainJs, 'findFocusSet'),
+    { focusSets: [] },
+  );
+  const scopedPaneRoot = compileFunction<(layout: { root: unknown }) => unknown>(
+    functionSource(mainJs, 'scopedPaneRoot'),
+    { findFocusSet, canvasSurfaceById, PsychePanes },
+  );
+  const paneFocusEligible = compileFunction<
+    (layout: { root: unknown } | null, threadId: string) => boolean
+  >(functionSource(mainJs, 'paneFocusEligible'), { scopedPaneRoot, PsychePanes });
+  const browserPaneLifecycle = compileFunction<
+    (thread: object | null) => { tearingDown: boolean }
+  >(functionSource(mainJs, 'browserPaneLifecycle'), {
+    browserPaneLifecycleStates: new WeakMap(),
+  });
+  const browserPaneIsClosing = compileFunction<(thread: object | null) => boolean>(
+    functionSource(mainJs, 'browserPaneIsClosing'),
+    { browserPaneLifecycle },
+  );
+  const paneSurfaceFocusEligible = compileFunction<
+    (layout: { root: unknown } | null, surface: object | null) => boolean
+  >(functionSource(mainJs, 'paneSurfaceFocusEligible'), {
+    browserPaneIsClosing,
+    paneFocusEligible,
+  });
+  return {
+    paneLayoutFor,
+    paneLayoutForThread,
+    paneFocusEligible,
+    paneSurfaceFocusEligible,
+    PsychePanes,
+  };
 }
 
 function focusDependencies(
@@ -59,8 +141,7 @@ function focusDependencies(
     state,
     findProject: () => ({ id: 'project-1' }),
     activeWorkspaceRoot: () => '/repo',
-    paneLayoutFor: () => ({ root: {}, focusedLeafId: null }),
-    PsychePanes: { findLeafByThreadId: () => ({ id: 'leaf-1' }) },
+    ...compilePaneFocusDependencies(state),
     renderPaneWorkspace: vi.fn(),
     renderGitSurface: vi.fn(),
     refreshSidebar: vi.fn(),
@@ -116,6 +197,48 @@ describe('Tauri thread focus activation', () => {
     expect(dependencies.renderPaneWorkspace).not.toHaveBeenCalled();
     expect(frames).toHaveLength(0);
     expect(thread.terminalController.focus).not.toHaveBeenCalled();
+  });
+
+  it('synchronizes the Files scope when focus selects another worktree', async () => {
+    const project = {
+      id: 'project-1',
+      selectedWorktreePath: '/other',
+    };
+    const thread = {
+      id: 'thread-1',
+      projectId: project.id,
+      worktreePath: '/repo',
+      kind: 'shell',
+      status: 'running',
+      hidden: false,
+      closing: false,
+      closeStarted: false,
+      pane: {},
+      terminalController: { focus: vi.fn() },
+    };
+    const state = {
+      activeThreadId: null,
+      activeProjectId: project.id,
+      threads: [thread],
+    };
+    const invalidateFilesPanelRender = vi.fn(() => 7);
+    const renderFilesPanel = vi.fn(() => true);
+    const dependencies = {
+      ...focusDependencies(state, async () => true, () => 1),
+      findProject: () => project,
+      sidebarView: 'files',
+      invalidateFilesPanelRender,
+      renderFilesPanel,
+    };
+    const focusThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource(mainJs, 'focusThread'),
+      dependencies,
+    );
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(project.selectedWorktreePath).toBe('/repo');
+    expect(invalidateFilesPanelRender).toHaveBeenCalledOnce();
+    expect(renderFilesPanel).toHaveBeenCalledWith({ generation: 7 });
   });
 
   it('can render and select a live thread without queueing terminal autofocus', async () => {

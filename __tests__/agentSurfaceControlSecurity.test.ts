@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { CapabilityLeaseStore } from '../src/control/capabilityLeases.js';
-import { ControlJournal } from '../src/control/journal.js';
+import { ControlJournal, exactCommandOutcomeDigest } from '../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { ControlRuntime, type ControlHandlers } from '../src/control/runtime.js';
 import { authorizeCommand } from '../src/control/server.js';
@@ -229,11 +229,14 @@ describe('agent surface control adversarial boundaries', () => {
         commandId: 'approval-pending', approvalId: 'approval-1', payloadDigest: 'a'.repeat(64),
       });
       await firstJournal.append('command.requested', {
-        commandId: 'browser-dispatched', idempotencyKey: 'completed-old-key',
+        commandId: 'completed-old-key-command', idempotencyKey: 'completed-old-key', kind: 'browser.action', ownerEpoch: 7,
       });
+      const completedOldOutcome = { status: 'succeeded' } as const;
       await firstJournal.append('command.succeeded', {
-        commandId: 'browser-dispatched', idempotencyKey: 'completed-old-key', status: 'succeeded',
+        commandId: 'completed-old-key-command', idempotencyKey: 'completed-old-key', status: 'succeeded',
+        outcomeDigest: exactCommandOutcomeDigest(completedOldOutcome),
       });
+      await firstJournal.storeOutcome('completed-old-key', completedOldOutcome);
       await firstJournal.append('command.requested', {
         commandId: 'browser-dispatched', idempotencyKey: 'browser-dispatched', kind: 'browser.action', ownerEpoch: 7,
       });

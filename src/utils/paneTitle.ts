@@ -4,6 +4,7 @@ import type { PsychePane } from '../types.js';
 import { getPaneProjectName, getPaneProjectRoot } from './paneProject.js';
 
 export const PANE_TITLE_DELIMITER = '__psyche__';
+export const MANAGED_PANE_TITLE_SEPARATOR = ' · ';
 /**
  * Delimiters that were actually written into pane titles by earlier releases.
  *
@@ -50,6 +51,20 @@ export function getPaneDisplayName(
   return displayName || pane.slug;
 }
 
+export function buildManagedPaneTitle(label: string | undefined, slug: string): string {
+  const stableSlug = sanitizePaneDisplayName(slug);
+  const displayLabel = typeof label === 'string'
+    ? sanitizePaneDisplayName(label)
+    : '';
+  if (!displayLabel || displayLabel === stableSlug) {
+    return stableSlug;
+  }
+  if (displayLabel.endsWith(`${MANAGED_PANE_TITLE_SEPARATOR}${stableSlug}`)) {
+    return displayLabel;
+  }
+  return `${displayLabel}${MANAGED_PANE_TITLE_SEPARATOR}${stableSlug}`;
+}
+
 function encodePaneTmuxTitle(
   displayTitle: string,
   stableTitle: string,
@@ -77,7 +92,7 @@ function getStablePaneTmuxTitle(
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
-  if (pane.type === 'shell') {
+  if (pane.type === 'shell' || pane.type === 'desktop-use') {
     return pane.slug;
   }
 
@@ -120,6 +135,9 @@ export function getPaneTmuxTitle(
   const stableTitle = getStablePaneTmuxTitle(pane, fallbackProjectRoot, fallbackProjectName);
   const displayTitle = getPaneTmuxDisplayTitle(pane, fallbackProjectRoot, fallbackProjectName);
 
+  if (displayTitle.endsWith(`${MANAGED_PANE_TITLE_SEPARATOR}${pane.slug}`)) {
+    return displayTitle;
+  }
   return displayTitle
     ? encodePaneTmuxTitle(displayTitle, stableTitle)
     : stableTitle;
@@ -141,6 +159,9 @@ export function getPaneTitleCandidates(
 
   if (!displayTitle) {
     return Array.from(candidates);
+  }
+  if (displayTitle.endsWith(`${MANAGED_PANE_TITLE_SEPARATOR}${pane.slug}`)) {
+    candidates.add(displayTitle);
   }
 
   for (const delimiter of ALL_PANE_TITLE_DELIMITERS) {

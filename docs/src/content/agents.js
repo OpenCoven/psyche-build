@@ -3,7 +3,7 @@ export const meta = { title: 'Agents' };
 export function render() {
   return `
     <h1>Agents</h1>
-    <p class="lead">Psyche Build supports 12 AI coding agents, led by <strong>Coven Code</strong> — OpenCoven's own CLI coding harness. Each agent is automatically detected if its CLI is installed and available in your PATH.</p>
+    <p class="lead">Psyche Build detects supported AI coding agent CLIs and launches them in isolated panes and git worktrees. Each agent remains an optional integration; plain terminal panes work without any agent CLI.</p>
 
     <h2>Agent Detection</h2>
     <p>Run <code>psyche doctor</code> to see whether this shell can find a supported agent CLI. psyche can still create plain terminal panes when none are installed; install at least one supported CLI when you want prompt-launched agent panes.</p>
@@ -22,7 +22,7 @@ export function render() {
     <p>If only one agent is found, psyche uses it automatically. If multiple agents are available, you'll be prompted to choose (unless <code>defaultAgent</code> is set in <a href="#/configuration">configuration</a>).</p>
 
     <h2>Enabling Agents</h2>
-    <p>Coven Code, Claude Code, OpenCode, and Codex are enabled by default. To use other agents, open settings by pressing <kbd>s</kbd> and toggle on the agents you want available in the agent selector.</p>
+    <p>Coven CLI, Claude Code, OpenCode, and Codex are enabled by default. To use other agents, open settings by pressing <kbd>s</kbd> and toggle on the agents you want available in the agent selector.</p>
 
     <h2>Default Agent</h2>
     <p>To focus your preferred agent first in the agent selection dialog, set a default agent:</p>
@@ -33,18 +33,19 @@ export function render() {
     </ul>
 
     <h2>Permission Modes</h2>
-    <p>The <code>permissionMode</code> setting controls what flags psyche passes to each agent:</p>
+    <p>The <code>permissionMode</code> setting controls what flags psyche passes to each agent. Psyche launches Coven CLI by running exactly <code>coven</code>, so it does not forward the initial prompt or permission mode to that agent.</p>
     <table>
       <thead>
-        <tr><th>permissionMode</th><th>Coven Code</th><th>Claude Code</th><th>Codex</th><th>opencode</th></tr>
+        <tr><th>permissionMode</th><th>Coven CLI</th><th>Claude Code</th><th>Codex</th><th>opencode</th></tr>
       </thead>
       <tbody>
         <tr><td><code>''</code> (empty)</td><td>No flags</td><td>No flags</td><td>No flags</td><td>No flags</td></tr>
-        <tr><td><code>plan</code></td><td><code>--permission-mode plan</code></td><td><code>--permission-mode plan</code></td><td>No flags</td><td>No flags</td></tr>
-        <tr><td><code>acceptEdits</code></td><td><code>--permission-mode accept-edits</code></td><td><code>--permission-mode acceptEdits</code></td><td><code>--ask-for-approval untrusted --sandbox danger-full-access</code></td><td>No flags</td></tr>
-        <tr><td><code>bypassPermissions</code></td><td><code>--permission-mode bypass-permissions</code></td><td><code>--dangerously-skip-permissions</code></td><td><code>--dangerously-bypass-approvals-and-sandbox</code></td><td>No flags</td></tr>
+        <tr><td><code>plan</code></td><td>No flags</td><td><code>--permission-mode plan</code></td><td>No flags</td><td>No flags</td></tr>
+        <tr><td><code>acceptEdits</code></td><td>No flags</td><td><code>--permission-mode acceptEdits</code></td><td><code>--ask-for-approval untrusted --sandbox danger-full-access</code></td><td>No flags</td></tr>
+        <tr><td><code>bypassPermissions</code></td><td>No flags</td><td><code>--dangerously-skip-permissions</code></td><td><code>--dangerously-bypass-approvals-and-sandbox</code></td><td>No flags</td></tr>
       </tbody>
     </table>
+    <p>Coven CLI stays on bare <code>coven</code> in every mode, so Psyche does not pass permission flags or the initial prompt to it. The other agents still receive their mode-specific launch flags.</p>
 
     <h2>Autopilot Mode</h2>
     <p>When <code>enableAutopilotByDefault</code> is enabled in <a href="#/configuration">settings</a>, psyche will automatically accept agent option dialogs when no risk is detected. This reduces manual intervention while agents work.</p>

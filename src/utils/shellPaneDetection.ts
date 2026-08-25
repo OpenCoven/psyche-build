@@ -160,7 +160,7 @@ export async function getUntrackedPanes(
   }
 }
 
-async function detectPaneProjectInfo(
+export async function detectShellPaneProjectInfo(
   paneId: string
 ): Promise<{ projectRoot?: string; projectName?: string; cwdReference?: string }> {
   try {
@@ -215,6 +215,9 @@ export interface CreateShellPaneOptions {
   tmuxServerIdentity?: TmuxServerIdentity;
   /** Defer title mutation until the caller has durably persisted the record. */
   setPaneTitle?: boolean;
+  paneRecordId?: string;
+  slug?: string;
+  projectInfo?: Awaited<ReturnType<typeof detectShellPaneProjectInfo>>;
 }
 
 export async function createShellPane(
@@ -232,13 +235,14 @@ export async function createShellPane(
     );
   }
   const shellType = await detectShellType(paneId);
-  const paneProjectInfo = await detectPaneProjectInfo(paneId);
+  const paneProjectInfo = options.projectInfo
+    ?? await detectShellPaneProjectInfo(paneId);
 
   // CRITICAL: Always generate unique shell-N slugs for shell panes.
   // Using existing titles (like hostname "Gigablaster.local") causes tracking bugs
   // because multiple panes can have the same title, and titleToId Map can only
   // store one mapping per title. This leads to duplicate pane entries.
-  const slug = `shell-${nextId}`;
+  const slug = options.slug || `shell-${nextId}`;
 
   // Always set the title to ensure unique titles for proper rebinding
   if (options.setPaneTitle !== false) {
@@ -253,7 +257,7 @@ export async function createShellPane(
   }
 
   return {
-    id: createPsychePaneId(),
+    id: options.paneRecordId || createPsychePaneId(),
     slug,
     prompt: '', // No prompt for manually created panes
     paneId,

@@ -291,6 +291,110 @@ describe('project config concurrent mutation', () => {
     expect(new Set(config.panes.map((p: any) => p.slug)).size).toBe(2);
   });
 
+  it('persists cross-project Coven panes in the current session namespace across reloads', async () => {
+    const sessionRoot = await tempProject({
+      projectRoot: 'placeholder',
+      panes: [{
+        id: 'existing',
+        paneId: '%existing',
+        slug: 'coven-aaaa1111',
+      }],
+    });
+    const targetRoot = await tempProject();
+    const session = covenSession(targetRoot, 'aaaa1111');
+    const client = fakeClient([session]);
+    const deps = fakeDeps();
+
+    await openProjectCovenSession({
+      sessionProjectRoot: sessionRoot,
+      targetProjectRoot: targetRoot,
+      sessionName: 'psyche-test',
+      sessionId: session.id,
+    }, client, deps);
+    await openProjectCovenSession({
+      sessionProjectRoot: sessionRoot,
+      targetProjectRoot: targetRoot,
+      sessionName: 'psyche-test',
+      sessionId: session.id,
+    }, client, deps);
+
+    const reloaded = await readConfig(sessionRoot);
+    expect(reloaded.projectRoot).toBe(sessionRoot);
+    expect(reloaded.panes.map((pane: any) => pane.slug).sort()).toEqual([
+      'coven-aaaa1111',
+      'coven-aaaa1111-2',
+      'coven-aaaa1111-3',
+    ]);
+    expect(reloaded.panes.slice(1)).toEqual([
+      expect.objectContaining({
+        projectRoot: targetRoot,
+        cwd: targetRoot,
+      }),
+      expect.objectContaining({
+        projectRoot: targetRoot,
+        cwd: targetRoot,
+      }),
+    ]);
+    await expect(readConfigText(targetRoot)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('derives the same full-id base slug when a colon-bearing session is reopened after reload', async () => {
+    const root = await tempProject({ panes: [] });
+    const session = covenSession(root, 'owner:session.one');
+    const deps = fakeDeps();
+
+    await openProjectCovenSession(
+      root,
+      'psyche-test',
+      session.id,
+      fakeClient([session]),
+      deps,
+    );
+    expect((await readConfig(root)).panes.map((pane: any) => pane.slug)).toEqual([
+      'coven-owner-session.one',
+    ]);
+
+    await openProjectCovenSession({
+      sessionProjectRoot: root,
+      targetProjectRoot: root,
+      sessionName: 'psyche-test',
+      sessionId: session.id,
+    }, fakeClient([session]), deps);
+
+    expect((await readConfig(root)).panes.map((pane: any) => pane.slug)).toEqual([
+      'coven-owner-session.one',
+      'coven-owner-session.one-2',
+    ]);
+  });
+
+  it('keeps distinct Coven sessions collision-safe when their full ids sanitize alike', async () => {
+    const root = await tempProject({ panes: [] });
+    const sessions = [
+      covenSession(root, 'owner:session'),
+      covenSession(root, 'owner-session'),
+    ];
+    const deps = fakeDeps();
+
+    await Promise.all(sessions.map((session) => openProjectCovenSession({
+      sessionProjectRoot: root,
+      targetProjectRoot: root,
+      sessionName: 'psyche-test',
+      sessionId: session.id,
+    }, fakeClient(sessions), deps)));
+
+    const panes = (await readConfig(root)).panes;
+    expect(panes.map((pane: any) => pane.covenSession.id).sort()).toEqual([
+      'owner-session',
+      'owner:session',
+    ]);
+    expect(panes.map((pane: any) => pane.slug).sort()).toEqual([
+      'coven-owner-session',
+      'coven-owner-session-2',
+    ]);
+  });
+
   it('does not lose a metadata patch racing a pane open', async () => {
     const root = await tempProject({ panes: [{ id: 'psyche-0', paneId: '%99', title: 'original' }] });
     const client = fakeClient([covenSession(root, 's1')]);

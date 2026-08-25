@@ -51,6 +51,11 @@ export interface PsycheAttentionNotificationRequest {
   tmuxPaneId: string;
 }
 
+export interface PsycheAttentionEffectOwnership {
+  signal: AbortSignal;
+  isCurrent: () => boolean;
+}
+
 export type PaneAttentionSurface = 'fully-focused' | 'same-window' | 'background';
 
 function isTestEnvironment(): boolean {
@@ -584,10 +589,14 @@ async function stopRunningHelper(socketPath: string): Promise<boolean> {
   return findHelperSocketOwnerProcessIds(socketPath).length === 0;
 }
 
-async function waitForHelperSocket(socketPath: string, timeoutMs: number): Promise<boolean> {
+async function waitForHelperSocket(
+  socketPath: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !signal?.aborted) {
     if (existsSync(socketPath)) {
       const connected = await new Promise<boolean>((resolve) => {
         const probe = createConnection(socketPath);
@@ -596,12 +605,16 @@ async function waitForHelperSocket(socketPath: string, timeoutMs: number): Promi
         const finish = (value: boolean) => {
           if (settled) return;
           settled = true;
+          signal?.removeEventListener('abort', handleAbort);
           probe.destroy();
           resolve(value);
         };
+        const handleAbort = () => finish(false);
 
         probe.once('connect', () => finish(true));
         probe.once('error', () => finish(false));
+        signal?.addEventListener('abort', handleAbort, { once: true });
+        if (signal?.aborted) handleAbort();
       });
 
       if (connected) {
@@ -609,32 +622,46 @@ async function waitForHelperSocket(socketPath: string, timeoutMs: number): Promi
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, 150);
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
+    });
   }
 
   return false;
 }
 
 async function ensureHelperRunning(
-  logger: LogService
+  logger: LogService,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   await removeLegacyMacosNotifierArtifacts().catch(() => undefined);
+  if (signal?.aborted) return null;
   const helperPaths = getHelperRuntimePaths();
   const { executablePath, socketPath } = helperPaths;
   const binaryStatus = await ensureHelperBundle(helperPaths);
+  if (signal?.aborted) return null;
 
   if (!binaryStatus.ready) {
     logger.warn('psyche helper app bundle is unavailable on this system', 'focus-helper');
     return null;
   }
 
-  const alreadyRunning = await waitForHelperSocket(socketPath, 250);
+  const alreadyRunning = await waitForHelperSocket(socketPath, 250, signal);
+  if (signal?.aborted) return null;
   if (alreadyRunning && !binaryStatus.rebuilt) {
     return socketPath;
   }
 
   if (alreadyRunning && binaryStatus.rebuilt) {
     const stopped = await stopRunningHelper(socketPath);
+    if (signal?.aborted) return null;
     if (!stopped) {
       logger.warn('Failed to restart psyche helper after rebuilding it', 'focus-helper');
       return socketPath;
@@ -642,13 +669,15 @@ async function ensureHelperRunning(
   }
 
   await fs.mkdir(path.dirname(socketPath), { recursive: true });
+  if (signal?.aborted) return null;
   const child = spawn(executablePath, ['--socket', socketPath, '--poll-ms', '250'], {
     detached: true,
     stdio: 'ignore',
   });
   child.unref();
 
-  const started = await waitForHelperSocket(socketPath, HELPER_SOCKET_WAIT_TIMEOUT_MS);
+  const started = await waitForHelperSocket(socketPath, HELPER_SOCKET_WAIT_TIMEOUT_MS, signal);
+  if (signal?.aborted) return null;
   if (!started) {
     logger.warn('Timed out waiting for psyche helper to start', 'focus-helper');
     return null;
@@ -704,6 +733,14 @@ export class PsycheFocusService extends EventEmitter {
     this.active = true;
     const helperSocketPath = await ensureHelperRunning(this.logger);
     if (!helperSocketPath) {
+      return;
+    }
+
+    this.activateHelperConnection(helperSocketPath);
+  }
+
+  private activateHelperConnection(helperSocketPath: string): void {
+    if (!this.active) {
       return;
     }
 
@@ -864,8 +901,14 @@ export class PsycheFocusService extends EventEmitter {
     return 'background';
   }
 
-  async flashPaneAttention(tmuxPaneId: string): Promise<void> {
+  async flashPaneAttention(
+    tmuxPaneId: string,
+    ownership?: PsycheAttentionEffectOwnership,
+  ): Promise<void> {
     if (this.flashingTmuxPaneIds.has(tmuxPaneId)) {
+      return;
+    }
+    if (ownership && (ownership.signal.aborted || !ownership.isCurrent())) {
       return;
     }
 
@@ -876,18 +919,45 @@ export class PsycheFocusService extends EventEmitter {
     const flashStyle = buildAttentionFlashWindowStyle(baseStyle);
 
     const restorePaneStyle = () => {
-      if (existingPaneStyle) {
-        this.tmuxService.setPaneOptionSync(tmuxPaneId, 'window-style', existingPaneStyle);
-      } else {
-        this.tmuxService.unsetPaneOptionSync(tmuxPaneId, 'window-style');
+      try {
+        if (existingPaneStyle) {
+          this.tmuxService.setPaneOptionSync(tmuxPaneId, 'window-style', existingPaneStyle);
+        } else {
+          this.tmuxService.unsetPaneOptionSync(tmuxPaneId, 'window-style');
+        }
+      } catch {
+        // The captured pane may already be gone; restoration is best effort.
       }
     };
+    const timers = new Set<NodeJS.Timeout>();
+    let finished = false;
+    const finish = (restore: boolean) => {
+      if (finished) return;
+      finished = true;
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      ownership?.signal.removeEventListener('abort', handleAbort);
+      if (restore) {
+        restorePaneStyle();
+      }
+      this.flashingTmuxPaneIds.delete(tmuxPaneId);
+    };
+    const handleAbort = () => finish(true);
+    ownership?.signal.addEventListener('abort', handleAbort, { once: true });
+    if (ownership?.signal.aborted) {
+      handleAbort();
+      return;
+    }
 
     for (let step = 0; step < ATTENTION_FLASH_SEQUENCE_LENGTH; step += 1) {
-      setTimeout(() => {
-        if (!this.active) {
-          restorePaneStyle();
-          this.flashingTmuxPaneIds.delete(tmuxPaneId);
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        if (
+          !this.active
+          || ownership?.signal.aborted
+          || (ownership && !ownership.isCurrent())
+        ) {
+          finish(true);
           return;
         }
 
@@ -898,22 +968,32 @@ export class PsycheFocusService extends EventEmitter {
         }
 
         if (step === ATTENTION_FLASH_SEQUENCE_LENGTH - 1) {
-          restorePaneStyle();
-          this.flashingTmuxPaneIds.delete(tmuxPaneId);
+          finish(true);
         }
       }, step * ATTENTION_FLASH_STEP_MS);
+      timers.add(timer);
     }
   }
 
   async sendAttentionNotification(
-    request: PsycheAttentionNotificationRequest
+    request: PsycheAttentionNotificationRequest,
+    ownership?: PsycheAttentionEffectOwnership,
   ): Promise<boolean> {
     if (!supportsNativePsycheHelper() || isTestEnvironment()) {
       return false;
     }
 
-    const socketPath = await this.ensureHelperSocketPath();
+    if (ownership && (ownership.signal.aborted || !ownership.isCurrent())) {
+      return false;
+    }
+    const socketPath = await this.waitForAttentionSetup(
+      this.ensureHelperSocketPath(ownership?.signal),
+      ownership,
+    );
     if (!socketPath) {
+      return false;
+    }
+    if (ownership && (ownership.signal.aborted || !ownership.isCurrent())) {
       return false;
     }
 
@@ -930,7 +1010,7 @@ export class PsycheFocusService extends EventEmitter {
     };
 
     return new Promise<boolean>((resolve) => {
-      const socket = createConnection(socketPath);
+      const socket = this.createNotificationSocket(socketPath);
       let settled = false;
 
       const finish = (value: boolean) => {
@@ -938,31 +1018,71 @@ export class PsycheFocusService extends EventEmitter {
           return;
         }
         settled = true;
+        ownership?.signal.removeEventListener('abort', handleAbort);
+        socket.removeListener('connect', handleConnect);
+        socket.removeListener('error', handleError);
         socket.destroy();
         resolve(value);
       };
-
-      socket.once('connect', () => {
+      const handleAbort = () => finish(false);
+      const handleError = () => finish(false);
+      const handleConnect = () => {
+        if (ownership && (ownership.signal.aborted || !ownership.isCurrent())) {
+          finish(false);
+          return;
+        }
         socket.write(`${JSON.stringify(payload)}\n`, (error) => {
           finish(!error);
         });
-      });
+      };
 
-      socket.once('error', () => {
-        finish(false);
-      });
+      socket.once('connect', handleConnect);
+      socket.once('error', handleError);
+      ownership?.signal.addEventListener('abort', handleAbort, { once: true });
+      if (ownership?.signal.aborted) handleAbort();
     });
   }
 
-  private async ensureHelperSocketPath(): Promise<string | null> {
+  private createNotificationSocket(socketPath: string): Socket {
+    return createConnection(socketPath);
+  }
+
+  private async waitForAttentionSetup<T>(
+    setup: Promise<T>,
+    ownership?: PsycheAttentionEffectOwnership,
+  ): Promise<T | null> {
+    if (!ownership) return setup;
+    if (ownership.signal.aborted || !ownership.isCurrent()) return null;
+
+    return new Promise<T | null>((resolve, reject) => {
+      let settled = false;
+      const finish = (value: T | null, error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        ownership.signal.removeEventListener('abort', handleAbort);
+        if (error !== undefined) reject(error);
+        else resolve(value);
+      };
+      const handleAbort = () => finish(null);
+      ownership.signal.addEventListener('abort', handleAbort, { once: true });
+      setup.then(
+        (value) => finish(ownership.isCurrent() ? value : null),
+        (error) => finish(null, error),
+      );
+      if (ownership.signal.aborted) handleAbort();
+    });
+  }
+
+  private async ensureHelperSocketPath(signal?: AbortSignal): Promise<string | null> {
     if (this.helperSocketPath) {
-      const helperReady = await waitForHelperSocket(this.helperSocketPath, 100);
+      const helperReady = await waitForHelperSocket(this.helperSocketPath, 100, signal);
       if (helperReady) {
         return this.helperSocketPath;
       }
     }
 
-    const helperSocketPath = await ensureHelperRunning(this.logger);
+    if (signal?.aborted) return null;
+    const helperSocketPath = await ensureHelperRunning(this.logger, signal);
     if (!helperSocketPath) {
       return null;
     }

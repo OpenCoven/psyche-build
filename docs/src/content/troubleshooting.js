@@ -22,12 +22,12 @@ node /path/to/psyche-build/psyche --version</code></pre>
         <tr><th>Symptom</th><th>Check</th><th>Fix</th></tr>
       </thead>
       <tbody>
-        <tr><td>The GUI does not launch</td><td>The Cask is not installed or the release is not yet available</td><td>Confirm the public GitHub release and tap Cask exist, then reinstall and open the app</td></tr>
-        <tr><td>Cask name not found</td><td>The tap is stale or the release is not yet available</td><td>Run <code>brew update</code> and confirm <code>opencoven/tap/psyche-build</code> exists</td></tr>
+        <tr><td>The GUI does not launch</td><td>The Cask is missing, stale, or the installed application was blocked</td><td>Confirm the public GitHub release and tap Cask exist, reinstall, then open the app and inspect the macOS error</td></tr>
+        <tr><td>Cask name not found</td><td>The local tap metadata is stale or the tap is unavailable</td><td>Run <code>brew update</code> and confirm <code>opencoven/tap/psyche-build</code> exists</td></tr>
         <tr><td>Checksum mismatch</td><td>The Cask and release assets disagree</td><td>Stop and report the release integrity failure; do not bypass Homebrew verification</td></tr>
       </tbody>
     </table>
-    <p>After the v0.0.1 release and Cask are available:</p>
+    <p>Install or reinstall the published <code>v0.0.1</code> Cask with:</p>
     <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"</code></pre>
     <p>The Cask installs only <code>Psyche Build.app</code>. It does not provide a <code>psyche</code> command. The Node CLI is not an npm release in 0.0.1; source-development recovery uses <code>node /path/to/psyche-build/psyche</code> from the repository checkout.</p>
@@ -49,9 +49,9 @@ open -a "Psyche Build"</code></pre>
       <li>Set <code>defaultAgent</code> only after the agent appears in the selector.</li>
     </ol>
 
-    <h2>No Coven Sessions Appear</h2>
-    <p>Coven is optional. If no local Coven daemon is running, psyche still supports tmux panes, worktrees, installed agents, merge, PR, rituals, settings, and file browsing.</p>
-    <p>When Coven is available, only sessions scoped to the current project are shown. Confirm the daemon is running for the same project root before debugging psyche.</p>
+    <h2>Optional session integration is unavailable</h2>
+    <p>Psyche Build's core tmux, worktree, agent, merge, pull-request, ritual, settings, and file-browser workflows continue without the optional session provider.</p>
+    <p>If you enabled that integration, verify its local service is running for the same canonical project root, then restart or refresh Psyche Build.</p>
 
     <h2>Branch Names or Commit Messages Are Generic</h2>
     <p>Smart branch names and AI commit messages require OpenRouter.</p>

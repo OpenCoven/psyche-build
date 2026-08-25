@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-runtime-process-metrics"
+description = "Enables the runtime_process_metrics command without any pre-configured scope."
+commands.allow = ["runtime_process_metrics"]
+
+[[permission]]
+identifier = "deny-runtime-process-metrics"
+description = "Denies the runtime_process_metrics command without any pre-configured scope."
+commands.deny = ["runtime_process_metrics"]

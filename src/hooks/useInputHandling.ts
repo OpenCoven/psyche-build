@@ -1,5 +1,6 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react"
 import path from "path"
+import { randomUUID } from "node:crypto"
 import { useInput } from "ink"
 import { runPairAction } from "../actions/implementations/pairAction.js"
 import { runDevicesAction } from "../actions/implementations/devicesAction.js"
@@ -27,6 +28,7 @@ import { suggestCommand } from "../utils/commands.js"
 import type { PopupManager } from "../services/PopupManager.js"
 import { getPaneProjectName, getPaneProjectRoot } from "../utils/paneProject.js"
 import {
+  buildManagedPaneTitle,
   getPaneDisplayName,
   getPaneTmuxTitle,
   sanitizePaneDisplayName,
@@ -116,6 +118,8 @@ import {
 } from "../utils/covenDesktopUse.js"
 import { createTransactionalPane } from "../utils/transactionalPaneCreation.js"
 import { withWorktreePaneCreationReservation } from "../utils/worktreePaneCreationReservation.js"
+import { summarizeOrchestrationWarnings } from "../orchestration/warnings.js"
+import { summarizeDurableEffectWarnings } from "../utils/durableEffectWarnings.js"
 
 // Type for the action system returned by useActionSystem hook
 interface ActionSystem {
@@ -327,16 +331,18 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage("Creating terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
-      await createTransactionalPane({
+      const nextId = getNextPsycheId(panes)
+      const createdPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot: projectRoot,
         operation: "terminal-pane",
+        slugBase: `shell-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
         createPane: async ({ paneId, tmuxServerIdentity }) => {
           const pane = await createShellPane(
             paneId,
-            getNextPsycheId(panes),
+            nextId,
             undefined,
             { tmuxServerIdentity, setPaneTitle: false },
           )
@@ -359,8 +365,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       })
 
       setIsCreatingPane(false)
-      setStatusMessage("Terminal pane created")
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings(createdPane.recoveryWarnings)
+          || "Terminal pane created"
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        createdPane.recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
 
       // Force a reload to ensure tmux metadata and pane IDs are in sync
       await loadPanes()
@@ -390,16 +404,17 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const tmuxService = TmuxService.getInstance()
       const nextId = getNextPsycheId(panes)
-      await createTransactionalPane({
+      const createdPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot: projectRoot,
         operation: "desktop-use-pane",
+        slugBase: `desktop-use-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
-        createPane: ({ paneId, tmuxServerIdentity }) => ({
+        createPane: ({ paneId, tmuxServerIdentity, slug }) => ({
           id: createPsychePaneId(),
-          slug: `desktop-use-${nextId}`,
-          displayName: "desktop-use",
+          slug,
+          displayName: buildManagedPaneTitle(title, slug),
           prompt,
           paneId,
           ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
@@ -423,7 +438,10 @@ export function useInputHandling(params: UseInputHandlingParams) {
         }),
         persist: (pane) => savePanes([...panes, pane], panes),
         activate: async (pane) => {
-          await tmuxService.setPaneTitle(pane.paneId, "desktop-use")
+          await tmuxService.setPaneTitle(
+            pane.paneId,
+            getPaneTmuxTitle(pane, projectRoot),
+          )
           await tmuxService.sendShellCommand(
             pane.paneId,
             buildCovenAttachCommand(session.id),
@@ -434,8 +452,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       })
       await loadPanes()
 
-      setStatusMessage("Desktop-use pane connected to Coven")
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings((createdPane as PsychePane).recoveryWarnings)
+          || "Desktop-use pane connected to Coven"
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        (createdPane as PsychePane).recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
     } catch (error: any) {
       setStatusMessage(`Failed to create desktop-use pane: ${error?.message || String(error)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
@@ -474,15 +500,26 @@ export function useInputHandling(params: UseInputHandlingParams) {
     try {
       setIsCreatingPane(true)
       setStatusMessage(`Opening Coven session ${session.title || session.id}...`)
-      await openProjectCovenSession(
-        targetProjectRoot,
-        sessionName,
-        session.id,
+      const opened = await openProjectCovenSession(
+        {
+          sessionProjectRoot: projectRoot,
+          targetProjectRoot,
+          sessionName,
+          sessionId: session.id,
+        },
         createKnownCovenSessionClient(covenSessionsState)
       )
       await loadPanes()
-      setStatusMessage(`Opened Coven session ${session.title || session.id}`)
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings(opened.warnings)
+          || `Opened Coven session ${session.title || session.id}`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        opened.warnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
     } catch (error: any) {
       setStatusMessage(`Failed to open Coven session: ${error?.message || String(error)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
@@ -558,20 +595,23 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage(`Opening terminal in ${getPaneDisplayName(selectedPane)}...`)
 
       const tmuxService = TmuxService.getInstance()
-      await withWorktreePaneCreationReservation({
+      const nextId = getNextPsycheId(panes)
+      const createdPane = await withWorktreePaneCreationReservation({
         worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
         operation: (canonicalWorktreePath, reservation) => createTransactionalPane({
           projectRoot: targetProjectRoot,
           sessionProjectRoot: projectRoot,
           operation: "worktree-terminal-pane",
+          slugBase: `shell-${nextId}`,
+          worktreePath: canonicalWorktreePath,
           tmuxService,
           reservation,
           allocate: () => tmuxService.splitPane({ cwd: canonicalWorktreePath }),
           createPane: async ({ paneId, tmuxServerIdentity }) => {
             const pane = await createShellPane(
               paneId,
-              getNextPsycheId(panes),
+              nextId,
               undefined,
               { tmuxServerIdentity, setPaneTitle: false },
             )
@@ -594,8 +634,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
         }),
       })
 
-      setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings(createdPane.recoveryWarnings)
+          || `Opened terminal in ${getPaneDisplayName(selectedPane)}`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        createdPane.recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
 
       // Force a reload to ensure tmux metadata and pane IDs are in sync
       await loadPanes()
@@ -639,20 +687,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const tmuxService = TmuxService.getInstance()
       const slugBase = `files-${path.basename(selectedPane.worktreePath)}`
-      let slug = slugBase
-      let suffix = 2
-      while (panes.some((pane) => pane.slug === slug)) {
-        slug = `${slugBase}-${suffix}`
-        suffix += 1
-      }
 
-      await withWorktreePaneCreationReservation({
+      const createdPane = await withWorktreePaneCreationReservation({
         worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
         operation: (canonicalWorktreePath, reservation) => createTransactionalPane({
           projectRoot: targetProjectRoot,
           sessionProjectRoot: projectRoot,
           operation: "file-browser-pane",
+          slugBase,
+          worktreePath: canonicalWorktreePath,
           tmuxService,
           reservation,
           // Do not pass a command to split-window: the browser must not start
@@ -662,7 +706,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
           }),
           createPane: ({ paneId, tmuxServerIdentity }) => ({
             id: createPsychePaneId(),
-            slug,
+            slug: slugBase,
             prompt: "",
             paneId,
             ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
@@ -675,7 +719,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
           }),
           persist: (pane) => savePanes([...panes, pane], panes),
           activate: async (pane) => {
-            await tmuxService.setPaneTitle(pane.paneId, slug)
+            await tmuxService.setPaneTitle(pane.paneId, pane.slug)
             await tmuxService.sendShellCommand(pane.paneId, buildFilesOnlyCommand())
             await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
           },
@@ -683,8 +727,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       })
       await loadPanes()
 
-      setStatusMessage(`Opened file browser for ${getPaneDisplayName(selectedPane)}`)
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        summarizeDurableEffectWarnings((createdPane as PsychePane).recoveryWarnings)
+          || `Opened file browser for ${getPaneDisplayName(selectedPane)}`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        (createdPane as PsychePane).recoveryWarnings?.length
+          ? STATUS_MESSAGE_DURATION_LONG
+          : STATUS_MESSAGE_DURATION_SHORT
+      )
     } catch (error: any) {
       setStatusMessage(`Failed to open file browser: ${error?.message || String(error)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
@@ -1746,46 +1798,80 @@ export function useInputHandling(params: UseInputHandlingParams) {
           : "Attaching agent..."
       )
 
-      const { attachAgentToWorktree } = await import("../utils/attachAgent.js")
-      const createdPanes: PsychePane[] = []
-      const failedAgents: AgentName[] = []
+      const { Orchestrator } = await import("../orchestration/orchestrator.js")
+      const { createLocalPaneBackend } = await import("../orchestration/localPaneBackend.js")
 
-      for (const agent of selectedAgents) {
-        try {
-          const result = await attachAgentToWorktree({
-            targetPane: selectedPane,
-            prompt: promptValue,
-            agent,
-            existingPanes: [...panes, ...createdPanes],
-            sessionProjectRoot: projectRoot,
-          })
-          createdPanes.push(result.pane)
-        } catch {
-          failedAgents.push(agent)
-        }
+      const existingWorktreeBase = {
+        slug: selectedPane.slug,
+        worktreePath: selectedPane.worktreePath!,
+        branchName: selectedPane.branchName || selectedPane.slug,
       }
 
-      if (createdPanes.length > 0 || failedAgents.length > 0) {
-        // attachAgentToWorktree makes each pane durable while its reuse
-        // reservation is held. Failed exact-identity cleanup can also mean a
-        // concurrent pane rebind won, so reload rather than replaying this
-        // stale React snapshot over the cross-process registry.
+      const lanes = selectedAgents.map((agent) => ({
+        id: `${agent}-attach`,
+        mode: "shared-worktree" as const,
+        agent,
+        existingWorktree: existingWorktreeBase,
+      }))
+
+      const backend = createLocalPaneBackend({
+        projectName: selectedPane.projectName || path.basename(targetProjectRoot),
+        sessionProjectRoot: projectRoot,
+        sessionConfigPath: panesFile,
+        basePanes: panes,
+        availableAgents: targetAvailableAgents,
+        persistReusedPane: async (_pane, previousPanes, panesToPersist) => {
+          await savePanes(panesToPersist, previousPanes)
+        },
+        persistOrchestrationMetadata: async (originatingPane, nextPane) => {
+          await savePanes([nextPane], [originatingPane])
+          return nextPane
+        },
+      })
+      const orchestrator = new Orchestrator({ executeLane: backend.execute })
+
+      const result = await orchestrator.execute({
+        taskId: `attach-${Date.now()}`,
+        operationId: `tui-attach-${randomUUID()}`,
+        projectRoot: targetProjectRoot,
+        prompt: promptValue,
+        lanes,
+      })
+
+      const createdPanes = result.lanes.flatMap((lane) =>
+        lane.status === "completed" && lane.pane ? [lane.pane] : []
+      )
+      const failures = result.lanes.filter((lane) => lane.status === "failed")
+      const warningMessage = summarizeOrchestrationWarnings(
+        result.lanes,
+        failures.length > 0
+          ? `${failures.length} lane${failures.length === 1 ? "" : "s"} failed`
+          : undefined
+      )
+
+      if (createdPanes.length > 0 || failures.length > 0) {
+        // createPane makes each pane durable while its reuse reservation is
+        // held. Reload rather than replaying this stale React snapshot over
+        // the cross-process registry.
         await loadPanes()
       }
 
-      if (failedAgents.length === 0) {
+      if (warningMessage) {
+        setStatusMessage(warningMessage)
+        setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
+      } else if (failures.length === 0) {
         setStatusMessage(
           `Attached ${createdPanes.length} agent${createdPanes.length === 1 ? "" : "s"} to ${getPaneDisplayName(selectedPane)}`
         )
         setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
       } else if (createdPanes.length === 0) {
         setStatusMessage(
-          `Failed to attach agents: ${failedAgents.join(", ")}`
+          `Failed to attach agents: ${failures.map((f) => f.id).join(", ")}`
         )
         setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
       } else {
         setStatusMessage(
-          `Attached ${createdPanes.length}/${selectedAgents.length} agents to ${getPaneDisplayName(selectedPane)} (${failedAgents.length} failed)`
+          `Attached ${createdPanes.length}/${selectedAgents.length} agents to ${getPaneDisplayName(selectedPane)} (${failures.length} failed)`
         )
         setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
       }

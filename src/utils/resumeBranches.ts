@@ -10,6 +10,7 @@ import { createPane } from './paneCreation.js';
 import { shellQuote } from './promptStore.js';
 import { SettingsManager } from './settingsManager.js';
 import { writeWorktreeMetadata } from './worktreeMetadata.js';
+import { derivePaneSlug } from './slug.js';
 import { acquireProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 import {
   runGitMutationWithSupervisor,
@@ -17,6 +18,7 @@ import {
 } from '../services/GitMutationSupervisor.js';
 
 const REMOTE_FALLBACK = 'origin';
+export const BEADS_PROJECT_SYNC_LOCK_BRANCH = 'psyche-beads-project-sync-lock';
 const RESUME_SCAN_EXCLUDED_DIRS = new Set([
   '.psyche',
   '.git',
@@ -28,6 +30,10 @@ const RESUME_SCAN_EXCLUDED_DIRS = new Set([
   'build',
   'coverage',
 ]);
+
+function isProductBranch(branchName: string): boolean {
+  return branchName !== BEADS_PROJECT_SYNC_LOCK_BRANCH;
+}
 
 export interface ResumableBranchCandidate {
   branchName: string;
@@ -227,6 +233,7 @@ function listLocalBranches(repoPath: string): Set<string> {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
@@ -276,6 +283,7 @@ function listRemoteBranches(repoPath: string, remoteName: string): Set<string> {
         line.startsWith(`${remoteName}/`) ? line.slice(remoteName.length + 1) : line
       ))
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
@@ -420,17 +428,6 @@ async function refreshRemoteBranchStateAsync(
   ).has(branchName);
 }
 
-function deriveBaseSlug(branchName: string): string {
-  const segment = branchName.split('/').pop() || branchName;
-  const normalized = segment
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return normalized || 'branch';
-}
-
 function shortHash(input: string): string {
   return createHash('sha1').update(input).digest('hex').slice(0, 6);
 }
@@ -493,7 +490,7 @@ function getAvailableSlug(
 ): string {
   const worktreesDir = path.join(projectRoot, '.psyche', 'worktrees');
   const reserved = new Set(existingPanes.map((pane) => pane.slug));
-  const baseSlug = deriveBaseSlug(branchName);
+  const baseSlug = derivePaneSlug(branchName, 'branch');
   let candidate = baseSlug;
   let attempt = 0;
 
@@ -712,6 +709,7 @@ async function listLocalBranchesAsync(repoPath: string): Promise<Set<string>> {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
@@ -768,6 +766,7 @@ async function listRemoteBranchesAsync(
         line.startsWith(`${remoteName}/`) ? line.slice(remoteName.length + 1) : line
       ))
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
