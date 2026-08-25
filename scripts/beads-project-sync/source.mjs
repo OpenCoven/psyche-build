@@ -126,13 +126,32 @@ function systemTemporaryRootFallbacks() {
 }
 
 /**
+ * @param {string} output
+ * @returns {string[]}
+ */
+function parseWorktreePaths(output) {
+  return output
+    .split('\0')
+    .filter((field) => field.startsWith('worktree '))
+    .map((field) => field.slice('worktree '.length))
+    .filter(Boolean);
+}
+
+/**
  * @param {string} cwd
+ * @param {{
+ *   run?: ExecFileRun,
+ *   realpath?: (path: string) => Promise<string>,
+ *   candidates?: readonly string[],
+ * }} [options]
  * @returns {Promise<string>}
  */
-async function safeTemporaryRoot(cwd) {
+export async function selectSafeTemporaryRoot(cwd, options = {}) {
+  const run = options.run ?? createExecFileRun();
+  const realpath = options.realpath ?? nodeRealpath;
   let canonicalCwd;
   try {
-    canonicalCwd = await nodeRealpath(resolve(cwd));
+    canonicalCwd = await realpath(resolve(cwd));
   } catch (error) {
     throw new Error(
       `Unable to canonicalize Beads source working directory "${cwd}": ${errorMessage(error)}`,
@@ -140,8 +159,45 @@ async function safeTemporaryRoot(cwd) {
     );
   }
 
+  const worktreeResult = await run(
+    'git',
+    ['worktree', 'list', '--porcelain', '-z'],
+    { cwd: canonicalCwd },
+  );
+  assertCommandSucceeded(worktreeResult, 'git worktree list');
+  const commonDirectoryResult = await run(
+    'git',
+    ['rev-parse', '--git-common-dir'],
+    { cwd: canonicalCwd },
+  );
+  assertCommandSucceeded(commonDirectoryResult, 'git rev-parse --git-common-dir');
+  const commonDirectory = commonDirectoryResult.stdout.trim();
+  if (!commonDirectory) {
+    fail('git rev-parse --git-common-dir returned an empty path');
+  }
+
+  const protectedRoots = [];
+  for (const path of [
+    ...parseWorktreePaths(worktreeResult.stdout),
+    resolve(canonicalCwd, commonDirectory),
+  ]) {
+    try {
+      protectedRoots.push(await realpath(resolve(path)));
+    } catch (error) {
+      throw new Error(
+        `Unable to canonicalize protected Git path "${path}": ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+  }
+  if (!protectedRoots.includes(canonicalCwd)) {
+    protectedRoots.push(canonicalCwd);
+  }
+
   const rejected = [];
-  for (const candidate of [...new Set([tmpdir(), ...systemTemporaryRootFallbacks()])]) {
+  const candidates = options.candidates
+    ?? [...new Set([tmpdir(), ...systemTemporaryRootFallbacks()])];
+  for (const candidate of candidates) {
     if (!isAbsolute(candidate)) {
       rejected.push(`"${candidate}" is not absolute`);
       continue;
@@ -149,7 +205,7 @@ async function safeTemporaryRoot(cwd) {
 
     let canonicalRoot;
     try {
-      canonicalRoot = await nodeRealpath(candidate);
+      canonicalRoot = await realpath(candidate);
     } catch (error) {
       rejected.push(`"${candidate}" cannot be canonicalized: ${errorMessage(error)}`);
       continue;
@@ -159,15 +215,19 @@ async function safeTemporaryRoot(cwd) {
       rejected.push(`"${candidate}" resolves to a filesystem root`);
       continue;
     }
-    if (containsPath(canonicalCwd, canonicalRoot)) {
-      rejected.push(`"${candidate}" resolves inside the working directory`);
+    const containingGitRoot = protectedRoots.find((root) =>
+      containsPath(root, canonicalRoot));
+    if (containingGitRoot != null) {
+      rejected.push(
+        `"${candidate}" resolves inside registered Git path "${containingGitRoot}"`,
+      );
       continue;
     }
     return canonicalRoot;
   }
 
   throw new Error(
-    `Unable to find a safe system temporary directory outside "${canonicalCwd}": `
+    `Unable to find a safe system temporary directory outside registered Git paths: `
     + rejected.join('; '),
   );
 }
@@ -307,6 +367,7 @@ function installSignalCleanup(cleanup, signalProcess) {
  *   inventoryFile?: string | null,
  *   run?: ExecFileRun,
  *   makeTemporaryDirectory?: (prefix: string) => Promise<string>,
+ *   gitRun?: ExecFileRun,
  *   readFile?: (path: string, encoding: 'utf8') => Promise<string>,
  *   remove?: (path: string, options: {recursive: true, force: true}) => Promise<unknown>,
  *   signalProcess?: SignalProcess,
@@ -326,7 +387,9 @@ export async function loadBeadsSource(options) {
   }
   const makeTemporaryDirectory = options.makeTemporaryDirectory ?? nodeMakeTemporaryDirectory;
   const remove = options.remove ?? nodeRemove;
-  const temporaryRoot = await safeTemporaryRoot(options.cwd);
+  const temporaryRoot = await selectSafeTemporaryRoot(options.cwd, {
+    run: options.gitRun,
+  });
   let temporaryDirectory;
   try {
     temporaryDirectory = await makeTemporaryDirectory(

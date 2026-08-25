@@ -219,7 +219,7 @@ describe('Beads project renderers', () => {
       sanitizePublicText(
         'Contact owner@example.com from /Users/buns/Documents/GitHub/OpenCoven/psyche-build.',
       ),
-    ).toBe('Contact <redacted-email> from ~/Documents/GitHub/OpenCoven/psyche-build.');
+    ).toBe('Contact [redacted-email] from ~/Documents/GitHub/OpenCoven/psyche-build.');
     expect(sanitizePublicText('Linux path: /home/alice/private/notes.txt')).toBe(
       'Linux path: ~/private/notes.txt',
     );
@@ -253,15 +253,15 @@ describe('Beads project renderers', () => {
           + 'and https://example.com/home/alice/docs public.',
       ),
     ).toBe(
-      'Keep https://example.com/<redacted-local-path> '
+      'Keep https://example.com/[redacted-local-path] '
         + 'and https://example.com/home/alice/docs public.',
     );
     expect(sanitizePublicText('Keep https://example.com/.worktrees/releases public.')).toBe(
-      'Keep https://example.com/<redacted-local-path> public.',
+      'Keep https://example.com/[redacted-local-path] public.',
     );
     expect(
       sanitizePublicText('Keep http://example.com/.psyche/worktrees/releases public.'),
-    ).toBe('Keep http://example.com/<redacted-local-path> public.');
+    ).toBe('Keep http://example.com/[redacted-local-path] public.');
     expect(sanitizePublicText('Keep https://example.com/?path=/Users/buns/docs public.')).toBe(
       'Keep https://example.com/?path=~/docs public.',
     );
@@ -282,17 +282,17 @@ describe('Beads project renderers', () => {
       'Keep https://example.com/?path=~/docs#~/docs public.',
     );
     expect(sanitizePublicText('Plan: ~/.copilot/session-state/run-1/plan.md')).toBe(
-      'Plan: <redacted-local-path>',
+      'Plan: [redacted-local-path]',
     );
     expect(sanitizePublicText('Plan: .copilot/session-state/run-1/plan.md')).toBe(
-      'Plan: <redacted-local-path>',
+      'Plan: [redacted-local-path]',
     );
     expect(
       sanitizePublicText('Checkout .worktrees/mobile-multiproject-cockpit before continuing.'),
-    ).toBe('Checkout <redacted-local-path> before continuing.');
+    ).toBe('Checkout [redacted-local-path] before continuing.');
     expect(
       sanitizePublicText('/Users/buns/.copilot/session-state/run-1/plan.md'),
-    ).toBe('<redacted-local-path>');
+    ).toBe('[redacted-local-path]');
     for (const localPath of [
       '.psyche/worktrees/public-beads-project/plan.md',
       './.psyche/worktrees/public-beads-project/plan.md',
@@ -301,7 +301,7 @@ describe('Beads project renderers', () => {
       '/opt/repos/psyche-build/.psyche/worktrees/public-beads-project/plan.md',
       'C:\\repos\\psyche-build\\.psyche\\worktrees\\public-beads-project\\plan.md',
     ]) {
-      expect(sanitizePublicText(`Plan: ${localPath}`)).toBe('Plan: <redacted-local-path>');
+      expect(sanitizePublicText(`Plan: ${localPath}`)).toBe('Plan: [redacted-local-path]');
     }
     expect(
       sanitizePublicText(
@@ -373,7 +373,7 @@ describe('Beads project renderers', () => {
         'Open ssh://host/srv/public?workspace=.psyche/worktrees/run#/home/alice/private.',
       ),
     ).toBe(
-      'Open ssh://host/srv/public?workspace=<redacted-local-path>#~/private.',
+      'Open ssh://host/srv/public?workspace=[redacted-local-path]#~/private.',
     );
   });
 
@@ -384,8 +384,8 @@ describe('Beads project renderers', () => {
           + '#/.copilot/session-state/run-2/plan.md public.',
       ),
     ).toBe(
-      'Keep https://example.com/<redacted-local-path>?cwd=<redacted-local-path>'
-        + '#<redacted-local-path> public.',
+      'Keep https://example.com/[redacted-local-path]?cwd=[redacted-local-path]'
+        + '#[redacted-local-path] public.',
     );
     expect(
       sanitizePublicText(
@@ -393,8 +393,8 @@ describe('Beads project renderers', () => {
           + '#route?plan=%2Epsyche%2Fworktrees%2Frun-2 public.',
       ),
     ).toBe(
-      'Keep https://example.com/docs?workspace=<redacted-local-path>'
-        + '#route?plan=<redacted-local-path> public.',
+      'Keep https://example.com/docs?workspace=[redacted-local-path]'
+        + '#route?plan=[redacted-local-path] public.',
     );
     expect(
       sanitizePublicText(
@@ -430,7 +430,7 @@ describe('Beads project renderers', () => {
     for (const unsafeUrl of unsafeUrls) {
       const sanitized = sanitizePublicText(`Open ${unsafeUrl}?view=public#summary`, config);
       expect(sanitized).toBe(
-        'Open https://example.com/<redacted-local-path>?view=public#summary',
+        'Open https://example.com/[redacted-local-path]?view=public#summary',
       );
       expect(sanitized).not.toContain('client-plan');
       expect(sanitized).not.toContain('public-beads-project');
@@ -470,9 +470,9 @@ describe('Beads project renderers', () => {
       ),
     ).toBe([
       'file:///~/private%20notes.md',
-      'ssh://host/<redacted-local-path>',
+      'ssh://host/[redacted-local-path]',
       'https://example.com/releases?cwd=~/private%26admin%3Dtrue'
-        + '&workspace=<redacted-local-path>#~/secret%29preview',
+        + '&workspace=[redacted-local-path]#~/secret%29preview',
       'https://example.com/releases/My%20Project'
         + '?redirect=%252Fpublic%252Fdocs#section%202',
     ].join('\n'));
@@ -531,7 +531,7 @@ describe('Beads project renderers', () => {
     const redacted = sanitizePublicText(
       'Open ssh://host/(%252Epsyche%252Fworktrees%252Frun) next.',
     );
-    expect(redacted).toContain('<redacted-local-path>');
+    expect(redacted).toContain('[redacted-local-path]');
     expect(redacted).not.toContain('%252Epsyche');
     expect(redacted).not.toContain('.psyche/worktrees');
 
@@ -564,7 +564,7 @@ describe('Beads project renderers', () => {
       sanitizePublicText(
         'Open file://host%252F.psyche%252Fworktrees%252Frun next.',
       ),
-    ).toBe('Open <redacted-local-path> next.');
+    ).toBe('Open [redacted-local-path] next.');
   });
 
   it('inspects opaque and slashless absolute URI components recursively while preserving safe URIs', () => {
@@ -580,7 +580,7 @@ describe('Beads project renderers', () => {
         'file:/srv/public/releases',
       ].join('\n')),
     ).toBe([
-      'mailto:<redacted-email>?subject=Public%20roadmap',
+      'mailto:[redacted-email]?subject=Public%20roadmap',
       'data:text/plain,hello%20world',
       'urn:ietf:rfc:3986',
       'file:/srv/public/releases',
@@ -595,8 +595,8 @@ describe('Beads project renderers', () => {
       ].join('\n')),
     ).toBe([
       'file:/~/private/notes.md',
-      'urn:<redacted-local-path>',
-      'mailto:<redacted-email>?workspace=<redacted-local-path>#preview=~/private',
+      'urn:[redacted-local-path]',
+      'mailto:[redacted-email]?workspace=[redacted-local-path]#preview=~/private',
     ].join('\n'));
 
     for (const unsafeUri of [
@@ -726,14 +726,14 @@ describe('Beads project renderers', () => {
 
     const sanitized = sanitizePublicText(unsafe);
 
-    expect(sanitized).toContain('HREF="&lt;redacted-local-path&gt;"');
+    expect(sanitized).toContain('HREF="[redacted-local-path]"');
     expect(sanitized).toContain('src="~/private.png"');
-    expect(sanitized).toContain("action='mailto:&lt;redacted-email&gt;'");
+    expect(sanitized).toContain("action='mailto:[redacted-email]'");
     expect(sanitized).toContain('poster=~/private.jpg');
-    expect(sanitized).toContain('cite="https://example.com/&lt;redacted-local-path&gt;"');
+    expect(sanitized).toContain('cite="https://example.com/[redacted-local-path]"');
     expect(sanitized).toContain('data="https://example.com/~/private"');
     expect(sanitized).toContain(
-      'srcset="~/one.png 1x, &lt;redacted-local-path&gt; 2x,'
+      'srcset="~/one.png 1x, [redacted-local-path] 2x,'
         + ' https://example.com/public.png 3x"',
     );
     expect(sanitized).not.toMatch(/Users|home\/alice|\.worktrees|\.psyche\/worktrees/iu);
@@ -760,7 +760,7 @@ describe('Beads project renderers', () => {
     const sanitized = sanitizePublicText(unsafe);
 
     expect(sanitized).not.toMatch(/%2FUsers|%2Fhome|%2E(?:worktrees|psyche|copilot)/iu);
-    expect(sanitized).toContain('formaction="&lt;redacted-local-path&gt;"');
+    expect(sanitized).toContain('formaction="[redacted-local-path]"');
     expect(sanitized).toContain('ping="~/ping https://example.com/public"');
     expect(sanitized).toContain('archive="~/a.jar public.jar"');
     expect(sanitized).toContain('srcset="~/one.png 1x, public.png 2x"');
@@ -808,19 +808,19 @@ describe('Beads project renderers', () => {
       sanitizePublicText('<p>token&#58supersecretvalue</p>')
     ).toThrow(/Publishable credential assignment/i);
     expect(sanitizePublicText('<p>alice&#64example.com</p>')).toBe(
-      '<p><redacted-email></p>',
+      '<p>[redacted-email]</p>',
     );
     expect(
       sanitizePublicText('<p>&#47Users&#47alice&#47private&#47plan.md</p>'),
     ).toBe('<p>~&#47private&#47plan.md</p>');
     expect(
       sanitizePublicText('<p>.worktrees&#47private&#47plan.md</p>'),
-    ).toBe('<p><redacted-local-path></p>');
+    ).toBe('<p>[redacted-local-path]</p>');
     expect(
       sanitizePublicText('<p>&#x2fUsers&#x2fzed&#x2fprivate&#x2fplan.md</p>'),
     ).toBe('<p>~&#x2fprivate&#x2fplan.md</p>');
     expect(sanitizePublicText('<p>alice&#x40test.com</p>')).toBe(
-      '<p><redacted-email></p>',
+      '<p>[redacted-email]</p>',
     );
   });
 
@@ -907,7 +907,7 @@ describe('Beads project renderers', () => {
     expect(sanitizePublicText(safe)).toBe(safe);
     expect(
       sanitizePublicText('<textarea>alice&#64;example.com</textarea>'),
-    ).toBe('<textarea><redacted-email></textarea>');
+    ).toBe('<textarea>[redacted-email]</textarea>');
   });
 
   it('treats Markdown code examples as literal while validating adjacent raw HTML', () => {
@@ -919,7 +919,12 @@ describe('Beads project renderers', () => {
       '<https://example.com> and alice&#64example.com are Markdown.',
       '\\<span>alice\\</span>&#64;example.com is escaped Markdown.',
     ].join('\n');
-    expect(sanitizePublicText(safe)).toBe(safe);
+    expect(sanitizePublicText(safe)).toBe(
+      safe.replace(
+        'alice&#64example.com are Markdown.',
+        '[redacted-email] are Markdown.',
+      ),
+    );
 
     expect(() =>
       sanitizePublicText(
@@ -927,6 +932,51 @@ describe('Beads project renderers', () => {
           + '<span>token</span>&#58;supersecretvalue',
       )
     ).toThrow(/Publishable credential assignment/i);
+  });
+
+  it('uses CommonMark source ranges for indented and nested fenced code', () => {
+    const safe = [
+      'Before.',
+      '',
+      '    <span>token</span>&#58;supersecretvalue',
+      '',
+      '- ````html',
+      '  <span>alice</span>&#64;example.com',
+      '  ````',
+      '',
+      '> ~~~~~html',
+      '> <span>token</span>&#58;supersecretvalue',
+      '> ~~~~~',
+      '',
+      'Inline ``<x-y href="`&#x67;hp_ABC123`">`` stays literal.',
+    ].join('\n');
+
+    expect(sanitizePublicText(safe)).toBe(safe);
+  });
+
+  it('keeps backticks inside custom and namespaced raw HTML attributes active', () => {
+    for (const unsafe of [
+      '<x-y href="`&#x67;hp_ABC123`">unsafe</x-y>',
+      '<svg:use xlink:href="`&#x67;hp_ABC123`"></svg:use>',
+    ]) {
+      expect(() => sanitizePublicText(unsafe)).toThrow(/GitHub token/i);
+    }
+  });
+
+  it('uses inert readable placeholders even for hundreds of redactions', () => {
+    const source = `<p>${Array.from(
+      { length: 500 },
+      (_, index) => `person${index}@example.com`,
+    ).join(' ')}</p>`;
+    const sanitized = sanitizePublicText(source);
+
+    expect(sanitized).toBe(
+      `<p>${Array.from({ length: 500 }, () => '[redacted-email]').join(' ')}</p>`,
+    );
+    expect(sanitized).not.toMatch(/<redacted-(?:email|local-path)>/u);
+    expect(sanitizePublicText('.worktrees/private/plan.md')).toBe(
+      '[redacted-local-path]',
+    );
   });
 
   it('bounds parse5 raw HTML traversal by node count and depth', () => {
@@ -958,7 +1008,18 @@ describe('Beads project renderers', () => {
       '```',
       'Ordinary Markdown keeps alice&#64example.com unchanged.',
     ].join('\n');
-    expect(sanitizePublicText(safe)).toBe(safe);
+    expect(sanitizePublicText(safe)).toBe([
+      '<div title="alice&#64example.com"><span>AT&T &copy</span></div>',
+      '<p>Safe<!-- alice&#64example.com -->text.</p>',
+      '`<p>[redacted-email]</p>`',
+      '\\<p>[redacted-email]\\</p>',
+      '<https://example.com> then [redacted-email] stays Markdown text.',
+      '```html',
+      '<p>[redacted-email]</p>',
+      '<script>token&#58supersecretvalue</script>',
+      '```',
+      'Ordinary Markdown keeps [redacted-email] unchanged.',
+    ].join('\n'));
   });
 
   it('scans raw HTML text references with near-linear scaling', () => {
@@ -1028,7 +1089,7 @@ describe('Beads project renderers', () => {
     expect(rendered).toContain(
       'See [https://example.com/[docs]/(v2)?redirect=%252Fpublic%252Fdocs].',
     );
-    expect(rendered).toContain('<redacted-local-path>');
+    expect(rendered).toContain('[redacted-local-path]');
     expect(rendered).not.toContain('%252Epsyche');
 
     const token = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
@@ -1057,10 +1118,10 @@ describe('Beads project renderers', () => {
       'Psyche path: &period;psyche&sol;worktrees&sol;run-3&sol;plan.md.',
     ].join('\n'));
 
-    expect(countMatches(rendered, '<redacted-email>')).toBe(4);
+    expect(countMatches(rendered, '[redacted-email]')).toBe(4);
     expect(rendered).toContain('macOS path: ~/private/notes.md.');
     expect(rendered).toContain('Linux path: ~/private/notes.md.');
-    expect(countMatches(rendered, '<redacted-local-path>')).toBe(3);
+    expect(countMatches(rendered, '[redacted-local-path]')).toBe(3);
     expect(rendered).not.toMatch(
       /alice&#64;|bob&#x40;|carol&commat;|dave&amp;#64;|&#85;sers|&#x68;ome|session-state|&period;worktrees|&period;psyche/u,
     );
@@ -1078,8 +1139,8 @@ describe('Beads project renderers', () => {
 
     expect(rendered).toContain('https://example.com/docs?cwd=~&sol;private.');
     expect(rendered).toContain('https://example.com/docs#preview=~&sol;private.');
-    expect(rendered).toContain('https://example.com/docs?owner=<redacted-email>.');
-    expect(rendered).toContain('Opaque urn:<redacted-local-path>.');
+    expect(rendered).toContain('https://example.com/docs?owner=[redacted-email].');
+    expect(rendered).toContain('Opaque urn:[redacted-local-path].');
     expect(rendered).toContain(`Safe route ${safeRoute}.`);
     expect(rendered).not.toContain('&sol;Users&sol;alice&sol;private');
     expect(rendered).not.toContain('&sol;home&sol;bob&sol;private');
@@ -1105,12 +1166,12 @@ describe('Beads project renderers', () => {
         config,
       ),
     ).toBe([
-      'https://example.com/<redacted-local-path>?view=public#summary',
-      'https&colon;&sol;&sol;example.com/<redacted-local-path>'
+      'https://example.com/[redacted-local-path]?view=public#summary',
+      'https&colon;&sol;&sol;example.com/[redacted-local-path]'
         + '&quest;view&equals;public&num;summary',
-      'https&#58;&#47;&#47;example.com/<redacted-local-path>',
-      'https&#x3a;&#x2f;&#x2f;example.com/<redacted-local-path>',
-      'https&colon;%2F%2Fexample.com/<redacted-local-path>',
+      'https&#58;&#47;&#47;example.com/[redacted-local-path]',
+      'https&#x3a;&#x2f;&#x2f;example.com/[redacted-local-path]',
+      'https&colon;%2F%2Fexample.com/[redacted-local-path]',
     ].join('\n'));
   });
 
@@ -1134,11 +1195,11 @@ describe('Beads project renderers', () => {
         config,
       ),
     ).toBe([
-      '[artifact](https&colon;&sol;&sol;example.com/<redacted-local-path>)',
-      '![preview](https&#58;&#47;&#47;example.com/<redacted-local-path> "Private preview")',
-      '<https&#x3a;&#x2f;&#x2f;example.com/<redacted-local-path>>',
-      '[percent](https%3A%2F%2Fexample.com/<redacted-local-path> "Download")',
-      '[mixed](https&colon;%2F%2Fexample.com/<redacted-local-path>?view=public#summary)',
+      '[artifact](https&colon;&sol;&sol;example.com/[redacted-local-path])',
+      '![preview](https&#58;&#47;&#47;example.com/[redacted-local-path] "Private preview")',
+      '<https&#x3a;&#x2f;&#x2f;example.com/[redacted-local-path]>',
+      '[percent](https%3A%2F%2Fexample.com/[redacted-local-path] "Download")',
+      '[mixed](https&colon;%2F%2Fexample.com/[redacted-local-path]?view=public#summary)',
     ].join('\n'));
   });
 
@@ -1164,14 +1225,14 @@ describe('Beads project renderers', () => {
         config,
       ),
     ).toBe([
-      'https://example.com/<redacted-local-path>?view=public#summary',
-      'https://example.com/<redacted-local-path>',
-      'https&colon;&sol;&sol;example.com/<redacted-local-path>',
-      'https&#58;&#47;&#47;example.com/<redacted-local-path>',
-      'https&#x3a;&#x2f;&#x2f;example.com/<redacted-local-path>',
-      'https://example.com/<redacted-local-path>',
-      'https&amp;colon;&percnt;2F&percnt;2Fexample.com/<redacted-local-path>',
-      'https://example.com/<redacted-local-path>',
+      'https://example.com/[redacted-local-path]?view=public#summary',
+      'https://example.com/[redacted-local-path]',
+      'https&colon;&sol;&sol;example.com/[redacted-local-path]',
+      'https&#58;&#47;&#47;example.com/[redacted-local-path]',
+      'https&#x3a;&#x2f;&#x2f;example.com/[redacted-local-path]',
+      'https://example.com/[redacted-local-path]',
+      'https&amp;colon;&percnt;2F&percnt;2Fexample.com/[redacted-local-path]',
+      'https://example.com/[redacted-local-path]',
     ].join('\n'));
   });
 
@@ -1192,10 +1253,10 @@ describe('Beads project renderers', () => {
         config,
       ),
     ).toBe([
-      '[raw](https://example.com/<redacted-local-path>)',
-      '[entity](https&colon;&sol;&sol;example.com/<redacted-local-path> "Private")',
-      '[percent](https%3A%2F%2Fexample.com/<redacted-local-path>)',
-      '[mixed](https&amp;colon;&percnt;2F&percnt;2Fexample.com/<redacted-local-path>)',
+      '[raw](https://example.com/[redacted-local-path])',
+      '[entity](https&colon;&sol;&sol;example.com/[redacted-local-path] "Private")',
+      '[percent](https%3A%2F%2Fexample.com/[redacted-local-path])',
+      '[mixed](https&amp;colon;&percnt;2F&percnt;2Fexample.com/[redacted-local-path])',
     ].join('\n'));
   });
 
@@ -1399,10 +1460,10 @@ describe('Beads project renderers', () => {
     expect(sanitizePublicText(source, {
       homeDirectories: ['/srv/user'],
     })).toBe([
-      '<a href="https://host.example/&lt;redacted-local-path&gt;">decimal</a>',
-      '<a href=https://host.example/&lt;redacted-local-path&gt;>hex</a>',
-      '[path](https&#x3a&#x2f&#x2fhost.example/<redacted-local-path>)',
-      '[query](https&#58&#47&#47host.example&#63contact=<redacted-email>&#35public)',
+      '<a href="https://host.example/[redacted-local-path]">decimal</a>',
+      '<a href=https://host.example/[redacted-local-path]>hex</a>',
+      '[path](https&#x3a&#x2f&#x2fhost.example/[redacted-local-path])',
+      '[query](https&#58&#47&#47host.example&#63contact=[redacted-email]&#35public)',
       '[fragment](https&#58&#47&#47host.example&#35cwd=~&#47private)',
     ].join('\n'));
   });
@@ -1432,7 +1493,7 @@ describe('Beads project renderers', () => {
     ['slashless query', 'https:example.com?contact=user@example.net'],
     ['slashless fragment', 'https:example.com#contact=user@example.net'],
   ])('does not treat an email in a %s as URL userinfo', (_name, safeUrl) => {
-    const expectedUrl = safeUrl.replace('user@example.net', '<redacted-email>');
+    const expectedUrl = safeUrl.replace('user@example.net', '[redacted-email]');
     expect(() => assertNoPublishableSecrets(safeUrl)).not.toThrow();
     expect(sanitizePublicText(`Publish ${safeUrl} next.`)).toBe(
       `Publish ${expectedUrl} next.`,
@@ -1601,7 +1662,7 @@ describe('Beads project renderers', () => {
     ['arithmetic token', 'a//b', 'a//b'],
     ['line comment', '// comment about the public release', '// comment about the public release'],
     ['block comment', '/* // comment */', '/* // comment */'],
-    ['ordinary email', 'Contact user@example.com.', 'Contact <redacted-email>.'],
+    ['ordinary email', 'Contact user@example.com.', 'Contact [redacted-email].'],
   ])('keeps %s safe during structural URL discovery', (_name, source, expected) => {
     expect(sanitizePublicText(source)).toBe(expected);
   });
@@ -1615,7 +1676,7 @@ describe('Beads project renderers', () => {
     ].join('\n');
 
     expect(sanitizePublicText(source)).toBe(
-      source.replace('user@example.net', '<redacted-email>'),
+      source.replace('user@example.net', '[redacted-email]'),
     );
   });
 
@@ -1679,7 +1740,7 @@ describe('Beads project renderers', () => {
       'Plain //cdn.example.com/assets/release.png.',
       '[docs](//docs.example.com:8443/public/releases)',
       '<img src="//cdn.example.com/public/release.png">',
-      'Contact <redacted-email> for public release details.',
+      'Contact [redacted-email] for public release details.',
     ].join('\n'));
   });
 
@@ -1779,7 +1840,7 @@ describe('Beads project renderers', () => {
       '```',
     ].join('\n'));
 
-    expect(countMatches(rendered, '<redacted-local-path>')).toBe(5);
+    expect(countMatches(rendered, '[redacted-local-path]')).toBe(5);
     expect(rendered).toContain('Safe escaped prose: \\*literal emphasis\\* and \\[not a link\\].');
     expect(rendered).toContain('[safe route](docs/My%20Project.md)');
     expect(rendered).toContain([
@@ -1846,47 +1907,47 @@ describe('Beads project renderers', () => {
       sanitizePublicText(
         'Open `~/.worktrees/public-beads-project/秘密 roadmap.md` next.',
       ),
-    ).toBe('Open `<redacted-local-path>` next.');
+    ).toBe('Open `[redacted-local-path]` next.');
     expect(
       sanitizePublicText(
         'Plan: ".psyche/worktrees/public-beads-project/秘密 roadmap.md"; keep this note.',
       ),
-    ).toBe('Plan: "<redacted-local-path>"; keep this note.');
+    ).toBe('Plan: "[redacted-local-path]"; keep this note.');
     expect(
       sanitizePublicText(
         'Plan: [~/.copilot/session-state/run-1/秘密 roadmap.md] follows.',
       ),
-    ).toBe('Plan: [<redacted-local-path>] follows.');
+    ).toBe('Plan: [[redacted-local-path]] follows.');
     expect(
       sanitizePublicText(
         "Plan: '.psyche/worktrees/public-beads-project/秘密 roadmap.md'; keep this note.",
       ),
-    ).toBe("Plan: '<redacted-local-path>'; keep this note.");
+    ).toBe("Plan: '[redacted-local-path]'; keep this note.");
     expect(
       sanitizePublicText(
         "Plan: '.psyche/worktrees/x/O'Reilly secret.md'; keep this note.",
       ),
-    ).toBe("Plan: '<redacted-local-path>'; keep this note.");
+    ).toBe("Plan: '[redacted-local-path]'; keep this note.");
     expect(
       sanitizePublicText(
         'Plan: /opt/repos/.psyche/worktrees/public-beads-project/秘密/roadmap.md. Keep this sentence.',
       ),
-    ).toBe('Plan: <redacted-local-path>. Keep this sentence.');
+    ).toBe('Plan: [redacted-local-path]. Keep this sentence.');
     expect(
       sanitizePublicText(
         'Checkout .worktrees/public-beads-project/secret roadmap.md before continuing.',
       ),
-    ).toBe('Checkout <redacted-local-path> before continuing.');
+    ).toBe('Checkout [redacted-local-path] before continuing.');
     expect(
       sanitizePublicText(
         "Open .worktrees/public-beads-project/O'Reilly secret.md next.",
       ),
-    ).toBe('Open <redacted-local-path> next.');
+    ).toBe('Open [redacted-local-path] next.');
     expect(
       sanitizePublicText(
         "Open .worktrees/public-beads-project/secret O'Reilly.md next.",
       ),
-    ).toBe('Open <redacted-local-path> next.');
+    ).toBe('Open [redacted-local-path] next.');
   });
 
   it('preserves prose and path-like names outside operational path boundaries', () => {
@@ -1894,20 +1955,20 @@ describe('Beads project renderers', () => {
       sanitizePublicText(
         "Don't expose .worktrees/project/plan.md; it isn't public.",
       ),
-    ).toBe("Don't expose <redacted-local-path>; it isn't public.");
+    ).toBe("Don't expose [redacted-local-path]; it isn't public.");
     expect(
       sanitizePublicText(
         'Keep the release note before .worktrees/project/plan.md and the explanation after it.',
       ),
     ).toBe(
-      'Keep the release note before <redacted-local-path> and the explanation after it.',
+      'Keep the release note before [redacted-local-path] and the explanation after it.',
     );
     expect(
       sanitizePublicText(
         'Keep /public/example and .worktrees/project/plan.md as separate references.',
       ),
     ).toBe(
-      'Keep /public/example and <redacted-local-path> as separate references.',
+      'Keep /public/example and [redacted-local-path] as separate references.',
     );
     expect(
       sanitizePublicText(
@@ -1939,7 +2000,7 @@ describe('Beads project renderers', () => {
     expect(publicFeature).toEqual({
       id: 'pb-feature',
       title: 'Model Beads project inventory',
-      description: 'Email <redacted-email> when the sync lands.',
+      description: 'Email [redacted-email] when the sync lands.',
       design: designDocPath,
       specId: planDocPath,
       acceptanceCriteria: '- Expose hierarchy and blockers.\n- Keep assignee mapping safe.',
@@ -2194,7 +2255,7 @@ describe('Beads project renderers', () => {
     );
 
     expect(renderedSanitizedSource).not.toContain('## Design');
-    expect(renderedSanitizedSource).not.toContain('<redacted-local-path>');
+    expect(renderedSanitizedSource).not.toContain('[redacted-local-path]');
     expect(renderedSanitizedSource).not.toContain('/blob/f2f1da60/');
 
     for (const safePath of [

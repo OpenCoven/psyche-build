@@ -45,6 +45,8 @@ const MAX_ERROR_DETAIL = 512;
 const MAX_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 25;
 const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_GRAPHQL_PAGES = 100;
+const MAX_GRAPHQL_ITEMS = 10_000;
 const APPLY_LOCK_MESSAGE_PREFIX = 'psyche-beads-project-lock:v1 ';
 const DEFAULT_APPLY_LOCK_TTL_MS = 30 * 60 * 1_000;
 const MAX_APPLY_LOCK_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -551,6 +553,61 @@ function requiredString(value, fieldName) {
     fail(`${fieldName} must be a non-empty string`);
   }
   return value.trim();
+}
+
+/**
+ * @param {string} label
+ * @param {{maxPages?: number, maxItems?: number}} [options]
+ */
+export function createGraphqlPaginationGuard(label, options = {}) {
+  const normalizedLabel = requiredString(label, 'pagination label');
+  const maxPages = options.maxPages ?? MAX_GRAPHQL_PAGES;
+  const maxItems = options.maxItems ?? MAX_GRAPHQL_ITEMS;
+  if (!Number.isSafeInteger(maxPages) || maxPages <= 0) {
+    fail(`${normalizedLabel} pagination maxPages must be a positive integer`);
+  }
+  if (!Number.isSafeInteger(maxItems) || maxItems <= 0) {
+    fail(`${normalizedLabel} pagination maxItems must be a positive integer`);
+  }
+
+  let pageCount = 0;
+  let itemCount = 0;
+  const seenCursors = new Set();
+
+  return Object.freeze({
+    /**
+     * @param {unknown} rawPageInfo
+     * @param {number} pageItemCount
+     * @returns {string | null}
+     */
+    advance(rawPageInfo, pageItemCount) {
+      if (!Number.isSafeInteger(pageItemCount) || pageItemCount < 0) {
+        fail(`${normalizedLabel} pagination item count must be a non-negative integer`);
+      }
+      pageCount += 1;
+      itemCount += pageItemCount;
+      if (pageCount > maxPages) {
+        fail(`${normalizedLabel} pagination exceeded the ${maxPages} page limit`);
+      }
+      if (itemCount > maxItems) {
+        fail(`${normalizedLabel} pagination exceeded the ${maxItems} item limit`);
+      }
+
+      const pageInfo = record(rawPageInfo);
+      if (pageInfo.hasNextPage !== true) {
+        return null;
+      }
+      const cursor = requiredString(
+        pageInfo.endCursor,
+        `${normalizedLabel} pagination cursor`,
+      );
+      if (seenCursors.has(cursor)) {
+        fail(`${normalizedLabel} pagination returned repeated cursor "${cursor}"`);
+      }
+      seenCursors.add(cursor);
+      return cursor;
+    },
+  });
 }
 
 /**
@@ -1247,15 +1304,19 @@ function assigneeLogins(value, fieldName) {
   if (!Array.isArray(value)) {
     fail(`${fieldName} must be an array`);
   }
-  const logins = new Set();
+  const logins = new Map();
   for (const rawAssignee of value) {
     const assignee = record(rawAssignee);
     const login = typeof rawAssignee === 'string'
       ? requiredString(rawAssignee, 'assignee')
       : requiredString(assignee.login, 'assignee login');
-    logins.add(login);
+    const canonicalLogin = login.toLowerCase();
+    if (!logins.has(canonicalLogin)) {
+      logins.set(canonicalLogin, login);
+    }
   }
-  return [...logins].sort();
+  return [...logins.values()].sort((left, right) =>
+    left.toLowerCase().localeCompare(right.toLowerCase()));
 }
 
 /**
@@ -2749,6 +2810,7 @@ export function createGhClient(options) {
     }
     const project = requireProject();
     const items = [];
+    const pagination = createGraphqlPaginationGuard('project item');
     let cursor = null;
 
     for (;;) {
@@ -2759,15 +2821,15 @@ export function createGhClient(options) {
       const data = record(payload.data);
       const node = record(data.node);
       const connection = record(node.items);
-      for (const rawItem of array(connection.nodes)) {
+      const pageItems = array(connection.nodes);
+      for (const rawItem of pageItems) {
         items.push(record(rawItem));
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageItems.length);
+      if (cursor == null) {
         projectItemsCache = items;
         return [...items];
       }
-      cursor = requiredString(pageInfo.endCursor, 'project item page cursor');
     }
   }
 
@@ -3013,6 +3075,7 @@ export function createGhClient(options) {
       return [...lastDiscoveredProjects];
     }
     const projectsFound = [];
+    const pagination = createGraphqlPaginationGuard('project');
     let cursor = null;
 
     for (;;) {
@@ -3021,7 +3084,6 @@ export function createGhClient(options) {
       const organization = record(data.organization);
       const repository = record(data.repository);
       const projects = record(organization.projectsV2);
-      const pageInfo = record(projects.pageInfo);
 
       if (typeof organization.id === 'string') {
         organizationId = organization.id;
@@ -3030,14 +3092,15 @@ export function createGhClient(options) {
         repositoryId = repository.id;
       }
 
-      for (const rawProject of array(projects.nodes)) {
+      const pageProjects = array(projects.nodes);
+      for (const rawProject of pageProjects) {
         projectsFound.push(normalizeProject(rawProject));
       }
 
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(projects.pageInfo, pageProjects.length);
+      if (cursor == null) {
         break;
       }
-      cursor = requiredString(pageInfo.endCursor, 'project page cursor');
     }
 
     lastDiscoveredProjects = projectsFound;
@@ -3168,20 +3231,30 @@ export function createGhClient(options) {
     let cursor = project?.linkedRepositoriesKnown
       ? project.linkedRepositoriesEndCursor ?? null
       : null;
+    const pagination = createGraphqlPaginationGuard('linked repository');
+    if (project?.linkedRepositoriesKnown) {
+      cursor = pagination.advance(
+        {
+          hasNextPage: project.linkedRepositoriesHasNextPage === true,
+          endCursor: project.linkedRepositoriesEndCursor ?? null,
+        },
+        project.linkedRepositoryIds?.length ?? 0,
+      );
+    }
     for (;;) {
       const payload = await graphql(DISCOVER_LINKED_REPOSITORIES_QUERY, {
         projectId,
         cursor,
       });
       const connection = record(record(record(payload.data).node).repositories);
-      if (array(connection.nodes).some((rawRepository) => record(rawRepository).id === repositoryId)) {
+      const pageRepositories = array(connection.nodes);
+      if (pageRepositories.some((rawRepository) => record(rawRepository).id === repositoryId)) {
         return true;
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageRepositories.length);
+      if (cursor == null) {
         return false;
       }
-      cursor = requiredString(pageInfo.endCursor, 'linked repository page cursor');
     }
   }
 
@@ -3332,6 +3405,7 @@ export function createGhClient(options) {
   async function discoverFields() {
     const project = requireProject();
     const fields = new Map();
+    const pagination = createGraphqlPaginationGuard('field');
     let cursor = null;
 
     for (;;) {
@@ -3342,17 +3416,17 @@ export function createGhClient(options) {
       const data = record(payload.data);
       const node = record(data.node);
       const connection = record(node.fields);
-      for (const rawField of array(connection.nodes)) {
+      const pageFields = array(connection.nodes);
+      for (const rawField of pageFields) {
         const field = normalizeField(rawField);
         if (field) {
           fields.set(field.name, field);
         }
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageFields.length);
+      if (cursor == null) {
         break;
       }
-      cursor = requiredString(pageInfo.endCursor, 'field page cursor');
     }
 
     fieldContext = fields;
@@ -3438,6 +3512,7 @@ export function createGhClient(options) {
   async function discoverViews() {
     const project = requireProject();
     const views = [];
+    const pagination = createGraphqlPaginationGuard('view');
     let cursor = null;
 
     for (;;) {
@@ -3448,17 +3523,17 @@ export function createGhClient(options) {
       const data = record(payload.data);
       const node = record(data.node);
       const connection = record(node.views);
-      for (const rawView of array(connection.nodes)) {
+      const pageViews = array(connection.nodes);
+      for (const rawView of pageViews) {
         const view = normalizeView(rawView);
         if (view) {
           views.push(view);
         }
       }
-      const pageInfo = record(connection.pageInfo);
-      if (pageInfo.hasNextPage !== true) {
+      cursor = pagination.advance(connection.pageInfo, pageViews.length);
+      if (cursor == null) {
         break;
       }
-      cursor = requiredString(pageInfo.endCursor, 'view page cursor');
     }
     return views;
   }

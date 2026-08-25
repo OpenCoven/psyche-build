@@ -419,7 +419,7 @@ function normalizeRepositoryRelativePath(value) {
     || normalized.includes('\\')
     || normalized.includes('?')
     || normalized.includes('#')
-    || normalized.includes('<redacted-local-path>')
+    || normalized.includes('[redacted-local-path]')
     || containsLocalOperationalPath(normalized)
   ) {
     return null;

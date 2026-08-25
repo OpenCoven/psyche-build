@@ -7,6 +7,9 @@ import {
   EntityDecoder,
   htmlDecodeTree,
 } from 'entities/decode';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
 import { parseFragment } from 'parse5';
 import { normalizeBeadPriority } from './model.mjs';
 
@@ -14,6 +17,16 @@ import { normalizeBeadPriority } from './model.mjs';
 /** @typedef {import('./model.mjs').BeadPriority} BeadPriority */
 /** @typedef {import('parse5').DefaultTreeAdapterTypes.Node} ParsedHtmlNode */
 /** @typedef {import('parse5').DefaultTreeAdapterTypes.Element} ParsedHtmlElement */
+/**
+ * @typedef {{
+ *   type: string,
+ *   position?: {
+ *     start: {offset?: number},
+ *     end: {offset?: number},
+ *   },
+ *   children?: MdastNode[],
+ * }} MdastNode
+ */
 
 /**
  * @typedef {{
@@ -45,6 +58,8 @@ import { normalizeBeadPriority } from './model.mjs';
  */
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
+const REDACTED_EMAIL = '[redacted-email]';
+const REDACTED_LOCAL_PATH = '[redacted-local-path]';
 const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/iu;
 const PRIVATE_KEY_PATTERN = /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/iu;
 const API_KEY_ASSIGNMENT_PATTERN =
@@ -876,96 +891,37 @@ function appendMappedInspectionValue(output, sourceRanges, value, sourceRange) {
  * @param {string} value
  * @returns {Uint8Array}
  */
-function markdownFencedCodeMask(value) {
-  const mask = new Uint8Array(value.length);
-  /** @type {{character: string, length: number} | null} */
-  let activeFence = null;
-  let lineStart = 0;
-
-  while (lineStart <= value.length) {
-    const newlineIndex = value.indexOf('\n', lineStart);
-    const lineEnd = newlineIndex === -1 ? value.length : newlineIndex;
-    const line = value.slice(lineStart, lineEnd);
-    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
-    const isValidOpening = activeFence == null
-      && fence != null
-      && (fence[1]?.[0] !== '`' || !(fence[2] ?? '').includes('`'));
-    const isClosing = activeFence != null
-      && fence != null
-      && fence[1]?.[0] === activeFence.character
-      && (fence[1]?.length ?? 0) >= activeFence.length
-      && /^[ \t]*$/u.test(fence[2] ?? '');
-
-    if (activeFence != null || isValidOpening) {
-      mask.fill(1, lineStart, newlineIndex === -1 ? lineEnd : lineEnd + 1);
-    }
-    if (isValidOpening && fence != null) {
-      activeFence = {
-        character: fence[1]?.[0] ?? '',
-        length: fence[1]?.length ?? 0,
-      };
-    } else if (isClosing) {
-      activeFence = null;
-    }
-
-    if (newlineIndex === -1) {
-      break;
-    }
-    lineStart = newlineIndex + 1;
-  }
-
-  return mask;
-}
-
-/**
- * @param {string} value
- * @param {Uint8Array} protectedMask
- * @param {number} start
- * @param {number} runLength
- * @returns {number | null}
- */
-function findInlineCodeSpanEnd(value, protectedMask, start, runLength) {
-  let cursor = start + runLength;
-  while (cursor < value.length) {
-    if (protectedMask[cursor] || value[cursor] !== '`') {
-      cursor += 1;
-      continue;
-    }
-    let end = cursor + 1;
-    while (value[end] === '`' && !protectedMask[end]) {
-      end += 1;
-    }
-    if (end - cursor === runLength) {
-      return end;
-    }
-    cursor = end;
-  }
-  return null;
-}
-
-/**
- * @param {string} value
- * @returns {Uint8Array}
- */
 function markdownCodeMask(value) {
-  const mask = markdownFencedCodeMask(value);
-  let cursor = 0;
-  while (cursor < value.length) {
-    if (mask[cursor] || value[cursor] !== '`') {
-      cursor += 1;
+  const tree = fromMarkdown(value, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  const mask = new Uint8Array(value.length);
+  const pending = /** @type {MdastNode[]} */ ([tree]);
+
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node == null) {
       continue;
     }
-    let runEnd = cursor + 1;
-    while (value[runEnd] === '`' && !mask[runEnd]) {
-      runEnd += 1;
-    }
-    const spanEnd = findInlineCodeSpanEnd(value, mask, cursor, runEnd - cursor);
-    if (spanEnd == null) {
-      cursor = runEnd;
+    if (node.type === 'code' || node.type === 'inlineCode') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (
+        typeof start !== 'number'
+        || typeof end !== 'number'
+        || start < 0
+        || end < start
+        || end > value.length
+      ) {
+        fail('Markdown parser returned an invalid code source range');
+      }
+      mask.fill(1, start, end);
       continue;
     }
-    mask.fill(1, cursor, spanEnd);
-    cursor = spanEnd;
+    if ('children' in node && Array.isArray(node.children)) {
+      pending.push(...node.children);
+    }
   }
   return mask;
 }
@@ -979,37 +935,12 @@ function decodeMarkdownEscapesMapped(mapped) {
     return mapped;
   }
 
-  const protectedMask = markdownFencedCodeMask(mapped.value);
+  const protectedMask = markdownCodeMask(mapped.value);
   const output = /** @type {string[]} */ ([]);
   const sourceRanges = /** @type {SourceRange[]} */ ([]);
   let cursor = 0;
 
   while (cursor < mapped.value.length) {
-    if (!protectedMask[cursor] && mapped.value[cursor] === '`') {
-      let runEnd = cursor + 1;
-      while (mapped.value[runEnd] === '`' && !protectedMask[runEnd]) {
-        runEnd += 1;
-      }
-      const spanEnd = findInlineCodeSpanEnd(
-        mapped.value,
-        protectedMask,
-        cursor,
-        runEnd - cursor,
-      );
-      if (spanEnd != null) {
-        for (let index = cursor; index < spanEnd; index += 1) {
-          appendMappedInspectionValue(
-            output,
-            sourceRanges,
-            mapped.value[index] ?? '',
-            mapped.sourceRanges[index] ?? { start: index, end: index + 1 },
-          );
-        }
-        cursor = spanEnd;
-        continue;
-      }
-    }
-
     const next = mapped.value[cursor + 1];
     if (
       !protectedMask[cursor]
@@ -1992,60 +1923,10 @@ function assertSafeDataUrisInText(value, config, depth) {
 
 /**
  * @param {string} value
- * @param {number} index
- * @returns {boolean}
- */
-function isMarkdownEscaped(value, index) {
-  let backslashCount = 0;
-  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
-    backslashCount += 1;
-  }
-  return backslashCount % 2 === 1;
-}
-
-/**
- * @param {string} value
- * @returns {boolean}
- */
-function isMarkdownAutolink(value) {
-  return (
-    /^[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*$/u.test(value)
-    || /^[^<>\s@]+@[^<>\s@]+$/u.test(value)
-  );
-}
-
-/**
- * @param {string} value
- * @returns {Uint8Array}
- */
-function markdownLiteralHtmlMask(value) {
-  const protectedMask = markdownCodeMask(value);
-  for (let cursor = 0; cursor < value.length; cursor += 1) {
-    if (protectedMask[cursor] || value[cursor] !== '<') {
-      continue;
-    }
-    if (isMarkdownEscaped(value, cursor)) {
-      protectedMask[cursor] = 1;
-      continue;
-    }
-    const end = value.indexOf('>', cursor + 1);
-    if (end === -1 || value.slice(cursor, end).includes('\n')) {
-      continue;
-    }
-    if (isMarkdownAutolink(value.slice(cursor + 1, end))) {
-      protectedMask.fill(1, cursor, end + 1);
-      cursor = end;
-    }
-  }
-  return protectedMask;
-}
-
-/**
- * @param {string} value
  * @returns {string}
  */
 function protectMarkdownLiteralsFromHtmlParser(value) {
-  const protectedMask = markdownLiteralHtmlMask(value);
+  const protectedMask = markdownCodeMask(value);
   return Array.from({ length: value.length }, (_, index) => {
     const character = value[index] ?? '';
     return protectedMask[index] && character !== '\n' ? ' ' : character;
@@ -2217,7 +2098,7 @@ function collectParsedTextReplacements(replacements, mapped, matchers) {
         mapped,
         start,
         start + match[0].length,
-        '<redacted-email>',
+        REDACTED_EMAIL,
         1,
       );
     }
@@ -2238,7 +2119,7 @@ function collectParsedTextReplacements(replacements, mapped, matchers) {
       mapped,
       range.start,
       range.end,
-      '<redacted-local-path>',
+      REDACTED_LOCAL_PATH,
       2,
     );
   }
@@ -2323,7 +2204,7 @@ function sanitizeRawHtmlDestination(rawValue, quote, config, depth) {
   let sanitized = uri == null
     ? decoded
     : sanitizeProtectedUrl(decoded, matchers);
-  sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
+  sanitized = sanitized.replace(EMAIL_PATTERN, REDACTED_EMAIL);
   sanitized = redactHomeDirectoryToken(sanitized, matchers);
   sanitized = redactLocalOperationalPaths(sanitized);
 
@@ -2517,7 +2398,7 @@ function rawHtmlAttributeValueRange(value, location, qualifiedName) {
  * @returns {Uint8Array}
  */
 function rawHtmlRewriteMask(value, fragment) {
-  const mask = markdownLiteralHtmlMask(value);
+  const mask = markdownCodeMask(value);
   traverseParsedHtml(fragment, (node, _depth, parentTag) => {
     const location = node.sourceCodeLocation;
     if (
@@ -3179,8 +3060,8 @@ function percentDecodedVariants(value) {
  * @returns {string}
  */
 function encodeSanitizedDecodedUrlComponent(value) {
-  if (value.includes('<redacted-local-path>')) {
-    return '<redacted-local-path>';
+  if (value.includes(REDACTED_LOCAL_PATH)) {
+    return REDACTED_LOCAL_PATH;
   }
 
   return encodeURIComponent(value)
@@ -3246,7 +3127,7 @@ function redactLocalOperationalPathsInUrlComponent(value) {
 function redactEmailsInUrlComponent(value) {
   return sanitizePercentDecodedUrlComponent(
     value,
-    (variant) => variant.replace(EMAIL_PATTERN, '<redacted-email>'),
+    (variant) => variant.replace(EMAIL_PATTERN, REDACTED_EMAIL),
   );
 }
 
@@ -3294,7 +3175,7 @@ function sanitizeDecodedHttpPathname(value, matchers) {
     containsExactHomeDirectory(value, matchers)
     || containsLocalOperationalPath(value)
   ) {
-    return value.startsWith('/') ? '/<redacted-local-path>' : '<redacted-local-path>';
+    return value.startsWith('/') ? `/${REDACTED_LOCAL_PATH}` : REDACTED_LOCAL_PATH;
   }
   return value;
 }
@@ -3547,8 +3428,8 @@ function sanitizeParsedUri(value, uri, matchers) {
     uri.authority,
     (component) => sanitizeUrlComponent(component, matchers),
   );
-  if (authorityReplacement?.value.includes('<redacted-local-path>')) {
-    return '<redacted-local-path>';
+  if (authorityReplacement?.value.includes(REDACTED_LOCAL_PATH)) {
+    return REDACTED_LOCAL_PATH;
   }
   if (authorityReplacement) {
     replacements.push(authorityReplacement);
@@ -3622,15 +3503,15 @@ function redactStructurallyDecodedHttpPath(value, matchers) {
   if (uri.authority != null) {
     const authority = withoutUserinfo.slice(uri.authority.start, uri.authority.end);
     const sanitizedAuthority = sanitizeUrlComponent(authority, matchers);
-    if (sanitizedAuthority.includes('<redacted-local-path>')) {
-      return '<redacted-local-path>';
+    if (sanitizedAuthority.includes(REDACTED_LOCAL_PATH)) {
+      return REDACTED_LOCAL_PATH;
     }
     safePrefix = `${withoutUserinfo.slice(0, uri.authority.start)}${sanitizedAuthority}`;
   }
 
   const safePath = pathname.startsWith('/')
-    ? '/<redacted-local-path>'
-    : '<redacted-local-path>';
+    ? `/${REDACTED_LOCAL_PATH}`
+    : REDACTED_LOCAL_PATH;
   const query = uri.query == null
     ? ''
     : `?${sanitizeUrlQuery(
@@ -3673,7 +3554,7 @@ function sanitizeProtectedUrl(value, matchers) {
       return sanitized;
     }
     if (sanitized !== variant) {
-      return '<redacted-local-path>';
+      return REDACTED_LOCAL_PATH;
     }
   }
 
@@ -4297,7 +4178,7 @@ function redactLocalOperationalPaths(value) {
   let sanitized = '';
   let cursor = 0;
   for (const range of ranges) {
-    sanitized += `${value.slice(cursor, range.start)}<redacted-local-path>`;
+    sanitized += `${value.slice(cursor, range.start)}${REDACTED_LOCAL_PATH}`;
     cursor = range.end;
   }
   return sanitized + value.slice(cursor);
@@ -4425,7 +4306,7 @@ function collectMappedPathReplacements(mapped, original, matchers, replacements)
       mapped,
       range.start,
       range.end,
-      '<redacted-local-path>',
+      REDACTED_LOCAL_PATH,
       2,
     );
   }
@@ -4478,7 +4359,7 @@ function collectMappedEmailReplacements(mapped, original, replacements) {
       mapped,
       start,
       start + match[0].length,
-      '<redacted-email>',
+      REDACTED_EMAIL,
       1,
     );
   }
@@ -4537,7 +4418,7 @@ function redactDecodedHtmlEntitySensitiveText(value, config, entityProtectedMask
               inspectedCandidate,
               0,
               inspectedCandidate.value.length,
-              '<redacted-local-path>',
+              REDACTED_LOCAL_PATH,
               3,
             );
             cursor = candidate.end;
@@ -4565,7 +4446,7 @@ function redactDecodedHtmlEntitySensitiveText(value, config, entityProtectedMask
               inspectedCandidate,
               uri.path.start,
               uri.path.end,
-              '<redacted-local-path>',
+              REDACTED_LOCAL_PATH,
               2,
             );
           } else {
@@ -4673,7 +4554,7 @@ function redactDecodedHtmlEntitySensitiveText(value, config, entityProtectedMask
         inspectedDestination,
         0,
         inspectedDestination.value.length,
-        '<redacted-local-path>',
+        REDACTED_LOCAL_PATH,
         4,
       );
     }
@@ -5035,7 +4916,7 @@ export function sanitizePublicText(value, config = {}) {
     const uri = parseAbsoluteUri(url);
     return uri == null ? url : stripUriUserinfo(url, uri);
   });
-  sanitized = sanitized.replace(EMAIL_PATTERN, '<redacted-email>');
+  sanitized = sanitized.replace(EMAIL_PATTERN, REDACTED_EMAIL);
   sanitized = redactLocalPaths(sanitized, config);
   assertNoPublishableSecrets(sanitized);
   sanitized = escapeGeneratedMarkers(sanitized);

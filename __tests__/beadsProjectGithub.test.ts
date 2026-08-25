@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  createGraphqlPaginationGuard,
   createGhClient as createGhClientImplementation,
   PROJECT_VIEWS,
 } from '../scripts/beads-project-sync/github.mjs';
@@ -418,6 +419,65 @@ function linkedRepositoriesPage(
 }
 
 describe('createGhClient', () => {
+  it('bounds GraphQL pagination and rejects missing or repeated cursors', () => {
+    const repeated = createGraphqlPaginationGuard('project', {
+      maxPages: 3,
+      maxItems: 10,
+    });
+    expect(repeated.advance(
+      { hasNextPage: true, endCursor: 'cursor-1' },
+      2,
+    )).toBe('cursor-1');
+    expect(() => repeated.advance(
+      { hasNextPage: true, endCursor: 'cursor-1' },
+      2,
+    )).toThrow(/project.*repeated.*cursor/i);
+
+    const missing = createGraphqlPaginationGuard('field', {
+      maxPages: 3,
+      maxItems: 10,
+    });
+    expect(() => missing.advance(
+      { hasNextPage: true, endCursor: null },
+      1,
+    )).toThrow(/field.*cursor.*non-empty/i);
+
+    const pageCeiling = createGraphqlPaginationGuard('item', {
+      maxPages: 1,
+      maxItems: 10,
+    });
+    expect(pageCeiling.advance(
+      { hasNextPage: true, endCursor: 'cursor-1' },
+      1,
+    )).toBe('cursor-1');
+    expect(() => pageCeiling.advance(
+      { hasNextPage: false, endCursor: null },
+      1,
+    )).toThrow(/item.*page.*limit/i);
+
+    const itemCeiling = createGraphqlPaginationGuard('repository', {
+      maxPages: 3,
+      maxItems: 1,
+    });
+    expect(() => itemCeiling.advance(
+      { hasNextPage: false, endCursor: null },
+      2,
+    )).toThrow(/repository.*item.*limit/i);
+  });
+
+  it('bounds repeated cursors in Project discovery', async () => {
+    const runner = createRunner([
+      projectDiscovery([], true, 'repeated'),
+      projectDiscovery([], true, 'repeated'),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.discoverProject()).rejects.toThrow(
+      /project.*repeated.*cursor/i,
+    );
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it('allows managed issue snapshots to include a parent issue number', () => {
     const snapshot: ManagedIssueSnapshot = {
       beadId: 'pb-child',
@@ -510,6 +570,33 @@ describe('createGhClient', () => {
         'GET',
         ...apiHeaders,
       ],
+    ]);
+  });
+
+  it('normalizes managed issue assignee snapshots case-insensitively', async () => {
+    const runner = createRunner([
+      success([
+        trustedIssue({
+          number: 42,
+          title: '[pb-42] Work',
+          body: managedBody('pb-42'),
+          state: 'open',
+          assignees: [
+            { login: 'BunsDev' },
+            { login: 'bunsdev' },
+          ],
+          labels: [],
+          html_url: 'https://github.com/OpenCoven/psyche-build/issues/42',
+        }),
+      ]),
+      projectDiscovery([]),
+      httpError(404, 'parent not found'),
+      success([]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listManagedIssues()).resolves.toEqual([
+      expect.objectContaining({ assignees: ['BunsDev'] }),
     ]);
   });
 

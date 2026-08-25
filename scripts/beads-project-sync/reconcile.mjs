@@ -641,11 +641,16 @@ function normalizeAssigneeLogins(value, legacyAssignee, context) {
     fail(`${context} must be an array when present`);
   }
 
-  const assignees = new Set();
+  const assignees = new Map();
   for (const entry of rawAssignees) {
-    assignees.add(normalizeRequiredTrimmedString(entry, 'assignee', context));
+    const login = normalizeRequiredTrimmedString(entry, 'assignee', context);
+    const canonicalLogin = login.toLowerCase();
+    if (!assignees.has(canonicalLogin)) {
+      assignees.set(canonicalLogin, login);
+    }
   }
-  return [...assignees].sort(compareStrings);
+  return [...assignees.values()].sort((left, right) =>
+    compareStrings(left.toLowerCase(), right.toLowerCase()));
 }
 
 /**
@@ -1324,11 +1329,12 @@ function stringListsEqual(left, right) {
  * @returns {boolean}
  */
 function stringSetsEqual(left, right) {
-  if (left.length !== right.length) {
+  const leftSet = new Set(left.map((value) => value.toLowerCase()));
+  const rightSet = new Set(right.map((value) => value.toLowerCase()));
+  if (leftSet.size !== rightSet.size) {
     return false;
   }
-  const rightSet = new Set(right);
-  return left.every((value) => rightSet.has(value));
+  return [...leftSet].every((value) => rightSet.has(value));
 }
 
 /**

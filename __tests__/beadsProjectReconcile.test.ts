@@ -1009,6 +1009,29 @@ describe('Beads project reconciliation', () => {
     }
   });
 
+  it('treats GitHub login casing and duplicate casing as the same exact assignee set', () => {
+    const inventory = finalizeInventory([
+      makeBead('pb-assignee-case', { githubAssignee: 'BunsDev' }),
+    ]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 425);
+
+    for (const assignees of [
+      ['bunsdev'],
+      ['BunsDev', 'bunsdev'],
+    ]) {
+      const plan = planReconciliation({
+        inventory,
+        existingIssues: [
+          managedIssue(inventory[0]!, inventory, issueNumbers, { assignees }),
+        ],
+        readme: { body: canonicalReadmeBody(inventory) },
+        renderContext: baseContext,
+      });
+
+      expect(plan.operations.filter((operation) => operation.type === 'updateIssue')).toEqual([]);
+    }
+  });
+
   it('clears every existing assignee when the source has no desired assignee', () => {
     const inventory = finalizeInventory([makeBead('pb-assignee-clear')]);
     const issueNumbers = activeIssueNumbersByBeadId(inventory, 430);

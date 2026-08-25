@@ -198,6 +198,21 @@ export class GhClientError extends Error {
   constructor(kind: string, message: string, status?: number);
 }
 
+export interface GraphqlPaginationGuard {
+  advance(
+    pageInfo: unknown,
+    pageItemCount: number,
+  ): string | null;
+}
+
+export function createGraphqlPaginationGuard(
+  label: string,
+  options?: {
+    maxPages?: number;
+    maxItems?: number;
+  },
+): GraphqlPaginationGuard;
+
 export const PROJECT_README_MARKER: string;
 export const LEGACY_PROJECT_README_MARKER: string;
 export const PROJECT_VIEWS: readonly ProjectViewDefinition[];

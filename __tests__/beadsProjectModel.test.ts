@@ -121,6 +121,23 @@ describe('Beads project model', () => {
     expect(JSON.stringify(beads)).not.toContain('feature-owner@example.com');
   });
 
+  it('uses one configured spelling for case-equivalent GitHub assignee mappings', () => {
+    const beads = parseBeadExport(toJsonl(
+      makeIssue({ id: 'one', assignee: 'first-owner' }),
+      makeIssue({ id: 'two', assignee: 'second-owner' }),
+    ), {
+      assigneeMap: new Map([
+        ['first-owner', 'BunsDev'],
+        ['second-owner', 'bunsdev'],
+      ]),
+    });
+
+    expect(beads.map((bead) => bead.githubAssignee)).toEqual([
+      'BunsDev',
+      'BunsDev',
+    ]);
+  });
+
   it('builds lookup indexes for ids, children, and blocker dependents', () => {
     const beads = parseBeadExport(issuesJsonl, {
       assigneeMap: {

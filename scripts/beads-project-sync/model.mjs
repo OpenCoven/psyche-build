@@ -314,6 +314,7 @@ function normalizeAssigneeMap(assigneeMap) {
       : fail('parseBeadExport config.assigneeMap must be an object or Map');
 
   const normalized = new Map();
+  const configuredSpellingByLogin = new Map();
   for (const [rawAssignee, rawGithubAssignee] of entries) {
     const assignee = normalizeRequiredString(rawAssignee, 'assigneeMap key', 'parseBeadExport config');
     const githubAssignee = normalizeRequiredString(
@@ -321,7 +322,11 @@ function normalizeAssigneeMap(assigneeMap) {
       'assigneeMap value',
       'parseBeadExport config',
     );
-    normalized.set(assignee, githubAssignee);
+    const canonicalLogin = githubAssignee.toLowerCase();
+    const configuredSpelling = configuredSpellingByLogin.get(canonicalLogin)
+      ?? githubAssignee;
+    configuredSpellingByLogin.set(canonicalLogin, configuredSpelling);
+    normalized.set(assignee, configuredSpelling);
   }
   return normalized;
 }

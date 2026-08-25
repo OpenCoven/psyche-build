@@ -23,6 +23,7 @@ import {
 } from '../scripts/beads-project-sync/cli.mjs';
 import {
   loadBeadsSource,
+  selectSafeTemporaryRoot,
 } from '../scripts/beads-project-sync/source.mjs';
 import type {
   GhClient,
@@ -552,6 +553,16 @@ describe('Beads project sync configuration', () => {
       ...base,
       assigneeMap: { source: 'valid-login' },
     }).assigneeMap).toEqual({ source: 'valid-login' });
+    expect(parseSyncConfig({
+      ...base,
+      assigneeMap: {
+        primary: 'BunsDev',
+        secondary: 'bunsdev',
+      },
+    }).assigneeMap).toEqual({
+      primary: 'BunsDev',
+      secondary: 'BunsDev',
+    });
     for (const invalid of ['-invalid', 'invalid-', 'invalid--login', 'invalid login', 'a'.repeat(40)]) {
       expect(() => parseSyncConfig({
         ...base,
@@ -562,6 +573,67 @@ describe('Beads project sync configuration', () => {
 });
 
 describe('Beads source adapter', () => {
+  it('rejects temp roots inside every registered worktree and the common Git root', async () => {
+    const cwd = '/repo/worktrees/current';
+    const candidates = [
+      '/repo/worktrees/current/tmp',
+      '/repo/main/tmp',
+      '/global/worktree/tmp',
+      '/repo/main/.git/tmp',
+      '/safe/system-temp',
+    ];
+    const run: ExecFileRun = async (_command, args) => {
+      if (args.includes('worktree')) {
+        return {
+          stdout: [
+            'worktree /repo/main',
+            'HEAD aaa',
+            '',
+            'worktree /repo/worktrees/current',
+            'HEAD bbb',
+            '',
+            'worktree /global/worktree',
+            'HEAD ccc',
+            '',
+          ].join('\0'),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return {
+        stdout: '/repo/main/.git\n',
+        stderr: '',
+        exitCode: 0,
+      };
+    };
+
+    await expect(selectSafeTemporaryRoot(cwd, {
+      run,
+      candidates,
+      realpath: async (path) => path,
+    })).resolves.toBe('/safe/system-temp');
+  });
+
+  it('compares canonical temp and worktree paths and fails when no root is safe', async () => {
+    const aliases = new Map([
+      ['/repo/current-link', '/repo/worktrees/current'],
+      ['/candidate-link', '/repo/worktrees/current/tmp'],
+    ]);
+    const run: ExecFileRun = async (_command, args) => ({
+      stdout: args.includes('worktree')
+        ? 'worktree /repo/current-link\0HEAD aaa\0\0'
+        : '/repo/common.git\n',
+      stderr: '',
+      exitCode: 0,
+    });
+
+    await expect(selectSafeTemporaryRoot('/repo/current-link', {
+      run,
+      candidates: ['/candidate-link'],
+      realpath: async (path) => aliases.get(path) ?? path,
+    })).rejects.toThrow(/no safe system temporary directory|unable to find/i);
+  });
+
   it.each(['apply', 'provision'] as const)(
     'reuses an existing shared database for %s without bootstrapping',
     async (mode) => {
