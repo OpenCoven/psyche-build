@@ -1413,36 +1413,48 @@ describe('Beads project renderers', () => {
 
   it('follows raw-text parsing without rewriting safe raw HTML syntax', () => {
     expect(
-      sanitizePublicText('<script>token&#58;supersecretvalue</script>'),
-    ).toBe('<script>token&#58;supersecretvalue</script>');
+      sanitizePublicText('<script>example&#58;publicvalue</script>'),
+    ).toBe('<script>example&#58;publicvalue</script>');
     expect(
-      sanitizePublicText('<style>/* alice&#64;example.com */</style>'),
-    ).toBe('<style>/* alice&#64;example.com */</style>');
+      sanitizePublicText('<style>/* public&#64;example */</style>'),
+    ).toBe('<style>/* public&#64;example */</style>');
 
     const safe = [
-      '<div title="alice&#64example.com"><span>AT&T &copy</span></div>',
-      '<p>Safe<!-- alice&#64example.com -->text.</p>',
+      '<div title="public&#64example"><span>AT&T &copy</span></div>',
+      '<p>Safe<!-- public&#64example -->text.</p>',
       '`<p>alice&#64example.com</p>`',
       '\\<p>alice&#64example.com\\</p>',
       '<https://example.com> then alice&#64example.com stays Markdown text.',
       '```html',
       '<p>alice&#64example.com</p>',
-      '<script>token&#58supersecretvalue</script>',
+      '<script>example&#58publicvalue</script>',
       '```',
       'Ordinary Markdown keeps alice&#64example.com unchanged.',
     ].join('\n');
     expect(sanitizePublicText(safe)).toBe([
-      '<div title="alice&#64example.com"><span>AT&T &copy</span></div>',
-      '<p>Safe<!-- alice&#64example.com -->text.</p>',
+      '<div title="public&#64example"><span>AT&T &copy</span></div>',
+      '<p>Safe<!-- public&#64example -->text.</p>',
       '`<p>[redacted-email]</p>`',
       '\\<p>[redacted-email]\\</p>',
       '<https://example.com> then [redacted-email] stays Markdown text.',
       '```html',
       '<p>[redacted-email]</p>',
-      '<script>token&#58supersecretvalue</script>',
+      '<script>example&#58publicvalue</script>',
       '```',
       'Ordinary Markdown keeps [redacted-email] unchanged.',
     ].join('\n'));
+  });
+
+  it('rejects entity-obfuscated secrets in non-rendered HTML source', () => {
+    expect(() =>
+      sanitizePublicText('<!-- ghp&#95;secret_token_123 -->')
+    ).toThrow(/GitHub token/i);
+    expect(() =>
+      sanitizePublicText('<style>/* alice&#64;example.com */</style>')
+    ).toThrow(/email|sensitive/i);
+    expect(() =>
+      assertNoPublishableSecrets('<!-- ghp&#95;secret_token_123 -->')
+    ).toThrow(/GitHub token/i);
   });
 
   it('scans raw HTML text references with near-linear scaling', () => {
@@ -2725,6 +2737,18 @@ describe('Beads project renderers', () => {
     expect(rendered).not.toContain('x-access-token');
     expect(rendered).not.toContain('access_token=');
     expect(rendered).not.toContain('https://github.com/OpenCoven/psyche-build/blob/');
+
+    expect(() =>
+      renderIssueBody(
+        {
+          ...feature!,
+          design: designDocPath,
+        },
+        buildContext(inventory, {
+          sourceRef: 'ghp_secret_token_123',
+        }),
+      )
+    ).toThrow(/GitHub token/i);
   });
 
   it('renders dependencies in stable order regardless of blockedByIds order', () => {

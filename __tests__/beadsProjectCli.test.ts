@@ -6,7 +6,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -1678,5 +1678,22 @@ describe('Beads project sync CLI', () => {
     } finally {
       await rm(malformedPath, { force: true });
     }
+  });
+
+  it('fully redacts home-relative source paths in failure diagnostics', async () => {
+    const missingPath = join(
+      homedir(),
+      'work',
+      'OpenCoven',
+      'psyche-build',
+      'private-missing.jsonl',
+    );
+    const result = await runCli(['--dry-run', '--inventory-file', missingPath]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('[redacted-local-path]');
+    expect(result.stderr).not.toContain('~/work');
+    expect(result.stderr).not.toContain('private-missing.jsonl');
   });
 });

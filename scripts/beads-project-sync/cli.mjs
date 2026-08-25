@@ -184,8 +184,10 @@ function errorMessage(error, secrets = []) {
     .slice(0, 2_000);
 
   try {
-    return (sanitizePublicText(structurallyRedacted)
-      ?? 'Unknown Beads Project sync failure')
+    const publicMessage = sanitizePublicText(structurallyRedacted)
+      ?? 'Unknown Beads Project sync failure';
+    return publicMessage
+      .replace(/~[\\/].*$/gu, '[redacted-local-path]')
       .replace(/\s+/gu, ' ')
       .trim()
       .slice(0, 500);

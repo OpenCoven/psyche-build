@@ -295,6 +295,82 @@ function fail(message) {
 }
 
 /**
+ * @param {string} text
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ * @param {string} sourceKind
+ */
+function assertDecodedRawHtmlSourceTextSafe(text, config, sourceKind) {
+  const decoded = decodeHtmlEntitiesMapped(
+    createMappedInspectionText(text),
+  ).value;
+  try {
+    assertNoDirectPublishableSecrets(decoded);
+    assertNoCredentialUrlReferences(decoded, false, true);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail(`Public HTML sanitization rejected ${sourceKind}: ${message}`);
+  }
+  if (containsEmail(decoded)) {
+    fail(`Public HTML sanitization rejected ${sourceKind}: publishable email detected`);
+  }
+  const matchers = buildHomeDirectoryMatchers(config);
+  if (
+    containsLocalOperationalPath(decoded)
+    || homeDirectoryDecodedRanges(decoded, matchers).length > 0
+  ) {
+    fail(`Public HTML sanitization rejected ${sourceKind}: publishable local path detected`);
+  }
+}
+
+/**
+ * @param {string} value
+ * @param {SanitizePublicTextConfig | null | undefined} config
+ */
+function assertParsedRawHtmlSourceSafe(value, config) {
+  const fragment = parsePublicHtmlFragment(value);
+  traverseParsedHtml(fragment, (node, _depth, parentTag) => {
+    const location = node.sourceCodeLocation;
+    if (
+      location != null
+      && (
+        node.nodeName === '#comment'
+        || node.nodeName === '#documentType'
+        || (
+          node.nodeName === '#text'
+          && parentTag != null
+          && (
+            RAW_HTML_RAW_TEXT_ELEMENTS.has(parentTag)
+            || parentTag === 'textarea'
+            || parentTag === 'title'
+          )
+        )
+      )
+    ) {
+      assertDecodedRawHtmlSourceTextSafe(
+        value.slice(location.startOffset, location.endOffset),
+        config,
+        'non-rendered source text',
+      );
+      return;
+    }
+    if (!isParsedHtmlElement(node)) {
+      return;
+    }
+    for (const attribute of node.attrs) {
+      const qualifiedName = parsedHtmlAttributeName(node, attribute);
+      if (RAW_HTML_URL_ATTRIBUTE_MODES.has(qualifiedName)) {
+        continue;
+      }
+      assertDecodedRawHtmlSourceTextSafe(
+        attribute.value,
+        config,
+        `attribute "${qualifiedName}"`,
+      );
+    }
+  });
+}
+
+/**
  * @param {string} value
  */
 function assertPublicTextInspectionLength(value) {
@@ -5505,6 +5581,7 @@ export function assertNoPublishableSecrets(value) {
   assertPublicTextInspectionLength(value);
   const protectedSource = protectOriginalMarkdownCode(value);
   const protectedValue = protectedSource.value;
+  assertParsedRawHtmlSourceSafe(protectedValue, {});
   const entityProtectedMask = rawHtmlRewriteMask(
     protectedValue,
     parsePublicHtmlFragment(protectedValue),
@@ -5533,6 +5610,7 @@ export function assertNoSensitiveMarkdownReconstruction(value, config = {}) {
     return;
   }
   assertPublicTextInspectionLength(value);
+  assertNoPublishableSecrets(value);
   assertRenderedMarkdownSensitiveTextSafe(value, config);
 }
 
@@ -5553,6 +5631,7 @@ export function sanitizePublicText(value, config = {}) {
   let sanitized = protectedSource.value.replace(/\r\n?/gu, '\n');
   sanitized = rewriteRawHtmlFromParsedSource(sanitized, config, 0);
   assertParsedRawHtmlUrlAttributesSafe(sanitized, config, 0);
+  assertParsedRawHtmlSourceSafe(sanitized, config);
   assertParsedRawHtmlSafe(sanitized, config, 0);
   const entityProtectedMask = rawHtmlRewriteMask(
     sanitized,
