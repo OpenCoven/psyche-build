@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+required_commands=(node pnpm git tmux)
+missing=()
+for command_name in "${required_commands[@]}"; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    missing+=("$command_name")
+  fi
+done
+
+if ((${#missing[@]} > 0)); then
+  printf 'Missing required commands: %s\n' "${missing[*]}" >&2
+  printf 'Psyche Build requires Node.js, pnpm, Git, and tmux. Use Corepack to activate the pinned pnpm version when needed.\n' >&2
+  exit 1
+fi
+
+version_at_least() {
+  node - "$1" "$2" <<'NODE'
+const actual = process.argv[2].match(/\d+(?:\.\d+)*/)?.[0] ?? '';
+const minimum = process.argv[3].match(/\d+(?:\.\d+)*/)?.[0] ?? '';
+const parse = (value) => value.split('.').map((part) => Number(part));
+const a = parse(actual);
+const b = parse(minimum);
+const width = Math.max(a.length, b.length);
+for (let index = 0; index < width; index += 1) {
+  const left = a[index] ?? 0;
+  const right = b[index] ?? 0;
+  if (left > right) process.exit(0);
+  if (left < right) process.exit(1);
+}
+process.exit(0);
+NODE
+}
+
+node_version="$(node --version)"
+pnpm_version="$(pnpm --version)"
+git_version="$(git --version | awk '{print $3}')"
+tmux_version="$(tmux -V | awk '{print $2}')"
+
+if ! version_at_least "$node_version" "20.10.0"; then
+  printf 'Psyche Build requires Node.js >=20.10.0; found %s.\n' "$node_version" >&2
+  exit 1
+fi
+
+if [[ "$pnpm_version" != "10.34.5" ]]; then
+  printf 'Psyche Build requires pnpm 10.34.5; found %s. Run: corepack prepare pnpm@10.34.5 --activate\n' "$pnpm_version" >&2
+  exit 1
+fi
+
+if ! version_at_least "$git_version" "2.20.0"; then
+  printf 'Psyche Build requires Git >=2.20.0; found %s.\n' "$git_version" >&2
+  exit 1
+fi
+
+if ! version_at_least "$tmux_version" "3.0"; then
+  printf 'Psyche Build requires tmux >=3.0; found %s.\n' "$tmux_version" >&2
+  exit 1
+fi
+
+if [[ "${PSYCHE_BOOTSTRAP_OFFLINE:-0}" == "1" ]]; then
+  pnpm install --frozen-lockfile --offline
+else
+  pnpm install --frozen-lockfile
+fi
+
+if [[ "${PSYCHE_BOOTSTRAP_IOS:-0}" == "1" ]]; then
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    printf 'PSYCHE_BOOTSTRAP_IOS=1 requires macOS.\n' >&2
+    exit 1
+  fi
+  command -v xcodegen >/dev/null 2>&1 || {
+    printf 'PSYCHE_BOOTSTRAP_IOS=1 requires XcodeGen.\n' >&2
+    exit 1
+  }
+  command -v xcodebuild >/dev/null 2>&1 || {
+    printf 'PSYCHE_BOOTSTRAP_IOS=1 requires Xcode.\n' >&2
+    exit 1
+  }
+fi
+
+printf 'Psyche Build bootstrap complete.\n'
+printf '  node: %s\n' "$node_version"
+printf '  pnpm: %s\n' "$pnpm_version"
+printf '  git:  %s\n' "$git_version"
+printf '  tmux: %s\n' "$tmux_version"
+printf 'Run ./scripts/agent-check fast before editing.\n'

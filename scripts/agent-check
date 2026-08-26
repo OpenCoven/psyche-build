@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+mode="${1:-fast}"
+
+run_fast() {
+  pnpm run typecheck
+  pnpm run docs:focus:check
+  pnpm run release:check
+  git diff --check
+  git diff --exit-code -- src/utils/generated-agents-doc.ts
+}
+
+run_full() {
+  run_fast
+  pnpm test
+  pnpm run build
+  pnpm run smoke:pack
+
+  if [[ "${PSYCHE_AGENT_CHECK_TRACKER:-0}" == "1" ]]; then
+    pnpm run beads:project:check
+  fi
+
+  if [[ "${PSYCHE_AGENT_CHECK_TAURI:-0}" == "1" ]]; then
+    pnpm run build:tauri
+  fi
+
+  if [[ "${PSYCHE_AGENT_CHECK_IOS:-0}" == "1" ]]; then
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      printf 'PSYCHE_AGENT_CHECK_IOS=1 requires macOS.\n' >&2
+      exit 1
+    fi
+    command -v xcodegen >/dev/null 2>&1 || {
+      printf 'PSYCHE_AGENT_CHECK_IOS=1 requires XcodeGen.\n' >&2
+      exit 1
+    }
+    command -v xcodebuild >/dev/null 2>&1 || {
+      printf 'PSYCHE_AGENT_CHECK_IOS=1 requires Xcode.\n' >&2
+      exit 1
+    }
+    pnpm run ios:project:check
+  fi
+
+  git diff --check
+  git diff --exit-code
+}
+
+case "$mode" in
+  fast)
+    run_fast
+    ;;
+  full)
+    run_full
+    ;;
+  *)
+    printf 'Usage: %s [fast|full]\n' "$0" >&2
+    exit 2
+    ;;
+esac
+
+printf 'Psyche Build agent check (%s) passed.\n' "$mode"
+printf 'Physical-device, notarization, TestFlight, credentialed tracker, and remote-provider claims still require their dedicated retained evidence.\n'
