@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "rootDir": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": [
+    "scripts/beads-project-sync/*.mjs",
+    "scripts/sync-beads-project.mjs",
+    "scripts/verify-beads-graphql-e2e.mjs"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

@@ -18,6 +18,7 @@ import {
 } from '../services/GitMutationSupervisor.js';
 
 const REMOTE_FALLBACK = 'origin';
+export const BEADS_PROJECT_SYNC_LOCK_BRANCH = 'psyche-beads-project-sync-lock';
 const RESUME_SCAN_EXCLUDED_DIRS = new Set([
   '.psyche',
   '.git',
@@ -29,6 +30,10 @@ const RESUME_SCAN_EXCLUDED_DIRS = new Set([
   'build',
   'coverage',
 ]);
+
+function isProductBranch(branchName: string): boolean {
+  return branchName !== BEADS_PROJECT_SYNC_LOCK_BRANCH;
+}
 
 export interface ResumableBranchCandidate {
   branchName: string;
@@ -228,6 +233,7 @@ function listLocalBranches(repoPath: string): Set<string> {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
@@ -277,6 +283,7 @@ function listRemoteBranches(repoPath: string, remoteName: string): Set<string> {
         line.startsWith(`${remoteName}/`) ? line.slice(remoteName.length + 1) : line
       ))
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
@@ -702,6 +709,7 @@ async function listLocalBranchesAsync(repoPath: string): Promise<Set<string>> {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
@@ -758,6 +766,7 @@ async function listRemoteBranchesAsync(
         line.startsWith(`${remoteName}/`) ? line.slice(remoteName.length + 1) : line
       ))
       .filter(Boolean)
+      .filter(isProductBranch)
   );
 }
 
