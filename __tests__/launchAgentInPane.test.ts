@@ -19,8 +19,6 @@ vi.mock('../src/utils/geminiTrust.js', () => ({
 const { sendPromptViaTmux } = await import('../src/utils/agentPromptDispatch.js');
 const { ensureGeminiFolderTrusted } = await import('../src/utils/geminiTrust.js');
 
-const COVEN_SESSION_ID = '12345678-1234-4abc-8def-1234567890ab';
-
 function createTmux() {
   const shellCommands: string[] = [];
   const keys: Array<[string, string]> = [];
@@ -62,7 +60,6 @@ async function launch(
     projectRoot,
     psychePaneId: 'psyche-1',
     tmuxService: tmux as never,
-    generateCovenSessionId: () => COVEN_SESSION_ID,
     ...extra,
   });
   return tmux;
@@ -84,37 +81,26 @@ describe('launchAgentInPane', () => {
     },
   );
 
-  it('launches coven-code with its prompt', async () => {
+  it('launches coven-code bare even when a prompt is provided', async () => {
     const tmux = await launch('coven-code');
 
-    expect(tmux.shellCommands[0]).toMatch(
-      new RegExp(
-        `coven code --session-id ${COVEN_SESSION_ID} "\\$PSYCHE_PROMPT_CONTENT"$`,
-      ),
-    );
+    expect(tmux.shellCommands[0]).toBe('coven');
   });
 
-  it('applies coven-code permission flags', async () => {
+  it('suppresses coven-code permission flags', async () => {
     const tmux = await launch('coven-code', '', { permissionMode: 'plan' });
 
-    expect(tmux.shellCommands[0]).toBe(
-      `coven code --session-id ${COVEN_SESSION_ID} --permission-mode plan`,
-    );
+    expect(tmux.shellCommands[0]).toBe('coven');
   });
 
   describe('prompt transports', () => {
-    it('passes the prompt positionally for coven-code', async () => {
-      const generateCovenSessionId = vi.fn(() => COVEN_SESSION_ID);
-      const tmux = await launch('coven-code', 'Fix the failing tests', {
-        generateCovenSessionId,
-      });
+    it('treats coven-code as a launch-only transport', async () => {
+      expect(getPromptTransport('coven-code')).toBe('launch-only');
+      const tmux = await launch('coven-code', 'Fix the failing tests');
 
-      expect(generateCovenSessionId).toHaveBeenCalledTimes(1);
-      expect(tmux.shellCommands[0]).toMatch(
-        new RegExp(
-          `coven code --session-id ${COVEN_SESSION_ID} "\\$PSYCHE_PROMPT_CONTENT"$`,
-        ),
-      );
+      expect(tmux.shellCommands[0]).toBe('coven');
+      expect(tmux.shellCommands[0]).not.toContain('PSYCHE_PROMPT_CONTENT');
+      expect(sendPromptViaTmux).not.toHaveBeenCalled();
     });
 
     it('uses the configured option flag for option-transport agents', async () => {
@@ -151,25 +137,22 @@ describe('launchAgentInPane', () => {
   describe('no-prompt launches', () => {
     it('starts the bare command when there is no prompt', async () => {
       const tmux = await launch('coven-code', '');
-      expect(tmux.shellCommands[0]).toBe(`coven code --session-id ${COVEN_SESSION_ID}`);
+      expect(tmux.shellCommands[0]).toBe('coven');
       expect(sendPromptViaTmux).not.toHaveBeenCalled();
     });
 
     it('treats a whitespace-only prompt as no prompt', async () => {
       const tmux = await launch('coven-code', '   \n  ');
-      expect(tmux.shellCommands[0]).toBe(`coven code --session-id ${COVEN_SESSION_ID}`);
+      expect(tmux.shellCommands[0]).toBe('coven');
     });
   });
 
   describe('agent-specific setup', () => {
     it('wraps codex in its hook command', async () => {
-      const generateCovenSessionId = vi.fn(() => COVEN_SESSION_ID);
       const tmux = await launch('codex', 'Fix it', {
         codexHookEventFile: path.join(projectRoot, 'events.json'),
-        generateCovenSessionId,
       });
       expect(tmux.shellCommands[0]).toContain('PSYCHE_PANE_ID');
-      expect(generateCovenSessionId).not.toHaveBeenCalled();
     });
 
     it('does not wrap non-codex agents in codex hooks', async () => {
@@ -199,22 +182,21 @@ describe('launchAgentInPane', () => {
   });
 
   describe('prompt delivery safety', () => {
-    it('writes the prompt to a file rather than inlining it', async () => {
+    it('never bootstraps a prompt file for coven-code', async () => {
       const tmux = await launch('coven-code', 'a "quoted" $prompt with `backticks`');
 
-      // The raw prompt must never reach the command line.
+      // Launch-only agents must never receive the prompt at all.
       expect(tmux.shellCommands[0]).not.toContain('backticks');
-      expect(tmux.shellCommands[0]).toContain(`coven code --session-id ${COVEN_SESSION_ID}`);
-      expect(tmux.shellCommands[0]).toContain('$PSYCHE_PROMPT_CONTENT');
+      expect(tmux.shellCommands[0]).toBe('coven');
+      expect(tmux.shellCommands[0]).not.toContain('$PSYCHE_PROMPT_CONTENT');
     });
 
-    it('escapes inline when the prompt file cannot be written', async () => {
+    it('still launches coven-code bare when prompt-file writes fail', async () => {
       const tmux = await launch('coven-code', 'say "hi"', {
         projectRoot: '/nonexistent-root-for-prompt-file',
       });
 
-      expect(tmux.shellCommands[0]).toContain(`coven code --session-id ${COVEN_SESSION_ID}`);
-      expect(tmux.shellCommands[0]).toContain('\\"hi\\"');
+      expect(tmux.shellCommands[0]).toBe('coven');
       expect(tmux.shellCommands[0]).not.toContain('PSYCHE_PROMPT_CONTENT');
     });
   });

@@ -26,7 +26,7 @@ tarball, and verifies the exported `psyche-build/control-task-tokens` subpath;
 correctly and still fail to launch.
 
 The manual checks below still cover the richer pane, ritual, merge, and
-optional Coven flows that the automated check deliberately leaves alone.
+optional Coven CLI flows that the automated check deliberately leaves alone.
 
 ## Package checks
 
@@ -79,8 +79,8 @@ does not prove physical GPU acceleration.
 1. Launch the packaged macOS app and open a project with at least one linked
    worktree.
 2. Press `Ctrl+T` and confirm a shell opens in the selected worktree.
-3. Press `Ctrl+A` and confirm Coven Code opens in the same worktree by running
-   `coven code --session-id <id>`.
+3. Press `Ctrl+A` and confirm Coven CLI opens in the same worktree by running
+   exactly `coven` with no arguments.
 4. Move the panes into a mixed row/column layout, resize both split axes, hide
    one pane, and focus the other.
 5. Quit Psyche without using **Stop and close**.

@@ -1479,7 +1479,7 @@ describe('Tauri physical terminal panes', () => {
       createThread.indexOf('refreshSidebar()'),
     );
     expect(functionSource('removeProject')).toMatch(
-      /var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
+      /threadIds\.map\(function \(tid\) \{[\s\S]*var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
     );
   });
 
@@ -2047,6 +2047,60 @@ describe('Tauri physical terminal panes', () => {
       expect(harness.queued).toHaveLength(0);
     },
   );
+
+  it('switches fullscreen to Files when its minimap preview is activated', async () => {
+    const filesPane = {
+      id: 'files-project-repo',
+      kind: 'files',
+      activeFileId: 'file-a',
+    };
+    const layout: PaneFocusLayout = {
+      root: PsychePanes.insertBelow(
+        PsychePanes.createLeaf('leaf-source', 'thread-source'),
+        'leaf-source',
+        PsychePanes.createLeaf('leaf-files', filesPane.id),
+        'split-files',
+      ),
+      focusedLeafId: 'leaf-source',
+      maximizedLeafId: 'leaf-source',
+    };
+    const terminalArea = new FakeMinimapElement('section');
+    const toggled: unknown[] = [];
+    let restoredEditorFocus = 0;
+    const renderPaneMinimap = compileFunction<
+      (paneLayout: PaneFocusLayout, activeFile: unknown) => void
+    >(functionSource('renderPaneMinimap'), {
+      terminalArea,
+      document: {
+        createElement: (tagName: string) => new FakeMinimapElement(tagName),
+      },
+      paneMinimapItems: () => [{
+        kind: 'file',
+        id: 'file-a',
+        label: 'Button.tsx',
+        detail: 'src/Button.tsx',
+        current: false,
+        thread: null,
+        surface: filesPane,
+      }],
+      paneGlyphFor: () => 'F',
+      sessionStatusClass: () => '',
+      PsychePanes,
+      filesPaneHasCanvasFocus: () => false,
+      returnFromFileFocus: async () => false,
+      focusThread: async () => false,
+      togglePaneMaximize: (surface: unknown) => { toggled.push(surface); },
+      restoreFileEditorFocus: () => { restoredEditorFocus += 1; },
+    });
+
+    renderPaneMinimap(layout, null);
+    const entry = terminalArea.querySelector('.minimap-pane');
+    if (!entry) throw new Error('missing Files minimap pane');
+    await entry.emit('click');
+
+    expect(toggled).toEqual([filesPane]);
+    expect(restoredEditorFocus).toBe(0);
+  });
 
   it('does not mutate layout when maximizing an inactive tearing-down browser', () => {
     const source: PaneFocusThread = {
@@ -2727,7 +2781,7 @@ describe('Tauri physical terminal panes', () => {
     };
     const state = {
       activeProjectId: activeProject.id,
-      activeThreadId: 'active-thread',
+      activeThreadId: 'active-thread' as string | null,
       activeFileId: null as string | null,
       projects: [activeProject, removedProject],
       threads: [removedThread],
@@ -2775,6 +2829,149 @@ describe('Tauri physical terminal panes', () => {
     }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('refreshes the siderail after removing an inactive project with no local threads', async () => {
+    const activeProject = { id: 'active-project' };
+    const removedProject = { id: 'removed-project' };
+    const state = {
+      activeProjectId: activeProject.id,
+      activeThreadId: 'active-thread',
+      activeFileId: null as string | null,
+      projects: [activeProject, removedProject],
+      threads: [{
+        id: 'active-thread',
+        projectId: activeProject.id,
+      }],
+      openFiles: [] as Array<{ id: string; projectId: string }>,
+    };
+    const refreshSidebarProjects: Array<Array<string>> = [];
+    const refreshTabs = vi.fn();
+    const closeThread = vi.fn();
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (projectId: string) => (
+        state.projects.find((project) => project.id === projectId) || null
+      ),
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: {
+        invalidateCovenRequests: (value: unknown) => value,
+      },
+      closeThread,
+      fileViewEl: null,
+      terminalHost: null,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      setStatus: () => undefined,
+      refreshSidebar: () => {
+        refreshSidebarProjects.push(state.projects.map((project) => project.id));
+      },
+      refreshTabs,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    await expect(removeProject(removedProject.id)).resolves.toBe(true);
+    expect(closeThread).not.toHaveBeenCalled();
+    expect(state.projects).toEqual([activeProject]);
+    expect(refreshSidebarProjects).toEqual([[activeProject.id]]);
+    expect(refreshTabs).not.toHaveBeenCalled();
+    expect(state.activeProjectId).toBe(activeProject.id);
+    expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('hands off to a remaining project if an inactive removal target becomes active mid-guard', async () => {
+    const activeProject = { id: 'active-project' };
+    const removedProject = { id: 'removed-project' };
+    const guard = deferred<boolean>();
+    const state = {
+      activeProjectId: activeProject.id,
+      activeThreadId: 'active-thread' as string | null,
+      activeFileId: null as string | null,
+      projects: [activeProject, removedProject],
+      threads: [{
+        id: 'active-thread',
+        projectId: activeProject.id,
+      }],
+      openFiles: [{
+        id: 'removed-file',
+        projectId: removedProject.id,
+      }],
+    };
+    const refreshSidebarProjects: Array<Array<string>> = [];
+    const refreshCalls: string[] = [];
+    const refreshTabs = vi.fn(() => {
+      refreshCalls.push('tabs');
+    });
+    const closeThread = vi.fn();
+    const setActiveProjectCalls: string[] = [];
+    const activeProjectBeforeHandoff: Array<string | null> = [];
+    const refreshSidebar = vi.fn(() => {
+      refreshCalls.push('sidebar');
+      refreshSidebarProjects.push(state.projects.map((project) => project.id));
+    });
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (projectId: string) => (
+        state.projects.find((project) => project.id === projectId) || null
+      ),
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: () => guard.promise,
+      covenDiscovery: {},
+      PsycheSessions: {
+        invalidateCovenRequests: (value: unknown) => value,
+      },
+      closeThread,
+      fileViewEl: null,
+      terminalHost: null,
+      startCovenPolling: () => undefined,
+      setActiveProject: async (projectId: string) => {
+        activeProjectBeforeHandoff.push(state.activeProjectId);
+        setActiveProjectCalls.push(projectId);
+        state.activeProjectId = projectId;
+        state.activeThreadId = 'active-thread';
+        refreshSidebar();
+        return true;
+      },
+      renderPaneWorkspace: () => undefined,
+      setStatus: () => undefined,
+      refreshSidebar,
+      refreshTabs,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+    });
+
+    const removing = removeProject(removedProject.id);
+    await Promise.resolve();
+    state.activeProjectId = removedProject.id;
+    state.activeThreadId = null;
+    guard.resolve(true);
+
+    await expect(removing).resolves.toBe(true);
+    expect(closeThread).not.toHaveBeenCalled();
+    expect(state.projects).toEqual([activeProject]);
+    expect(state.openFiles).toEqual([]);
+    expect(state.activeProjectId).toBe(activeProject.id);
+    expect(state.activeThreadId).toBe('active-thread');
+    expect(activeProjectBeforeHandoff).toEqual([null]);
+    expect(setActiveProjectCalls).toEqual([activeProject.id]);
+    expect(refreshSidebarProjects).toEqual([[activeProject.id]]);
+    expect(refreshSidebar).toHaveBeenCalledTimes(1);
+    expect(refreshTabs).toHaveBeenCalledTimes(1);
+    expect(refreshCalls).toEqual(['sidebar', 'tabs']);
   });
 
   it('skips explicit target focus while the terminal canvas is hidden before RAF', async () => {
@@ -4838,6 +5035,7 @@ describe('Tauri physical terminal panes', () => {
         scopedPaneRoot: (value: Layout) => value.root,
         PsychePanes,
         findThread: (id: string) => threads.get(id) || null,
+        canvasSurfaceById: (id: string) => threads.get(id) || null,
         PsycheSessions: { attentionLabel: () => 'Waiting for you' },
       });
 
@@ -4869,6 +5067,66 @@ describe('Tauri physical terminal panes', () => {
           detail: 'running · Waiting for you',
           current: false,
           thread: threads.get('thread-b'),
+        },
+      ]);
+    });
+
+    it('keeps the Files pane in the minimap while another pane is maximized', () => {
+      const thread = { id: 'thread-a', name: 'Agent', status: 'running' };
+      const filesPane = {
+        id: 'files-project-repo',
+        kind: 'files',
+        name: 'Files',
+        activeFileId: 'file-a',
+        workspaceRoot: '/repo',
+      };
+      const file = {
+        id: 'file-a',
+        name: 'Button.tsx',
+        rel: 'src/Button.tsx',
+      };
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-a', thread.id),
+          'leaf-a',
+          PsychePanes.createLeaf('leaf-files', filesPane.id),
+          'split-files',
+        ),
+        focusedLeafId: 'leaf-a',
+        maximizedLeafId: 'leaf-a',
+      };
+      const paneMinimapItems = compileFunction<
+        (value: Layout, activeFile: typeof file | null) => Array<unknown>
+      >(functionSource('paneMinimapItems'), {
+        scopedPaneRoot: (value: Layout) => value.root,
+        PsychePanes,
+        findThread: (id: string) => id === thread.id ? thread : null,
+        canvasSurfaceById: (id: string) => {
+          if (id === thread.id) return thread;
+          if (id === filesPane.id) return filesPane;
+          return null;
+        },
+        findOpenFile: (id: string) => id === file.id ? file : null,
+        PsycheSessions: { attentionLabel: () => '' },
+      });
+
+      expect(paneMinimapItems(layout, null)).toEqual([
+        {
+          kind: 'pane',
+          id: thread.id,
+          label: 'Agent',
+          detail: 'running',
+          current: true,
+          thread,
+        },
+        {
+          kind: 'file',
+          id: file.id,
+          label: 'Button.tsx',
+          detail: 'src/Button.tsx',
+          current: false,
+          thread: null,
+          surface: filesPane,
         },
       ]);
     });

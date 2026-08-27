@@ -90,10 +90,7 @@ pub(crate) fn build_create_args(
     args: &[String],
 ) -> Result<Vec<String>, String> {
     let name = session_name(&request.id)?;
-    if matches!(
-        request.launch_kind,
-        NativeLaunchKind::CovenCode | NativeLaunchKind::CovenAttach
-    ) {
+    if matches!(request.launch_kind, NativeLaunchKind::CovenAttach) {
         let id = request
             .coven_session_id
             .as_deref()
@@ -317,26 +314,47 @@ mod tests {
     }
 
     #[test]
-    fn coven_launch_requires_a_safe_session_id() {
-        for kind in [NativeLaunchKind::CovenCode, NativeLaunchKind::CovenAttach] {
-            let mut launch = request(kind);
-            launch.coven_session_id = Some("valid:session-1".to_string());
-            assert!(build_create_args(
-                Path::new("/tmp/socket"),
-                &launch,
-                "/usr/local/bin/coven",
-                &[]
-            )
-            .is_ok());
-            launch.coven_session_id = Some("../unsafe".to_string());
-            assert!(build_create_args(
-                Path::new("/tmp/socket"),
-                &launch,
-                "/usr/local/bin/coven",
-                &[]
-            )
-            .is_err());
-        }
+    fn coven_attach_launch_requires_a_safe_session_id() {
+        let mut launch = request(NativeLaunchKind::CovenAttach);
+        launch.coven_session_id = Some("valid:session-1".to_string());
+        assert!(build_create_args(
+            Path::new("/tmp/socket"),
+            &launch,
+            "/usr/local/bin/coven",
+            &["attach".to_string(), "valid:session-1".to_string()]
+        )
+        .is_ok());
+        launch.coven_session_id = Some("../unsafe".to_string());
+        assert!(build_create_args(
+            Path::new("/tmp/socket"),
+            &launch,
+            "/usr/local/bin/coven",
+            &["attach".to_string(), "../unsafe".to_string()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn coven_code_launch_does_not_require_or_quote_a_session_id() {
+        let launch: NativeSessionCreate = serde_json::from_value(serde_json::json!({
+            "id": "session-1",
+            "projectRoot": "/repo",
+            "cwd": "/repo/worktree",
+            "launchKind": "coven-code"
+        }))
+        .expect("bare Coven CLI request should deserialize");
+
+        let create_args = build_create_args(
+            Path::new("/tmp/socket"),
+            &launch,
+            "/usr/local/bin/coven",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            create_args.last().map(String::as_str),
+            Some("'/usr/local/bin/coven'")
+        );
     }
 
     #[test]
@@ -345,10 +363,9 @@ mod tests {
             "id": "session-1",
             "projectRoot": "/repo",
             "cwd": "/repo/worktree",
-            "launchKind": "coven-code",
-            "covenSessionId": "valid:session-1"
+            "launchKind": "coven-code"
         }))
-        .expect("canonical Coven Code request should deserialize");
+        .expect("canonical Coven CLI request should deserialize");
 
         assert_eq!(launch.launch_kind, NativeLaunchKind::CovenCode);
         assert_eq!(
@@ -359,16 +376,12 @@ mod tests {
             Path::new("/tmp/socket"),
             &launch,
             "/usr/local/bin/coven",
-            &[
-                "code".to_string(),
-                "--session-id".to_string(),
-                "valid:session-1".to_string(),
-            ],
+            &[],
         )
         .unwrap();
         assert_eq!(
             create_args.last().map(String::as_str),
-            Some("'/usr/local/bin/coven' 'code' '--session-id' 'valid:session-1'")
+            Some("'/usr/local/bin/coven'")
         );
     }
 
