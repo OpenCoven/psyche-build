@@ -92,7 +92,8 @@ plus organization **Projects: read and write**. Create two protected
 environments restricted to the main branch (`main`):
 
 - The `beads-project-sync-automation` environment has no required reviewers, so
-  the daily schedule remains unattended.
+  the staggered unattended schedules can recover when GitHub drops a scheduled
+  event.
 - The `beads-project-sync` environment has required reviewers, so every manual
   `workflow_dispatch` run is reviewer-gated.
 
@@ -146,9 +147,11 @@ create a fresh Project and return its node ID for a maintainer to review and
 commit before future synchronization. It must never adopt an existing marked
 private Project.
 
-`.github/workflows/beads-project-sync.yml` applies the mirror every day at
-03:17 UTC. Maintainers can also use **Actions → Beads Project Sync → Run
-workflow**:
+`.github/workflows/beads-project-sync.yml` applies the mirror at 03:17 UTC and
+runs a redundant 09:43 UTC apply because GitHub may delay or drop scheduled
+events. The synchronizer is idempotent and lease-serialized, so the backup run
+is normally a zero-operation verification. Maintainers can also use
+**Actions → Beads Project Sync → Run workflow**:
 
 - `dry_run: true` makes Actions dry-run bootstrap an ephemeral runner database
   from the authoritative Beads remote, without a GitHub token, before selecting
