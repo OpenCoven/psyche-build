@@ -146,11 +146,13 @@ GitHub's issue `user.login` matches a configured login case-insensitively;
 reviewed ownership migration changes the issue-creation actor. Created issues
 are re-read and fail closed on an actor mismatch.
 
-After that gate is satisfied, the daily
-`.github/workflows/beads-project-sync.yml` run applies automatically. Use
-workflow dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an
-exception guard override and should be enabled only after reviewing a dry-run
-artifact, including its operation-kind counts and body-free closure candidates.
+After that gate is satisfied, `.github/workflows/beads-project-sync.yml`
+applies automatically at 03:17 UTC with a redundant 09:43 UTC run because
+GitHub may delay or drop scheduled events. The sync is idempotent and
+lease-serialized, so the backup normally applies zero operations. Use workflow
+dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an exception
+guard override and should be enabled only after reviewing a dry-run artifact,
+including its operation-kind counts and body-free closure candidates.
 
 The synchronizer minimizes GitHub GraphQL pressure within each run. Project
 discovery and Project item inventory are read once and reused, while all field
