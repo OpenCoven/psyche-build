@@ -274,6 +274,8 @@ describe('Beads Project sync workflow contract', () => {
 
     expect(workflow).toContain('name: Beads Project Sync');
     expect(workflow).toContain('- cron: "17 3 * * *"');
+    expect(workflow).toContain('- cron: "43 9 * * *"');
+    expect(workflow.match(/^\s+- cron:/gm)).toHaveLength(2);
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).toMatch(
       /dry_run:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
