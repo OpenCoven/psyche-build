@@ -231,12 +231,13 @@ or #200 unless a bounded slice is explicitly reprioritized.
 | [#190](https://github.com/OpenCoven/psyche-build/pull/190) | **Source material only** | Integrate bounded pieces through #199/#243 after callback safety, readiness retry, redaction, and diagnostic limits are proven |
 | [#193](https://github.com/OpenCoven/psyche-build/pull/193) | **Source material only** | Extract #241 first, then discovery/reconnect, then physical acceptance; do not merge the large branch as one unit |
 | [#192](https://github.com/OpenCoven/psyche-build/pull/192) | **Source material only** | Extract production publication, execution, and UI in #242 order after accepted host readiness |
-| [#254](https://github.com/OpenCoven/psyche-build/pull/254) | **Outside Stage 0** | PR #254 remains outside Stage 0; evaluate it only against #201/#253's P2 compatibility gate and exact-head evidence |
+| [#262](https://github.com/OpenCoven/psyche-build/pull/262) | **Focused mapping slice** | Completes only #253 delivery slice 1; keep #253 open for the immutable pin, canary, adapters, and reference-flow evidence |
 
-No listed active implementation PR is merge-ready merely because it can be
-rebased or its tests once passed. Every replacement starts from current `main`, has one owning
-outcome and one acceptance gate, resolves current review findings, and passes
-required checks on its exact final head.
+The listed source-material PRs are not merge-ready merely because they can be
+rebased or their tests once passed. Every replacement starts from current
+`main`, has one owning outcome and one acceptance gate, resolves current review
+findings, and passes required checks on its exact final head. PR #262 is the
+focused replacement for #254's mapping scope and does not complete #253.
 
 ## Concurrency rules
 
