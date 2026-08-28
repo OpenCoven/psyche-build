@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -17,26 +19,35 @@ const canonicalTargets = {
   'gh-246': { issue: 246, title: 'Cross-platform Vim and keyboard-mode parity', priority: 2 as const },
 };
 
-function body(status: string, priority: number, hash = 'a'.repeat(64)): string {
-  return [
-    '<!-- psyche-bead-sync:v1 bead-id=psyche-test -->',
+function body(
+  status: string,
+  priority: number,
+  hash?: string,
+  beadId = 'psyche-test',
+): string {
+  const renderedBody = [
+    `<!-- psyche-bead-sync:v1 bead-id=${beadId} -->`,
     '',
     '## Source metadata',
     `- Source status: ${status}`,
     `- Source priority: P${priority}`,
-    '',
-    `<!-- psyche-bead-sync:v1 render-hash=${hash} -->`,
   ].join('\n');
+  const renderHash = hash ?? createHash('sha256').update(renderedBody).digest('hex');
+  return `${renderedBody}\n\n<!-- psyche-bead-sync:v1 render-hash=${renderHash} -->`;
 }
 
 function issue(overrides: Partial<DriftManagedIssue> = {}): DriftManagedIssue {
+  const managedBody = overrides.body ?? body('closed', 1);
+  const renderHash = Object.hasOwn(overrides, 'renderHash')
+    ? overrides.renderHash
+    : managedBody?.match(/render-hash=([a-f0-9]{64})/u)?.[1] ?? null;
   return {
     beadId: 'psyche-test',
     number: 206,
     state: 'closed',
     labels: ['bead', 'priority:P1'],
-    body: body('closed', 1),
-    renderHash: 'a'.repeat(64),
+    body: managedBody,
+    renderHash,
     ...overrides,
   };
 }
@@ -59,7 +70,7 @@ function rawIssue(
   return {
     number,
     state: 'open',
-    body: body('open', 1).replace('psyche-test', beadId),
+    body: body('open', 1, undefined, beadId),
     user: { login: 'BunsDev' },
     labels: [{ name: 'bead' }, { name: 'priority:P1' }],
     ...overrides,
@@ -144,6 +155,71 @@ describe('tracker drift validation', () => {
         mirrorSourceStatus: 'open',
       },
     ]);
+  });
+
+  it('detects a stale valid-looking render hash without exposing issue body content', () => {
+    const privateBody = 'PRIVATE-STALE-RENDER-SENTINEL';
+    const managedBody = body('closed', 1).replace(
+      '\n\n<!-- psyche-bead-sync:v1 render-hash=',
+      `\n\n${privateBody}\n\n<!-- psyche-bead-sync:v1 render-hash=`,
+    );
+    const report = validateTrackerDrift(
+      [bead()],
+      [issue({ body: managedBody })],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toContainEqual({
+      kind: 'render_hash_mismatch',
+      beadId: 'psyche-test',
+      issueNumber: 206,
+    });
+    expect(JSON.stringify(report)).not.toContain(privateBody);
+  });
+
+  it('rejects extra managed priority labels and obsolete release-blocker metadata', () => {
+    const report = validateTrackerDrift(
+      [bead()],
+      [issue({
+        labels: [
+          'bead',
+          'priority:P1',
+          'priority:P0',
+          'release-blocker',
+          'unrelated-public-label',
+        ],
+      })],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toEqual([
+      {
+        kind: 'obsolete_blocker_metadata',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+      },
+      {
+        kind: 'priority_mismatch',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+        sourcePriority: 1,
+      },
+    ]);
+  });
+
+  it('rejects noncanonical labels in the managed priority namespace', () => {
+    const report = validateTrackerDrift(
+      [bead()],
+      [issue({ labels: ['bead', 'priority:P1', 'priority:urgent', 'triage'] })],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toEqual([{
+      kind: 'priority_mismatch',
+      beadId: 'psyche-test',
+      issueNumber: 206,
+      sourcePriority: 1,
+    }]);
   });
 
   it('detects missing, duplicate, orphan, and unverifiable generated mirrors', () => {
@@ -280,6 +356,31 @@ describe('tracker drift validation', () => {
     });
   });
 
+  it('returns exit 1 with bounded drift for a malformed active external_ref', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads-malformed-ref.jsonl',
+      '--issues-file',
+      '__tests__/fixtures/beads-project-sync/tracker-issues.json',
+    ], { stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value())).toMatchObject({
+      result: 'fail',
+      findings: [{
+        kind: 'canonical_mapping_malformed',
+        beadId: 'tracker-open',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      }],
+    });
+    expect(stdout.value()).not.toContain('issue-PRIVATE-TARGET');
+  });
+
   it('returns exit 2 when inventory evidence cannot be established', async () => {
     const stdout = outputBuffer();
     const stderr = outputBuffer();
@@ -313,7 +414,7 @@ describe('tracker drift validation', () => {
       }),
       rawIssue('tracker-closed', 302, {
         state: 'closed',
-        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        body: body('closed', 0, undefined, 'tracker-closed'),
         labels: [{ name: 'bead' }, { name: 'priority:P0' }],
       }),
     ];
@@ -354,7 +455,7 @@ describe('tracker drift validation', () => {
         ].join('\n'),
       }),
       rawIssue('tracker-closed', 302, {
-        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        body: body('closed', 0, undefined, 'tracker-closed'),
         labels: [{ name: 'bead' }, { name: 'priority:P0' }],
       }),
     ];
@@ -425,6 +526,44 @@ describe('tracker drift validation', () => {
     expect(stderr.value()).not.toContain(privateBody);
   });
 
+  it('rejects marker case variants and retains render-only managed metadata', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const rawIssues = [
+      rawIssue('tracker-open', 305, {
+        body: [
+          '<!-- PSYCHE-BEAD-SYNC:V1 BEAD-ID=tracker-open -->',
+          '<!-- PSYCHE-BEAD-SYNC:V1 RENDER-HASH=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA -->',
+        ].join('\n'),
+      }),
+      rawIssue('unused', 306, {
+        body: `<!-- psyche-bead-sync:v1 render-hash=${'b'.repeat(64)} -->`,
+      }),
+      rawIssue('tracker-open', 307, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-open  -->',
+          `<!-- psyche-bead-sync:v1 render-hash=${'c'.repeat(64)} -->`,
+        ].join('\n'),
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    const report = JSON.parse(stdout.value());
+    expect(report.managedMirrorCount).toBe(3);
+    expect(report.findings).toEqual(expect.arrayContaining([
+      { kind: 'malformed_bead_marker', issueNumber: 305 },
+      { kind: 'malformed_render_hash_marker', issueNumber: 305 },
+      { kind: 'missing_bead_marker', issueNumber: 306 },
+      { kind: 'malformed_bead_marker', issueNumber: 307 },
+    ]));
+  });
+
   it('reports malformed render-hash markers without aborting the remaining inventory', async () => {
     const stdout = outputBuffer();
     const stderr = outputBuffer();
@@ -458,7 +597,7 @@ describe('tracker drift validation', () => {
         ].join('\n'),
       }),
       rawIssue('tracker-closed', 302, {
-        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        body: body('closed', 0, undefined, 'tracker-closed'),
         labels: [{ name: 'bead' }, { name: 'priority:P0' }],
       }),
     ];
@@ -500,6 +639,32 @@ describe('tracker drift validation', () => {
     expect(stderr.value()).not.toContain(privateBody);
   });
 
+  it('reports an empty render-hash marker even when another valid marker is present', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const rawIssues = [
+      rawIssue('tracker-open', 301, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-open -->',
+          '<!-- psyche-bead-sync:v1 render-hash= -->',
+          `<!-- psyche-bead-sync:v1 render-hash=${'a'.repeat(64)} -->`,
+        ].join('\n'),
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value()).findings).toEqual(expect.arrayContaining([
+      { kind: 'duplicate_render_hash_marker', beadId: 'tracker-open', issueNumber: 301 },
+      { kind: 'empty_render_hash_marker', beadId: 'tracker-open', issueNumber: 301 },
+    ]));
+  });
+
   it('matches trusted GitHub authors case-insensitively', async () => {
     const stdout = outputBuffer();
     const stderr = outputBuffer();
@@ -507,7 +672,7 @@ describe('tracker drift validation', () => {
       rawIssue('tracker-open', 301, { user: { login: 'BUNSDEV' } }),
       rawIssue('tracker-closed', 302, {
         state: 'closed',
-        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        body: body('closed', 0, undefined, 'tracker-closed'),
         labels: [{ name: 'bead' }, { name: 'priority:P0' }],
         user: { login: 'BuNsDeV' },
       }),
@@ -618,5 +783,61 @@ describe('tracker drift validation', () => {
       canonicalOutcomeCount: 1,
       findingCount: 0,
     });
+  });
+
+  it('handles invalid CLI options without stack traces or argument disclosure', () => {
+    const privateArgument = 'PRIVATE-OPTION-SENTINEL';
+    const result = spawnSync(process.execPath, [
+      'scripts/validate-beads-tracker.mjs',
+      `--invalid-${privateArgument}`,
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GH_TOKEN: 'PRIVATE-TOKEN-SENTINEL',
+      },
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/^Tracker drift validation failed: invalid command-line options\n$/u);
+    expect(result.stderr).not.toContain(privateArgument);
+    expect(result.stderr).not.toContain('PRIVATE-TOKEN-SENTINEL');
+    expect(result.stderr).not.toContain('at ');
+  });
+
+  it('handles missing private input paths without disclosing paths or raw filesystem errors', () => {
+    const privatePath = join(
+      process.cwd(),
+      '.private',
+      'PRIVATE-PATH-SENTINEL',
+      'inventory.jsonl',
+    );
+    const result = spawnSync(process.execPath, [
+      'scripts/validate-beads-tracker.mjs',
+      '--inventory-file',
+      privatePath,
+      '--issues-file',
+      '__tests__/fixtures/beads-project-sync/tracker-issues.json',
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BEADS_PROJECT_TOKEN: 'PRIVATE-TOKEN-SENTINEL',
+      },
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(
+      /^Tracker drift validation failed: unable to read or parse inventory input\n$/u,
+    );
+    expect(result.stderr).not.toContain(privatePath);
+    expect(result.stderr).not.toContain('PRIVATE-PATH-SENTINEL');
+    expect(result.stderr).not.toContain('PRIVATE-TOKEN-SENTINEL');
+    expect(result.stderr).not.toContain('ENOENT');
+    expect(result.stderr).not.toContain('at ');
   });
 });

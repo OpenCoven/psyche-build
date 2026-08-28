@@ -64,6 +64,7 @@ import { normalizeCanonicalOutcomeRef } from './outcomes.mjs';
 /**
  * @typedef {{
  *   assigneeMap?: ReadonlyMap<string, string> | Record<string, string>,
+ *   deferCanonicalOutcomeValidation?: boolean,
  * }} ParseBeadExportConfig
  */
 
@@ -171,6 +172,23 @@ function normalizeOptionalString(value, fieldName, context) {
   }
   const normalized = value.trim();
   return normalized || null;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} context
+ * @param {boolean} deferValidation
+ * @returns {string | null}
+ */
+function normalizeExternalRef(value, context, deferValidation) {
+  try {
+    return normalizeCanonicalOutcomeRef(value, context, { allowNull: true });
+  } catch (error) {
+    if (!deferValidation) {
+      throw error;
+    }
+    return 'malformed-canonical-outcome-ref';
+  }
 }
 
 /**
@@ -429,9 +447,10 @@ function normalizeDependencies(value, recordId, lineNumber) {
  * @param {unknown} record
  * @param {number} lineNumber
  * @param {Map<string, string>} assigneeMap
+ * @param {boolean} deferCanonicalOutcomeValidation
  * @returns {ParsedBead}
  */
-function normalizeRecord(record, lineNumber, assigneeMap) {
+function normalizeRecord(record, lineNumber, assigneeMap, deferCanonicalOutcomeValidation) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     fail(`Malformed Beads record on line ${lineNumber}`);
   }
@@ -496,10 +515,10 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
       'notes',
       `Beads record "${id}" on line ${lineNumber}`,
     ),
-    externalRef: normalizeCanonicalOutcomeRef(
+    externalRef: normalizeExternalRef(
       beadRecord.external_ref,
       `Beads record "${id}" on line ${lineNumber} field "external_ref"`,
-      { allowNull: true },
+      deferCanonicalOutcomeValidation,
     ),
     status: normalizeRequiredString(
       beadRecord.status,
@@ -548,6 +567,7 @@ export function parseBeadExport(jsonl, config = {}) {
   }
 
   const assigneeMap = normalizeAssigneeMap(config.assigneeMap);
+  const deferCanonicalOutcomeValidation = config.deferCanonicalOutcomeValidation === true;
   const beads = /** @type {ParsedBead[]} */ ([]);
   const seenIds = new Set();
   for (const [index, rawLine] of jsonl.split(/\r?\n/).entries()) {
@@ -566,7 +586,12 @@ export function parseBeadExport(jsonl, config = {}) {
       fail(`Malformed JSON on line ${lineNumber}: ${detail}`);
     }
 
-    const bead = normalizeRecord(record, lineNumber, assigneeMap);
+    const bead = normalizeRecord(
+      record,
+      lineNumber,
+      assigneeMap,
+      deferCanonicalOutcomeValidation,
+    );
     if (seenIds.has(bead.id)) {
       fail(`Duplicate Beads id "${bead.id}" on line ${lineNumber}`);
     }

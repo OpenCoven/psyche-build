@@ -34,6 +34,7 @@ export interface ParsedBead {
 
 export interface ParseBeadExportConfig {
   assigneeMap?: ReadonlyMap<string, string> | Record<string, string>;
+  deferCanonicalOutcomeValidation?: boolean;
 }
 
 export interface IndexableBead {
