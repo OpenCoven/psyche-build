@@ -710,12 +710,14 @@ public actor ConnectionManager {
                 return .ignored
             }
             hasNegotiatedV3 = true
-            transition(to: .connected)
             completeNegotiation(for: session, with: .success(()))
-            await requestInitialSnapshotIfAuthorized(
-                for: session,
-                generation: generation
-            )
+            if activeConnection?.invite == nil {
+                transition(to: .connected)
+                await requestInitialSnapshotIfAuthorized(
+                    for: session,
+                    generation: generation
+                )
+            }
         case .projectList(let projects):
             guard hasNegotiatedV3 else { return .ignored }
             self.projects = projects
@@ -750,6 +752,12 @@ public actor ConnectionManager {
                     return .ignored
                 }
                 self.activeConnection = activeConnection.withDurableCredential(payload.token)
+                guard hasNegotiatedV3 else { return .processed }
+                transition(to: .connected)
+                await requestInitialSnapshotIfAuthorized(
+                    for: session,
+                    generation: generation
+                )
             } catch {
                 return .failed(error.localizedDescription)
             }

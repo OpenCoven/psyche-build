@@ -1,12 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { MobileInviteStore } from "../../src/services/bridge/MobileInviteStore";
+import {
+  MobileInviteStore,
+  mobileInviteId,
+} from "../../src/services/bridge/MobileInviteStore";
 
 describe("MobileInviteStore", () => {
   it("redeems a signed invite exactly once for its endpoint", () => {
     const store = new MobileInviteStore();
     const issued = store.issue({ endpoint: "wss://psyche.local:43123" });
 
-    expect(store.redeem(issued.token)).toEqual({ endpoint: "wss://psyche.local:43123" });
+    expect(store.redeem(issued.token)).toEqual({
+      endpoint: "wss://psyche.local:43123",
+      inviteId: mobileInviteId(issued.token),
+    });
     expect(store.redeem(issued.token)).toBeNull();
   });
 
@@ -16,7 +22,10 @@ describe("MobileInviteStore", () => {
     const altered = `${issued.token}x`;
 
     expect(store.redeem(altered)).toBeNull();
-    expect(store.redeem(issued.token)).toEqual({ endpoint: "wss://psyche.local:43123" });
+    expect(store.redeem(issued.token)).toEqual({
+      endpoint: "wss://psyche.local:43123",
+      inviteId: mobileInviteId(issued.token),
+    });
   });
 
   it("rejects a non-canonical signature without consuming the original", () => {
@@ -24,7 +33,10 @@ describe("MobileInviteStore", () => {
     const issued = store.issue({ endpoint: "wss://psyche.local:43123" });
 
     expect(store.redeem(`${issued.token}!`)).toBeNull();
-    expect(store.redeem(issued.token)).toEqual({ endpoint: "wss://psyche.local:43123" });
+    expect(store.redeem(issued.token)).toEqual({
+      endpoint: "wss://psyche.local:43123",
+      inviteId: mobileInviteId(issued.token),
+    });
   });
 
   it("rejects an expired invite", () => {

@@ -871,6 +871,77 @@ final class ConnectionManagerTests: XCTestCase {
         await reconnect.value
     }
 
+    func testInviteWelcomeWaitsForAuthAcceptedBeforeConnectingAndRequestingSnapshot() async throws {
+        let fake = FakeTransport()
+        let credentialStore = MobileCredentialStore(secureStore: InMemorySecureStore())
+        let persistenceGate = MessageProcessorStartGate()
+        let manager = makeManager(
+            transport: fake,
+            pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()),
+            credentialStore: credentialStore,
+            credentialPersistenceStart: { await persistenceGate.wait() }
+        )
+        let endpoint = testEndpoint()
+        let invite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fpsyche.local%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-invite"
+        )!))
+
+        let completionProbe = RequestCompletionProbe()
+        let redemption = Task {
+            let accepted = await manager.connectAndAwaitOutcome(using: invite)
+            await completionProbe.markComplete()
+            return accepted
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await manager.waitForEventDrain(after: 1)
+
+        let stateAfterWelcome = await manager.state
+        let credentialAfterWelcome = try await credentialStore.credential(for: endpoint)
+        let messagesAfterWelcome = await fake.sentMessages
+        let completedAfterWelcome = await completionProbe.isComplete
+        XCTAssertEqual(stateAfterWelcome, .authenticating)
+        XCTAssertNil(credentialAfterWelcome)
+        XCTAssertFalse(completedAfterWelcome)
+        XCTAssertEqual(
+            messagesAfterWelcome.filter(\.isWorkspaceSnapshotRequest).count,
+            0
+        )
+
+        await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
+        await persistenceGate.waitUntilEntered()
+
+        let stateDuringPersistence = await manager.state
+        let credentialDuringPersistence = try await credentialStore.credential(for: endpoint)
+        let messagesDuringPersistence = await fake.sentMessages
+        let completedDuringPersistence = await completionProbe.isComplete
+        XCTAssertEqual(stateDuringPersistence, .authenticating)
+        XCTAssertNil(credentialDuringPersistence)
+        XCTAssertFalse(completedDuringPersistence)
+        XCTAssertEqual(
+            messagesDuringPersistence.filter(\.isWorkspaceSnapshotRequest).count,
+            0
+        )
+
+        await persistenceGate.release()
+        let accepted = await redemption.value
+        for _ in 0..<100 { await Task.yield() }
+
+        let stateAfterAcceptance = await manager.state
+        let credentialAfterAcceptance = try await credentialStore.credential(for: endpoint)
+        let messagesAfterAcceptance = await fake.sentMessages
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(stateAfterAcceptance, .connected)
+        XCTAssertEqual(
+            credentialAfterAcceptance?.token,
+            "durable-token"
+        )
+        XCTAssertEqual(
+            messagesAfterAcceptance.filter(\.isWorkspaceSnapshotRequest).count,
+            1
+        )
+    }
+
     func testClearedFreshCredentialAllowsNewInviteRedemption() async throws {
         let fake = FakeTransport()
         let secureStore = InMemorySecureStore()
@@ -1033,6 +1104,7 @@ final class ConnectionManagerTests: XCTestCase {
         await transport.releaseFirstConnect()
         try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
 
         let firstOutcome = await first.value
         let secondOutcome = await second.value

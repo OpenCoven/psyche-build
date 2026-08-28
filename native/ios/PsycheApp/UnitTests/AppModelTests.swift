@@ -1,6 +1,6 @@
 import Foundation
-import PsycheCore
 import XCTest
+@testable import PsycheCore
 @testable import Psyche_Build
 
 @MainActor
@@ -161,6 +161,9 @@ final class AppModelTests: XCTestCase {
         await transport.emit(.legacy(.welcome(WelcomePayload(
             serverID: "studio", serverName: "Studio", protocolVersion: 3, projectName: nil
         ))))
+        await model.composition?.connectionManager.waitForEventDrain(after: 1)
+        XCTAssertNil(model.hostName)
+        await transport.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
 
         let connected = await result.value
         XCTAssertTrue(connected)
@@ -228,6 +231,9 @@ final class AppModelTests: XCTestCase {
         await transport.emit(.legacy(.welcome(WelcomePayload(
             serverID: "studio", serverName: "Studio", protocolVersion: 3, projectName: nil
         ))))
+        await model.composition?.connectionManager.waitForEventDrain(after: 1)
+        XCTAssertNil(model.hostName)
+        await transport.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
         await start.value
 
         XCTAssertEqual(model.hostName, "studio.example")
