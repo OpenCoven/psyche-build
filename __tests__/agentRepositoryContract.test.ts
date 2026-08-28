@@ -36,6 +36,10 @@ describe('agent repository contract', () => {
     expect(manifest).toContain('bootstrap: ./scripts/agent-bootstrap');
     expect(manifest).toContain('fast: ./scripts/agent-check fast');
     expect(manifest).toContain('full: ./scripts/agent-check full');
+    expect(manifest).toContain('node: package.json#engines.node');
+    expect(manifest).toContain('pnpm: package.json#packageManager');
+    expect(manifest).not.toContain('10.34.5');
+    expect(manifest).not.toContain('20.10.0');
     expect(manifest).toContain('authority: github-issues-and-milestones');
     expect(manifest).toContain('authority: beads');
     expect(manifest).toContain('direction: one-way-sanitized');

@@ -61,8 +61,8 @@ agent:
     - macos
     - linux
   required_tools:
-    node: ">=20.10.0"
-    pnpm: "10.34.5"
+    node: package.json#engines.node
+    pnpm: package.json#packageManager
     git: ">=2.20.0"
     tmux: ">=3.0"
 
