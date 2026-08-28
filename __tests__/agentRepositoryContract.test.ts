@@ -123,6 +123,10 @@ describe('agent repository contract', () => {
       'native/desktop/psyche-build-tauri/src-tauri/**',
       'native/ios/**',
       '.github/workflows/release.yml',
+      '.github/workflows/beads-project-sync.yml',
+      'scripts/app-store-connect.mjs',
+      'scripts/build-macos-app.mjs',
+      'scripts/beads-project-sync/**',
       '.beads/**',
     ]) {
       expect(guide).toContain(path);
