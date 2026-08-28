@@ -14,6 +14,7 @@ const check = read('scripts/agent-check');
 const packageJson = JSON.parse(read('package.json')) as {
   packageManager: string;
   engines: { node: string };
+  scripts: { smoke: string };
 };
 
 describe('agent repository contract', () => {
@@ -85,7 +86,6 @@ describe('agent repository contract', () => {
       'pnpm test',
       'pnpm docs:focus:check',
       'pnpm --dir docs build',
-      'pnpm build',
       'pnpm smoke',
       'pnpm smoke:pack',
       'cargo fmt',
@@ -95,6 +95,7 @@ describe('agent repository contract', () => {
       expect(check, `full gate should include ${command}`).toContain(command);
     }
 
+    expect(packageJson.scripts.smoke).toContain('pnpm run build');
     expect(check).toContain('PSYCHE_AGENT_CHECK_IOS');
     expect(check).toContain('Skipping iOS simulator checks: not asserted');
     expect(check).toContain('Physical-device, signing, TestFlight, and distribution claims remain unasserted');
