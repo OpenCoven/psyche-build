@@ -47,7 +47,7 @@ describe('post-release execution documentation', () => {
     }
   });
 
-  it('records administrator enforcement with one named owner bypass for Stage 0', async () => {
+  it('records administrator enforcement with one named PR-only owner bypass for Stage 0', async () => {
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
@@ -57,13 +57,15 @@ describe('post-release execution documentation', () => {
 
     for (const { filePath, source } of documents) {
       expect(source, filePath).toMatch(/administrator enforcement/i);
-      expect(source, filePath).toMatch(/single named owner bypass[\s\S]{0,100}BunsDev/i);
-      expect(source, filePath).toMatch(/all other actors[\s\S]{0,120}(?:cannot bypass|remain subject)/i);
+      expect(source, filePath).toMatch(/single named PR-only owner bypass[\s\S]{0,100}BunsDev/i);
+      expect(source, filePath).toMatch(/all other actors[\s\S]{0,160}(?:require|remain subject to)[\s\S]{0,80}approval/i);
       expect(source, filePath).toMatch(/direct-push rejection proof/i);
+      expect(source, filePath).toMatch(/direct pushes[\s\S]{0,120}platform-blocked[\s\S]{0,100}BunsDev/i);
       expect(source, filePath).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
       expect(source, filePath).toMatch(
-        /independent review[\s\S]{0,120}preferred[\s\S]{0,120}not required[\s\S]{0,160}BunsDev[\s\S]{0,160}owner-authored administrative PR/i,
+        /BunsDev[\s\S]{0,180}explicit PR-only bypass[\s\S]{0,160}admin merge[\s\S]{0,180}exact-head[\s\S]{0,120}resolved conversations/i,
       );
+      expect(source, filePath).not.toMatch(/classic `?bypass_pull_request_allowances`?[\s\S]{0,100}(?:BunsDev|owner)/i);
       expect(source, filePath).not.toMatch(/no standing (?:bypass )?actor/i);
       expect(source, filePath).not.toMatch(/zero (?:standing )?bypasses/i);
     }

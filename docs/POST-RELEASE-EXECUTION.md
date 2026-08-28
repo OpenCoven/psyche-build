@@ -54,12 +54,12 @@ the owning issues. Documentation and tests alone do not prove remote policy,
 apply, or issue-closure state.
 
 For #31, the policy evidence must prove administrator enforcement plus a
-single named owner bypass, `BunsDev`. All other actors remain subject to the
-required approval and cannot bypass it, and the retained evidence includes
-direct-push rejection proof. GitHub cannot create an author self-approval review.
-Independent review is preferred, but it is not required for a `BunsDev`
-owner-authored administrative PR using an explicit recorded admin merge
-override after exact-head successful checks and resolved conversations.
+single named PR-only owner bypass, `BunsDev`. Direct pushes remain
+platform-blocked for `BunsDev`, all other actors require one approval, and the
+retained evidence includes direct-push rejection proof. GitHub cannot create an
+author self-approval review. When independent review is unavailable, `BunsDev`
+uses the explicit PR-only bypass for an admin merge only after exact-head
+checks succeed and conversations are resolved; this is not self-approval.
 
 [PR #247](https://github.com/OpenCoven/psyche-build/pull/247) also closed the
 desktop Git-log command-execution path by routing log inspection through the
@@ -109,9 +109,11 @@ policy evidence, first apply, and zero-operation run in the owning issues.
 Preserve the deployed single-writer lease, protected `main`-only environments,
 canonical target mapping, deterministic drift validation, and bounded GraphQL
 behavior. The #31 evidence records administrator enforcement, the single named
-`BunsDev` owner bypass, the absence of team, app, or additional-user bypass
-actors, and direct-push rejection proof; it does not claim a self-approval
-review.
+PR-only owner bypass, `BunsDev`, the absence of team, app, or additional-user
+bypass actors, and direct-push rejection proof. Direct pushes remain
+platform-blocked for `BunsDev`; all other actors require approval, and the
+owner path is an explicit PR-only bypass/admin merge after exact-head checks
+and resolved conversations, never a self-approval claim.
 
 **Exit state:** roadmap, support claims, branch policy, Beads, GitHub mirrors,
 and live PR disposition agree on what is delivered, active, blocked, and
