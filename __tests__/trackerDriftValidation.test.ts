@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -140,5 +141,34 @@ describe('tracker drift validation', () => {
       [issue({ state: 'open', labels: ['priority:P0'], body: body('in_progress', 0) })],
       canonicalTargets,
     )).toThrow(/priority P0 does not match gh-200 priority P1/i);
+  });
+
+  it('runs the documented offline command without network or Beads bootstrap', () => {
+    const result = spawnSync(process.execPath, [
+      'scripts/validate-beads-tracker.mjs',
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+      '--issues-file',
+      '__tests__/fixtures/beads-project-sync/tracker-issues.json',
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GH_TOKEN: 'must-not-be-used',
+        GITHUB_TOKEN: 'must-not-be-used',
+        BEADS_PROJECT_TOKEN: 'must-not-be-used',
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: 1,
+      result: 'pass',
+      sourceCount: 2,
+      managedMirrorCount: 2,
+      canonicalOutcomeCount: 1,
+      findingCount: 0,
+    });
   });
 });
