@@ -1066,8 +1066,8 @@ final class ConnectionManagerTests: XCTestCase {
         let first = Task { await manager.connect(using: firstInvite) }
         await transport.waitUntilFirstConnectSuspends()
         let second = Task { await manager.connect(using: latestInvite) }
-        await transport.releaseFirstConnect()
         try await waitForHello(on: fake)
+        await transport.releaseFirstConnect()
 
         let hellos = await fake.sentMessages.compactMap { message -> HelloPayload? in
             guard case let .legacy(.hello(payload)) = message else { return nil }
@@ -1102,8 +1102,8 @@ final class ConnectionManagerTests: XCTestCase {
         let first = Task { await manager.connectAndAwaitOutcome(using: firstInvite) }
         await transport.waitUntilFirstConnectSuspends()
         let second = Task { await manager.connectAndAwaitOutcome(using: secondInvite) }
-        await transport.releaseFirstConnect()
         try await waitForHello(on: fake)
+        await transport.releaseFirstConnect()
         await fake.emit(.legacy(.welcome(makeWelcome())))
         await fake.emit(.legacy(.authAccepted(AuthAcceptedPayload(token: "durable-token"))))
 
