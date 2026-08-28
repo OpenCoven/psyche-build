@@ -1067,7 +1067,6 @@ final class ConnectionManagerTests: XCTestCase {
         await transport.waitUntilFirstConnectSuspends()
         let second = Task { await manager.connect(using: latestInvite) }
         await transport.releaseFirstConnect()
-        _ = await second.value
         try await waitForHello(on: fake)
 
         let hellos = await fake.sentMessages.compactMap { message -> HelloPayload? in
@@ -1080,6 +1079,8 @@ final class ConnectionManagerTests: XCTestCase {
         let credential = try await credentialStore.credential(for: endpoint)
         XCTAssertEqual(disconnectCount, 1)
         XCTAssertNil(credential)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        _ = await second.value
         _ = await first.value
     }
 
