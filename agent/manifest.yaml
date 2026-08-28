@@ -1,0 +1,133 @@
+schema_version: opencoven.dev/agent-repository/v1
+repository: OpenCoven/psyche-build
+lifecycle: active
+risk_class: R4
+
+role:
+  class: product-client
+  name: Psyche Build coding cockpit
+  owns:
+    - user-facing coding cockpit behavior
+    - product-local project, pane, terminal, tmux, worktree, and branch composition
+    - desktop, browser, TUI, and iOS client presentation
+    - adapters for optional agent and capability providers
+  excludes:
+    - canonical Familiar, PersonBinding, Task, Lane, Run, Thread, Action, Artifact, and Receipt identity
+    - canonical Psyche lease, approval, verdict, recovery, and compatibility semantics
+    - Coven daemon process, PTY, project-boundary, and authoritative runtime-event ownership
+  protocol_consumer:
+    target: OpenCoven/psyche
+    current_status: compatibility canary planned in issue 253
+    conformance_claim: false
+
+trackers:
+  github:
+    owns: public outcomes, accountable ownership, acceptance gates, and externally legible status
+    runtime_identity: false
+  beads:
+    owns: internal implementation tasks and dependency ordering
+    authoritative_for_generated_mirrors: true
+    runtime_identity: false
+  pull_requests:
+    owns: reviewable implementation slices and exact-head proof
+    complete_user_path_evidence_by_default: false
+
+canonical_documents:
+  - docs/POST-RELEASE-EXECUTION.md
+  - docs/ROADMAP.md
+  - docs/SUPPORT-MATRIX.md
+  - docs/CONTROL-PLANE.md
+  - docs/AGENT-SURFACE-CONTROL.md
+  - docs/BRIDGE-SECURITY.md
+  - docs/RELEASE-ACCEPTANCE.md
+  - CONTRIBUTING.md
+  - .beads/README.md
+
+toolchain:
+  node: ">=20.10.0"
+  pnpm: "10.34.5"
+  git: ">=2.20.0"
+  tmux: ">=3.0.0"
+  rust: "1.95.0"
+
+entrypoints:
+  bootstrap: bash ./scripts/agent-bootstrap
+  fast_check: bash ./scripts/agent-check fast
+  full_check: bash ./scripts/agent-check full
+  ios_check:
+    command: PSYCHE_AGENT_CHECK_IOS=1 bash ./scripts/agent-check full
+    default: not_asserted
+    requirements:
+      - macOS
+      - Xcode 26.2 build 17C52
+      - iOS 26.2 iPhone 16 Pro simulator
+      - XcodeGen
+
+protected_paths:
+  - path: src/control/**
+    risk: R3
+    evidence: authority, scope, denial, idempotency, receipt, revocation, and recovery tests
+  - path: src/services/bridge/**
+    risk: R3
+    evidence: authentication, transport, compatibility, and failure-boundary tests
+  - path: protocol-fixtures/**
+    risk: R4
+    evidence: schema ownership, generated parity, compatibility, and downgrade tests
+  - path: native/desktop/psyche-build-tauri/src-tauri/**
+    risk: R3
+    evidence: focused Rust tests, format/check, platform behavior, and rollback
+  - path: native/ios/**
+    risk: R3
+    evidence: generated-project parity, Core/app/UI tests, and explicit physical-device gaps
+  - path: .github/workflows/**
+    risk: R4
+    evidence: workflow contract tests, exact-head protected run, least privilege, and rollback
+  - path: .github/actions/**
+    risk: R4
+    evidence: pinned dependencies, least privilege, and workflow contract tests
+  - path: scripts/release*.mjs
+    risk: R4
+    evidence: release contract tests and immutable artifact provenance
+  - path: scripts/app-store-connect.mjs
+    risk: R4
+    evidence: credential-boundary review and distribution acceptance
+  - path: .beads/**
+    risk: R4
+    evidence: sole writer or migrator, sanitized source-first reconciliation, and drift report
+  - path: scripts/beads-project-sync/**
+    risk: R4
+    evidence: lease fencing, bounded safe output, dry-run, and managed-ownership tests
+
+generated_paths:
+  - path: src/utils/generated-agents-doc.ts
+    generator: pnpm generate:hooks-docs
+    direct_edit: false
+  - path: native/desktop/psyche-build-tauri/web/*.bundle.js
+    generator: pnpm --dir native/desktop/psyche-build-tauri build:web
+    direct_edit: false
+  - path: native/ios/Psyche.xcodeproj/**
+    generator: pnpm ios:project:generate
+    verifier: pnpm ios:project:check
+    direct_edit: false
+  - path: native/ios/PsycheApp/Resources/Info.plist
+    generator: pnpm ios:project:generate
+    verifier: pnpm ios:project:check
+    direct_edit: false
+  - path: dist/**
+    generator: pnpm build
+    direct_edit: false
+
+contracts:
+  current:
+    - product-local cockpit contracts documented in this repository
+    - public GitHub outcomes with Beads as the source for generated mirrors
+    - project-scoped authority, approval, receipt, revocation, persistence, and recovery boundaries
+  planned:
+    - immutable released Psyche consumer profile
+    - positive and negative compatibility canary
+    - incremental identity-preserving adapters behind current product interfaces
+  forbidden_inference:
+    - source presence proves support
+    - simulator or hosted compilation proves physical availability
+    - UI, tmux, process, path, provider session, Bead, branch, or issue identity proves protocol authority
+    - unit-test count alone proves a complete user path
