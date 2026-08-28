@@ -30,6 +30,9 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  *     | 'duplicate_bead_marker'
  *     | 'empty_bead_marker'
  *     | 'malformed_bead_marker'
+ *     | 'duplicate_render_hash_marker'
+ *     | 'empty_render_hash_marker'
+ *     | 'malformed_render_hash_marker'
  *   )[],
  * }} DriftManagedIssue
  */
@@ -51,7 +54,10 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  *     | 'canonical_priority_mismatch'
  *     | 'duplicate_bead_marker'
  *     | 'empty_bead_marker'
- *     | 'malformed_bead_marker',
+ *     | 'malformed_bead_marker'
+ *     | 'duplicate_render_hash_marker'
+ *     | 'empty_render_hash_marker'
+ *     | 'malformed_render_hash_marker',
  *   beadId?: string,
  *   issueNumber?: number,
  *   sourceStatus?: string,
@@ -132,6 +138,22 @@ function canonicalIssueNumber(bead) {
   }
 }
 
+/** @param {DriftManagedIssue} issue */
+function hasBeadMarkerFinding(issue) {
+  return (issue.markerFindingKinds ?? []).some((kind) =>
+    kind === 'duplicate_bead_marker'
+    || kind === 'empty_bead_marker'
+    || kind === 'malformed_bead_marker');
+}
+
+/** @param {DriftManagedIssue} issue */
+function hasRenderHashMarkerFinding(issue) {
+  return (issue.markerFindingKinds ?? []).some((kind) =>
+    kind === 'duplicate_render_hash_marker'
+    || kind === 'empty_render_hash_marker'
+    || kind === 'malformed_render_hash_marker');
+}
+
 /**
  * Compare authoritative Beads state with the normalized public managed-issue
  * projection. This function is deliberately pure: it neither queries nor
@@ -197,7 +219,7 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
         issueNumber: issue.number,
       });
     }
-    if (issue.beadId == null || (issue.markerFindingKinds?.length ?? 0) > 0) {
+    if (issue.beadId == null || hasBeadMarkerFinding(issue)) {
       continue;
     }
     const existing = mirrorsByBeadId.get(issue.beadId);
@@ -268,7 +290,10 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
       });
     }
 
-    if (issue.renderHash == null || !issue.renderHash.trim()) {
+    if (
+      (issue.renderHash == null || !issue.renderHash.trim())
+      && !hasRenderHashMarkerFinding(issue)
+    ) {
       findings.push({
         kind: 'missing_render_hash',
         beadId: bead.id,
@@ -280,7 +305,7 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
   for (const issue of managedIssues) {
     if (
       issue.beadId != null
-      && (issue.markerFindingKinds?.length ?? 0) === 0
+      && !hasBeadMarkerFinding(issue)
       && !sourceById.has(issue.beadId)
     ) {
       findings.push({

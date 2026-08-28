@@ -341,6 +341,81 @@ describe('tracker drift validation', () => {
     expect(stderr.value()).not.toContain(privateBody);
   });
 
+  it('reports malformed render-hash markers without aborting the remaining inventory', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const privateBody = 'PRIVATE-RENDER-HASH-SENTINEL';
+    const rawIssues = [
+      rawIssue('tracker-open', 301, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-open -->',
+          '',
+          '## Source metadata',
+          '- Source status: open',
+          '- Source priority: P1',
+          '',
+          `<!-- psyche-bead-sync:v1 render-hash=${'c'.repeat(64)} -->`,
+          `<!-- psyche-bead-sync:v1 render-hash=${'d'.repeat(64)} -->`,
+          privateBody,
+        ].join('\n'),
+      }),
+      rawIssue('tracker-empty', 303, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-empty -->',
+          '<!-- psyche-bead-sync:v1 render-hash= -->',
+          privateBody,
+        ].join('\n'),
+      }),
+      rawIssue('tracker-malformed', 304, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-malformed -->',
+          '<!-- psyche-bead-sync:v1 render-hash=not-a-sha -->',
+          privateBody,
+        ].join('\n'),
+      }),
+      rawIssue('tracker-closed', 302, {
+        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        labels: [{ name: 'bead' }, { name: 'priority:P0' }],
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    const report = JSON.parse(stdout.value());
+    expect(report.managedMirrorCount).toBe(4);
+    expect(report.findings).toEqual([
+      {
+        kind: 'state_mismatch',
+        beadId: 'tracker-closed',
+        issueNumber: 302,
+        sourceStatus: 'closed',
+        mirrorState: 'open',
+      },
+      { kind: 'empty_render_hash_marker', beadId: 'tracker-empty', issueNumber: 303 },
+      {
+        kind: 'orphan_mirror',
+        beadId: 'tracker-empty',
+        issueNumber: 303,
+        mirrorState: 'open',
+      },
+      { kind: 'malformed_render_hash_marker', beadId: 'tracker-malformed', issueNumber: 304 },
+      {
+        kind: 'orphan_mirror',
+        beadId: 'tracker-malformed',
+        issueNumber: 304,
+        mirrorState: 'open',
+      },
+      { kind: 'duplicate_render_hash_marker', beadId: 'tracker-open', issueNumber: 301 },
+    ]);
+    expect(stdout.value()).not.toContain(privateBody);
+    expect(stderr.value()).not.toContain(privateBody);
+  });
+
   it('matches trusted GitHub authors case-insensitively', async () => {
     const stdout = outputBuffer();
     const stderr = outputBuffer();

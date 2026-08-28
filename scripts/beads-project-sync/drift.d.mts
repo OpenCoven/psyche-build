@@ -21,6 +21,9 @@ export interface DriftManagedIssue {
     | 'duplicate_bead_marker'
     | 'empty_bead_marker'
     | 'malformed_bead_marker'
+    | 'duplicate_render_hash_marker'
+    | 'empty_render_hash_marker'
+    | 'malformed_render_hash_marker'
   )[];
 }
 
@@ -39,7 +42,10 @@ export type TrackerDriftFindingKind =
   | 'canonical_priority_mismatch'
   | 'duplicate_bead_marker'
   | 'empty_bead_marker'
-  | 'malformed_bead_marker';
+  | 'malformed_bead_marker'
+  | 'duplicate_render_hash_marker'
+  | 'empty_render_hash_marker'
+  | 'malformed_render_hash_marker';
 
 export interface TrackerDriftFinding {
   kind: TrackerDriftFindingKind;

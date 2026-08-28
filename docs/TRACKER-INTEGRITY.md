@@ -52,6 +52,7 @@ The validator composes two contracts rather than replacing the synchronizer:
    - orphan mirrors;
    - duplicate managed Bead IDs;
    - duplicate, empty, or malformed managed Bead markers;
+   - duplicate, empty, or malformed render-hash markers;
    - open/closed state disagreement;
    - `priority:Pn` label disagreement;
    - generated `Source status` disagreement;

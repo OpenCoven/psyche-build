@@ -86,10 +86,23 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors) {
   }
 
   const renderMatches = [...body.matchAll(new RegExp(
-    `<!--\\s*${marker}\\s+render-hash=([a-f0-9]{64})\\s*-->`,
+    `<!--\\s*${marker}\\s+render-hash(?=\\s|=|-->)([^>]*)-->`,
     'giu',
   ))];
-  if (renderMatches.length > 1) fail(`Issue #${number} contains duplicate render hashes`);
+  const renderValues = renderMatches.map((match) => {
+    const metadata = match[1] ?? '';
+    return metadata.match(/^=([a-f0-9]{64})\s*$/iu)?.[1] ?? null;
+  });
+  if (renderMatches.length > 1) markerFindingKinds.push('duplicate_render_hash_marker');
+  if (renderMatches.some((match) => /^=\s*$/u.test(match[1] ?? ''))) {
+    markerFindingKinds.push('empty_render_hash_marker');
+  }
+  if (renderMatches.some((match) => {
+    const metadata = match[1] ?? '';
+    return !/^=\s*$/u.test(metadata) && !/^=[a-f0-9]{64}\s*$/iu.test(metadata);
+  })) {
+    markerFindingKinds.push('malformed_render_hash_marker');
+  }
 
   const labels = Array.isArray(rawIssue.labels)
     ? rawIssue.labels.map((label) => {
@@ -105,7 +118,7 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors) {
     state,
     labels,
     body,
-    renderHash: renderMatches[0]?.[1] ?? null,
+    renderHash: renderValues.find((value) => value != null) ?? null,
     markerFindingKinds,
   };
 }
