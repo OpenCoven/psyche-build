@@ -18,12 +18,13 @@ export interface CanonicalOutcomeBead {
 export interface CanonicalOutcomeValidation {
   mappedActiveCount: number;
   unmappedActiveBeadIds: readonly string[];
+  malformedTargetBeadIds: readonly string[];
   unknownTargetBeadIds: readonly string[];
   priorityMismatchBeadIds: readonly string[];
 }
 
 export const CANONICAL_OUTCOME_REF_PATTERN: RegExp;
-export const CANONICAL_OUTCOME_DIAGNOSTIC_ID_LIMIT: 50;
+export const CANONICAL_OUTCOME_DIAGNOSTIC_ID_LIMIT: 100;
 
 export function normalizeCanonicalOutcomeRef(
   value: unknown,
@@ -40,8 +41,13 @@ export function normalizeCanonicalOutcomeRef(
 export function canonicalOutcomeIssueNumber(reference: string): number;
 
 export class CanonicalOutcomeValidationError extends Error {
-  constructor(message: string, diagnostics: CanonicalOutcomeValidation);
+  constructor(
+    message: string,
+    diagnostics: CanonicalOutcomeValidation,
+    failureCount: number,
+  );
   readonly diagnostics: CanonicalOutcomeValidation;
+  readonly failureCount: number;
 }
 
 export function validateCanonicalOutcomes(
