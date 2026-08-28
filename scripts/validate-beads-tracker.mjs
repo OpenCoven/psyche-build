@@ -2,6 +2,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { readSyncConfig } from './beads-project-sync/config.mjs';
 import { validateTrackerDrift } from './beads-project-sync/drift.mjs';
@@ -37,12 +38,17 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
-function normalizeIssue(rawIssue, config) {
-  if (typeof rawIssue !== 'object' || rawIssue == null || Array.isArray(rawIssue)) return null;
-  if ('pull_request' in rawIssue && rawIssue.pull_request != null) return null;
-  const author = typeof rawIssue.user === 'object' && rawIssue.user != null
-    ? String(rawIssue.user.login ?? '').toLowerCase()
-    : '';
+function objectRecord(value) {
+  return typeof value === 'object' && value != null && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function normalizeIssue(rawValue, config) {
+  const rawIssue = objectRecord(rawValue);
+  if (Object.keys(rawIssue).length === 0 || rawIssue.pull_request != null) return null;
+  const rawUser = objectRecord(rawIssue.user);
+  const author = typeof rawUser.login === 'string' ? rawUser.login.toLowerCase() : '';
   if (!config.trustedIssueAuthors.includes(author)) return null;
   const number = rawIssue.number;
   const body = typeof rawIssue.body === 'string' ? rawIssue.body : '';
@@ -55,7 +61,9 @@ function normalizeIssue(rawIssue, config) {
   ))];
   if (beadMatches.length === 0) return null;
   if (beadMatches.length !== 1) fail(`Issue #${number} contains duplicate managed Bead markers`);
-  const beadId = beadMatches[0][1];
+  const beadId = beadMatches[0]?.[1];
+  if (!beadId) fail(`Issue #${number} contains an empty managed Bead id`);
+
   const renderMatches = [...body.matchAll(new RegExp(
     `<!--\\s*${marker}\\s+render-hash=([a-f0-9]{64})\\s*-->`,
     'giu',
@@ -63,13 +71,11 @@ function normalizeIssue(rawIssue, config) {
   if (renderMatches.length > 1) fail(`Issue #${number} contains duplicate render hashes`);
 
   const labels = Array.isArray(rawIssue.labels)
-    ? rawIssue.labels.map((label) => (
-      typeof label === 'string'
-        ? label
-        : typeof label === 'object' && label != null
-          ? String(label.name ?? '')
-          : ''
-    )).filter(Boolean)
+    ? rawIssue.labels.map((label) => {
+      if (typeof label === 'string') return label;
+      const record = objectRecord(label);
+      return typeof record.name === 'string' ? record.name : '';
+    }).filter(Boolean)
     : [];
 
   return {
@@ -82,14 +88,14 @@ function normalizeIssue(rawIssue, config) {
   };
 }
 
-async function loadPublicGitHubIssues(config) {
+async function loadPublicGitHubIssues(config, fetchImpl = fetch) {
   const issues = [];
   for (let page = 1; page <= MAX_GITHUB_ISSUE_PAGES; page += 1) {
     const url = new URL(`https://api.github.com/repos/${config.owner}/${config.repository}/issues`);
     url.searchParams.set('state', 'all');
     url.searchParams.set('per_page', String(GITHUB_ISSUE_PAGE_SIZE));
     url.searchParams.set('page', String(page));
-    const response = await fetch(url, {
+    const response = await fetchImpl(url, {
       headers: {
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
@@ -108,44 +114,54 @@ async function loadPublicGitHubIssues(config) {
   fail(`Public GitHub issue inventory exceeded ${MAX_GITHUB_ISSUE_PAGES} pages`);
 }
 
-async function loadIssueInventory(options, config) {
+async function loadIssueInventory(options, config, dependencies) {
   if (options.issuesFile) {
-    const parsed = JSON.parse(await readFile(resolve(options.issuesFile), 'utf8'));
+    const parsed = JSON.parse(await readFile(resolve(dependencies.cwd, options.issuesFile), 'utf8'));
     if (!Array.isArray(parsed)) fail('--issues-file must contain a JSON array of GitHub issue objects');
     return parsed;
   }
-  return loadPublicGitHubIssues(config);
+  return loadPublicGitHubIssues(config, dependencies.fetchImpl);
 }
 
-export async function runTrackerDriftCheck(argv, dependencies = {}) {
+export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
   const options = parseOptions(argv);
-  const cwd = dependencies.cwd ?? process.cwd();
-  const stdout = dependencies.stdout ?? process.stdout;
-  const stderr = dependencies.stderr ?? process.stderr;
+  const dependencies = {
+    cwd: suppliedDependencies.cwd ?? process.cwd(),
+    stdout: suppliedDependencies.stdout ?? process.stdout,
+    stderr: suppliedDependencies.stderr ?? process.stderr,
+    configPath: suppliedDependencies.configPath,
+    rawIssues: suppliedDependencies.rawIssues,
+    fetchImpl: suppliedDependencies.fetchImpl ?? fetch,
+  };
   try {
     const config = await readSyncConfig(
-      dependencies.configPath ?? resolve(cwd, '.github/beads-project-sync.json'),
+      dependencies.configPath ?? resolve(dependencies.cwd, '.github/beads-project-sync.json'),
     );
     const source = await loadBeadsSource({
-      cwd,
+      cwd: dependencies.cwd,
       mode: 'dry-run',
-      inventoryFile: options.inventoryFile == null ? null : resolve(cwd, options.inventoryFile),
+      inventoryFile: options.inventoryFile == null
+        ? null
+        : resolve(dependencies.cwd, options.inventoryFile),
     });
     const beads = parseBeadExport(source, { assigneeMap: config.assigneeMap });
-    const rawIssues = dependencies.rawIssues ?? await loadIssueInventory(options, config);
+    const rawIssues = dependencies.rawIssues ?? await loadIssueInventory(options, config, dependencies);
     const managedIssues = rawIssues
       .map((issue) => normalizeIssue(issue, config))
       .filter((issue) => issue != null);
     const report = validateTrackerDrift(beads, managedIssues, config.canonicalTargets);
-    stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    dependencies.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return report.result === 'pass' ? 0 : 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown tracker drift validation failure';
-    stderr.write(`Tracker drift validation failed: ${message.replace(/\s+/gu, ' ').slice(0, 1_000)}\n`);
+    dependencies.stderr.write(
+      `Tracker drift validation failed: ${message.replace(/\s+/gu, ' ').slice(0, 1_000)}\n`,
+    );
     return 2;
   }
 }
 
-if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+const invokedPath = process.argv[1];
+if (invokedPath && import.meta.url === pathToFileURL(resolve(invokedPath)).href) {
   process.exitCode = await runTrackerDriftCheck(process.argv.slice(2));
 }
