@@ -211,6 +211,45 @@ final class AppModelTests: XCTestCase {
         start.cancel()
     }
 
+    func testPendingLaunchInvitePublishesItsHostOnlyAfterAuthentication() async throws {
+        let transport = AppModelFakeTransport()
+        let model = AppModel(composition: MobileAppComposition(
+            transport: transport,
+            pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()),
+            mobileCredentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
+        ))
+        model.receive(url: URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-invite"
+        )!)
+
+        let start = Task { await model.start() }
+        _ = try await transport.waitForHello()
+        XCTAssertNil(model.hostName)
+        await transport.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "studio", serverName: "Studio", protocolVersion: 3, projectName: nil
+        ))))
+        await start.value
+
+        XCTAssertEqual(model.hostName, "studio.example")
+        XCTAssertNil(model.connectionError)
+    }
+
+    func testPendingLaunchInviteRejectionUsesSafeRecovery() async throws {
+        let model = AppModel(composition: MobileAppComposition(
+            transport: AppModelRejectingTransport(),
+            pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()),
+            mobileCredentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
+        ))
+        model.receive(url: URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fstudio.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=one-time-invite"
+        )!)
+
+        await model.start()
+
+        XCTAssertNil(model.hostName)
+        XCTAssertEqual(model.connectionError, "Could not connect. Create a fresh Open on phone invite and try again.")
+    }
+
     func testRejectsAnInvalidDeepLinkWithoutChangingPendingInvite() {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 

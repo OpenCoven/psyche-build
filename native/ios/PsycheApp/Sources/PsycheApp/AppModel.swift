@@ -152,18 +152,15 @@ final class AppModel: ObservableObject {
 
         if let invite = pendingInvite {
             await composition.start(reconnectToStoredHost: false)
-            if await composition.connectionManager.connect(using: invite) {
-                pendingInvite = nil
-            }
+            _ = await connect(using: invite)
         } else {
             await composition.start()
-        }
-
-        // Read the stored identity rather than waiting on a welcome: it is
-        // what auto-connect just used, and it lets Settings and VoiceOver name
-        // the host even when the connection has not come up.
-        if let paired = try? await composition.pairedHostStore.hosts().first {
-            hostName = paired.serverName
+            // Read the stored identity rather than waiting on a welcome: it is
+            // what auto-connect just used, and it lets Settings and VoiceOver name
+            // the host even when the connection has not come up.
+            if let paired = try? await composition.pairedHostStore.hosts().first {
+                hostName = paired.serverName
+            }
         }
 
         let state = await composition.connectionManager.state

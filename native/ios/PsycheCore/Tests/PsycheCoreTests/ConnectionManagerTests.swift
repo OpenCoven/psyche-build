@@ -1012,6 +1012,34 @@ final class ConnectionManagerTests: XCTestCase {
         _ = await first.value
     }
 
+    func testSupersededInviteOutcomeCannotAcceptNewerInviteConnection() async throws {
+        let fake = FakeTransport()
+        let transport = AllocatedConnectSuspensionTransport(base: fake)
+        let manager = makeManager(
+            transport: transport,
+            pairedHostStore: PairedHostStore(secureStore: InMemorySecureStore()),
+            credentialStore: MobileCredentialStore(secureStore: InMemorySecureStore())
+        )
+        let firstInvite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Ffirst.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=first-invite"
+        )!))
+        let secondInvite = try XCTUnwrap(PsycheInvite.parse(URL(string:
+            "psyche://connect?host=wss%3A%2F%2Fsecond.example%3A4242&fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&psyche_invite=second-invite"
+        )!))
+
+        let first = Task { await manager.connectAndAwaitOutcome(using: firstInvite) }
+        await transport.waitUntilFirstConnectSuspends()
+        let second = Task { await manager.connectAndAwaitOutcome(using: secondInvite) }
+        await transport.releaseFirstConnect()
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+        XCTAssertFalse(firstOutcome)
+        XCTAssertTrue(secondOutcome)
+    }
+
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(

@@ -130,6 +130,10 @@ public actor ConnectionManager {
     private var activeConnectAttempt: UUID?
     private var connectExecutionOwner: UUID?
     private var pendingInvite: PsycheInvite?
+    private var pendingInviteOutcomeID: UUID?
+    private var activeInviteOutcomeID: UUID?
+    private var inviteOutcomeWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+    private var completedInviteOutcomes: [UUID: Bool] = [:]
     private var activeTeardown: UUID?
     private var teardownWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var lifecycleIntentEpoch: UInt64 = 0
@@ -195,6 +199,9 @@ public actor ConnectionManager {
         for continuation in teardownWaiters.values {
             continuation.resume()
         }
+        for continuation in inviteOutcomeWaiters.values {
+            continuation.resume(returning: false)
+        }
     }
 
     public func connectToStoredHost() async {
@@ -255,9 +262,37 @@ public actor ConnectionManager {
     /// verified.
     @discardableResult
     public func connect(using invite: PsycheInvite) async -> Bool {
+        await startInviteConnection(invite, outcomeID: nil)
+    }
+
+    /// Starts an invite redemption and waits for this invite's own terminal
+    /// outcome. A newer invite resolves an older waiter as unsuccessful rather
+    /// than allowing it to observe the newer connection's state.
+    public func connectAndAwaitOutcome(using invite: PsycheInvite) async -> Bool {
+        let outcomeID = UUID()
+        _ = await startInviteConnection(invite, outcomeID: outcomeID)
+        return await withTaskCancellationHandler {
+            await waitForInviteOutcome(outcomeID)
+        } onCancel: {
+            Task { [weak self] in
+                await self?.cancelInviteOutcome(outcomeID)
+            }
+        }
+    }
+
+    @discardableResult
+    private func startInviteConnection(
+        _ invite: PsycheInvite,
+        outcomeID: UUID?
+    ) async -> Bool {
+        // A retired connection's deferred scheduler may already have started
+        // this exact invite while its caller was waiting for teardown.
+        if let outcomeID, activeInviteOutcomeID == outcomeID { return true }
         lifecycleIntentEpoch &+= 1
         let intentEpoch = lifecycleIntentEpoch
+        completeSupersededInviteOutcomes(except: outcomeID)
         pendingInvite = invite
+        pendingInviteOutcomeID = outcomeID
         if let generation = activeGeneration {
             await tearDownActiveConnection(generation: generation, finalState: .disconnected)
         }
@@ -266,27 +301,12 @@ public actor ConnectionManager {
         return true
     }
 
-    /// Starts an invite redemption, then reports its terminal authentication
-    /// outcome. UI uses this; the legacy enqueue API above stays nonblocking
-    /// so a newer invite can supersede an in-flight connection.
-    public func connectAndAwaitOutcome(using invite: PsycheInvite) async -> Bool {
-        guard await connect(using: invite) else { return false }
-        while true {
-            switch state {
-            case .connected:
-                return true
-            case .failed, .disconnected:
-                return false
-            case .connecting, .authenticating, .disconnecting:
-                try? await Task.sleep(for: .milliseconds(10))
-            }
-        }
-    }
-
     private func startPendingInviteIfIdle(intentEpoch: UInt64) async {
         guard connectExecutionOwner == nil,
               let invite = pendingInvite else { return }
+        let outcomeID = pendingInviteOutcomeID
         pendingInvite = nil
+        pendingInviteOutcomeID = nil
         do {
             let hosts = try await pairedHostStore.hosts()
             let endpoint = HostEndpoint(
@@ -299,6 +319,7 @@ public actor ConnectionManager {
                 throw ConnectionManagerError.untrustedInviteEndpoint
             }
             guard lifecycleIntentEpoch == intentEpoch else { return }
+            activeInviteOutcomeID = outcomeID
             await connect(
                 using: ConnectionConfiguration(
                     endpoint: endpoint,
@@ -309,6 +330,7 @@ public actor ConnectionManager {
             )
         } catch {
             guard lifecycleIntentEpoch == intentEpoch else { return }
+            completeInviteOutcome(id: outcomeID, with: false)
             transition(to: .failed(error.localizedDescription))
         }
     }
@@ -1210,11 +1232,66 @@ public actor ConnectionManager {
     private func transition(to newState: ConnectionState) {
         state = newState
         stateHistory.append(newState)
+        switch newState {
+        case .connected:
+            completeInviteOutcome(id: activeInviteOutcomeID, with: true)
+        case .failed, .disconnected:
+            completeInviteOutcome(id: activeInviteOutcomeID, with: false)
+        case .connecting, .authenticating, .disconnecting:
+            break
+        }
         let completedWaiters = stateWaiters.filter { newState == $0.value.state }
         completedWaiters.forEach { waiterID, waiter in
             stateWaiters.removeValue(forKey: waiterID)
             waiter.continuation.resume()
         }
+    }
+
+    private func completeSupersededInviteOutcomes(except outcomeID: UUID?) {
+        let outstandingIDs = Set(inviteOutcomeWaiters.keys)
+            .union(completedInviteOutcomes.keys)
+        for id in outstandingIDs where id != outcomeID {
+            completeInviteOutcome(id: id, with: false)
+        }
+        if let activeInviteOutcomeID, activeInviteOutcomeID != outcomeID {
+            completeInviteOutcome(id: activeInviteOutcomeID, with: false)
+        }
+        if let pendingInviteOutcomeID, pendingInviteOutcomeID != outcomeID {
+            completeInviteOutcome(id: pendingInviteOutcomeID, with: false)
+        }
+    }
+
+    private func completeInviteOutcome(id: UUID?, with result: Bool) {
+        guard let id else { return }
+        if activeInviteOutcomeID == id {
+            activeInviteOutcomeID = nil
+        }
+        if pendingInviteOutcomeID == id {
+            pendingInviteOutcomeID = nil
+        }
+        if let continuation = inviteOutcomeWaiters.removeValue(forKey: id) {
+            continuation.resume(returning: result)
+        } else {
+            completedInviteOutcomes[id] = result
+        }
+    }
+
+    private func waitForInviteOutcome(_ id: UUID) async -> Bool {
+        if let result = completedInviteOutcomes.removeValue(forKey: id) {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            if let result = completedInviteOutcomes.removeValue(forKey: id) {
+                continuation.resume(returning: result)
+            } else {
+                inviteOutcomeWaiters[id] = continuation
+            }
+        }
+    }
+
+    private func cancelInviteOutcome(_ id: UUID) {
+        completedInviteOutcomes.removeValue(forKey: id)
+        completeInviteOutcome(id: id, with: false)
     }
 
     private struct WelcomeIdentity {
