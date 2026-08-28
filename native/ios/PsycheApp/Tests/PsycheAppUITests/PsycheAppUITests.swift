@@ -68,8 +68,8 @@ final class PsycheAppUITests: XCTestCase {
     /// that needs you says so rather than only looking different.
     func testAttentionPaneIsLabelledAsNeedingYou() throws {
         let app = launchApp()
+        XCTAssertTrue(element("now-pane-web-home", in: app).waitForExistence(timeout: 30))
         let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
 
         let label = paneRow.label
         XCTAssertTrue(label.contains("homepage polish"), label)
@@ -358,8 +358,8 @@ final class PsycheAppUITests: XCTestCase {
         let app = launchApp()
         try requireCompactWidth(in: app)
 
+        XCTAssertTrue(element("now-pane-web-home", in: app).waitForExistence(timeout: 30))
         let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
         paneRow.tap()
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
 
@@ -595,8 +595,8 @@ final class PsycheAppUITests: XCTestCase {
         let app = launchApp()
         try requireRegularWidth(in: app)
 
+        XCTAssertTrue(element("now-pane-web-home", in: app).waitForExistence(timeout: 30))
         let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
         paneRow.tap()
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
 
@@ -649,10 +649,14 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     /// Reaches the terminal workspace from whichever shell is on screen.
+    ///
+    /// The wait uses the fast descendants query rather than the cell-preferring
+    /// `row()` helper. Calling `row()` first evaluates `app.cells.matching(…).exists`
+    /// synchronously, which can block for 10+ seconds on a loaded simulator and
+    /// consume the entire timeout budget before the wait even begins.
     private func openWebHomePane(in app: XCUIApplication) {
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
-        paneRow.tap()
+        XCTAssertTrue(element("now-pane-web-home", in: app).waitForExistence(timeout: 30))
+        row("now-pane-web-home", in: app).tap()
     }
 
     /// Always launches the fixture root.
