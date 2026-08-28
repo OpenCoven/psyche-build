@@ -1,0 +1,87 @@
+schema_version: opencoven.agent-repo/v1
+
+repository:
+  name: psyche-build
+  role: product-coding-cockpit
+  lifecycle: active
+  canonical_for:
+    - local-coding-cockpit
+    - worktree-and-tmux-product-orchestration
+    - psyche-build-product-ui
+    - bounded-provider-adapters
+  not_canonical_for:
+    - familiar-identity
+    - protected-surface-authorization
+    - psyche-orchestration-protocol
+    - coven-daemon-authority
+    - runtime-persistence
+  owners:
+    - github: BunsDev
+
+risk:
+  class: R4
+  protected_paths:
+    - src/control/**
+    - src/services/bridge/**
+    - native/desktop/psyche-build-tauri/src-tauri/**
+    - native/ios/**
+    - .github/workflows/release.yml
+    - .github/workflows/beads-project-sync.yml
+    - scripts/app-store-connect.mjs
+    - scripts/build-macos-app.mjs
+    - scripts/beads-project-sync/**
+    - .beads/**
+  generated_paths:
+    - src/utils/generated-agents-doc.ts
+    - protocol-fixtures/**
+    - native/ios/Psyche.xcodeproj/**
+    - native/ios/PsycheApp/Resources/Info.plist
+    - native/desktop/psyche-build-tauri/web/*.bundle.js
+  network_policy: deny-by-default-in-tests
+  secrets_policy: forbidden-in-repository
+  external_side_effects:
+    - git-push
+    - github-mutation
+    - beads-mutation
+    - release
+    - publish
+    - notarization
+    - testflight-upload
+    - homebrew-update
+
+agent:
+  entrypoint: AGENTS.md
+  bootstrap: ./scripts/agent-bootstrap
+  verify:
+    fast: ./scripts/agent-check fast
+    full: ./scripts/agent-check full
+  platform_gates:
+    ios: PSYCHE_AGENT_CHECK_IOS=1 ./scripts/agent-check full
+  supported_hosts:
+    - macos
+    - linux
+  required_tools:
+    node: ">=20.10.0"
+    pnpm: "10.34.5"
+    git: ">=2.20.0"
+    tmux: ">=3.0"
+
+planning:
+  authoritative: beads
+  public_mirror: github-project
+  public_mirror_direction: one-way-sanitized
+  managed_state_changes_via: bd
+
+contracts:
+  current:
+    produces:
+      - psyche-build.repository-local-cockpit
+    consumes:
+      - coven.optional-session-provider
+  planned:
+    consumes:
+      - name: psyche.consumer-profile
+        status: not-yet-conformant
+        tracking: https://github.com/OpenCoven/psyche-build/issues/253
+  conformance_claims:
+    psyche: prohibited-until-planned-canary-passes

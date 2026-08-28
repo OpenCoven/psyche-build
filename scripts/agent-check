@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+  printf 'agent-check: %s\n' "$*" >&2
+  exit 1
+}
+
+run() {
+  printf '\n==> %s\n' "$*"
+  "$@"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+mode="${1:-}"
+case "$mode" in
+  fast|full) ;;
+  *) fail "usage: ./scripts/agent-check fast|full" ;;
+esac
+[[ "$#" -eq 1 ]] || fail "usage: ./scripts/agent-check fast|full"
+
+require_command git
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
+  fail "run this command from a Psyche Build Git checkout"
+cd "$repo_root"
+
+require_command node
+require_command pnpm
+require_command tmux
+
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *) fail "supported verification hosts are macOS and Linux" ;;
+esac
+
+expected_pnpm="$(
+  node -p "String(require('./package.json').packageManager).replace(/^pnpm@/, '')"
+)"
+actual_pnpm="$(pnpm --version)"
+[[ "$actual_pnpm" == "$expected_pnpm" ]] ||
+  fail "pnpm $expected_pnpm is required; found $actual_pnpm"
+
+[[ -d node_modules ]] ||
+  fail "dependencies are missing; run ./scripts/agent-bootstrap first"
+
+before="$(mktemp)"
+after="$(mktemp)"
+ios_derived=""
+cleanup() {
+  rm -f "$before" "$after"
+  if [[ -n "$ios_derived" ]]; then
+    rm -rf "$ios_derived"
+  fi
+}
+trap cleanup EXIT
+git status --porcelain=v1 --untracked-files=all > "$before"
+
+if [[ "$mode" == "fast" ]]; then
+  run pnpm typecheck
+  run pnpm vitest --run __tests__/agentRepositoryContract.test.ts
+else
+  require_command cargo
+
+  run pnpm docs:focus:check
+  run pnpm --dir docs build
+  run pnpm typecheck
+  run pnpm test
+  run pnpm build
+  run pnpm smoke
+  run pnpm smoke:pack
+  run pnpm --dir native/desktop/psyche-build-tauri build:web
+
+  desktop_manifest="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
+  run cargo fmt --manifest-path "$desktop_manifest" --check
+  run cargo test --manifest-path "$desktop_manifest" --locked
+  run cargo check --manifest-path "$desktop_manifest" --locked
+
+  if [[ "${PSYCHE_AGENT_CHECK_IOS:-0}" == "1" ]]; then
+    [[ "$(uname -s)" == "Darwin" ]] ||
+      fail "PSYCHE_AGENT_CHECK_IOS=1 requires macOS; iOS was not validated"
+
+    require_command xcodebuild
+    require_command xcrun
+    require_command xcodegen
+
+    xcode_version="$(mktemp)"
+    xcodebuild -version | tee "$xcode_version"
+    grep -Fx 'Xcode 26.2' "$xcode_version" >/dev/null ||
+      fail "iOS validation requires Xcode 26.2"
+    grep -Fx 'Build version 17C52' "$xcode_version" >/dev/null ||
+      fail "iOS validation requires Xcode build 17C52"
+    rm -f "$xcode_version"
+
+    simulator='platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro'
+    ios_derived="$(mktemp -d)"
+    xcrun simctl list devices available --json |
+      node -e '
+        let input = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", chunk => { input += chunk; });
+        process.stdin.on("end", () => {
+          const devices = JSON.parse(input).devices[
+            "com.apple.CoreSimulator.SimRuntime.iOS-26-2"
+          ] ?? [];
+          if (!devices.some(device =>
+            device.name === "iPhone 16 Pro" && device.isAvailable === true
+          )) {
+            console.error("iOS 26.2 iPhone 16 Pro simulator is unavailable");
+            process.exit(1);
+          }
+        });
+      '
+
+    run pnpm ios:project:check
+    run xcodebuild test \
+      -project native/ios/Psyche.xcodeproj \
+      -scheme PsycheCore \
+      -destination "$simulator" \
+      -derivedDataPath "$ios_derived/core"
+    run xcodebuild build \
+      -project native/ios/Psyche.xcodeproj \
+      -scheme PsycheApp \
+      -destination "$simulator" \
+      -derivedDataPath "$ios_derived/app-build"
+    run xcodebuild test \
+      -project native/ios/Psyche.xcodeproj \
+      -scheme PsycheApp \
+      -destination "$simulator" \
+      -derivedDataPath "$ios_derived/app-test"
+  else
+    printf '\n%s\n' \
+      'SKIP iOS: set PSYCHE_AGENT_CHECK_IOS=1 on a compatible Mac.' \
+      'This explicit platform skip is not iOS validation evidence.'
+  fi
+fi
+
+run git diff --check
+git status --porcelain=v1 --untracked-files=all > "$after"
+
+if ! cmp -s "$before" "$after"; then
+  printf '%s\n' \
+    'agent-check changed repository state; generated or test output must be reconciled:' >&2
+  diff -u "$before" "$after" >&2 || true
+  exit 1
+fi
+
+printf '\nagent-check %s complete.\n' "$mode"

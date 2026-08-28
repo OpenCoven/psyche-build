@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+  printf 'agent-bootstrap: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+version_at_least() {
+  local actual="$1"
+  local minimum="$2"
+  node - "$actual" "$minimum" <<'NODE'
+const [actualInput, minimumInput] = process.argv.slice(2);
+
+function parse(input) {
+  const match = String(input).match(/\d+(?:\.\d+){1,2}/);
+  if (!match) {
+    process.exit(2);
+  }
+  const parts = match[0].split('.').map(Number);
+  while (parts.length < 3) parts.push(0);
+  return parts;
+}
+
+const actual = parse(actualInput);
+const minimum = parse(minimumInput);
+for (let index = 0; index < 3; index += 1) {
+  if (actual[index] > minimum[index]) process.exit(0);
+  if (actual[index] < minimum[index]) process.exit(1);
+}
+process.exit(0);
+NODE
+}
+
+require_command git
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
+  fail "run this command from a Psyche Build Git checkout"
+cd "$repo_root"
+
+require_command node
+require_command pnpm
+require_command tmux
+
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *) fail "supported bootstrap hosts are macOS and Linux" ;;
+esac
+
+node_minimum="$(
+  node -p "String(require('./package.json').engines.node).replace(/^>=/, '')"
+)"
+expected_pnpm="$(
+  node -p "String(require('./package.json').packageManager).replace(/^pnpm@/, '')"
+)"
+
+version_at_least "$(node --version)" "$node_minimum" ||
+  fail "Node.js $node_minimum or newer is required; found $(node --version)"
+
+actual_pnpm="$(pnpm --version)"
+[[ "$actual_pnpm" == "$expected_pnpm" ]] ||
+  fail "pnpm $expected_pnpm is required; found $actual_pnpm. Activate the packageManager pin with Corepack."
+
+version_at_least "$(git --version)" "2.20.0" ||
+  fail "Git 2.20.0 or newer is required; found $(git --version)"
+
+version_at_least "$(tmux -V)" "3.0.0" ||
+  fail "tmux 3.0 or newer is required; found $(tmux -V)"
+
+before="$(mktemp)"
+after="$(mktemp)"
+cleanup() {
+  rm -f "$before" "$after"
+}
+trap cleanup EXIT
+
+git status --porcelain=v1 --untracked-files=all > "$before"
+
+printf 'Installing the lockfile-defined dependency graph with pnpm %s...\n' "$expected_pnpm"
+CI=true pnpm install --frozen-lockfile
+
+git diff --check
+git status --porcelain=v1 --untracked-files=all > "$after"
+
+if ! cmp -s "$before" "$after"; then
+  printf '%s\n' \
+    'agent-bootstrap changed repository state; inspect and restore the checkout:' >&2
+  diff -u "$before" "$after" >&2 || true
+  exit 1
+fi
+
+printf '%s\n' \
+  'agent-bootstrap complete.' \
+  'Next: ./scripts/agent-check fast'
