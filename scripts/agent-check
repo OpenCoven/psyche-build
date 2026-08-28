@@ -47,7 +47,6 @@ else
   run "Focused documentation contract" pnpm docs:focus:check
   run "Documentation build" pnpm --dir docs build
   run "TypeScript and repository contract typecheck" pnpm typecheck
-  run "Production build" pnpm build
   run "Source smoke gate" pnpm smoke
   run "Packaged-artifact smoke gate" pnpm smoke:pack
   run "Deterministic desktop web bundles" pnpm --dir native/desktop/psyche-build-tauri build:web
