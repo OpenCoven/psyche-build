@@ -21,15 +21,15 @@ node scripts/validate-beads-tracker.mjs
 
 Dry-run source loading intentionally never bootstraps or migrates Beads on the caller's behalf. The sole-migrator rule in [`.beads/README.md`](../.beads/README.md) still applies during schema/version migrations.
 
-For deterministic offline/CI fixtures, provide both source inventories explicitly:
+For deterministic offline/CI validation, the repository includes a synthetic source/mirror pair:
 
 ```bash
 node scripts/validate-beads-tracker.mjs \
-  --inventory-file __tests__/fixtures/beads-project-sync/issues.jsonl \
-  --issues-file /path/to/sanitized-public-github-issues.json
+  --inventory-file __tests__/fixtures/beads-project-sync/tracker-beads.jsonl \
+  --issues-file __tests__/fixtures/beads-project-sync/tracker-issues.json
 ```
 
-`--issues-file` accepts the ordinary GitHub REST issue-array shape. Keep retained fixtures synthetic or public and bounded; do not store credentials, private issue bodies, raw prompts, terminal output, or private paths.
+That exact command is exercised by `__tests__/trackerDriftValidation.test.ts` with fake token environment variables present, proving the offline path does not need or consume them. `--issues-file` accepts the ordinary GitHub REST issue-array shape. Keep retained fixtures synthetic or public and bounded; do not store credentials, private issue bodies, raw prompts, terminal output, or private paths.
 
 ## What the check proves
 
