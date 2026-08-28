@@ -193,7 +193,6 @@ describe('v0.0.1 release documentation contract', () => {
 
     expect(runbook).toContain('expected_bunsdev_id=68980965');
     expect(runbook).toContain('gh api users/BunsDev --jq .id');
-    expect(runbook).toMatch(/test "\$bunsdev_id" = "\$expected_bunsdev_id"/);
     expect(runbook).toContain('name: "Main pull request governance"');
     expect(runbook).toContain('target: "branch"');
     expect(runbook).toContain('enforcement: "active"');
@@ -268,6 +267,49 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toMatch(/git push origin "\$probe_sha:refs\/heads\/main"/);
     expect(runbook).toMatch(
       /classic\s+`bypass_pull_request_allowances`[\s\S]{0,100}(?:must not|is not|never)/i,
+    );
+  });
+
+  it('fails closed before constructing governance payloads when the owner ID differs', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const actorFailureIndex = runbook.search(
+      /if test "\$bunsdev_id" != "\$expected_bunsdev_id"; then[\s\S]{0,240}ERROR:[\s\S]{0,160}exit 1[\s\S]{0,40}fi/,
+    );
+    const payloadIndex = runbook.indexOf('main_ruleset_payload=');
+
+    expect(actorFailureIndex).toBeGreaterThan(-1);
+    expect(payloadIndex).toBeGreaterThan(actorFailureIndex);
+    expect(runbook).not.toMatch(
+      /^test "\$bunsdev_id" = "\$expected_bunsdev_id"$/m,
+    );
+  });
+
+  it('treats only an attributable GitHub policy rejection as direct-push proof', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const actorPreflightIndex = runbook.indexOf('gh auth status --active');
+    const pushIndex = runbook.indexOf(
+      'git push origin "$probe_sha:refs/heads/main"',
+    );
+
+    expect(actorPreflightIndex).toBeGreaterThan(-1);
+    expect(pushIndex).toBeGreaterThan(actorPreflightIndex);
+    expect(runbook).toContain('gh api user --jq .login');
+    expect(runbook).toMatch(
+      /if test "\$active_gh_login" != "BunsDev"; then[\s\S]{0,240}exit 1/,
+    );
+    expect(runbook).toContain('StrictHostKeyChecking=yes');
+    expect(runbook).toContain('GIT_TERMINAL_PROMPT=0');
+    expect(runbook).toContain('Hi BunsDev!');
+    expect(runbook).toMatch(/Git HTTP actor[\s\S]{0,300}do not|do not[\s\S]{0,300}Git HTTP actor/i);
+    expect(runbook).toMatch(/tail -c 16384/);
+    expect(runbook).toContain('probe_status="${PIPESTATUS[0]}"');
+    expect(runbook).toMatch(/test "\$probe_status" -eq 0[\s\S]{0,240}exit 1/);
+    expect(runbook).toMatch(/GH\(006\|013\)/);
+    expect(runbook).toMatch(
+      /Changes must be made through a pull request|required pull request/i,
+    );
+    expect(runbook).toMatch(
+      /INCONCLUSIVE:[\s\S]{0,240}(?:network|authentication|credential|transport|other)[\s\S]{0,240}exit 1/i,
     );
   });
 

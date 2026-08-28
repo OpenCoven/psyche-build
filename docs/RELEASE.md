@@ -187,7 +187,10 @@ merge commit from landing on `main`, while squash and rebase remain usable.
 ```sh
 expected_bunsdev_id=68980965
 bunsdev_id="$(gh api users/BunsDev --jq .id)"
-test "$bunsdev_id" = "$expected_bunsdev_id"
+if test "$bunsdev_id" != "$expected_bunsdev_id"; then
+  echo "ERROR: BunsDev actor ID mismatch; expected $expected_bunsdev_id, got $bunsdev_id" >&2
+  exit 1
+fi
 
 gh api repos/OpenCoven/psyche-build \
   --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
@@ -291,12 +294,53 @@ jq -n '{
 ```
 
 Verify the effective rules, the classic protection split, and the exact
-ruleset actor/mode. Then perform a direct-push rejection probe while
-authenticated as `BunsDev`. `git commit-tree` creates an unreferenced empty
-probe commit without changing the worktree; a successful push is a critical
-failure and must stop the procedure.
+ruleset actor/mode. Then perform the direct-push rejection probe only after the
+actor preflight below. The GitHub CLI identity must be `BunsDev`. For an SSH
+push URL, the non-mutating SSH greeting also verifies the Git credential actor.
+For an HTTPS push URL, `gh auth status` and `gh api user` do not prove the Git
+HTTP actor because Git may use a different credential helper. Do not inspect
+credential-helper output or print credential material. Record the rejection
+actor from GitHub output or an API audit if either identifies it; otherwise
+record that the Git HTTP actor was not independently attributable and do not
+describe the result as a `BunsDev`-specific rejection.
 
-```sh
+`git commit-tree` creates an unreferenced empty probe commit without changing
+the worktree. Run this block in Bash: it retains at most 16 KiB of push stderr
+and records the push exit code separately. A successful push is a critical
+failure. A nonzero exit is conclusive only when GitHub reports `GH006` or
+`GH013` and a required-pull-request violation; network, authentication,
+credential, transport, and other failures are inconclusive and must abort
+closure.
+
+```bash
+gh auth status --active --hostname github.com
+active_gh_login="$(gh api user --jq .login)"
+if test "$active_gh_login" != "BunsDev"; then
+  echo "ERROR: active GitHub CLI actor is not BunsDev" >&2
+  exit 1
+fi
+
+origin_push_url="$(git remote get-url --push origin)"
+case "$origin_push_url" in
+  git@github.com:*|ssh://git@github.com/*)
+    ssh_actor_output="$(
+      ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
+        -T git@github.com 2>&1 || true
+    )"
+    if ! printf '%s\n' "$ssh_actor_output" | grep -Fq 'Hi BunsDev!'; then
+      echo "INCONCLUSIVE: SSH Git credential actor is not BunsDev or could not be verified" >&2
+      exit 1
+    fi
+    ;;
+  https://github.com/*)
+    echo "NOTICE: Git HTTP actor cannot be verified without credential-helper interaction; do not overclaim attribution" >&2
+    ;;
+  *)
+    echo "INCONCLUSIVE: unsupported origin push URL for safe Git actor preflight" >&2
+    exit 1
+    ;;
+esac
+
 gh api repos/OpenCoven/psyche-build/rules/branches/main |
   jq -e 'any(.[]; .type == "pull_request")' >/dev/null
 
@@ -327,12 +371,35 @@ probe_sha="$(
   printf 'Verify BunsDev direct pushes remain blocked\n' |
     git commit-tree "$(git rev-parse origin/main^{tree})" -p "$(git rev-parse origin/main)"
 )"
-if probe_output="$(git push origin "$probe_sha:refs/heads/main" 2>&1)"; then
-  printf '%s\n' "$probe_output" >&2
+
+probe_stderr_file="$(git rev-parse --git-path direct-push-probe.stderr)"
+trap 'rm -f "$probe_stderr_file"' EXIT HUP INT TERM
+set +e
+GIT_TERMINAL_PROMPT=0 \
+GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=yes' \
+  git push origin "$probe_sha:refs/heads/main" 2>&1 >/dev/null |
+  tail -c 16384 >"$probe_stderr_file"
+probe_status="${PIPESTATUS[0]}"
+set -e
+probe_stderr="$(cat "$probe_stderr_file")"
+rm -f "$probe_stderr_file"
+trap - EXIT HUP INT TERM
+
+if test "$probe_status" -eq 0; then
+  printf '%s\n' "$probe_stderr" >&2
   echo "ERROR: direct-push rejection probe unexpectedly updated main" >&2
   exit 1
 fi
-printf '%s\n' "$probe_output"
+
+if ! printf '%s\n' "$probe_stderr" | grep -Eq 'GH(006|013)' ||
+   ! printf '%s\n' "$probe_stderr" |
+     grep -Eiq 'Changes must be made through a pull request|required pull request'; then
+  printf '%s\n' "$probe_stderr" >&2
+  echo "INCONCLUSIVE: network, authentication, credential, transport, or other failure did not prove the pull-request policy" >&2
+  exit 1
+fi
+
+printf '%s\n' "$probe_stderr"
 ```
 
 The `pull_request` bypass mode keeps direct pushes platform-blocked for
