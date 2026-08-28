@@ -1,0 +1,33 @@
+# Default repository ownership
+* @BunsDev
+
+# Governance, automation, release, and contributor-facing policy
+/.github/ @BunsDev
+/SECURITY.md @BunsDev
+/SUPPORT.md @BunsDev
+/CODE_OF_CONDUCT.md @BunsDev
+/CONTRIBUTING.md @BunsDev
+/AGENTS.md @BunsDev
+/agent/ @BunsDev
+/docs/ @BunsDev
+/package.json @BunsDev
+/pnpm-lock.yaml @BunsDev
+/pnpm-workspace.yaml @BunsDev
+/rust-toolchain.toml @BunsDev
+/scripts/release*.mjs @BunsDev
+/scripts/app-store-connect.mjs @BunsDev
+
+# Authority, security, persistence, bridge, and protocol boundaries
+/src/control/ @BunsDev
+/src/services/bridge/ @BunsDev
+/protocol-fixtures/ @BunsDev
+/native/desktop/psyche-build-tauri/src-tauri/ @BunsDev
+/native/ios/ @BunsDev
+/src/utils/generated-agents-doc.ts @BunsDev
+/native/ios/Psyche.xcodeproj/ @BunsDev
+/native/ios/PsycheApp/Resources/Info.plist @BunsDev
+/native/desktop/psyche-build-tauri/web/*.bundle.js @BunsDev
+
+# Planning source, migrations, and managed public-mirror automation
+/.beads/ @BunsDev
+/scripts/beads-project-sync/ @BunsDev

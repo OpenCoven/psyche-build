@@ -1,0 +1,55 @@
+name: Documentation report
+description: Report incorrect, missing, ambiguous, or stale Psyche Build documentation
+title: "[Docs]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Documentation should distinguish shipped behavior, supported surfaces, plans, and historical design. Review the [roadmap](../../docs/ROADMAP.md) and [support matrix](../../docs/SUPPORT-MATRIX.md) before reporting a support-status mismatch.
+
+        This issue is public. Quote only the smallest relevant public excerpt. Do not disclose private repository content, credentials, raw prompts, unrestricted terminal output, complete environment dumps, private service URLs, unredacted personal paths, or vulnerability details.
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the public file, heading, or page and include the release or exact commit when relevant.
+      placeholder: docs/SUPPORT-MATRIX.md — Platform tiers
+    validations:
+      required: true
+  - type: dropdown
+    id: problem_type
+    attributes:
+      label: Problem type
+      options:
+        - Incorrect behavior or command
+        - Unsupported availability or support claim
+        - Missing prerequisite or recovery step
+        - Ambiguous authority or security boundary
+        - Stale link or terminology
+        - Missing documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current public text or behavior
+      description: Quote or summarize only the minimum public material needed to identify the mismatch.
+    validations:
+      required: true
+  - type: textarea
+    id: correction
+    attributes:
+      label: Proposed correction and evidence
+      description: Explain the accurate statement and identify source, test, runtime, release, or acceptance evidence. State any remaining uncertainty.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-report safety
+      options:
+        - label: The cited material is public and contains no sensitive or private data.
+          required: true
+        - label: I separated shipped behavior and support from plans or historical design.
+          required: true
