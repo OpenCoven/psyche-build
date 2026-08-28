@@ -205,6 +205,35 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain('required_conversation_resolution: true');
   });
 
+  it('requires a bounded reviewed emergency procedure without a standing bypass', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const emergencyHeading = /^## Emergency change procedure for #31\s*$/im.exec(runbook);
+    expect(emergencyHeading, 'missing the #31 emergency-change procedure').not.toBeNull();
+    const following = runbook.slice(emergencyHeading!.index + emergencyHeading![0].length);
+    const nextHeading = following.search(/^## /m);
+    const procedure = nextHeading === -1 ? following : following.slice(0, nextHeading);
+
+    expect(procedure).toMatch(/incident issue/i);
+    expect(procedure).toMatch(/named non-authorizing approver/i);
+    expect(procedure).toMatch(/exact intended SHA/i);
+    expect(procedure).toMatch(/bounded change/i);
+    expect(procedure).toMatch(/separately scoped and time-bounded mechanism/i);
+    expect(procedure).toMatch(/immediately restore[\s\S]{0,100}protections/i);
+    expect(procedure).toMatch(/sanitized before\/after settings/i);
+    expect(procedure).toMatch(/post-event review/i);
+    expect(procedure).toMatch(/never restore a standing personal\/admin bypass/i);
+
+    const permissiveBypassLines = procedure
+      .split(/\r?\n/)
+      .filter(
+        (line) =>
+          /bypass/i.test(line) &&
+          /(?:administrator|admin|standing|personal)/i.test(line),
+      )
+      .filter((line) => !/(?:never|must not|without|remove|no\b)/i.test(line));
+    expect(permissiveBypassLines).toEqual([]);
+  });
+
   it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 

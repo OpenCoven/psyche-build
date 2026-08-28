@@ -4,10 +4,16 @@ Beads is the authoritative issue and planning store for this repository. The
 public GitHub Project is a one-way, sanitized mirror for readers who do not use
 the Beads CLI.
 
-Do not edit mirrored issue titles, bodies, fields, relationships, or state in
-GitHub and expect those changes to persist. The next sync restores Beads state.
-Make planning changes with `bd`; the sync never imports GitHub changes into
-Beads and leaves unmanaged GitHub issues alone.
+`external_ref` is the canonical public outcome/maintenance-bucket field. Every
+active Bead must resolve through it to exactly one valid configured target in
+`.github/beads-project-sync.json`, and the Bead priority must match the roadmap
+priority for that target.
+
+Generated GitHub bodies remain one-way mirrors and are never the source of
+repair. Do not edit mirrored issue titles, bodies, fields, relationships, or
+state in GitHub and expect those changes to persist. The next sync restores
+Beads state. Make planning changes with `bd`; the sync never imports GitHub
+changes into Beads and leaves unmanaged GitHub issues alone.
 
 GitHub preserves issue body edit history, and the sync cannot purge individual
 revisions. Sanitize content before its first publication. If sensitive material
@@ -28,6 +34,22 @@ bd update <issue-id> --status done
 bd dolt pull
 bd dolt push
 ```
+
+## Review before `bd dolt push`
+
+Treat Beads mutations and their Dolt publication as a reviewed two-repository
+change:
+
+1. Perform mutations with sandbox mode and no auto-push.
+2. Review the generated interactions and the local Dolt diff.
+3. Merge the Git PR containing the tracked audit/config/code that describes and
+   validates the same state transition.
+4. Publish the exact reviewed Dolt commit with `bd dolt push`.
+5. Run the protected sync and retain its sanitized apply or zero-operation
+   evidence.
+
+Do not publish a different Dolt state after the Git review, and do not use a
+generated GitHub body to reconstruct or repair Beads.
 
 ## Sole migrator rule
 

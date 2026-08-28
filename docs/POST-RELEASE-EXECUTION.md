@@ -1,11 +1,11 @@
 # Psyche Build post-release execution contract
 
 **Status:** Active delivery plan  
-**Last reconciled:** 2026-08-25
+**Last reconciled:** 2026-08-28
 
 **Portfolio owner:** [@BunsDev](https://github.com/BunsDev)  
 **Roadmap control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)  
-**Documentation delivery:** [#238](https://github.com/OpenCoven/psyche-build/issues/238)
+**Delivered documentation foundation:** [#238](https://github.com/OpenCoven/psyche-build/issues/238)
 
 This document turns the canonical [roadmap](./ROADMAP.md) into an ordered,
 executable delivery plan. It identifies the current critical path, work that may
@@ -26,10 +26,14 @@ and OpenCoven Homebrew Cask are live. The desktop-only
 preserved shared validation while iOS verification and distribution were
 skipped deliberately.
 
-The remaining P0 work is post-release control and stabilization work. It does
-not make the public macOS artifact unreleased. The iOS companion remains
+The remaining P0 work after this control-state proof wave is stabilization. It
+does not make the public macOS artifact unreleased. The iOS companion remains
 planned pending [#200](https://github.com/OpenCoven/psyche-build/issues/200);
 source, simulator, fixture, and UI-test success do not establish live TestFlight availability.
+
+[Issue #238](https://github.com/OpenCoven/psyche-build/issues/238) remains
+delivered through [PR #245](https://github.com/OpenCoven/psyche-build/pull/245)
+and merge commit `5f4b7b05`; it is completed Stage 0 foundation.
 
 Since this plan was drafted, [PR #248](https://github.com/OpenCoven/psyche-build/pull/248)
 and [PR #249](https://github.com/OpenCoven/psyche-build/pull/249) landed the
@@ -38,8 +42,16 @@ drift checks, mutation fencing, and sanitizer hardening. The production
 automation and manual environments are restricted to `main`; the manual path
 requires Maintainer approval. A current live dry-run plans zero mutations with
 two GraphQL queries. [PR #236](https://github.com/OpenCoven/psyche-build/pull/236)
-is closed as superseded. The public tracker outcomes remain open until their
-owning issues link and accept this evidence.
+is closed as superseded.
+
+When this proof PR merges and its linked remote evidence is completed,
+[#31](https://github.com/OpenCoven/psyche-build/issues/31) is delivered by this
+wave, [#237](https://github.com/OpenCoven/psyche-build/issues/237) is delivered
+by this wave, and [#240](https://github.com/OpenCoven/psyche-build/issues/240)
+is delivered by this wave. Their closure is finalized by linking this proof PR,
+sanitized policy evidence, the first apply, and the final zero-operation run in
+the owning issues. Documentation and tests alone do not prove remote policy,
+apply, or issue-closure state.
 
 [PR #247](https://github.com/OpenCoven/psyche-build/pull/247) also closed the
 desktop Git-log command-execution path by routing log inspection through the
@@ -67,43 +79,38 @@ only where the concurrency rules explicitly permit it.
 
 | Order | Outcome | Priority | Current state and exit gate |
 |---:|---|---:|---|
-| 1 | [#238 — current critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | PR #236 is retired. Merge this current-main plan, roadmap links, acceptance classification, and contract tests; then reconcile #195 |
-| 2 | [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Required checks and review apply to administrators, standing bypasses are removed, and a protected proof PR is retained |
-| 3 | [#237 — tracker reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) and [#240 — drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | Core synchronization and validation landed in PRs #248/#249 and are live. Link the before/after evidence, reconcile the issue checklists, and close only when their public acceptance gates agree |
-| 4 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths |
-| 5 | [#241 — atomic iOS host readiness](https://github.com/OpenCoven/psyche-build/issues/241) | P1 | A focused current-main PR cannot expose a new workspace when host authority or readiness commit fails |
-| 6 | #200 discovery, reconnect, and physical same-LAN acceptance | P1 | A physical iPhone preserves authoritative host/workspace state through restart, suspension, network interruption, revocation, and reconnect |
-| 7 | [#242 — production ritual publication and execution](https://github.com/OpenCoven/psyche-build/issues/242) | P1 | A live host publishes bounded ritual metadata, executes through the registered authority path, and returns canonical state/receipts |
-| 8 | #200 internal TestFlight | P1 | One immutable distributed build repeats the physical connection, action, reconnect, host-restart, and revocation matrix |
-| 9 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) and [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Bounded/redacted diagnostics and reusable recovery harnesses replace maintainer-only inference |
-| 10 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) and [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Security, ownership, support, issue, PR, and contribution surfaces are usable without protected maintainer knowledge |
-| 11 | [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Stable lifecycle, persistence, pane/process, browser/Git, and UI-state seams are extracted without public-contract drift |
-| 12 | [#201 — OpenCoven identity and Threads convergence](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | A cross-device reference flow preserves protocol-owned familiar/thread/run/action/artifact/receipt identity across disconnect and resume |
+| 1 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths |
+| 2 | [#241 — atomic iOS host readiness](https://github.com/OpenCoven/psyche-build/issues/241) under [#200 — iOS internal beta](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | A focused current-main PR cannot expose a new workspace when host authority or readiness commit fails |
+| 3 | #200 discovery, reconnect, and physical same-LAN acceptance | P1 | A physical iPhone preserves authoritative host/workspace state through restart, suspension, network interruption, revocation, and reconnect |
+| 4 | [#242 — production ritual publication and execution](https://github.com/OpenCoven/psyche-build/issues/242) | P1 | A live host publishes bounded ritual metadata, executes through the registered authority path, and returns canonical state/receipts |
+| 5 | #200 internal TestFlight | P1 | One immutable distributed build repeats the physical connection, action, reconnect, host-restart, and revocation matrix |
+| 6 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) and [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Bounded/redacted diagnostics and reusable recovery harnesses replace maintainer-only inference |
+| 7 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) and [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Security, ownership, support, issue, PR, and contribution surfaces are usable without protected maintainer knowledge |
+| 8 | [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Stable lifecycle, persistence, pane/process, browser/Git, and UI-state seams are extracted without public-contract drift |
+| 9 | [#201 — OpenCoven identity and Threads convergence](https://github.com/OpenCoven/psyche-build/issues/201) with [#253 — Psyche compatibility canary](https://github.com/OpenCoven/psyche-build/issues/253) | P2 | A pinned profile and incremental adapters preserve protocol-owned identity without blocking supported-product work |
+| 10 | [#246 — cross-platform Vim and keyboard-mode parity](https://github.com/OpenCoven/psyche-build/issues/246) | P2 | Opt-in shared semantics preserve terminal passthrough and earn evidence independently on each claimed platform |
 
-## Stage 0 — trustworthy control state
+## Stage 0 — delivered control-state closure wave
 
 **Owners:** #238, #31, #237, and #240.
 
-1. Merge the current-main documentation replacement. PR #236 is already closed
-   as superseded; preserve its useful history without reviving its branch.
-2. Capture sanitized branch-protection/ruleset state, enforce checks and review
-   for administrators, remove standing broad bypass actors, and merge a proof
-   PR through the protected path.
-3. Preserve the deployed single-writer/lease contract and protected
-   `main`-only automation environments delivered by PRs #248/#249.
-4. Reconcile #237/#240 against the landed source-first synchronization,
-   canonical mapping, drift validation, and final zero-operation live dry-run.
-5. Keep deterministic local/CI validation mandatory for status, priority,
-   mapping, mirror integrity, and bounded GraphQL behavior.
+When this proof PR merges and linked remote evidence is completed, #238 remains
+delivered through PR #245 / `5f4b7b05`, while #31, #237, and #240 are Stage 0
+closure items delivered by this wave. Finalize closure by linking the proof PR,
+policy evidence, first apply, and zero-operation run in the owning issues.
+Preserve the deployed single-writer lease, protected `main`-only environments,
+canonical target mapping, deterministic drift validation, and bounded GraphQL
+behavior.
 
-**Exit:** roadmap, support claims, branch policy, Beads, GitHub mirrors, and live
-PR disposition agree on what is delivered, active, blocked, and deferred.
+**Exit state:** roadmap, support claims, branch policy, Beads, GitHub mirrors,
+and live PR disposition agree on what is delivered, active, blocked, and
+deferred. The linked remote evidence, not these docs or tests alone, proves the
+exit.
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
 **Owners:** #196 and #239.  
-**May run while Stage 0 proceeds:** yes, using disposable repositories and
-sanitized evidence.
+**Current gate:** #196/#239 are the next P0 critical path.
 
 The acceptance manifest must cover:
 
@@ -128,6 +135,9 @@ state, and reusable gaps are transferred to #199.
 **Merge order:** #241 atomic readiness → discovery/reconnect UI → physical
 same-LAN acceptance → #242 publication → #242 execution → capability-gated UI →
 internal TestFlight.
+
+#200/#241 retains its P1 dependency gate: atomic readiness precedes every later
+iOS capability slice, and physical evidence precedes a support-state change.
 
 ### Atomic readiness
 
@@ -161,6 +171,10 @@ same-LAN beta; it does not block that beta.
 
 ## Stage 3 — operations and contributor readiness
 
+#199/#243 retains its P1 dependency gate: support-bundle schema and redaction
+may begin during #239, while reusable recovery harnesses follow observed #239
+cases.
+
 Support-bundle schema/redaction work in #243 may begin during #239, but reusable
 failure-harness extraction follows observed #239 cases. The bundle must be
 versioned, deterministic, bounded by time/count/record/total size, cancellable,
@@ -169,10 +183,14 @@ output, repository contents, environment variables, infrastructure details,
 and full user paths.
 
 The minimum security and ownership floor in #244 may also proceed independently.
-It must not claim branch policy is enforced before #31 proves it. Broader
-clean-checkout contributor acceptance remains under #198.
+#198/#244 retains its P1 dependency gate: it may land independently, but broader
+clean-checkout contributor acceptance remains under #198 and enforcement claims
+must link #31's policy evidence.
 
 ## Stage 4 — decomposition and OpenCoven convergence
+
+#197 retains its P1 dependency gate: implementation waits for stable #196/#199
+contracts.
 
 Desktop decomposition begins only after the #196/#199 contracts it will extract
 are stable. The required order is lifecycle/registration, persistence/recovery,
@@ -180,19 +198,27 @@ pane/PTY/process lifecycle, browser/Git control, then desktop-web state and
 events. Each PR preserves public commands, schemas, persisted formats, errors,
 security boundaries, generated outputs, and rollback.
 
-OpenCoven identity/Threads design may proceed in parallel, but implementation
-must not become an undeclared prerequisite for stabilization, diagnostics, or
-iOS. Protocol identity must outlive Beads, tmux/process IDs, paths, branches,
-providers, transports, and UI selections.
+#201/#253 retains its P2 dependency gate: mapping and design may proceed in
+parallel, while the immutable pin waits for a consumable Psyche profile and
+ownership-sensitive adapters wait for the cross-repository ownership decision.
+Implementation must not become an undeclared prerequisite for stabilization,
+diagnostics, or iOS. Protocol identity must outlive Beads, tmux/process IDs,
+paths, branches, providers, transports, and UI selections.
+
+#246 retains its P2 dependency gate: broad cross-platform input rollout follows
+stable input, persistence, action, P0 stabilization, and first iOS readiness
+contracts. It remains opt-in and cannot become a prerequisite for #196, #199,
+or #200 unless a bounded slice is explicitly reprioritized.
 
 ## Pull-request disposition and replacement rules
 
 | Pull request | Disposition | Replacement contract |
 |---|---|---|
-| [#236](https://github.com/OpenCoven/psyche-build/pull/236) | **Closed as superseded** by current-main reconciliation and #238 | Preserve useful review/history; do not force-update, reopen, or merge the stale branch |
+| [#236](https://github.com/OpenCoven/psyche-build/pull/236) | **Closed as superseded** by PR #245 and #238 | Preserve useful review/history; do not force-update, reopen, or merge the stale branch |
 | [#190](https://github.com/OpenCoven/psyche-build/pull/190) | **Source material only** | Integrate bounded pieces through #199/#243 after callback safety, readiness retry, redaction, and diagnostic limits are proven |
 | [#193](https://github.com/OpenCoven/psyche-build/pull/193) | **Source material only** | Extract #241 first, then discovery/reconnect, then physical acceptance; do not merge the large branch as one unit |
 | [#192](https://github.com/OpenCoven/psyche-build/pull/192) | **Source material only** | Extract production publication, execution, and UI in #242 order after accepted host readiness |
+| [#254](https://github.com/OpenCoven/psyche-build/pull/254) | **Outside Stage 0** | PR #254 remains outside Stage 0; evaluate it only against #201/#253's P2 compatibility gate and exact-head evidence |
 
 No listed active implementation PR is merge-ready merely because it can be
 rebased or its tests once passed. Every replacement starts from current `main`, has one owning
@@ -201,8 +227,7 @@ required checks on its exact final head.
 
 ## Concurrency rules
 
-- #31, #238, #237/#240, and #239 may proceed in parallel on non-overlapping
-  seams.
+- #196/#239 is the active P0 gate after the Stage 0 proof wave closes.
 - #243 schema and redaction work may begin during #239; recovery scenarios wait
   for observed acceptance cases.
 - #244 may proceed independently but must not destabilize release, tracker, or
@@ -210,7 +235,10 @@ required checks on its exact final head.
 - #241 precedes all later iOS capability work.
 - #242 publication precedes execution, and execution precedes mobile controls.
 - #197 implementation waits for stable #196/#199 contracts.
-- #201 design may proceed; implementation cannot block #196, #199, or #200.
+- #201/#253 design may proceed; implementation cannot block #196, #199, or
+  #200.
+- #246 stays P2 until prerequisite contracts stabilize or a bounded slice is
+  explicitly promoted.
 
 ## Merge and closure rules
 

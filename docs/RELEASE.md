@@ -200,6 +200,30 @@ jq -n '{
 }' | gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -
 ```
 
+## Emergency change procedure for #31
+
+Normal protected-branch and protected-tag paths remain mandatory. If an urgent
+production correction cannot wait for the normal path, use this exact
+incident-scoped procedure:
+
+- Open an incident issue before changing policy and identify the affected
+  production behavior.
+- Record a named non-authorizing approver who reviews the emergency plan and
+  evidence but cannot authorize their own change.
+- Record the exact intended SHA and the bounded change that the incident
+  permits; any additional change requires a new review.
+- Use a separately scoped and time-bounded mechanism that exists only for that
+  incident. It must not create an administrator, personal, or standing bypass.
+- Merge or deploy only the recorded SHA, then immediately restore all branch,
+  tag, review, and required-check protections.
+- Retain sanitized before/after settings, the exact policy-change and merge
+  audit records, and the incident result. Complete a post-event review that
+  records whether the mechanism expired and whether any follow-up is required.
+
+Never restore a standing personal/admin bypass. An emergency is not authority
+to weaken the normal release environment, immutable-tag ruleset, or
+administrator enforcement after the bounded incident ends.
+
 Protect `main` and `v*` tags now that repository rulesets are available. A
 ruleset bypass applies to every rule in that ruleset, so use two separate active
 tag rulesets: one lets the `Maintainers` team create a release tag, and the
