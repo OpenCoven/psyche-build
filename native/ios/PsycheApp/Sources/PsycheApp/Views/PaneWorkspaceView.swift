@@ -97,13 +97,19 @@ struct PaneWorkspaceView: View {
         .accessibilityIdentifier(
             primaryPane.map { "pane-workspace-\($0.id)" } ?? "pane-workspace"
         )
-        .task(id: workspaceKey) {
+        .onAppear {
+            // Apply the requested pane synchronously so the terminal view is
+            // visible in the same render pass as the navigation. Doing this
+            // inside the async .task below causes an observable delay on loaded
+            // CI runners that can push the identifier past XCTest's poll window.
             if !didApplyRequestedPane {
                 didApplyRequestedPane = true
                 if let requestedPrimaryPaneID, store.primaryPaneID != requestedPrimaryPaneID {
                     store.primaryPaneID = requestedPrimaryPaneID
                 }
             }
+        }
+        .task(id: workspaceKey) {
             await syncRegistry()
         }
     }
