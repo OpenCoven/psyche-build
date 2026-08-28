@@ -33,6 +33,10 @@ describe('agent repository contract', () => {
     expect(manifest).toContain('role: product-coding-cockpit');
     expect(manifest).toContain('lifecycle: active');
     expect(manifest).toContain('class: R4');
+    expect(manifest).toContain('node: ">=20.10.0"');
+    expect(manifest).toContain('pnpm: "10.34.5"');
+    expect(manifest).toContain('git: ">=2.20.0"');
+    expect(manifest).toContain('tmux: ">=3.0"');
     expect(manifest).toContain('bootstrap: ./scripts/agent-bootstrap');
     expect(manifest).toContain('fast: ./scripts/agent-check fast');
     expect(manifest).toContain('full: ./scripts/agent-check full');
