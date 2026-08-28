@@ -15168,7 +15168,7 @@
       } else if (snapshot.state === "failed") {
         reportGraphicsDiagnosticsFailure(
           "stress-action",
-          "Graphics stress scenario failed: " + String(error),
+          "Graphics stress scenario failed: " + (snapshot.error || String(error)),
           error
         );
       }
@@ -15285,9 +15285,7 @@
   }
 
   function graphicsDiagnosticsCancellation(error) {
-    if (!error || typeof error !== "object") return false;
-    if (error.name === "AbortError") return true;
-    return !!error.cause && graphicsDiagnosticsCancellation(error.cause);
+    return ptyRuntime.isGraphicsDiagnosticsStressCancellation(error);
   }
 
   function runGraphicsDiagnosticsStressScenario() {

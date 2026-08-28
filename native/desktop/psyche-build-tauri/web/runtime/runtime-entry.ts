@@ -3,6 +3,7 @@ export {
   buildGraphicsDiagnosticsView,
   createGraphicsDiagnosticsStressController,
   formatDiagnosticsStressProgress,
+  isGraphicsDiagnosticsStressCancellation,
   serializeGraphicsDiagnosticsSnapshot,
 } from './diagnostics-surface';
 export type {

@@ -3019,6 +3019,133 @@ describe('in-app graphics diagnostics surface', () => {
     expect(observedErrors).toEqual([failure]);
   });
 
+  it('settles a plain AbortError as cancelled after successful cleanup', async () => {
+    const cancellation = new DOMException('stress run cancelled', 'AbortError');
+    const observedErrors: unknown[] = [];
+    const controller = createGraphicsDiagnosticsStressController({
+      harness: {
+        run: vi.fn(async () => {
+          throw cancellation;
+        }),
+        cancel: vi.fn(() => false),
+      },
+      onStateChange(_snapshot, error) {
+        if (error !== undefined) observedErrors.push(error);
+      },
+    });
+
+    await expect(controller.run()).rejects.toBe(cancellation);
+
+    expect(controller.snapshot()).toEqual({ state: 'cancelled' });
+    expect(observedErrors).toEqual([cancellation]);
+  });
+
+  it('fails cancellation when one cleanup error is aggregated with the AbortError', async () => {
+    const cancellation = new DOMException('stress run cancelled', 'AbortError');
+    const cleanupFailure = new Error('run scope disposal failed');
+    const aggregate = new AggregateError(
+      [cancellation, cleanupFailure],
+      cancellation.message,
+      { cause: cancellation },
+    );
+    const observedErrors: unknown[] = [];
+    const controller = createGraphicsDiagnosticsStressController({
+      harness: {
+        run: vi.fn(async () => {
+          throw aggregate;
+        }),
+        cancel: vi.fn(() => false),
+      },
+      onStateChange(_snapshot, error) {
+        if (error !== undefined) observedErrors.push(error);
+      },
+    });
+
+    await expect(controller.run()).rejects.toBe(aggregate);
+
+    expect(controller.snapshot()).toEqual({
+      state: 'failed',
+      error: [
+        'AggregateError: stress run cancelled',
+        '  [1] AbortError: stress run cancelled',
+        '  [2] Error: run scope disposal failed',
+      ].join('\n'),
+    });
+    expect(observedErrors).toEqual([aggregate]);
+  });
+
+  it('reports every cleanup error aggregated with cancellation', async () => {
+    const cancellation = new DOMException('stress run cancelled', 'AbortError');
+    const interactionFailure = new Error('interaction cleanup failed');
+    const collectorFailure = new Error('collector stop failed');
+    const disposalFailure = new Error('run scope disposal failed');
+    const aggregate = new AggregateError(
+      [cancellation, interactionFailure, collectorFailure, disposalFailure],
+      cancellation.message,
+      { cause: cancellation },
+    );
+    const controller = createGraphicsDiagnosticsStressController({
+      harness: {
+        run: vi.fn(async () => {
+          throw aggregate;
+        }),
+        cancel: vi.fn(() => false),
+      },
+    });
+
+    await expect(controller.run()).rejects.toBe(aggregate);
+
+    const snapshot = controller.snapshot();
+    expect(snapshot.state).toBe('failed');
+    expect(snapshot.error).toContain('Error: interaction cleanup failed');
+    expect(snapshot.error).toContain('Error: collector stop failed');
+    expect(snapshot.error).toContain('Error: run scope disposal failed');
+    expect(JSON.parse(serializeGraphicsDiagnosticsSnapshot({ scenario: snapshot })))
+      .toEqual({ scenario: snapshot });
+  });
+
+  it('does not let causal AbortErrors mask nested harness cleanup aggregates', async () => {
+    const cancellation = new DOMException('stress run cancelled', 'AbortError');
+    const scenarioCleanupFailure = new Error('scenario resource disposal failed');
+    const adapterCleanupFailure = new Error('adapter restoration failed');
+    const scenarioAggregate = new AggregateError(
+      [cancellation, scenarioCleanupFailure],
+      cancellation.message,
+      { cause: cancellation },
+    );
+    const adapterAggregate = new AggregateError(
+      [scenarioAggregate, adapterCleanupFailure],
+      scenarioAggregate.message,
+      { cause: scenarioAggregate },
+    );
+    const wrapped = new Error('stress adapter failed', { cause: adapterAggregate });
+    const controller = createGraphicsDiagnosticsStressController({
+      harness: {
+        run: vi.fn(async () => {
+          throw wrapped;
+        }),
+        cancel: vi.fn(() => false),
+      },
+    });
+
+    await expect(controller.run()).rejects.toBe(wrapped);
+
+    expect(controller.snapshot()).toEqual({
+      state: 'failed',
+      error: [
+        'Error: stress adapter failed',
+        '  Caused by: AggregateError: stress run cancelled',
+        '    [1] AggregateError: stress run cancelled',
+        '      [1] AbortError: stress run cancelled',
+        '      [2] Error: scenario resource disposal failed',
+        '    [2] Error: adapter restoration failed',
+      ].join('\n'),
+    });
+    expect(wrapped.cause).toBe(adapterAggregate);
+    expect(adapterAggregate.cause).toBe(scenarioAggregate);
+    expect(scenarioAggregate.cause).toBe(cancellation);
+  });
+
   it('shares one active stress run across panel and exported cancellation paths', async () => {
     let rejectRun: ((error: unknown) => void) | null = null;
     const cancellation = new DOMException('cancelled', 'AbortError');
@@ -3514,6 +3641,46 @@ describe('in-app graphics diagnostics surface', () => {
     clear('collection');
     expect(status.textContent).toBe('Live diagnostics are updating.');
     expect(status.dataset.level).toBeUndefined();
+  });
+
+  it('uses deterministic stress failure details in the accessible status surface', () => {
+    const main = readFileSync(resolve(webRoot, 'main.js'), 'utf8');
+    const cancellation = new DOMException('stress run cancelled', 'AbortError');
+    const cleanupFailure = new Error('run scope disposal failed');
+    const aggregate = new AggregateError(
+      [cancellation, cleanupFailure],
+      cancellation.message,
+      { cause: cancellation },
+    );
+    const details = [
+      'AggregateError: stress run cancelled',
+      '  [1] AbortError: stress run cancelled',
+      '  [2] Error: run scope disposal failed',
+    ].join('\n');
+    const reportFailure = vi.fn();
+    const render = vi.fn();
+    const handle = compileFunction<
+      (snapshot: { state: string; error?: string }, error?: unknown, previous?: { state: string }) =>
+        void
+    >(
+      main,
+      'handleGraphicsDiagnosticsStressState',
+      {
+        reportGraphicsDiagnosticsFailure: reportFailure,
+        renderGraphicsDiagnosticsSurface: render,
+        clearGraphicsDiagnosticsFailure: vi.fn(),
+        toast: vi.fn(),
+      },
+    );
+
+    handle({ state: 'failed', error: details }, aggregate, { state: 'cancelling' });
+
+    expect(reportFailure).toHaveBeenCalledWith(
+      'stress-action',
+      `Graphics stress scenario failed: ${details}`,
+      aggregate,
+    );
+    expect(render).toHaveBeenCalledOnce();
   });
 
   it('routes snapshot, availability, and markup failures through diagnostics status', async () => {

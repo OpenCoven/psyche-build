@@ -62,10 +62,83 @@ export interface GraphicsDiagnosticsStressControllerOptions {
   ) => void;
 }
 
-function defaultStressCancellation(error: unknown): boolean {
+function errorProperty(error: object, key: string): unknown {
+  try {
+    return (error as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function aggregateErrorMembers(error: object): unknown[] {
+  const aggregate = typeof AggregateError !== 'undefined' && error instanceof AggregateError;
+  if (!aggregate && errorProperty(error, 'name') !== 'AggregateError') return [];
+  const errors = errorProperty(error, 'errors');
+  if (!errors || typeof errors !== 'object') return [];
+  try {
+    return Array.from(errors as Iterable<unknown>);
+  } catch {
+    return [];
+  }
+}
+
+function nestedStressErrors(error: object): unknown[] {
+  const nested = aggregateErrorMembers(error);
+  const cause = errorProperty(error, 'cause');
+  if (cause !== undefined && !nested.includes(cause)) nested.push(cause);
+  return nested;
+}
+
+function isStressCancellation(
+  error: unknown,
+  ancestors: Set<object>,
+): boolean {
   if (!error || typeof error !== 'object') return false;
-  if ('name' in error && error.name === 'AbortError') return true;
-  return 'cause' in error && defaultStressCancellation(error.cause);
+  if (ancestors.has(error)) return false;
+  ancestors.add(error);
+  const nested = nestedStressErrors(error);
+  const cancelled = nested.length === 0
+    ? errorProperty(error, 'name') === 'AbortError'
+    : nested.every((entry) => isStressCancellation(entry, ancestors));
+  ancestors.delete(error);
+  return cancelled;
+}
+
+export function isGraphicsDiagnosticsStressCancellation(error: unknown): boolean {
+  return isStressCancellation(error, new Set<object>());
+}
+
+function errorText(error: unknown): string {
+  try {
+    return String(error);
+  } catch {
+    return '[unprintable error]';
+  }
+}
+
+function formatStressErrorLines(error: unknown, ancestors: Set<object>): string[] {
+  if (!error || typeof error !== 'object') return [errorText(error)];
+  if (ancestors.has(error)) return ['[circular error]'];
+  ancestors.add(error);
+  const lines = [errorText(error)];
+  const members = aggregateErrorMembers(error);
+  members.forEach((member, index) => {
+    const child = formatStressErrorLines(member, ancestors);
+    lines.push(`  [${index + 1}] ${child[0]}`);
+    for (const line of child.slice(1)) lines.push(`  ${line}`);
+  });
+  const cause = errorProperty(error, 'cause');
+  if (cause !== undefined && !members.includes(cause)) {
+    const child = formatStressErrorLines(cause, ancestors);
+    lines.push(`  Caused by: ${child[0]}`);
+    for (const line of child.slice(1)) lines.push(`  ${line}`);
+  }
+  ancestors.delete(error);
+  return lines;
+}
+
+function formatStressError(error: unknown): string {
+  return formatStressErrorLines(error, new Set<object>()).join('\n');
 }
 
 function copyScenarioSnapshot(
@@ -85,7 +158,8 @@ export function createGraphicsDiagnosticsStressController(
   let state: GraphicsDiagnosticsScenarioSnapshot = { state: 'idle' };
   let activeRun: Promise<StressRunResult> | null = null;
   let active = false;
-  const isCancellation = options.isCancellation ?? defaultStressCancellation;
+  const isCancellation =
+    options.isCancellation ?? isGraphicsDiagnosticsStressCancellation;
 
   const snapshot = (): GraphicsDiagnosticsScenarioSnapshot => copyScenarioSnapshot(state);
   const publish = (
@@ -130,7 +204,7 @@ export function createGraphicsDiagnosticsStressController(
           publish({
             state: 'failed',
             ...(state.progress ? { progress: state.progress } : {}),
-            error: String(error),
+            error: formatStressError(error),
           }, error);
         }
         throw error;
