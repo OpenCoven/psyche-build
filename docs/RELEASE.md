@@ -170,7 +170,8 @@ gh api --method POST \
 Protect `main` with the two exact GitHub Actions check names already emitted by
 the release commit. Require a fresh non-self approval after the last push,
 enforce the policy for administrators, and leave no force-push or deletion
-path:
+path. `BunsDev` is the single named owner bypass; no team, app, or additional
+user receives a standing pull-request bypass:
 
 ```sh
 jq -n '{
@@ -187,7 +188,12 @@ jq -n '{
     dismiss_stale_reviews: true,
     require_code_owner_reviews: false,
     required_approving_review_count: 1,
-    require_last_push_approval: true
+    require_last_push_approval: true,
+    bypass_pull_request_allowances: {
+      users: ["BunsDev"],
+      teams: [],
+      apps: []
+    }
   },
   restrictions: null,
   required_linear_history: true,
@@ -200,6 +206,21 @@ jq -n '{
 }' | gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -
 ```
 
+GitHub cannot create an author self-approval review. Independent review remains
+preferred, but it is not required for a `BunsDev`
+owner-authored administrative PR when no independent reviewer is available.
+The standing allowance is only for an explicit recorded admin merge override
+on such a PR; it is not a normal review substitute and does not authorize
+another actor.
+
+The supported owner-bypass path remains a pull request. Direct pushes are
+rejected, force pushes and deletions are prohibited, and all other actors remain
+subject to the required approval. Before the owner-authored administrative PR
+merges, verify that the exact-head SHA has terminal and successful required
+checks and verify resolved conversations. Keep the recorded override reason and
+exact SHA in the PR or linked incident/change record, and retain audit evidence
+for the checks, conversation state, merge override, and resulting merge.
+
 ## Emergency change procedure for #31
 
 Normal protected-branch and protected-tag paths remain mandatory. If an urgent
@@ -207,22 +228,26 @@ production correction cannot wait for the normal path, use this exact
 incident-scoped procedure:
 
 - Open an incident issue before changing policy and identify the affected
-  production behavior.
-- Record a named non-authorizing approver who reviews the emergency plan and
-  evidence but cannot authorize their own change.
-- Record the exact intended SHA and the bounded change that the incident
-  permits; any additional change requires a new review.
-- Use a separately scoped and time-bounded mechanism that exists only for that
-  incident. It must not create an administrator, personal, or standing bypass.
-- Merge or deploy only the recorded SHA, then immediately restore all branch,
-  tag, review, and required-check protections.
-- Retain sanitized before/after settings, the exact policy-change and merge
-  audit records, and the incident result. Complete a post-event review that
-  records whether the mechanism expired and whether any follow-up is required.
+  production behavior and the incident/change reason.
+- Record the exact SHA and bounded change that the incident permits; any
+  additional change requires a new recorded decision.
+- Confirm the required exact-head checks are terminal and successful and all
+  conversations are resolved before using the merge override.
+- Use only the existing `BunsDev` owner allowance through a pull request. The
+  incident must not add another standing bypass actor, team, app, administrator,
+  or user.
+- Record the merge override, its reason, the exact SHA, and the resulting merge
+  in the incident/change record.
+- Retain sanitized before/after settings, exact-head check evidence,
+  conversation-resolution evidence, the merge audit records, and the incident
+  result.
+- Complete a post-event review covering the change, override, outcome, and any
+  follow-up. Restore any incident-specific policy change, but the approved
+  permanent BunsDev bypass remains; do not require its immediate removal.
 
-Never restore a standing personal/admin bypass. An emergency is not authority
-to weaken the normal release environment, immutable-tag ruleset, or
-administrator enforcement after the bounded incident ends.
+An emergency is not authority to weaken the normal release environment,
+immutable-tag ruleset, administrator enforcement, direct-push rejection,
+required checks, or conversation resolution.
 
 Protect `main` and `v*` tags now that repository rulesets are available. A
 ruleset bypass applies to every rule in that ruleset, so use two separate active

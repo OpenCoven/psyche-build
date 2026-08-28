@@ -188,7 +188,7 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).not.toContain('protected-branch deployment policy');
   });
 
-  it('protects main with the exact CI checks and no administrative rewrite path', async () => {
+  it('protects main with exact checks and only the named owner PR bypass', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 
     expect(runbook).toContain(
@@ -203,9 +203,40 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain('allow_force_pushes: false');
     expect(runbook).toContain('allow_deletions: false');
     expect(runbook).toContain('required_conversation_resolution: true');
+    expect(runbook).toContain('bypass_pull_request_allowances: {');
+    expect(runbook).toContain('users: ["BunsDev"]');
+    expect(runbook).toContain('teams: []');
+    expect(runbook).toContain('apps: []');
+
+    const protectionPayload = runbook.match(
+      /jq -n '(\{[\s\S]*?\})' \| gh api --method PUT repos\/OpenCoven\/psyche-build\/branches\/main\/protection --input -/,
+    )?.[1];
+    expect(protectionPayload, 'missing the full main protection payload').toBeDefined();
+    expect(protectionPayload!.match(/users:\s*\[[^\]]*\]/g)).toEqual([
+      'users: ["BunsDev"]',
+    ]);
+    expect(protectionPayload).toMatch(/teams:\s*\[\]/);
+    expect(protectionPayload).toMatch(/apps:\s*\[\]/);
+    expect(protectionPayload).not.toMatch(/users:\s*\[[^\]]*,[^\]]*\]/);
   });
 
-  it('requires a bounded reviewed emergency procedure without a standing bypass', async () => {
+  it('documents the recorded owner bypass without claiming self-approval', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
+    expect(runbook).toMatch(
+      /independent review[\s\S]{0,120}preferred[\s\S]{0,120}not required[\s\S]{0,160}BunsDev[\s\S]{0,160}owner-authored administrative PR/i,
+    );
+    expect(runbook).toMatch(/direct pushes[\s\S]{0,100}(?:rejected|prohibited)/i);
+    expect(runbook).toMatch(
+      /owner-authored administrative PR[\s\S]{0,500}exact[- ]head[\s\S]{0,160}(?:terminal and successful|successful required checks)/i,
+    );
+    expect(runbook).toMatch(/resolved conversations/i);
+    expect(runbook).toMatch(/recorded[\s\S]{0,100}override reason[\s\S]{0,100}exact SHA/i);
+    expect(runbook).toMatch(/retain(?:ed)?[\s\S]{0,100}audit evidence/i);
+  });
+
+  it('keeps emergency changes within the single approved standing owner bypass', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
     const emergencyHeading = /^## Emergency change procedure for #31\s*$/im.exec(runbook);
     expect(emergencyHeading, 'missing the #31 emergency-change procedure').not.toBeNull();
@@ -214,24 +245,17 @@ describe('v0.0.1 release documentation contract', () => {
     const procedure = nextHeading === -1 ? following : following.slice(0, nextHeading);
 
     expect(procedure).toMatch(/incident issue/i);
-    expect(procedure).toMatch(/named non-authorizing approver/i);
-    expect(procedure).toMatch(/exact intended SHA/i);
+    expect(procedure).toMatch(/incident\/change reason/i);
+    expect(procedure).toMatch(/exact SHA/i);
+    expect(procedure).toMatch(/exact-head checks/i);
     expect(procedure).toMatch(/bounded change/i);
-    expect(procedure).toMatch(/separately scoped and time-bounded mechanism/i);
-    expect(procedure).toMatch(/immediately restore[\s\S]{0,100}protections/i);
+    expect(procedure).toMatch(/merge override/i);
     expect(procedure).toMatch(/sanitized before\/after settings/i);
     expect(procedure).toMatch(/post-event review/i);
-    expect(procedure).toMatch(/never restore a standing personal\/admin bypass/i);
+    expect(procedure).toMatch(/must not add[\s\S]{0,100}standing bypass actor/i);
+    expect(procedure).toMatch(/permanent BunsDev bypass[\s\S]{0,100}(?:remains|retain)/i);
 
-    const permissiveBypassLines = procedure
-      .split(/\r?\n/)
-      .filter(
-        (line) =>
-          /bypass/i.test(line) &&
-          /(?:administrator|admin|standing|personal)/i.test(line),
-      )
-      .filter((line) => !/(?:never|must not|without|remove|no\b)/i.test(line));
-    expect(permissiveBypassLines).toEqual([]);
+    expect(procedure).not.toMatch(/remove[\s\S]{0,100}permanent BunsDev bypass/i);
   });
 
   it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {

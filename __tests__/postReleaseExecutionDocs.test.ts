@@ -47,6 +47,28 @@ describe('post-release execution documentation', () => {
     }
   });
 
+  it('records administrator enforcement with one named owner bypass for Stage 0', async () => {
+    const documents = await Promise.all(
+      ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of documents) {
+      expect(source, filePath).toMatch(/administrator enforcement/i);
+      expect(source, filePath).toMatch(/single named owner bypass[\s\S]{0,100}BunsDev/i);
+      expect(source, filePath).toMatch(/all other actors[\s\S]{0,120}(?:cannot bypass|remain subject)/i);
+      expect(source, filePath).toMatch(/direct-push rejection proof/i);
+      expect(source, filePath).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
+      expect(source, filePath).toMatch(
+        /independent review[\s\S]{0,120}preferred[\s\S]{0,120}not required[\s\S]{0,160}BunsDev[\s\S]{0,160}owner-authored administrative PR/i,
+      );
+      expect(source, filePath).not.toMatch(/no standing (?:bypass )?actor/i);
+      expect(source, filePath).not.toMatch(/zero (?:standing )?bypasses/i);
+    }
+  });
+
   it('names the complete critical path without changing support claims', async () => {
     const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
 

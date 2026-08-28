@@ -82,6 +82,14 @@ linking this proof PR, sanitized policy evidence, the first apply, and the final
 zero-operation run. Documentation and tests alone are not proof of those remote
 state transitions.
 
+For #31, the policy evidence must prove administrator enforcement plus a
+single named owner bypass, `BunsDev`. All other actors remain subject to the
+required approval and cannot bypass it, and the retained evidence includes
+direct-push rejection proof. GitHub cannot create an author self-approval review.
+Independent review is preferred, but it is not required for a `BunsDev`
+owner-authored administrative PR using an explicit recorded admin merge
+override after exact-head successful checks and resolved conversations.
+
 [PR #247](https://github.com/OpenCoven/psyche-build/pull/247) hardened the
 supported desktop Git surface so repository-controlled signature-verification
 configuration cannot execute commands during log inspection; bare repositories
@@ -197,7 +205,10 @@ and roadmap agree on delivered, active, blocked, and deferred work.
 Stage 0 closure items delivered by this wave. Finalize their closure by linking
 the proof PR, policy evidence, first apply, and zero-operation run in the owning
 issues. Keep the source-first sync, protected environments, canonical mapping,
-and bounded drift validation intact.
+and bounded drift validation intact. The #31 evidence records administrator
+enforcement, the single named `BunsDev` owner bypass, the absence of team, app,
+or additional-user bypass actors, and direct-push rejection proof; it does not
+claim a self-approval review.
 
 ## Stage 1 — close the supported release stabilization baseline
 
