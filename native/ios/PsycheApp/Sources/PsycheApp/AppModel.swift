@@ -164,7 +164,7 @@ final class AppModel: ObservableObject {
         }
 
         let state = await composition.connectionManager.state
-        if case let .failed(reason) = state {
+        if connectionError == nil, case let .failed(reason) = state {
             connectionError = reason
         }
     }
