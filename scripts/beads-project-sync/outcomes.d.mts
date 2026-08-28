@@ -24,7 +24,7 @@ export interface CanonicalOutcomeValidation {
 }
 
 export const CANONICAL_OUTCOME_REF_PATTERN: RegExp;
-export const CANONICAL_OUTCOME_DIAGNOSTIC_ID_LIMIT: 50;
+export const CANONICAL_OUTCOME_DIAGNOSTIC_ID_LIMIT: 100;
 
 export function normalizeCanonicalOutcomeRef(
   value: unknown,

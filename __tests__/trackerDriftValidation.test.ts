@@ -341,6 +341,90 @@ describe('tracker drift validation', () => {
     expect(stderr.value()).not.toContain(privateBody);
   });
 
+  it('reports independent Bead and render-hash marker findings before identity checks', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const privateBody = 'PRIVATE-COMBINED-MARKER-SENTINEL';
+    const rawIssues = [
+      rawIssue('unused', 301, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=not a valid id -->',
+          '<!-- psyche-bead-sync:v1 render-hash -->',
+          privateBody,
+        ].join('\n'),
+      }),
+      rawIssue('tracker-closed', 302, {
+        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        labels: [{ name: 'bead' }, { name: 'priority:P0' }],
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    const report = JSON.parse(stdout.value());
+    expect(report.managedMirrorCount).toBe(2);
+    expect(report.findings).toEqual([
+      { kind: 'malformed_bead_marker', issueNumber: 301 },
+      { kind: 'malformed_render_hash_marker', issueNumber: 301 },
+      {
+        kind: 'state_mismatch',
+        beadId: 'tracker-closed',
+        issueNumber: 302,
+        sourceStatus: 'closed',
+        mirrorState: 'open',
+      },
+      {
+        kind: 'missing_mirror',
+        beadId: 'tracker-open',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      },
+    ]);
+    expect(stdout.value()).not.toContain(privateBody);
+    expect(stderr.value()).not.toContain(privateBody);
+  });
+
+  it('treats a generated Bead marker missing equals as malformed but ignores prose', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const privateBody = 'PRIVATE-MISSING-EQUALS-SENTINEL';
+    const rawIssues = [
+      rawIssue('unused', 305, {
+        body: [
+          'Generated mirrors mention bead-id in documentation.',
+          '<!-- psyche-bead-sync:v1 bead-id -->',
+          `<!-- psyche-bead-sync:v1 render-hash=${'a'.repeat(64)} -->`,
+          privateBody,
+        ].join('\n'),
+      }),
+      rawIssue('unused', 306, {
+        body: 'Ordinary issue prose can mention bead-id without becoming managed.',
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    const report = JSON.parse(stdout.value());
+    expect(report.managedMirrorCount).toBe(1);
+    expect(report.findings).toContainEqual({
+      kind: 'malformed_bead_marker',
+      issueNumber: 305,
+    });
+    expect(report.findings).not.toContainEqual(expect.objectContaining({ issueNumber: 306 }));
+    expect(stdout.value()).not.toContain(privateBody);
+    expect(stderr.value()).not.toContain(privateBody);
+  });
+
   it('reports malformed render-hash markers without aborting the remaining inventory', async () => {
     const stdout = outputBuffer();
     const stderr = outputBuffer();

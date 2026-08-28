@@ -67,23 +67,25 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors) {
 
   const marker = escapeRegExp(config.issueMarker);
   const beadMatches = [...body.matchAll(new RegExp(
-    `<!--\\s*${marker}\\s+bead-id=([^>]*)-->`,
+    `<!--\\s*${marker}\\s+bead-id(?=\\s|=|-->)([^>]*)-->`,
     'giu',
   ))];
   if (beadMatches.length === 0) return null;
-  const beadIds = beadMatches.map((match) => match[1]?.trim() ?? '');
+  const beadIds = beadMatches.map((match) => {
+    const metadata = match[1] ?? '';
+    return metadata.match(/^=(.*)$/su)?.[1]?.trim() ?? null;
+  });
   const markerFindingKinds = [];
   if (beadMatches.length > 1) markerFindingKinds.push('duplicate_bead_marker');
-  if (beadIds.some((beadId) => !beadId)) markerFindingKinds.push('empty_bead_marker');
-  if (beadIds.some((beadId) => beadId && !BEAD_ID_PATTERN.test(beadId))) {
+  if (beadIds.some((beadId) => beadId === '')) markerFindingKinds.push('empty_bead_marker');
+  if (beadIds.some((beadId) => beadId == null || !BEAD_ID_PATTERN.test(beadId))) {
     markerFindingKinds.push('malformed_bead_marker');
   }
-  const uniqueBeadIds = [...new Set(beadIds.filter((beadId) => BEAD_ID_PATTERN.test(beadId)))];
+  const uniqueBeadIds = [...new Set(
+    beadIds.filter((beadId) => beadId != null && BEAD_ID_PATTERN.test(beadId)),
+  )];
   const beadId = uniqueBeadIds.length === 1 ? uniqueBeadIds[0] : null;
   const state = rawIssue.state === 'closed' ? 'closed' : 'open';
-  if (markerFindingKinds.length > 0) {
-    return { beadId, number, state, markerFindingKinds };
-  }
 
   const renderMatches = [...body.matchAll(new RegExp(
     `<!--\\s*${marker}\\s+render-hash(?=\\s|=|-->)([^>]*)-->`,
