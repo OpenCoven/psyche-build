@@ -8,10 +8,73 @@ const pullUrl = (pull: number): string =>
   `https://github.com/OpenCoven/psyche-build/pull/${pull}`;
 
 describe('post-release execution documentation', () => {
+  it('records the Stage 0 proof wave as delivered before the next P0 gate', async () => {
+    const documents = await Promise.all(
+      ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of documents) {
+      expect(source, filePath).toContain(pullUrl(245));
+      expect(source, filePath).toContain('5f4b7b05');
+      expect(source, filePath).toMatch(/#238[\s\S]{0,240}(?:delivered|completed)/i);
+      expect(source, filePath).toMatch(/#31[\s\S]{0,160}delivered by this wave/i);
+      expect(source, filePath).toMatch(/#237[\s\S]{0,160}delivered by this wave/i);
+      expect(source, filePath).toMatch(/#240[\s\S]{0,160}delivered by this wave/i);
+      expect(source, filePath).toContain('#196/#239 are the next P0 critical path');
+      expect(source, filePath).toMatch(/when this proof PR merges/i);
+      expect(source, filePath).toMatch(/linked remote evidence/i);
+      expect(source, filePath).toMatch(/proof PR/i);
+      expect(source, filePath).toMatch(/policy evidence/i);
+      expect(source, filePath).toMatch(/first apply/i);
+      expect(source, filePath).toMatch(/zero-operation run/i);
+      expect(source, filePath).toMatch(/owning issues/i);
+      const stale238Claims = source
+        .split(/\n\s*\n/)
+        .filter((paragraph) => /#238/.test(paragraph))
+        .filter((paragraph) =>
+          /(?:current critical-path|remains pending|is pending|pending work|merge this current-main|merge the #238)/i.test(
+            paragraph,
+          ),
+        );
+      expect(stale238Claims, filePath).toEqual([]);
+      expect(source, filePath).not.toMatch(
+        /(?:#31|#237|#240)[^\n]{0,220}(?:current blocker|precedes stabilization)/i,
+      );
+      expect(source, filePath).not.toMatch(/while Stage 0 proceeds/i);
+    }
+  });
+
+  it('records administrator enforcement with one named PR-only owner bypass for Stage 0', async () => {
+    const documents = await Promise.all(
+      ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of documents) {
+      expect(source, filePath).toMatch(/administrator enforcement/i);
+      expect(source, filePath).toMatch(/single named PR-only owner bypass[\s\S]{0,100}BunsDev/i);
+      expect(source, filePath).toMatch(/all other actors[\s\S]{0,160}(?:require|remain subject to)[\s\S]{0,80}approval/i);
+      expect(source, filePath).toMatch(/direct-push rejection proof/i);
+      expect(source, filePath).toMatch(/direct pushes[\s\S]{0,120}platform-blocked[\s\S]{0,100}BunsDev/i);
+      expect(source, filePath).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
+      expect(source, filePath).toMatch(
+        /BunsDev[\s\S]{0,180}explicit PR-only bypass[\s\S]{0,160}admin merge[\s\S]{0,180}exact-head[\s\S]{0,120}resolved conversations/i,
+      );
+      expect(source, filePath).not.toMatch(/classic `?bypass_pull_request_allowances`?[\s\S]{0,100}(?:BunsDev|owner)/i);
+      expect(source, filePath).not.toMatch(/no standing (?:bypass )?actor/i);
+      expect(source, filePath).not.toMatch(/zero (?:standing )?bypasses/i);
+    }
+  });
+
   it('names the complete critical path without changing support claims', async () => {
     const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
 
-    for (const issue of [31, 195, 196, 198, 199, 200, 201, 237, 238, 239, 240, 241, 242, 243, 244]) {
+    for (const issue of [31, 195, 196, 197, 198, 199, 200, 201, 237, 238, 239, 240, 241, 242, 243, 244, 246, 253]) {
       expect(execution, `missing issue #${issue}`).toContain(issueUrl(issue));
     }
 
@@ -41,6 +104,64 @@ describe('post-release execution documentation', () => {
     expect(roadmap).toMatch(/#236[\s\S]{0,160}\*\*Closed as superseded\*\*/i);
     expect(execution).toMatch(/No listed active implementation PR is merge-ready/i);
     expect(roadmap).toMatch(/No active implementation PR above is merge-ready/i);
+  });
+
+  it('retains dependency gates and keeps unrelated PR #254 outside Stage 0', async () => {
+    const documents = await Promise.all(
+      ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of documents) {
+      for (const issue of [197, 198, 199, 200, 201, 241, 243, 244, 246, 253]) {
+        expect(source, `${filePath} missing issue #${issue}`).toContain(issueUrl(issue));
+      }
+      for (const pull of [190, 192, 193]) {
+        expect(source, `${filePath} changed PR #${pull} disposition`).toMatch(
+          new RegExp(`${pullUrl(pull).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,220}\\*\\*Source material only\\*\\*`, 'i'),
+        );
+      }
+      expect(source, filePath).toMatch(/#200\/#241[\s\S]{0,160}P1 dependency gate/i);
+      expect(source, filePath).toMatch(/#199\/#243[\s\S]{0,160}P1 dependency gate/i);
+      expect(source, filePath).toMatch(/#198\/#244[\s\S]{0,160}P1 dependency gate/i);
+      expect(source, filePath).toMatch(/#197[\s\S]{0,160}P1 dependency gate/i);
+      expect(source, filePath).toMatch(/#201\/#253[\s\S]{0,160}P2 dependency gate/i);
+      expect(source, filePath).toMatch(/#246[\s\S]{0,160}P2 dependency gate/i);
+      expect(source, filePath).toContain(pullUrl(254));
+      expect(source, filePath).toMatch(/PR #254 remains outside Stage 0/i);
+    }
+  });
+
+  it('documents canonical Beads mapping and review before Dolt publication', async () => {
+    const [beads, roadmap, execution] = await Promise.all([
+      readFile('.beads/README.md', 'utf8'),
+      readFile('docs/ROADMAP.md', 'utf8'),
+      readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8'),
+    ]);
+
+    expect(beads).toMatch(/`external_ref`[\s\S]{0,160}canonical public outcome\/maintenance-bucket field/i);
+    expect(beads).toMatch(/active Bead[\s\S]{0,160}exactly one valid configured target/i);
+    expect(beads).toMatch(/priority[\s\S]{0,100}match(?:es|ing)?\s+(?:the\s+)?roadmap\s+priority/i);
+    expect(beads).toMatch(/generated GitHub bodies[\s\S]{0,160}one-way mirrors/i);
+    expect(beads).toMatch(/never\s+the\s+source\s+of\s+repair/i);
+    expect(beads).toMatch(/review before `bd dolt push`/i);
+    expect(beads).toMatch(/sandbox[\s\S]{0,80}no auto-push/i);
+    expect(beads).toMatch(/generated interactions[\s\S]{0,100}local Dolt diff/i);
+    expect(beads).toMatch(/merge the Git PR[\s\S]{0,120}tracked audit\/config\/code/i);
+    expect(beads).toMatch(/publish the exact reviewed Dolt commit/i);
+    expect(beads).toMatch(/run the protected sync/i);
+    expect(beads).not.toMatch(
+      /(?:edit|change|repair) generated GitHub bodies directly/i,
+    );
+
+    const permissiveMirrorParagraphs = [beads, roadmap, execution]
+      .flatMap((source) => source.split(/\n\s*\n/))
+      .filter((paragraph) => /(?:generated GitHub|generated mirror|mirrored issue)/i.test(paragraph))
+      .filter((paragraph) => /(?:edit|change|repair|authoritative source)/i.test(paragraph))
+      .filter((paragraph) => !/(?:do not|never|must not|cannot|not the source)/i.test(paragraph));
+    expect(permissiveMirrorParagraphs).toEqual([]);
   });
 
   it('keeps the roadmap, docs index, and acceptance contract connected', async () => {

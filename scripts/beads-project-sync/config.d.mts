@@ -1,3 +1,5 @@
+import type { CanonicalTargets } from './outcomes.mjs';
+
 export interface BeadsProjectSyncConfig {
   owner: string;
   repository: string;
@@ -9,6 +11,7 @@ export interface BeadsProjectSyncConfig {
   trustedIssueAuthors: readonly string[];
   legacyProjectMarkers?: readonly string[];
   assigneeMap: Readonly<Record<string, string>>;
+  canonicalTargets: CanonicalTargets;
   massClose: {
     readonly minimum: number;
     readonly fraction: number;

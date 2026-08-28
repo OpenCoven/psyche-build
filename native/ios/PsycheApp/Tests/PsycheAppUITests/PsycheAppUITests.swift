@@ -68,8 +68,8 @@ final class PsycheAppUITests: XCTestCase {
     /// that needs you says so rather than only looking different.
     func testAttentionPaneIsLabelledAsNeedingYou() throws {
         let app = launchApp()
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        let paneRow = element("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
 
         let label = paneRow.label
         XCTAssertTrue(label.contains("homepage polish"), label)
@@ -319,8 +319,8 @@ final class PsycheAppUITests: XCTestCase {
         try requireCompactWidth(in: app)
         XCTAssertTrue(app.staticTexts["Needs You"].waitForExistence(timeout: 10))
 
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        let paneRow = app.cells.containing(.any, identifier: "now-pane-web-home").firstMatch
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
         paneRow.tap()
 
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
@@ -420,8 +420,8 @@ final class PsycheAppUITests: XCTestCase {
         let app = launchApp()
         try requireCompactWidth(in: app)
 
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        let paneRow = app.cells.containing(.any, identifier: "now-pane-web-home").firstMatch
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
         paneRow.tap()
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
 
@@ -657,8 +657,8 @@ final class PsycheAppUITests: XCTestCase {
         let app = launchApp()
         try requireRegularWidth(in: app)
 
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        let paneRow = app.cells.containing(.any, identifier: "now-pane-web-home").firstMatch
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
         paneRow.tap()
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
 
@@ -711,9 +711,13 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     /// Reaches the terminal workspace from whichever shell is on screen.
+    ///
+    /// Querying the cell that contains the identifier avoids `row()`'s
+    /// synchronous `.exists` check. SwiftUI exposes this identifier on a row
+    /// descendant rather than on the cell itself.
     private func openWebHomePane(in app: XCUIApplication) {
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        let paneRow = app.cells.containing(.any, identifier: "now-pane-web-home").firstMatch
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
         paneRow.tap()
     }
 

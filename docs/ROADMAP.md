@@ -2,7 +2,7 @@
 
 **Status:** Active post-release roadmap  
 **Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-08-25
+**Last reconciled:** 2026-08-28
 
 **Portfolio control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)  
 **Execution contract:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
@@ -60,14 +60,35 @@ Silicon and Intel lifecycle validation.
 distribution were skipped deliberately while shared validation was preserved.
 This evidence makes macOS public and supported; it does not make iOS supported.
 
+[Issue #238](https://github.com/OpenCoven/psyche-build/issues/238) remains
+delivered through [PR #245](https://github.com/OpenCoven/psyche-build/pull/245)
+and merge commit `5f4b7b05`. Its critical-path documentation and retirement of
+the superseded release-doc branch are completed foundation.
+
 PRs [#248](https://github.com/OpenCoven/psyche-build/pull/248) and
 [#249](https://github.com/OpenCoven/psyche-build/pull/249) have also landed the
 managed Beads Project mirror, bounded GraphQL discovery/inventory caching,
 deterministic drift checks, write fencing, and public-body sanitizer hardening.
 Production synchronization is restricted to `main`, the manual environment is
 Maintainer-gated, and the latest live dry-run planned zero mutations with two
-GraphQL queries. #237/#240 remain listed until their public issue checklists and
-evidence links are reconciled with that delivered implementation.
+GraphQL queries.
+
+When this proof PR merges and its linked remote evidence is completed,
+[#31](https://github.com/OpenCoven/psyche-build/issues/31) is delivered by this
+wave, [#237](https://github.com/OpenCoven/psyche-build/issues/237) is delivered
+by this wave, and [#240](https://github.com/OpenCoven/psyche-build/issues/240)
+is delivered by this wave. Their closure is finalized in the owning issues by
+linking this proof PR, sanitized policy evidence, the first apply, and the final
+zero-operation run. Documentation and tests alone are not proof of those remote
+state transitions.
+
+For #31, the policy evidence must prove administrator enforcement plus a
+single named PR-only owner bypass, `BunsDev`. Direct pushes remain
+platform-blocked for `BunsDev`, all other actors require one approval, and the
+retained evidence includes direct-push rejection proof. GitHub cannot create an
+author self-approval review. When independent review is unavailable, `BunsDev`
+uses the explicit PR-only bypass for an admin merge only after exact-head
+checks succeed and conversations are resolved; this is not self-approval.
 
 [PR #247](https://github.com/OpenCoven/psyche-build/pull/247) hardened the
 supported desktop Git surface so repository-controlled signature-verification
@@ -105,11 +126,11 @@ Delivered foundation
   #194 macOS v0.0.1 ── #203 desktop/iOS release independence
              │
              ▼
-Post-release control
-  #238 docs ── #31 governance ── #237/#240 evidence closure
+Delivered Stage 0 control wave
+  #238 via PR #245 + #31 governance + #237/#240 evidence closure
              │
              ▼
-Supported-surface stabilization
+Next P0 critical path
   #196/#239 operator acceptance ──► #199/#243 operations
              │                              │
              ├──────────────────────────────┤
@@ -128,17 +149,20 @@ Independent iOS train                 Stable extraction seams
 
 Parallel community floor
   #198/#244 security, ownership, support, and contribution readiness
+
+Deferred P2 trains
+  #201/#253 Psyche compatibility ── #246 cross-platform input parity
 ```
 
-## Active portfolio outcomes
+## Portfolio outcomes and closure state
 
 | Outcome | Priority | Train | Close condition |
 |---|---:|---|---|
 | [#195 — roadmap and post-release control](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Portfolio | Every active outcome has one owner, priority, dependency chain, support decision, and evidence location |
-| [#238 — critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | Documentation | The current-main replacement plan and tests merge, stale #236 is retired, and #195 is reconciled |
-| [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Governance | Required checks/review apply to administrators, standing bypasses are removed, and a protected proof PR is retained |
-| [#237 — Beads/mirror reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) | P0 | Tracker integrity | PRs #248/#249 delivered source-first synchronization; close after the issue links the final mapping, apply, and zero-drift evidence |
-| [#240 — tracker drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | Tracker integrity | Deterministic local/CI/live validation is delivered; close after the issue accepts its bounded report and clean-checkout evidence |
+| [#238 — critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | Documentation | **Delivered** by PR #245 / `5f4b7b05`; preserve it as completed Stage 0 foundation |
+| [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Governance | **Delivered by this wave** when the proof PR and sanitized protected-path evidence are linked in the issue |
+| [#237 — Beads/mirror reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) | P0 | Tracker integrity | **Delivered by this wave** when the reviewed mapping, first apply, and issue evidence links agree |
+| [#240 — tracker drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | Tracker integrity | **Delivered by this wave** when bounded validation and the final zero-operation run are linked in the issue |
 | [#196 — `v0.0.1` stabilization](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Reliability | Supported ordinary and representative failure paths have operator-observed evidence |
 | [#239 — operator acceptance manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | Reliability | One sanitized manifest ties exact-source smoke, lifecycle, persistence, Git/cleanup, and provider-isolation evidence to the release |
 | [#200 — iOS internal beta and continuity](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | iOS | An immutable physical build restores authoritative state, performs only wired scoped effects, reconnects, and fails closed on revocation |
@@ -150,6 +174,8 @@ Parallel community floor
 | [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Community | Security, CODEOWNERS, support, issue, PR, conduct, and protected-data guidance merge and remain validated |
 | [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Concentrated entry points compose independently testable capabilities without public/persisted contract drift |
 | [#201 — OpenCoven identity and Threads](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | OpenCoven | A cross-device reference flow preserves protocol-owned identity through execution, evidence, disconnect, and resume |
+| [#253 — Psyche compatibility canary and adapters](https://github.com/OpenCoven/psyche-build/issues/253) | P2 | OpenCoven | Pin a consumable protocol profile and introduce bounded canaries/adapters without blocking supported-product work |
+| [#246 — cross-platform Vim and keyboard-mode parity](https://github.com/OpenCoven/psyche-build/issues/246) | P2 | Input | Opt-in shared semantics preserve exact terminal passthrough and earn platform-specific evidence after prerequisite contracts stabilize |
 
 ## Pull-request disposition
 
@@ -158,34 +184,38 @@ status sources.
 
 | Pull request | Train | Disposition | Required replacement gate |
 |---|---|---|---|
-| [#236 — release documentation](https://github.com/OpenCoven/psyche-build/pull/236) | Documentation | **Closed as superseded** | Preserve discussion/history but do not force-update, reopen, or merge the stale branch |
+| [#236 — release documentation](https://github.com/OpenCoven/psyche-build/pull/236) | Documentation | **Closed as superseded** by PR #245 | Preserve discussion/history but do not force-update, reopen, or merge the stale branch |
 | [#190 — graphics reporting](https://github.com/OpenCoven/psyche-build/pull/190) | #199/#243 diagnostics | **Source material only** | Extract bounded pieces after callback safety, readiness retry, schema bounds, and redaction are proven |
 | [#193 — Bonjour/readiness](https://github.com/OpenCoven/psyche-build/pull/193) | #200 iOS | **Source material only** | Extract #241 first, then discovery/reconnect, then physical same-LAN acceptance |
 | [#192 — mobile rituals](https://github.com/OpenCoven/psyche-build/pull/192) | #200 iOS | **Source material only** | Extract #242 publication, execution, and capability-gated UI in order after accepted readiness |
+| [#254 — Psyche conformance foundation](https://github.com/OpenCoven/psyche-build/pull/254) | #201/#253 | **Outside Stage 0** | PR #254 remains outside Stage 0; evaluate it only against the P2 compatibility gate and its own exact-head evidence |
 
 No active implementation PR above is merge-ready. Rebase success, historical
 green tests, source presence, or conflict resolution alone does not satisfy its
 current contract.
 
-## Stage 0 — restore trustworthy control state
+## Stage 0 — delivered control-state closure wave
 
 **Owners:** #238, #31, #237, and #240.  
-**Exit:** public docs, branch policy, Beads, generated mirrors, priorities, and
-roadmap agree on delivered, active, blocked, and deferred work.
+**Exit state:** when this proof PR merges and linked remote evidence is
+completed, public docs, branch policy, Beads, generated mirrors, priorities,
+and roadmap agree on delivered, active, blocked, and deferred work.
 
-1. Merge the #238 current-main documentation replacement; #236 is retired.
-2. Enforce required checks/review for administrators and prove the policy with
-   sanitized before/after state plus a protected PR.
-3. Reconcile #237/#240 with the source-first synchronization, protected
-   environments, and zero-drift live evidence delivered by PRs #248/#249.
-4. Keep repeatable mirror and GraphQL-budget validation green.
-5. Require routine tracker and documentation changes to use the reviewed PR
-   path.
+#238 remains delivered through PR #245 / `5f4b7b05`. #31, #237, and #240 are
+Stage 0 closure items delivered by this wave. Finalize their closure by linking
+the proof PR, policy evidence, first apply, and zero-operation run in the owning
+issues. Keep the source-first sync, protected environments, canonical mapping,
+and bounded drift validation intact. The #31 evidence records administrator
+enforcement, the single named PR-only owner bypass, `BunsDev`, the absence of
+team, app, or additional-user bypass actors, and direct-push rejection proof.
+Direct pushes remain platform-blocked for `BunsDev`; all other actors require
+approval, and the owner path is an explicit PR-only bypass/admin merge after
+exact-head checks and resolved conversations, never a self-approval claim.
 
 ## Stage 1 — close the supported release stabilization baseline
 
 **Owners:** #196 and #239.  
-**May proceed during Stage 0:** yes.
+**Current gate:** #196/#239 are the next P0 critical path.
 
 Retain exact-source tmux smoke, first-run/onboarding, terminal and agent lanes,
 project/pane lifecycle, restart/recovery, Git/PR/cleanup, optional-provider
@@ -199,6 +229,10 @@ explicit `recovery_required` state. Transfer reusable infrastructure gaps to
 **Owner:** #200.  
 **Required order:** #241 → discovery/reconnect → physical same-LAN proof → #242
 publication → #242 execution → capability-gated UI → immutable TestFlight.
+
+#200/#241 retains its P1 dependency gate: atomic readiness must land before
+later iOS capability work, and physical evidence remains required before the
+support claim changes.
 
 Bonjour remains a replaceable discovery adapter. Host identity and authority
 must survive address and transport changes. No support status changes from
@@ -214,6 +248,9 @@ identities.
 
 **Owners:** #199 and #243.
 
+#199/#243 retains its P1 dependency gate: schema/redaction design may begin
+during #239, while reusable failure harnesses follow observed #239 cases.
+
 Define one versioned, deterministic support bundle with strict time, count,
 record-size, and total-size bounds; automatic redaction; cancellation; and
 truthful partial-failure semantics. Turn #239 observations into reusable
@@ -224,15 +261,22 @@ safe portions of #190 that materially improve this bounded contract.
 
 **Owners:** #198 and #244.
 
+#198/#244 retains its P1 dependency gate: the minimum community floor may land
+independently, but broad contributor-readiness claims require clean-checkout
+evidence and must preserve delivered branch policy.
+
 Land the minimum security, ownership, support, issue, PR, conduct, generated-file,
 protected-data, and contribution floor independently. Then prove the broader
 clean-checkout contributor loop and architecture map. Repository documentation
-must not claim #31 policy is enforced until #31 links actual settings evidence.
+must link #31's actual settings evidence when claiming the policy is enforced.
 
 ## Stage 5 — decompose behind proven contracts
 
 **Owner:** #197.  
 **Depends on:** stable #196/#199 seams.
+
+#197 retains its P1 dependency gate: implementation waits for stable #196/#199
+contracts.
 
 Extraction order:
 
@@ -248,7 +292,11 @@ This is not a framework rewrite or a visual redesign program.
 
 ## Stage 6 — converge on OpenCoven-native identity and execution
 
-**Owner:** #201.
+**Owners:** #201 and #253.
+
+#201/#253 retains its P2 dependency gate: design and current-state mapping may
+proceed, while the immutable pin waits for a consumable Psyche profile and
+ownership-sensitive adapters wait for the cross-repository ownership decision.
 
 Approve cross-repository ownership and compatibility contracts, wrap current
 pane/worktree/provider behavior with protocol-owned identities, introduce
@@ -257,17 +305,28 @@ recovery, and continuity semantics are executable. Design may proceed early;
 implementation cannot become an undeclared prerequisite for #196, #199, or
 #200.
 
+## Parallel P2 input train
+
+**Owner:** #246.
+
+#246 retains its P2 dependency gate: bounded semantic-core work may be promoted
+explicitly, but broad cross-platform rollout follows stable input, persistence,
+action, P0 stabilization, and the first iOS readiness seams. It must not become
+an implicit prerequisite for #196, #199, or #200.
+
 ## Concurrency rules
 
-- #238, #31, #237/#240, and #239 may proceed in parallel on non-overlapping
-  seams.
+- #196/#239 is the active P0 gate after the Stage 0 proof wave closes.
 - #243 schema/redaction work may begin during #239; reusable failure scenarios
   wait for observed #239 cases.
 - #244 may proceed independently but must not destabilize P0 or iOS contracts.
 - #241 precedes every later iOS capability slice.
 - #242 publication precedes execution; execution precedes mobile controls.
 - #197 implementation waits for stable #196/#199 contracts.
-- #201 design may proceed; implementation cannot block #196, #199, or #200.
+- #201/#253 design may proceed; implementation cannot block #196, #199, or
+  #200.
+- #246 remains P2 until its prerequisite contracts are stable or a bounded
+  slice is explicitly promoted.
 
 ## Evidence and merge rules
 
