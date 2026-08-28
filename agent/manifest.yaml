@@ -67,10 +67,17 @@ agent:
     tmux: ">=3.0"
 
 planning:
-  authoritative: beads
-  public_mirror: github-project
-  public_mirror_direction: one-way-sanitized
-  managed_state_changes_via: bd
+  public_outcomes:
+    authority: github-issues-and-milestones
+  implementation_dependencies:
+    authority: beads
+    managed_state_changes_via: bd
+  managed_public_mirrors:
+    surfaces:
+      - github-project
+      - generated-github-issues
+    direction: one-way-sanitized
+  runtime_identity: neither-tracker
 
 contracts:
   current:

@@ -18,7 +18,9 @@ describe('agent repository contract', () => {
     expect(guide).toContain('`coven-threads` owns protected-surface authorization');
     expect(guide).toContain('issues/253');
     expect(guide).toMatch(/not Psyche protocol conformance/i);
-    expect(guide).toContain('Beads is authoritative');
+    expect(guide).toContain('GitHub issues and milestones own public outcomes');
+    expect(guide).toContain('Beads owns managed implementation tasks');
+    expect(guide).toContain('Neither tracker grants runtime identity or authority');
     expect(guide).toContain('./scripts/agent-check fast');
     expect(guide).toContain('./scripts/agent-check full');
     expect(guide).toContain('PSYCHE_AGENT_CHECK_IOS=1');
@@ -34,7 +36,10 @@ describe('agent repository contract', () => {
     expect(manifest).toContain('bootstrap: ./scripts/agent-bootstrap');
     expect(manifest).toContain('fast: ./scripts/agent-check fast');
     expect(manifest).toContain('full: ./scripts/agent-check full');
-    expect(manifest).toContain('authoritative: beads');
+    expect(manifest).toContain('authority: github-issues-and-milestones');
+    expect(manifest).toContain('authority: beads');
+    expect(manifest).toContain('direction: one-way-sanitized');
+    expect(manifest).toContain('runtime_identity: neither-tracker');
     expect(manifest).toContain('status: not-yet-conformant');
     expect(manifest).toContain('issues/253');
     expect(manifest).toContain('psyche: prohibited-until-planned-canary-passes');

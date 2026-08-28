@@ -72,10 +72,12 @@ expiring operational notes in scoped documentation or an issue.
 
 ## Planning and work isolation
 
-Beads is authoritative for managed planning state. The GitHub Project and
-managed GitHub issues are a one-way sanitized mirror. Use `bd` for managed issue
-state; do not edit mirrored issue content as though GitHub were canonical.
-Unmanaged GitHub issues remain ordinary GitHub issues.
+GitHub issues and milestones own public outcomes, acceptance gates, and
+externally legible status. Beads owns managed implementation tasks, dependency
+ordering, and execution detail. The GitHub Project and generated managed issue
+bodies are one-way sanitized mirrors of Beads; update their source with `bd`,
+not by editing generated mirrors. Unmanaged GitHub issues remain ordinary
+GitHub outcomes. Neither tracker grants runtime identity or authority.
 
 Use one branch and one worktree per PR. Do not reuse another lane's worktree,
 rewrite a shared branch, or remove a worktree that may contain uncommitted work.
