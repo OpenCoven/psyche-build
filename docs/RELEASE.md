@@ -167,28 +167,122 @@ gh api --method POST \
   -f name='v*' -f type=tag
 ```
 
-Protect `main` with the two exact GitHub Actions check names already emitted by
-the release commit. Require a fresh non-self approval after the last push,
-enforce the policy for administrators, and leave no force-push or deletion
-path:
+Protect `main` by layering an active branch ruleset over classic branch
+protection. The ruleset owns the pull-request and review requirement and gives
+only `BunsDev` a PR-only bypass. Classic protection continues to own the two
+strict GitHub Actions checks, administrator enforcement, linear history,
+conversation resolution, and the force-push/deletion prohibitions. Classic
+`bypass_pull_request_allowances` must not be configured for `BunsDev`: that
+classic allowance can bypass the pull-request requirement and permit a direct
+push.
+
+First resolve and pin the named actor. The recorded GitHub user ID for
+`BunsDev` is `68980965`; stop if the live identity differs. The repository
+currently enables merge commits, squash merges, and rebase merges, so those are
+the only methods allowed by the ruleset. Re-read the repository settings before
+applying this procedure and update both the payload and this documentation if
+an enabled method changes. Classic linear-history enforcement still prevents a
+merge commit from landing on `main`, while squash and rebase remain usable.
+
+```sh
+expected_bunsdev_id=68980965
+bunsdev_id="$(gh api users/BunsDev --jq .id)"
+if test "$bunsdev_id" != "$expected_bunsdev_id"; then
+  echo "ERROR: BunsDev actor ID mismatch; expected $expected_bunsdev_id, got $bunsdev_id" >&2
+  exit 1
+fi
+
+gh api repos/OpenCoven/psyche-build \
+  --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
+
+main_ruleset_payload="$(jq -cn --argjson bunsdev_id "$bunsdev_id" '{
+  name: "Main pull request governance",
+  target: "branch",
+  enforcement: "active",
+  bypass_actors: [{actor_id: $bunsdev_id, actor_type: "User", bypass_mode: "pull_request"}],
+  conditions: {
+    ref_name: {
+      include: ["refs/heads/main"],
+      exclude: []
+    }
+  },
+  rules: [{
+    type: "pull_request",
+    parameters: {
+      allowed_merge_methods: ["merge", "squash", "rebase"],
+      dismiss_stale_reviews_on_push: true,
+      dismissal_restriction: {enabled: false, allowed_actors: []},
+      require_code_owner_review: false,
+      require_last_push_approval: true,
+      required_approving_review_count: 1,
+      required_review_thread_resolution: true
+    }
+  }]
+}')"
+
+main_ruleset_matches="$(
+  gh api --paginate 'repos/OpenCoven/psyche-build/rulesets?includes_parents=false' \
+    --jq '.[] | select(.name == "Main pull request governance" and .target == "branch") | .id'
+)"
+main_ruleset_match_count="$(printf '%s\n' "$main_ruleset_matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+test "$main_ruleset_match_count" -le 1
+
+if test "$main_ruleset_match_count" -eq 0; then
+  main_ruleset_id="$(
+    printf '%s\n' "$main_ruleset_payload" |
+      gh api --method POST repos/OpenCoven/psyche-build/rulesets --input - --jq .id
+  )"
+else
+  main_ruleset_id="$main_ruleset_matches"
+  printf '%s\n' "$main_ruleset_payload" |
+    gh api --method PATCH "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id" --input - >/dev/null
+fi
+
+verified_main_ruleset="$(gh api "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id")"
+printf '%s\n' "$verified_main_ruleset" |
+  jq -e --argjson bunsdev_id "$bunsdev_id" '
+    .name == "Main pull request governance" and
+    .target == "branch" and
+    .enforcement == "active" and
+    .conditions.ref_name.include == ["refs/heads/main"] and
+    .conditions.ref_name.exclude == [] and
+    .bypass_actors == [{
+      actor_id: $bunsdev_id,
+      actor_type: "User",
+      bypass_mode: "pull_request"
+    }] and
+    (.rules | length == 1) and
+    .rules[0].type == "pull_request" and
+    .rules[0].parameters.allowed_merge_methods == ["merge", "squash", "rebase"] and
+    .rules[0].parameters.dismiss_stale_reviews_on_push == true and
+    .rules[0].parameters.dismissal_restriction == {
+      enabled: false,
+      allowed_actors: []
+    } and
+    .rules[0].parameters.require_code_owner_review == false and
+    .rules[0].parameters.require_last_push_approval == true and
+    .rules[0].parameters.required_approving_review_count == 1 and
+    .rules[0].parameters.required_review_thread_resolution == true
+  ' >/dev/null
+```
+
+Only after that ruleset verification succeeds, replace the complete classic
+branch-protection document. Setting `required_pull_request_reviews` to `null`
+explicitly removes the classic review requirement so it cannot layer a second
+approval gate over the PR-only ruleset bypass. Preserve every other protection;
+the GitHub Actions integration pin is preserved on each required check:
 
 ```sh
 jq -n '{
   required_status_checks: {
     strict: true,
     checks: [
-      {context: "TypeScript and Rust"},
-      {context: "iOS"}
+      {context: "TypeScript and Rust", app_id: 15368},
+      {context: "iOS", app_id: 15368}
     ]
   },
   enforce_admins: true,
-  required_pull_request_reviews: {
-    dismissal_restrictions: {},
-    dismiss_stale_reviews: true,
-    require_code_owner_reviews: false,
-    required_approving_review_count: 1,
-    require_last_push_approval: true
-  },
+  required_pull_request_reviews: null,
   restrictions: null,
   required_linear_history: true,
   allow_force_pushes: false,
@@ -199,6 +293,161 @@ jq -n '{
   allow_fork_syncing: false
 }' | gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -
 ```
+
+Verify the effective rules, the classic protection split, and the exact
+ruleset actor/mode. Then perform the direct-push rejection probe only after the
+actor preflight below. The GitHub CLI identity must be `BunsDev`. For an SSH
+push URL, the non-mutating SSH greeting also verifies the Git credential actor.
+For an HTTPS push URL, `gh auth status` and `gh api user` do not prove the Git
+HTTP actor because Git may use a different credential helper. Do not inspect
+credential-helper output or print credential material. Record the rejection
+actor from GitHub output or an API audit if either identifies it; otherwise
+record that the Git HTTP actor was not independently attributable and do not
+describe the result as a `BunsDev`-specific rejection.
+
+`git commit-tree` creates an unreferenced empty probe commit without changing
+the worktree. Run this block in Bash: it retains at most 16 KiB of push stderr
+and records the push exit code separately. A successful push is a critical
+failure. A nonzero exit is conclusive only when GitHub reports `GH006` or
+`GH013` and a required-pull-request violation; network, authentication,
+credential, transport, and other failures are inconclusive and must abort
+closure.
+
+```bash
+gh auth status --active --hostname github.com
+active_gh_login="$(gh api user --jq .login)"
+if test "$active_gh_login" != "BunsDev"; then
+  echo "ERROR: active GitHub CLI actor is not BunsDev" >&2
+  exit 1
+fi
+
+origin_push_url="$(git remote get-url --push origin)"
+case "$origin_push_url" in
+  git@github.com:*|ssh://git@github.com/*)
+    ssh_actor_output="$(
+      ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
+        -T git@github.com 2>&1 || true
+    )"
+    if ! printf '%s\n' "$ssh_actor_output" | grep -Fq 'Hi BunsDev!'; then
+      echo "INCONCLUSIVE: SSH Git credential actor is not BunsDev or could not be verified" >&2
+      exit 1
+    fi
+    ;;
+  https://github.com/*)
+    echo "NOTICE: Git HTTP actor cannot be verified without credential-helper interaction; do not overclaim attribution" >&2
+    ;;
+  *)
+    echo "INCONCLUSIVE: unsupported origin push URL for safe Git actor preflight" >&2
+    exit 1
+    ;;
+esac
+
+gh api repos/OpenCoven/psyche-build/rules/branches/main |
+  jq -e 'any(.[]; .type == "pull_request")' >/dev/null
+
+gh api repos/OpenCoven/psyche-build/branches/main/protection |
+  jq -e '
+    (.required_status_checks.strict == true) and
+    ([.required_status_checks.checks[] | {context, app_id}] == [
+      {context: "TypeScript and Rust", app_id: 15368},
+      {context: "iOS", app_id: 15368}
+    ]) and
+    (.enforce_admins.enabled == true) and
+    (has("required_pull_request_reviews") | not) and
+    (.required_linear_history.enabled == true) and
+    (.required_conversation_resolution.enabled == true) and
+    (.allow_force_pushes.enabled == false) and
+    (.allow_deletions.enabled == false)
+  ' >/dev/null
+
+verified_main_ruleset="$(gh api "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id")"
+printf '%s\n' "$verified_main_ruleset" |
+  jq -e --argjson bunsdev_id "$bunsdev_id" '
+    .bypass_actors == [{
+      actor_id: $bunsdev_id,
+      actor_type: "User",
+      bypass_mode: "pull_request"
+    }]
+  ' >/dev/null
+
+git fetch origin main
+probe_sha="$(
+  printf 'Verify BunsDev direct pushes remain blocked\n' |
+    git commit-tree "$(git rev-parse origin/main^{tree})" -p "$(git rev-parse origin/main)"
+)"
+
+probe_stderr_file="$(git rev-parse --git-path direct-push-probe.stderr)"
+trap 'rm -f "$probe_stderr_file"' EXIT HUP INT TERM
+set +e
+GIT_TERMINAL_PROMPT=0 \
+GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=yes' \
+  git push origin "$probe_sha:refs/heads/main" 2>&1 >/dev/null |
+  tail -c 16384 >"$probe_stderr_file"
+probe_status="${PIPESTATUS[0]}"
+set -e
+probe_stderr="$(cat "$probe_stderr_file")"
+rm -f "$probe_stderr_file"
+trap - EXIT HUP INT TERM
+
+if test "$probe_status" -eq 0; then
+  printf '%s\n' "$probe_stderr" >&2
+  echo "ERROR: direct-push rejection probe unexpectedly updated main" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$probe_stderr" | grep -Eq 'GH(006|013)' ||
+   ! printf '%s\n' "$probe_stderr" |
+     grep -Eiq 'Changes must be made through a pull request|required pull request'; then
+  printf '%s\n' "$probe_stderr" >&2
+  echo "INCONCLUSIVE: network, authentication, credential, transport, or other failure did not prove the pull-request policy" >&2
+  exit 1
+fi
+
+printf '%s\n' "$probe_stderr"
+```
+
+The `pull_request` bypass mode keeps direct pushes platform-blocked for
+`BunsDev`; force pushes and deletions are also prohibited. All other actors
+must obtain the required approval. GitHub cannot create an author
+self-approval review. Independent review remains preferred, but it is not
+required for a `BunsDev` owner-authored administrative PR when no independent
+reviewer is available. In that case, `BunsDev` uses the explicit PR-only bypass
+for an admin merge, not a direct push or a claimed self-approval. Before that
+admin merge, verify that the exact-head required checks are terminal and
+successful and verify resolved conversations. Keep the recorded override reason
+and exact SHA in the PR or linked incident/change record, and retain audit
+evidence for the checks, conversation state, merge override, and resulting
+merge.
+
+## Emergency change procedure for #31
+
+Normal protected-branch and protected-tag paths remain mandatory. If an urgent
+production correction cannot wait for the normal path, use this exact
+incident-scoped procedure:
+
+- Open an incident issue before changing policy and identify the affected
+  production behavior and the incident/change reason.
+- Record the exact SHA and bounded change that the incident permits; any
+  additional change requires a new recorded decision.
+- Confirm the required exact-head checks are terminal and successful and all
+  conversations are resolved before using the merge override.
+- Use only the existing PR-only `BunsDev` bypass through a pull request and an
+  explicit admin merge. The incident must not add another standing bypass actor,
+  team, app, administrator, or user, and it permits no new actor or bypass mode.
+- Record the merge override, its reason, the exact SHA, and the resulting merge
+  in the incident/change record.
+- Retain sanitized before/after settings, exact-head check evidence,
+  conversation-resolution evidence, the merge audit records, and the incident
+  result.
+- Complete a post-event review covering the change, override, outcome, and any
+  follow-up. Restore any incident-specific policy change; retain the existing
+  PR-only `BunsDev` bypass without adding or changing an actor or mode.
+
+An emergency is not authority to weaken the normal release environment,
+immutable-tag ruleset, administrator enforcement, direct-push rejection,
+required checks, or conversation resolution.
+
+## Release tag rulesets
 
 Protect `main` and `v*` tags now that repository rulesets are available. A
 ruleset bypass applies to every rule in that ruleset, so use two separate active

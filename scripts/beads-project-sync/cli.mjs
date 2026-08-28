@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { readSyncConfig } from './config.mjs';
 import { createGhClient } from './github.mjs';
 import { parseBeadExport, summarizeInventory } from './model.mjs';
+import { validateCanonicalOutcomes } from './outcomes.mjs';
 import {
   applyReconciliation,
   assertSafePlan,
@@ -54,6 +55,7 @@ import { createExecFileRun, loadBeadsSource } from './source.mjs';
  * @typedef {{
  *   mode: CliMode,
  *   inventory: ReturnType<typeof summarizeInventory>,
+ *   canonicalOutcomes: import('./outcomes.mjs').CanonicalOutcomeValidation,
  *   plannedOperationCount: number,
  *   appliedOperationCount: number,
  *   operationCounts: import('./reconcile.mjs').ReconciliationOperationCounts,
@@ -452,9 +454,6 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     if (token) {
       diagnosticSecrets.push(token);
     }
-    if (options.mode !== 'dry-run' && !token) {
-      fail(`BEADS_PROJECT_TOKEN is required for --${options.mode}`);
-    }
 
     const run = dependencies.run ?? createExecFileRun();
     const jsonl = await loadBeadsSource({
@@ -468,6 +467,13 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     });
     const inventory = parsedInventory.map((bead) => toPublicBead(bead));
     const inventorySummary = summarizeInventory(inventory);
+    const canonicalOutcomes = validateCanonicalOutcomes(
+      inventory,
+      config.canonicalTargets,
+    );
+    if (options.mode !== 'dry-run' && !token) {
+      fail(`BEADS_PROJECT_TOKEN is required for --${options.mode}`);
+    }
     const renderContext = {
       projectName: config.projectTitle,
       repositoryIdentity: `${config.owner}/${config.repository}`,
@@ -475,6 +481,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       sourceRef: 'main',
       projectMarker: config.projectMarker,
       issueMarker: config.issueMarker,
+      canonicalTargets: config.canonicalTargets,
       legacyProjectMarkers: [
         ...LEGACY_PROJECT_MARKERS,
         ...(config.legacyProjectMarkers ?? []),
@@ -502,6 +509,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       writeSummary({
         mode: options.mode,
         inventory: inventorySummary,
+        canonicalOutcomes,
         ...summarizePlan(plan, diagnosticSecrets),
         appliedOperationCount: 0,
         warnings,
@@ -610,6 +618,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
           writeSummary({
             mode: options.mode,
             inventory: inventorySummary,
+            canonicalOutcomes,
             ...summarizeNoReconciliation(),
             appliedOperationCount: 0,
             warnings,
@@ -647,6 +656,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         writeSummary({
           mode: options.mode,
           inventory: inventorySummary,
+          canonicalOutcomes,
           ...summarizePlan(plan, diagnosticSecrets),
           appliedOperationCount: 0,
           warnings,
@@ -665,6 +675,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         writeSummary({
           mode: options.mode,
           inventory: inventorySummary,
+          canonicalOutcomes,
           ...summarizePlan(plan, diagnosticSecrets),
           appliedOperationCount: 0,
           warnings,
@@ -715,6 +726,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         writeSummary({
           mode: options.mode,
           inventory: inventorySummary,
+          canonicalOutcomes,
           ...summarizePlan(plan, diagnosticSecrets),
           appliedOperationCount: error.applied.length,
           warnings,
@@ -729,6 +741,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
       writeSummary({
         mode: options.mode,
         inventory: inventorySummary,
+        canonicalOutcomes,
         ...summarizePlan(plan, diagnosticSecrets),
         appliedOperationCount: applied.applied.length,
         warnings,
