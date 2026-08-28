@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose one user or maintainer outcome for Psyche Build
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep the request to one observable outcome. Review the [roadmap](../../docs/ROADMAP.md), [support matrix](../../docs/SUPPORT-MATRIX.md), and existing issues first.
+
+        This is public. Use synthetic examples and omit credentials, private repository content, raw prompts, unrestricted terminal output, complete environment dumps, private service URLs, unredacted personal paths, and security-sensitive details.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and affected user
+      description: Describe the current limitation and who encounters it without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired observable outcome
+      description: State what a user or maintainer should be able to observe when this is complete.
+    validations:
+      required: true
+  - type: textarea
+    id: current_workaround
+    attributes:
+      label: Current workaround
+      description: Describe a safe workaround, or state that none is known.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Authority, identity, platform, or compatibility boundaries
+      description: Note whether the proposal touches projects, processes, files, credentials, approvals, receipts, recovery, Psyche protocol consumption, or platform support. Do not include secrets or private infrastructure details.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Suggested acceptance evidence
+      description: Name the user path and evidence that would prove the outcome without treating source presence, test count, hosted compilation, or simulator success as complete production proof.
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: I searched for an existing issue and kept this proposal to one outcome.
+          required: true
+        - label: I understand a roadmap entry is not an availability or support commitment.
+          required: true
+        - label: I removed private data, credentials, raw prompts, repository contents, internal URLs, and unredacted personal paths.
+          required: true

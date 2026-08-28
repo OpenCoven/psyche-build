@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/OpenCoven/psyche-build/security/advisories/new
+    about: Never disclose vulnerability details in a public issue. Use GitHub's private reporting flow.
+  - name: Read the support boundary
+    url: https://github.com/OpenCoven/psyche-build/blob/main/SUPPORT.md
+    about: Confirm platform status, safe evidence, and the correct public issue route before filing.

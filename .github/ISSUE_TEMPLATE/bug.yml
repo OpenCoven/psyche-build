@@ -1,0 +1,85 @@
+name: Bug report
+description: Report a reproducible defect on a supported Psyche Build surface
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Psyche Build. Search existing issues and review [SUPPORT.md](../../SUPPORT.md) and the [support matrix](../../docs/SUPPORT-MATRIX.md) first.
+
+        This is public and retained. Do not disclose credentials, tokens, passwords, private keys, certificates, signing material, raw prompts, unrestricted terminal output, private repository contents, complete environment dumps, private service URLs, unredacted personal paths, or vulnerability details. Use the private security link in the issue chooser for suspected vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: Release or exact commit
+      description: Provide a released version or full commit SHA, not a branch name such as main.
+      placeholder: v0.0.1 or 0123456789abcdef...
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system version and CPU architecture only; omit account, device, host, and path identifiers.
+      placeholder: macOS 26.x, arm64
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Affected user path and impact
+      description: Name the supported path and the observable impact in a few sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal sanitized reproduction
+      description: Use disposable data and synthetic project/path names. Remove unrelated commands and any private content.
+      placeholder: |
+        1. Start from ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Describe the bounded behavior. A screenshot or test count alone is not complete evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional bounded evidence excerpt
+      description: At most 30 relevant sanitized lines. Explain omissions and replace identifiers consistently; do not attach unrestricted logs, repositories, environment dumps, prompts, or command history.
+      render: text
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Frequency
+      options:
+        - Every time
+        - Intermittent
+        - Once
+        - Unknown
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-report safety
+      options:
+        - label: I confirmed this belongs on a public tracker and contains no suspected vulnerability details.
+          required: true
+        - label: I removed or replaced private data, credentials, prompts, repository contents, internal URLs, and personal paths.
+          required: true
+        - label: I checked the current support matrix and stated only what I directly observed.
+          required: true
