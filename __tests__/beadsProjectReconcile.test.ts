@@ -835,6 +835,69 @@ describe('Beads project reconciliation', () => {
     expect(plan.summary.updateReadmeCount).toBe(0);
   });
 
+  it('plans one canonical README update for external outcome metadata and converges on the second run', () => {
+    const canonicalBead = {
+      ...makeBead('pb-ios-beta', {
+        title: 'iOS internal beta and continuity',
+        notes: 'Historical note mentions gh-999 but must not determine the canonical outcome.',
+        priority: 1,
+      }),
+    } as PublicBead & { externalRef: string };
+    canonicalBead.externalRef = 'gh-200';
+
+    const canonicalInventory = finalizeInventory([canonicalBead]);
+    const staleInventory = canonicalInventory.map((bead) => {
+      const { externalRef: _externalRef, ...withoutExternalRef } = bead as PublicBead & {
+        externalRef?: string | null;
+      };
+      return withoutExternalRef as PublicBead;
+    });
+    const issueNumbers = activeIssueNumbersByBeadId(canonicalInventory, 200);
+    const existingIssues = canonicalInventory.map((bead) =>
+      managedIssue(bead, canonicalInventory, issueNumbers, {
+        body: canonicalIssueBody(bead, canonicalInventory, issueNumbers),
+      })
+    );
+
+    const firstPlan = planReconciliation({
+      inventory: canonicalInventory,
+      existingIssues,
+      readme: {
+        body: renderProjectReadme(staleInventory, baseContext),
+      },
+      renderContext: baseContext,
+    });
+
+    expect(firstPlan.summary.updateReadmeCount).toBe(1);
+    expect(firstPlan.summary.operationCounts.updateReadme).toBe(1);
+    expect(firstPlan.operations).toEqual([
+      expect.objectContaining({
+        type: 'updateReadme',
+        body: expect.stringContaining(
+          '## Canonical outcome\n'
+            + '- [#200](https://github.com/OpenCoven/psyche-build/issues/200) — '
+            + 'iOS internal beta and continuity',
+        ),
+      }),
+    ]);
+
+    const readmeUpdate = firstPlan.operations[0];
+    if (readmeUpdate?.type !== 'updateReadme') {
+      throw new Error('Expected a canonical README update operation');
+    }
+
+    const secondPlan = planReconciliation({
+      inventory: canonicalInventory,
+      existingIssues,
+      readme: {
+        body: readmeUpdate.body,
+      },
+      renderContext: baseContext,
+    });
+
+    expect(secondPlan.operations).toEqual([]);
+  });
+
   it('repairs blank Parent Goal and Source Updated fields and is idempotent afterward', () => {
     const inventory = finalizeInventory([
       makeBead('pb-parent', {

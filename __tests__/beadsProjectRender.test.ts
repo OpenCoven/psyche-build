@@ -126,6 +126,10 @@ function omittedClosedCount(rendered: string): number {
   return match == null ? 0 : Number.parseInt(match[1]!, 10);
 }
 
+function canonicalOutcomeSection(rendered: string): string | null {
+  return rendered.match(/## Canonical outcome\n[\s\S]*?(?=\n\n## |\s*$)/u)?.[0] ?? null;
+}
+
 function renderSourceDescription(description: string): string {
   const source = parseBeadExport(issuesJsonl, {
     assigneeMap: {
@@ -3227,6 +3231,29 @@ describe('Beads project renderers', () => {
         + '- `pb-angstrom` — Archive Å first (closed 2026-08-21T12:00:00Z)\n'
         + '- `pb-eclair` — Archive é second (closed 2026-08-21T12:00:00Z)\n'
         + '- `pb-closed` — Preserve closed blocker history (closed 2026-08-20T12:30:00Z)',
+    );
+  });
+
+  it('renders canonical outcome independently from free-form historical notes', () => {
+    const canonicalBead = {
+      ...buildPublicInventory()[0]!,
+      id: 'pb-ios-beta',
+      title: 'iOS internal beta and continuity',
+      notes: 'Historical note mentions gh-999 and #777 but must not control the canonical outcome.',
+    } as PublicBead & { externalRef: string };
+    canonicalBead.externalRef = 'gh-200';
+
+    const rendered = renderProjectReadme(
+      [canonicalBead],
+      buildContext([canonicalBead], {
+        mirroredIssueUrlsByBeadId: {},
+      }),
+    );
+
+    expect(canonicalOutcomeSection(rendered)).toBe(
+      '## Canonical outcome\n'
+        + '- [#200](https://github.com/OpenCoven/psyche-build/issues/200) — '
+        + 'iOS internal beta and continuity',
     );
   });
 

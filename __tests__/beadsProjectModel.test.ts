@@ -121,6 +121,21 @@ describe('Beads project model', () => {
     expect(JSON.stringify(beads)).not.toContain('feature-owner@example.com');
   });
 
+  it('exposes canonical externalRef values from source external_ref fields', () => {
+    const beads = parseBeadExport(issuesJsonl, { assigneeMap: {} });
+
+    expect(beads.find((bead) => bead.id === 'pb-feature')).toEqual(
+      expect.objectContaining({
+        externalRef: 'gh-200',
+      }),
+    );
+    expect(beads.find((bead) => bead.id === 'pb-closed')).toEqual(
+      expect.objectContaining({
+        externalRef: null,
+      }),
+    );
+  });
+
   it('uses one configured spelling for case-equivalent GitHub assignee mappings', () => {
     const beads = parseBeadExport(toJsonl(
       makeIssue({ id: 'one', assignee: 'first-owner' }),
@@ -276,6 +291,20 @@ describe('Beads project model', () => {
     expect(parseBeadExport(toJsonl(makeIssue({ priority })), {
       assigneeMap: {},
     })[0]?.priority).toBe(priority);
+  });
+
+  it.each([
+    ['non-string', 200],
+    ['empty', ''],
+    ['whitespace', '   '],
+    ['malformed', 'issue-200'],
+    ['non-positive', 'gh-0'],
+    ['multiple-target', 'gh-200,gh-201'],
+    ['unsafe', 'gh-200<script>'],
+  ])('rejects %s external_ref values before reconciliation', (_name, external_ref) => {
+    expect(() => parseBeadExport(toJsonl(makeIssue({ external_ref })), {
+      assigneeMap: {},
+    })).toThrow(/external[_ ]ref|canonical|GitHub outcome/i);
   });
 
   it.each(['bad id', 'bad>id', 'bad]id'])(

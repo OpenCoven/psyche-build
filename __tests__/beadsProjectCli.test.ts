@@ -123,6 +123,64 @@ function managedIssue(beadId: string, number: number) {
   };
 }
 
+function toJsonl(...records: Array<Record<string, unknown>>): string {
+  return `${records.map((record) => JSON.stringify(record)).join('\n')}\n`;
+}
+
+function makeSourceIssue(overrides: Record<string, unknown> = {}) {
+  const id = typeof overrides.id === 'string' ? overrides.id : 'fixture-task';
+  return {
+    _type: 'issue',
+    id,
+    title: `Issue ${id}`,
+    description: '## Work\nValidate canonical targets before GitHub access.',
+    acceptance_criteria: '- Reject invalid canonical outcome mappings during source validation.',
+    status: 'open',
+    priority: 1,
+    issue_type: 'task',
+    owner: 'owner@example.com',
+    created_at: '2026-08-20T00:00:00Z',
+    created_by: 'Maintainer',
+    updated_at: '2026-08-20T00:00:00Z',
+    dependencies: [],
+    dependency_count: 0,
+    dependent_count: 0,
+    comment_count: 0,
+    ...overrides,
+  };
+}
+
+function canonicalTargetConfig(overrides: Record<string, unknown> = {}) {
+  return {
+    owner: 'OpenCoven',
+    repository: 'psyche-build',
+    projectNodeId,
+    projectTitle: 'Psyche Build: Goals & Implementation',
+    projectMarker: 'psyche-beads-project-sync:v1',
+    issueMarker: 'psyche-bead-sync:v1',
+    applyLockRef: APPLY_LOCK_REF,
+    trustedIssueAuthors: ['BunsDev'],
+    assigneeMap: {},
+    canonicalTargets: {
+      'gh-200': {
+        issue: 200,
+        title: 'iOS internal beta and continuity',
+        priority: 1,
+      },
+      'gh-201': {
+        issue: 201,
+        title: 'macOS continuity hardening',
+        priority: 2,
+      },
+    },
+    massClose: {
+      minimum: 5,
+      fraction: 0.25,
+    },
+    ...overrides,
+  };
+}
+
 function createFakeGh(options: FakeGhOptions = {}) {
   const calls: string[] = [];
   const clientOptions: FakeClientOptions[] = [];
@@ -365,6 +423,61 @@ async function runCli(
   };
 }
 
+async function runCliWithMockedConfigAndSource(
+  args: readonly string[],
+  options: {
+    config: Record<string, unknown>;
+    jsonl: string;
+    env?: Readonly<Record<string, string | undefined>>;
+    fakeGh?: ReturnType<typeof createFakeGh>;
+  },
+): Promise<CapturedCli> {
+  const stdout = streamCapture();
+  const stderr = streamCapture();
+  const fakeGh = options.fakeGh ?? createFakeGh();
+
+  vi.resetModules();
+  vi.doMock('../scripts/beads-project-sync/config.mjs', () => ({
+    readSyncConfig: async () => options.config,
+  }));
+  vi.doMock('../scripts/beads-project-sync/source.mjs', async () => {
+    const actual = await vi.importActual<typeof import('../scripts/beads-project-sync/source.mjs')>(
+      '../scripts/beads-project-sync/source.mjs',
+    );
+    return {
+      ...actual,
+      loadBeadsSource: async () => options.jsonl,
+    };
+  });
+
+  try {
+    const { runBeadsProjectCli: runCliWithMocks } = await import(
+      '../scripts/beads-project-sync/cli.mjs'
+    );
+    const exitCode = await runCliWithMocks(args, {
+      configPath,
+      cwd: repositoryRoot,
+      env: options.env ?? {},
+      createGhClient(clientOptions: FakeClientOptions) {
+        fakeGh.clientOptions.push(clientOptions);
+        return fakeGh.client;
+      },
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    return {
+      exitCode,
+      stdout: stdout.read(),
+      stderr: stderr.read(),
+    };
+  } finally {
+    vi.doUnmock('../scripts/beads-project-sync/config.mjs');
+    vi.doUnmock('../scripts/beads-project-sync/source.mjs');
+    vi.resetModules();
+  }
+}
+
 describe('Beads project sync configuration', () => {
   it('loads the exact checked-in public Project configuration', async () => {
     await expect(readSyncConfig(configPath)).resolves.toEqual({
@@ -380,6 +493,23 @@ describe('Beads project sync configuration', () => {
       massClose: {
         minimum: 5,
         fraction: 0.25,
+      },
+    });
+  });
+
+  it('requires canonicalTargets entries with issue, title, and priority metadata', () => {
+    expect(parseSyncConfig(canonicalTargetConfig())).toMatchObject({
+      canonicalTargets: {
+        'gh-200': {
+          issue: 200,
+          title: 'iOS internal beta and continuity',
+          priority: 1,
+        },
+        'gh-201': {
+          issue: 201,
+          title: 'macOS continuity hardening',
+          priority: 2,
+        },
       },
     });
   });
@@ -1132,6 +1262,76 @@ describe('Beads project sync CLI', () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/created_at.*date|date.*created_at/i);
+    expect(fakeGh.clientOptions).toEqual([]);
+    expect(fakeGh.calls).toEqual([]);
+    expect(fakeGh.lockCalls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
+  });
+
+  it('rejects active beads without external_ref before creating a GitHub client', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCliWithMockedConfigAndSource(
+      ['--apply'],
+      {
+        config: canonicalTargetConfig(),
+        jsonl: toJsonl(makeSourceIssue({ id: 'pb-missing-external-ref' })),
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/pb-missing-external-ref.*external_ref|external_ref.*pb-missing-external-ref/i);
+    expect(fakeGh.clientOptions).toEqual([]);
+    expect(fakeGh.calls).toEqual([]);
+    expect(fakeGh.lockCalls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
+  });
+
+  it('rejects active beads targeting an unknown canonical issue before GitHub access', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCliWithMockedConfigAndSource(
+      ['--apply'],
+      {
+        config: canonicalTargetConfig(),
+        jsonl: toJsonl(makeSourceIssue({
+          id: 'pb-unknown-canonical-target',
+          external_ref: 'gh-999',
+        })),
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/unknown canonical target|gh-999/i);
+    expect(fakeGh.clientOptions).toEqual([]);
+    expect(fakeGh.calls).toEqual([]);
+    expect(fakeGh.lockCalls).toEqual([]);
+    expect(fakeGh.writes).toEqual([]);
+  });
+
+  it('rejects priority mismatches against canonicalTargets before GitHub access', async () => {
+    const fakeGh = createFakeGh();
+    const result = await runCliWithMockedConfigAndSource(
+      ['--apply'],
+      {
+        config: canonicalTargetConfig(),
+        jsonl: toJsonl(makeSourceIssue({
+          id: 'pb-priority-mismatch',
+          external_ref: 'gh-200',
+          priority: 0,
+        })),
+        env: { BEADS_PROJECT_TOKEN: token },
+        fakeGh,
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/priority.*gh-200|gh-200.*priority/i);
     expect(fakeGh.clientOptions).toEqual([]);
     expect(fakeGh.calls).toEqual([]);
     expect(fakeGh.lockCalls).toEqual([]);
