@@ -1,0 +1,46 @@
+name: Documentation
+description: Report stale, missing, contradictory, or unclear documentation.
+title: "[Docs]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Do not paste secrets, private repository content,
+        raw prompts, complete environment dumps, home paths, or unredacted
+        terminal/browser output.
+  - type: input
+    id: location
+    attributes:
+      label: Document or surface
+      description: File path, heading, command, or public page.
+      placeholder: docs/RELEASE.md — Publication gate
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current problem
+      description: Quote only the minimum public text needed to identify the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Correct outcome
+      description: State the behavior or claim the documentation should match.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification evidence
+      description: Link public source, test, release, or contract evidence.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: I removed secrets and private project/user data from this report.
+          required: true

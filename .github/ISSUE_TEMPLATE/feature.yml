@@ -1,0 +1,59 @@
+name: Feature request
+description: Propose a bounded product outcome with acceptance evidence.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Do not include credentials, raw prompts, private
+        repository content, complete environment dumps, user paths, or
+        unredacted transcripts. Managed roadmap state remains authoritative in
+        Beads; this form is for an unmanaged public proposal or discussion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and user outcome
+      description: Describe the observable problem without prescribing a large rewrite.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: What deterministic evidence would prove the outcome?
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: State what this proposal must not absorb or redefine.
+    validations:
+      required: true
+  - type: dropdown
+    id: authority
+    attributes:
+      label: Highest expected risk class
+      options:
+        - R0 — documentation or copy
+        - R1 — pure code without external state
+        - R2 — local mutable state or recovery
+        - R3 — network, credentials, user data, or remote APIs
+        - R4 — identity, authorization, persistence, release, or deletion
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Canonical boundaries and dependencies
+      description: Identify Psyche, Coven, Threads, Familiar Contract, or other ownership constraints.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: I removed secrets and private project/user data from this proposal.
+          required: true

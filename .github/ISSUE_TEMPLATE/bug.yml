@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible Psyche Build defect using redacted, disposable evidence.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Do not include access tokens, task credentials,
+        signing material, raw prompts, private repository contents, complete
+        environment dumps, user home paths, or unredacted terminal/browser
+        transcripts. Report vulnerabilities through SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Stable release, package version, or exact commit SHA.
+      placeholder: v0.0.1 or 0123456789abcdef...
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - macOS application
+        - Source CLI or TUI
+        - Desktop webview
+        - Control or MCP
+        - Git/worktree/tmux lifecycle
+        - Documentation or packaging
+        - iOS planned beta
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS version, architecture, and relevant tool versions.
+      placeholder: macOS 26.x, arm64, tmux 3.x
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Keep evidence focused and redacted.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use a disposable repository or synthetic fixture.
+      placeholder: |
+        1. Create a temporary repository...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Recovery and impact
+      description: Note stranded work, credentials, authority, or rollback attempts.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: I removed secrets and private project/user data from this report.
+          required: true
+        - label: This is not a vulnerability disclosure.
+          required: true

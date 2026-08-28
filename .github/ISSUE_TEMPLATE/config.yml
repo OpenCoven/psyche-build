@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/OpenCoven/psyche-build/security/advisories/new
+    about: Do not disclose vulnerabilities or sensitive reproductions in a public issue.
+  - name: Public roadmap
+    url: https://github.com/orgs/OpenCoven/projects/11
+    about: Read the sanitized GitHub mirror; managed planning changes remain authoritative in Beads.
