@@ -99,7 +99,7 @@ describe('repository community and security floor', () => {
     expect(conduct).toContain('## Our standard');
     expect(conduct).toContain('## Scope');
     expect(conduct).toContain('## Reporting and enforcement');
-    expect(conduct).toMatch(/Do not post names, screenshots, private messages/i);
+    expect(conduct).toMatch(/Do not post\s+names, screenshots, private messages/i);
     expect(conduct).toMatch(/warning[\s\S]*restrict participation[\s\S]*permanently exclude/i);
     expect(conduct).toMatch(/Good-faith reports and appeals must not be punished/i);
   });
