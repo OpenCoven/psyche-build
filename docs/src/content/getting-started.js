@@ -6,9 +6,10 @@ export function render() {
     <p>Install a supported AI coding agent when you want prompt-launched agent panes.</p>
 
     <h2>Install Psyche Build</h2>
-    <p>After the v0.0.1 release and Cask are available, install and open the supported public macOS GUI:</p>
+    <p>Install and open the supported public macOS <code>v0.0.1</code> GUI from the OpenCoven Homebrew tap:</p>
     <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"</code></pre>
+    <p>The matching signed and notarized Apple Silicon and Intel DMGs and <code>SHA256SUMS</code> are available from the <a href="https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1" target="_blank" rel="noopener">v0.0.1 GitHub Release</a>.</p>
     <p>The Cask installs only <code>Psyche Build.app</code>. For source CLI development, use the repository checkout and contributing guide, then invoke it explicitly:</p>
     <pre><code data-lang="bash">node /path/to/psyche-build/psyche</code></pre>
     <p>The Node CLI is not an npm release in 0.0.1.</p>
@@ -27,7 +28,7 @@ open -a "Psyche Build"</code></pre>
       <li>
         <p><strong>Check setup:</strong></p>
         <pre><code data-lang="bash">node /path/to/psyche-build/psyche doctor</code></pre>
-        <p>Doctor confirms tmux and git, shows whether any supported agent CLIs are detected, and explains which Coven features are optional.</p>
+        <p>Doctor confirms tmux and git, reports detected supported agent CLIs, and identifies optional integration availability.</p>
       </li>
       <li>
         <p><strong>Launch psyche:</strong></p>
@@ -132,9 +133,9 @@ set -ga update-environment "TERM_PROGRAM"</code></pre>
       On Linux, swap <code>pbcopy</code> for <code>wl-copy</code> (Wayland) or <code>xclip -selection clipboard -in</code> (X11) in the clipboard bindings.
     </div>
 
-    <h2>Standalone vs Coven</h2>
-    <p>psyche does not require Coven for the core cockpit. Without Coven, you can create tmux panes, open plain terminals, launch installed agent CLIs, isolate work in git worktrees, inspect files, merge, create PRs, and run rituals.</p>
-    <p>When a local Coven daemon is available, psyche adds harness-aware session actions: list scoped Coven sessions, open them in panes, and launch new scoped Coven sessions for the current project.</p>
+    <h2>Optional integrations</h2>
+    <p>Psyche Build does not require another OpenCoven product for panes, worktrees, agent launches, file inspection, merging, pull requests, rituals, settings, or cleanup.</p>
+    <p>When a supported local integration is available, Psyche Build may add scoped session actions without changing the core workflow.</p>
 
     <h2>Next Steps</h2>
     <ul>

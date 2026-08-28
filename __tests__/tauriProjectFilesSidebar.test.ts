@@ -606,10 +606,20 @@ function compileRenderSessionListFocusHarness(initial: {
 }) {
   const documentRef = initial.document ?? new FakeDocument();
   const sessionListRef = initial.sessionListEl ?? new FakeElement('div', documentRef);
+  const seedProjectId = initial.activeProjectId ?? initial.projects[0]?.id ?? '';
+  const seedThreads = seedProjectId
+    ? [{
+        id: `${seedProjectId}:live-session`,
+        projectId: seedProjectId,
+        hidden: false,
+        status: 'running',
+      }]
+    : [];
   return Function(
     'document',
     'sessionListEl',
     'seedProjects',
+    'seedThreads',
     'seedActiveProjectId',
     'seedSessionTreeFocusKey',
     `"use strict";
@@ -624,7 +634,7 @@ function compileRenderSessionListFocusHarness(initial: {
     var isRestoringWorkspace = false;
     var state = {
       projects: seedProjects,
-      threads: [],
+      threads: seedThreads,
       activeProjectId: seedActiveProjectId,
       activeThreadId: null,
     };
@@ -696,6 +706,7 @@ function compileRenderSessionListFocusHarness(initial: {
         };
       },
     };
+    ${functionSource('isDormantThread')}
     ${functionSource('renderSessionList')}
     return {
       renderSessionList: renderSessionList,
@@ -713,6 +724,7 @@ function compileRenderSessionListFocusHarness(initial: {
     documentRef,
     sessionListRef,
     initial.projects,
+    seedThreads,
     initial.activeProjectId ?? '',
     initial.sessionTreeFocusKey ?? '',
   ) as {

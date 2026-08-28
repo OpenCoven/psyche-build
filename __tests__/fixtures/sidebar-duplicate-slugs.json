@@ -1,0 +1,39 @@
+{
+  "projectName": "psyche-session",
+  "projectRoot": "/workspace/psyche-session",
+  "panes": [
+    {
+      "id": "pane-primary",
+      "paneId": "%1",
+      "slug": "fix-auth",
+      "displayName": "Fix auth",
+      "projectName": "psyche-session",
+      "projectRoot": "/workspace/psyche-session",
+      "prompt": ""
+    },
+    {
+      "id": "pane-api",
+      "paneId": "%2",
+      "slug": "fix-auth",
+      "displayName": "Fix auth",
+      "projectName": "api-service",
+      "projectRoot": "/workspace/api-service",
+      "prompt": ""
+    },
+    {
+      "id": "pane-web",
+      "paneId": "%3",
+      "slug": "fix-auth",
+      "displayName": "Fix auth",
+      "projectName": "web-client",
+      "projectRoot": "/workspace/web-client",
+      "covenSession": {
+        "id": "session-web",
+        "harness": "claude"
+      },
+      "prompt": ""
+    }
+  ],
+  "settings": {},
+  "lastUpdated": "2026-08-01T00:00:00.000Z"
+}

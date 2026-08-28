@@ -36,11 +36,11 @@ describe('agent launch utils', () => {
     expect(getAgentSlugSuffix('gemini')).toBe('gemini');
   });
 
-  it('returns default-enabled registry agents, led by Coven Code', () => {
+  it('returns default-enabled registry agents, led by Coven CLI', () => {
     expect(getDefaultEnabledAgents()).toEqual(['coven-code', 'claude', 'opencode', 'codex']);
   });
 
-  it('lists Coven Code first so it leads the new-pane picker', () => {
+  it('lists Coven CLI first so it leads the new-pane picker', () => {
     expect(getAgentDefinitions()[0]?.id).toBe('coven-code');
   });
 
@@ -149,6 +149,15 @@ describe('command builders', () => {
     );
   });
 
+  it('ignores prompts and permission modes for coven-code launches', () => {
+    expect(buildAgentCommand('coven-code', undefined)).toBe('coven');
+    expect(buildAgentCommand('coven-code', 'plan')).toBe('coven');
+    expect(buildInitialPromptCommand('coven-code', '"fix it"', undefined)).toBe('coven');
+    expect(buildInitialPromptCommand('coven-code', '"fix it"', 'bypassPermissions')).toBe('coven');
+    expect(buildResumeCommand('coven-code', 'acceptEdits')).toBeUndefined();
+    expect(buildAgentResumeOrLaunchCommand('coven-code', 'plan')).toBe('coven');
+  });
+
   it('builds option-style initial prompt command', () => {
     expect(buildInitialPromptCommand('copilot', '"fix it"', 'acceptEdits')).toBe(
       'copilot --allow-tool write -i "fix it"'
@@ -208,7 +217,7 @@ describe('command builders', () => {
 
 describe('getPromptTransport per agent', () => {
   const expectedTransports: Record<AgentName, PromptTransport> = {
-    'coven-code': 'positional',
+    'coven-code': 'launch-only',
     claude: 'positional',
     codex: 'positional',
     opencode: 'option',
@@ -231,13 +240,13 @@ describe('getPromptTransport per agent', () => {
 });
 
 describe('buildInitialPromptCommand per agent and permission mode', () => {
-  it('builds positional prompt commands for coven-code', () => {
+  it('returns the bare coven command for coven-code', () => {
     expect(buildInitialPromptCommand('coven-code', '"fix it"', undefined))
-      .toBe('coven-code "fix it"');
+      .toBe('coven');
     expect(buildInitialPromptCommand('coven-code', '"fix it"', 'plan'))
-      .toBe('coven-code --permission-mode plan "fix it"');
+      .toBe('coven');
     expect(buildInitialPromptCommand('coven-code', '"fix it"', 'bypassPermissions'))
-      .toBe('coven-code --permission-mode bypass-permissions "fix it"');
+      .toBe('coven');
   });
 
   it('builds positional prompt commands for claude', () => {
@@ -330,11 +339,26 @@ describe('isAgentName', () => {
 });
 
 describe('AGENT_REGISTRY contract', () => {
+  it('launches coven-code through coven with the approved contract', () => {
+    const entry = AGENT_REGISTRY['coven-code'];
+    expect(entry.name).toBe('Coven CLI');
+    expect(entry.description).toContain('Coven CLI');
+    expect(entry.installTestCommand).toBe(
+      'command -v coven 2>/dev/null || which coven 2>/dev/null'
+    );
+    expect(entry.commonPaths).toContain('/opt/homebrew/bin/coven');
+    expect(entry.commonPaths).not.toContain('/opt/homebrew/bin/coven-code');
+    expect(entry.promptCommand).toBe('coven');
+    expect(entry.promptTransport).toBe('launch-only');
+    expect(entry.resumeCommandTemplate).toBeUndefined();
+    expect(entry.permissionFlags).toEqual({});
+  });
+
   it('every agent has a consistent promptCommand and promptTransport', () => {
     for (const agent of AGENT_IDS) {
       const entry = AGENT_REGISTRY[agent];
       expect(entry.promptCommand).toBeTruthy();
-      expect(['positional', 'option', 'stdin', 'send-keys']).toContain(entry.promptTransport);
+      expect(['launch-only', 'positional', 'option', 'stdin', 'send-keys']).toContain(entry.promptTransport);
     }
   });
 

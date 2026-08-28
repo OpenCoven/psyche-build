@@ -12,6 +12,7 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { PsychePane } from '../types.js';
 import type { PaneLayout } from '../types.js';
 import { reconcilePaneLayout, seedPaneLayout } from '../layout/PaneLayoutTree.js';
+import { buildManagedPaneTitle } from '../utils/paneTitle.js';
 import {
   getProcessStartIdentity,
   isProcessAlive,
@@ -28,6 +29,8 @@ import {
 const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LOCK_DIRECTORY_NAME = 'pane-config.lock';
+const SLUG_ALLOCATION_LOCK_DIRECTORY_NAME = 'pane-slug-allocation.lock';
+const RECOVERY_LOCK_DIRECTORY_NAME = 'worktree-recovery.lock';
 const LOCK_RECORD_NAME = 'lease.json';
 
 export type ProjectPaneConfigPane = Record<string, unknown> | PsychePane;
@@ -109,6 +112,7 @@ interface ConfigLockPaths {
   canonicalProjectRoot: string;
   runtimeDir: string;
   lockDir: string;
+  lockDirectoryName: string;
 }
 
 interface LockReadResult {
@@ -124,7 +128,76 @@ export async function acquireProjectPaneConfigLock(
   projectRoot: string,
   options: ProjectPaneConfigLockOptions = {},
 ): Promise<ProjectPaneConfigLock> {
-  const paths = await resolveConfigLockPaths(projectRoot);
+  return acquireProjectScopedLock(
+    projectRoot,
+    LOCK_DIRECTORY_NAME,
+    'pane config',
+    options,
+  );
+}
+
+/**
+ * Acquires the project-wide sibling slug allocation lease. Reused-worktree
+ * creation holds this outside the shorter pane-config read/write leases.
+ */
+export async function acquireProjectPaneSlugAllocationLock(
+  projectRoot: string,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigLock> {
+  return acquireProjectScopedLock(
+    projectRoot,
+    SLUG_ALLOCATION_LOCK_DIRECTORY_NAME,
+    'pane slug allocation',
+    options,
+  );
+}
+
+/**
+ * Acquires the target-project recovery namespace before coordinating a
+ * target-wide cleanup marker with a session-local slug ownership record.
+ *
+ * Global lock order:
+ * worktree lifecycle/reuse -> target recovery -> session slug -> pane config.
+ * New-worktree flows may reserve and release the slug before taking the
+ * lifecycle lease, but no flow acquires lifecycle/reuse while a project
+ * namespace lock is held.
+ */
+export async function acquireProjectWorktreeRecoveryLock(
+  projectRoot: string,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigLock> {
+  return acquireProjectScopedLock(
+    projectRoot,
+    RECOVERY_LOCK_DIRECTORY_NAME,
+    'worktree recovery',
+    options,
+  );
+}
+
+/**
+ * Runs one sibling-slug allocation transaction while holding the shared
+ * project namespace lease through durable pane persistence.
+ */
+export async function withProjectPaneSlugAllocationLock<T>(
+  projectRoot: string,
+  operation: () => Promise<T>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<T> {
+  const lock = await acquireProjectPaneSlugAllocationLock(projectRoot, options);
+  try {
+    return await operation();
+  } finally {
+    await lock.release();
+  }
+}
+
+async function acquireProjectScopedLock(
+  projectRoot: string,
+  lockDirectoryName: string,
+  lockLabel: string,
+  options: ProjectPaneConfigLockOptions,
+): Promise<ProjectPaneConfigLock> {
+  const paths = await resolveConfigLockPaths(projectRoot, lockDirectoryName);
   const pid = options.pid ?? process.pid;
   const isOwnerProcessAlive = options.isProcessAlive ?? isProcessAlive;
   const resolveProcessStartIdentity = options.getProcessStartIdentity ?? getProcessStartIdentity;
@@ -135,10 +208,10 @@ export async function acquireProjectPaneConfigLock(
   const createNonce = options.createNonce ?? randomUUID;
 
   if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
-    throw new Error('project pane config lock pollIntervalMs must be greater than zero');
+    throw new Error(`project ${lockLabel} lock pollIntervalMs must be greater than zero`);
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new Error('project pane config lock timeoutMs must not be negative');
+    throw new Error(`project ${lockLabel} lock timeoutMs must not be negative`);
   }
 
   await mkdir(paths.runtimeDir, { recursive: true });
@@ -159,12 +232,12 @@ export async function acquireProjectPaneConfigLock(
   };
   const candidateDir = path.join(
     paths.runtimeDir,
-    `${LOCK_DIRECTORY_NAME}.candidate.${nonce}`,
+    `${lockDirectoryName}.candidate.${nonce}`,
   );
   const candidateRecordPath = path.join(candidateDir, LOCK_RECORD_NAME);
   const deadline = Date.now() + timeoutMs;
   let acquired = false;
-  let lastWaitReason = 'another project config mutation is in progress';
+  let lastWaitReason = `another project ${lockLabel} operation is in progress`;
 
   try {
     await mkdir(candidateDir);
@@ -197,22 +270,22 @@ export async function acquireProjectPaneConfigLock(
           )) {
             continue;
           }
-          lastWaitReason = `stale config lock recovery is in progress for pid ${current.record.pid}`;
+          lastWaitReason = `stale ${lockLabel} lock recovery is in progress for pid ${current.record.pid}`;
         } else {
-          lastWaitReason = `config lock is held by live or unverifiable pid ${current.record.pid}`;
+          lastWaitReason = `${lockLabel} lock is held by live or unverifiable pid ${current.record.pid}`;
         }
       } else if (current.missing) {
-        lastWaitReason = 'config lock was released while waiting';
+        lastWaitReason = `${lockLabel} lock was released while waiting`;
       } else {
         // A malformed lock could belong to a still-live writer. Without
         // owner metadata, removing it would be an unsafe lock steal.
-        lastWaitReason = 'config lock metadata is unavailable or invalid';
+        lastWaitReason = `${lockLabel} lock metadata is unavailable or invalid`;
       }
 
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         throw new Error(
-          `Timed out waiting for project pane config lock for ${paths.canonicalProjectRoot}: ${lastWaitReason}`,
+          `Timed out waiting for project ${lockLabel} lock for ${paths.canonicalProjectRoot}: ${lastWaitReason}`,
         );
       }
       await sleep(Math.min(pollIntervalMs, remainingMs));
@@ -268,6 +341,7 @@ export async function transactProjectPaneConfig<T>(
     let persisted = false;
     const persist = async (): Promise<void> => {
       assertUniquePaneIds(config.panes, projectPaneConfigPath(lock.canonicalProjectRoot));
+      assertUniquePaneSlugs(config.panes, projectPaneConfigPath(lock.canonicalProjectRoot));
       reconcileProjectPaneLayout(config);
       await writeProjectPaneConfig(lock.canonicalProjectRoot, config);
       persisted = true;
@@ -783,6 +857,8 @@ export async function readProjectPaneConfig(
     );
   }
   assertUniquePaneIds(config.panes, configPath);
+  migrateLegacyDuplicatePaneSlugs(config, canonicalProjectRoot);
+  assertUniquePaneSlugs(config.panes, configPath);
   for (const key of ['settings', 'updateSettings'] as const) {
     const value = config[key];
     if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
@@ -816,13 +892,17 @@ export function projectRootFromPaneConfigPath(configPath: string): string | unde
   return path.dirname(path.dirname(resolved));
 }
 
-async function resolveConfigLockPaths(projectRoot: string): Promise<ConfigLockPaths> {
+async function resolveConfigLockPaths(
+  projectRoot: string,
+  lockDirectoryName: string = LOCK_DIRECTORY_NAME,
+): Promise<ConfigLockPaths> {
   const canonicalProjectRoot = await canonicalizePath(projectRoot);
   const runtimeDir = path.join(canonicalProjectRoot, '.psyche', 'runtime');
   return {
     canonicalProjectRoot,
     runtimeDir,
-    lockDir: path.join(runtimeDir, LOCK_DIRECTORY_NAME),
+    lockDir: path.join(runtimeDir, lockDirectoryName),
+    lockDirectoryName,
   };
 }
 
@@ -968,6 +1048,142 @@ function assertUniquePaneIds(
   }
 }
 
+function assertUniquePaneSlugs(
+  panes: readonly ProjectPaneConfigPane[] | undefined,
+  configPath: string,
+): void {
+  const seen = new Set<string>();
+  for (const pane of Array.isArray(panes) ? panes : []) {
+    const record = asRecord(pane);
+    const slug = typeof record.slug === 'string' ? record.slug : undefined;
+    if (!slug) {
+      continue;
+    }
+    if (seen.has(slug)) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `Pane config ${configPath} contains duplicate pane slug "${slug}"`,
+      );
+    }
+    seen.add(slug);
+  }
+}
+
+function migrateLegacyDuplicatePaneSlugs(
+  config: ProjectPaneConfig,
+  canonicalProjectRoot: string,
+): void {
+  const panes = Array.isArray(config.panes) ? config.panes : [];
+  const reservedLegacySlugs = new Set(
+    panes
+      .map((pane) => asRecord(pane).slug)
+      .filter((slug): slug is string => typeof slug === 'string' && slug.length > 0),
+  );
+  const assigned = new Set<string>();
+
+  for (const pane of panes) {
+    const record = asRecord(pane);
+    const slug = typeof record.slug === 'string' ? record.slug : undefined;
+    if (!slug || !assigned.has(slug)) {
+      if (slug) assigned.add(slug);
+      continue;
+    }
+
+    const context = legacyPaneMigrationContext(
+      record,
+      config,
+      canonicalProjectRoot,
+    );
+    const contextSlug = slugContextSegment(context);
+    const candidateBase = `${slug}-${contextSlug || 'pane'}`;
+    let migratedSlug: string | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const candidate = attempt === 0
+        ? candidateBase
+        : `${candidateBase}-${attempt + 1}`;
+      if (!assigned.has(candidate) && !reservedLegacySlugs.has(candidate)) {
+        migratedSlug = candidate;
+        break;
+      }
+    }
+    if (!migratedSlug) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `Could not deterministically migrate duplicate pane slug "${slug}" in ${
+          projectPaneConfigPath(canonicalProjectRoot)
+        }`,
+      );
+    }
+
+    const displayName = typeof record.displayName === 'string'
+      && record.displayName.trim()
+      ? record.displayName
+      : slug;
+    if (
+      record.type !== 'shell'
+      && record.type !== 'desktop-use'
+      && typeof record.branchName !== 'string'
+    ) {
+      record.branchName = slug;
+    }
+    record.slug = migratedSlug;
+    record.displayName = buildManagedPaneTitle(displayName, migratedSlug);
+    assigned.add(migratedSlug);
+  }
+}
+
+function legacyPaneMigrationContext(
+  pane: Record<string, unknown>,
+  config: ProjectPaneConfig,
+  canonicalProjectRoot: string,
+): string {
+  const configName = typeof config.projectName === 'string'
+    ? config.projectName.trim()
+    : '';
+  const sessionName = path.basename(canonicalProjectRoot);
+  const paneProjectName = typeof pane.projectName === 'string'
+    ? pane.projectName.trim()
+    : '';
+  if (
+    paneProjectName
+    && paneProjectName !== configName
+    && paneProjectName !== sessionName
+  ) {
+    return paneProjectName;
+  }
+  if (typeof pane.projectRoot === 'string') {
+    const paneProjectRootName = path.basename(pane.projectRoot);
+    if (
+      paneProjectRootName
+      && paneProjectRootName !== configName
+      && paneProjectRootName !== sessionName
+    ) {
+      return paneProjectRootName;
+    }
+  }
+  const covenSession = pane.covenSession;
+  if (covenSession && typeof covenSession === 'object' && !Array.isArray(covenSession)) {
+    const session = covenSession as Record<string, unknown>;
+    const harness = typeof session.harness === 'string' ? session.harness.trim() : '';
+    const id = typeof session.id === 'string' ? session.id.trim() : '';
+    if (harness || id) return [harness, id].filter(Boolean).join('-');
+  }
+  return typeof pane.id === 'string' && pane.id.trim()
+    ? pane.id.trim()
+    : configName || sessionName;
+}
+
+function slugContextSegment(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 48)
+    .replace(/[._-]+$/g, '');
+}
+
 interface PanePropertyDelta {
   changed: Map<string, unknown>;
   deleted: Set<string>;
@@ -1078,7 +1294,7 @@ async function quarantineStaleLock(
 
   const quarantineDir = path.join(
     paths.runtimeDir,
-    `${LOCK_DIRECTORY_NAME}.stale.${record.nonce}`,
+    `${paths.lockDirectoryName}.stale.${record.nonce}`,
   );
   try {
     await rename(paths.lockDir, quarantineDir);

@@ -175,7 +175,7 @@ kbd {
   background: var(--sidebar-surface);
 }
 
-/* Collapsed rails — one click anywhere brings the surface back. */
+/* Collapsed rails stay inert except for their explicit controls. */
 .mini-rail {
   display: flex;
   flex-direction: column;
@@ -202,7 +202,6 @@ kbd {
   align-items: center;
   justify-content: center;
   flex: none;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .mini-rail-btn:hover { background: var(--surface-3); color: var(--text); }
 .mini-rail-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
@@ -271,8 +270,6 @@ kbd {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 .sidebar-tab svg { flex: none; opacity: 0.85; }
 .sidebar-tab:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
@@ -340,8 +337,6 @@ kbd {
   font-size: 12px;
   line-height: 1;
   white-space: nowrap;
-  transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 .sidebar-back-button:hover {
   background: var(--surface-2);
@@ -464,11 +459,6 @@ kbd {
   border-radius: 10px;
   background: var(--surface-2);
   color: var(--text-soft);
-  transition:
-    border-color var(--transition-fast),
-    background var(--transition-fast),
-    box-shadow var(--transition-fast),
-    color var(--transition-fast);
 }
 .project-appearance-choice:hover {
   border-color: var(--border-strong);
@@ -659,7 +649,6 @@ kbd {
   color: var(--text-soft);
   text-align: left;
   position: relative;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 /* Border-box 44px: the row is a fixed rhythm the eye can scan down, and the
    two-line text column is what sets it. */
@@ -725,7 +714,6 @@ kbd {
   flex: 0 0 7px;
   border-radius: 999px;
   background: var(--muted);
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
 }
 .session-row.running .dot,
 .session-row.running .session-dot { background: var(--ok); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
@@ -778,7 +766,7 @@ kbd {
   font-size: 13px;
   line-height: 1;
   opacity: 1;
-  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+  transition: opacity var(--transition-fast);
 }
 .session-close:focus-visible {
   outline: 1px solid var(--accent-line);
@@ -796,7 +784,6 @@ kbd {
    sticky header's opaque backdrop and must not be replaced. */
 .session-group-head {
   border-radius: 6px;
-  transition: box-shadow var(--transition-fast), color var(--transition-fast);
 }
 .session-group-head:hover {
   box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.05);
@@ -913,8 +900,7 @@ kbd {
   align-items: center;
   justify-content: center;
   flex: none;
-  transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast), transform var(--transition-fast);
+  transition: transform var(--transition-fast);
 }
 .rail-btn svg { display: block; }
 .rail-btn:hover:not(:disabled) {
@@ -1125,8 +1111,6 @@ kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast);
 }
 .chrome-btn svg { display: block; }
 .chrome-btn:hover { background: var(--surface-2); color: var(--text); }
@@ -1153,8 +1137,7 @@ kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast), transform var(--transition-fast);
+  transition: transform var(--transition-fast);
 }
 .icon-btn svg { width: 14px; height: 14px; display: block; }
 .icon-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--text); border-color: var(--border-strong); }
@@ -1177,10 +1160,15 @@ kbd {
   /* Pane minimums are relaxed so a narrow window can still hold the canvas. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  transition: grid-template-columns var(--transition-layout),
-              grid-template-rows    var(--transition-layout);
-  will-change: grid-template-columns, grid-template-rows;
 }
+
+/*
+ * The compositor may only be hinted while an element is actively transitioning.
+ * `beginCompositorTransition` in main.js toggles this class and removes it on
+ * transitionend/animationend or a 500 ms safety timeout, so no layer is ever
+ * pinned for the lifetime of the app.
+ */
+.is-transitioning { will-change: transform, opacity; }
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
@@ -1242,7 +1230,6 @@ kbd {
   user-select: none;
   position: relative;
   white-space: nowrap;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .file-tab-item {
   display: flex;
@@ -1280,7 +1267,7 @@ kbd {
   height: 6px;
   border-radius: 999px;
   background: var(--text-soft);
-  transition: opacity var(--transition-fast), background var(--transition-fast);
+  transition: opacity var(--transition-fast);
 }
 .tab.active .dot { background: var(--accent); }
 .file-tab-item > .close {
@@ -1299,7 +1286,7 @@ kbd {
   font-size: 14px;
   line-height: 1;
   opacity: 0;
-  transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+  transition: opacity var(--transition-fast);
 }
 /* Hover reveals the close and retires the dot. The active tab keeps its dot,
    because that is exactly the file whose unsaved state matters most. */
@@ -1316,7 +1303,6 @@ kbd {
   background: transparent;
   border: 0;
   font-size: 14px;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .tab-add:hover { background: var(--surface-2); color: var(--text); }
 .inline-edit {
@@ -1607,7 +1593,6 @@ kbd {
   justify-content: center;
   font-size: 11px;
   line-height: 1;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .terminal-pane-close { font-size: 13px; }
 .terminal-pane-hide:hover,
@@ -1625,8 +1610,7 @@ kbd {
 .terminal-pane-max,
 .terminal-pane-close {
   opacity: 0;
-  transition: opacity var(--transition-fast), background var(--transition-fast),
-              color var(--transition-fast);
+  transition: opacity var(--transition-fast);
 }
 .terminal-pane:hover .terminal-pane-hide,
 .terminal-pane:hover .terminal-pane-max,
@@ -1675,7 +1659,6 @@ kbd {
 .terminal-pane-divider {
   background: transparent;
   border-color: transparent;
-  transition: background var(--transition-fast);
 }
 .terminal-pane-divider:hover { background: rgba(var(--rgb-accent), 0.12); }
 
@@ -1712,7 +1695,6 @@ kbd {
   color: inherit;
   font: inherit;
   white-space: nowrap;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .terminal-pane-footer-item {
   display: inline-flex;
@@ -1889,11 +1871,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   box-shadow:
     0 0 0 1px rgba(var(--rgb-accent), 0.18),
     0 12px 32px -12px rgba(var(--rgb-accent), 0.55);
-  transition:
-    left var(--transition-fast),
-    top var(--transition-fast),
-    width var(--transition-fast),
-    height var(--transition-fast);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1935,7 +1912,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-size: 11px;
   font-weight: 650;
   padding: 3px 11px;
-  transition: background var(--transition-fast);
 }
 .set-pick-create:hover:not(:disabled) { background: rgba(var(--rgb-accent), 0.26); }
 /* Disabled rather than hidden: the count is the feedback that picking works. */
@@ -2044,7 +2020,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 5px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.8));
   opacity: 0.75;
-  transition: opacity var(--transition-fast), border-color var(--transition-fast);
+  transition: opacity var(--transition-fast);
 }
 .minimap-pane:hover { opacity: 1; border-color: var(--accent-line); }
 .minimap-pane.is-current {
@@ -2135,7 +2111,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   background: var(--surface-2);
   color: var(--text);
   font-size: 12.5px;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 .canvas-empty-action:hover { border-color: var(--accent-line); background: var(--accent-soft); }
 .canvas-empty-action .glyph { color: var(--accent); font-size: 16px; }
@@ -2184,8 +2159,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-family: var(--font-mono);
   font-size: 12.5px;
   outline: none;
-  transition: border-color var(--transition-fast), background var(--transition-fast),
-              box-shadow var(--transition-fast);
 }
 #command-input:focus {
   border-color: var(--accent);
@@ -2216,7 +2189,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: color var(--transition-fast), border-color var(--transition-fast);
 }
 .composer-btn svg { display: block; }
 .composer-btn:hover { color: var(--text); border-color: var(--accent-line); }
@@ -2532,22 +2504,22 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 
 .status-metric[data-severity="warn"],
-.status-more-btn[data-severity="warn"],
-.status-more-item[data-severity="warn"] {
+.status-more-btn[data-severity="warn"] {
   color: var(--warn);
 }
 
-.status-metric[data-severity="warn"] .status-metric-value {
+.status-metric[data-severity="warn"] .status-metric-value,
+.status-more-open[data-severity="warn"] .status-more-open-value {
   color: var(--warn);
 }
 
 .status-metric[data-severity="danger"],
-.status-more-btn[data-severity="danger"],
-.status-more-item[data-severity="danger"] {
+.status-more-btn[data-severity="danger"] {
   color: var(--error);
 }
 
-.status-metric[data-severity="danger"] .status-metric-value {
+.status-metric[data-severity="danger"] .status-metric-value,
+.status-more-open[data-severity="danger"] .status-more-open-value {
   color: var(--error);
 }
 
@@ -2557,9 +2529,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   bottom: calc(var(--status-h) + 8px);
   z-index: 65;
   display: grid;
-  gap: 2px;
-  width: 260px;
-  max-width: min(320px, calc(100vw - 16px));
+  gap: 0;
+  width: 320px;
+  max-width: calc(100vw - 16px);
   padding: 6px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -2568,12 +2540,36 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 
 .status-more-head {
-  padding: 4px 6px 2px;
+  padding: 4px 6px 6px;
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
+}
+
+.status-more-columns {
+  display: grid;
+  grid-template-columns: minmax(64px, 0.75fr) minmax(0, 1.25fr) 44px 52px;
+  align-items: center;
+  min-height: 20px;
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.status-more-column {
+  min-width: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.status-more-column:nth-child(3),
+.status-more-column:nth-child(4) {
+  padding: 0;
+  text-align: center;
 }
 
 .status-more-item {
@@ -2586,49 +2582,115 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .status-more-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-1);
+  grid-template-columns: minmax(0, 1fr) 44px 52px;
+  align-items: center;
+  min-height: 30px;
+  border-bottom: 1px solid var(--border);
+}
+
+.status-more-row:last-child {
+  border-bottom: 0;
 }
 
 .status-more-open {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(64px, 0.75fr) minmax(0, 1.25fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 0;
+  height: 28px;
   padding: 0;
+  border-radius: 4px;
 }
 
 .status-more-open-label,
 .status-more-open-value {
   min-width: 0;
+  padding: 0 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.status-more-open-label {
+  color: var(--muted);
+}
+
 .status-more-open-value {
-  margin-left: auto;
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-more-row[data-metric-kind="telemetry"] .status-more-open-value {
+  font-weight: 600;
 }
 
 .status-more-toggle {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
+  justify-content: center;
   min-width: 0;
   color: var(--text-soft);
 }
 
 .status-more-toggle input {
+  appearance: none;
+  position: relative;
+  width: 26px;
+  height: 14px;
   margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.status-more-toggle input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.status-more-toggle input:checked {
+  border-color: var(--accent-line);
+  background: rgba(var(--rgb-accent), 0.18);
+}
+
+.status-more-toggle input:checked::after {
+  background: var(--text);
+  transform: translateX(12px);
+}
+
+.status-more-toggle input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.status-more-toggle-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .status-more-meta {
+  grid-column: 1;
+  grid-row: 2;
   min-width: 0;
+  padding: 0 4px 4px;
   color: var(--muted);
   font-size: 9px;
   line-height: 1.3;
@@ -2638,18 +2700,24 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 2px;
 }
 
 .status-more-move {
+  width: 22px;
   height: 22px;
-  padding: 0 8px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: var(--text-soft);
   font: inherit;
   font-size: 10px;
+}
+
+.status-more-move:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .status-agent-row,
@@ -2901,7 +2969,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 6px;
   font-size: 12px;
   color: var(--text-soft);
-  transition: background var(--transition-fast);
 }
 .palette-item.palette-session {
   grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
@@ -3518,8 +3585,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-family: var(--font-mono);
   font-size: 12px;
   outline: none;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast),
-              background var(--transition-fast);
 }
 .browser-bar input:focus {
   border-color: rgba(var(--rgb-accent), 0.35);
@@ -3602,7 +3667,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   background: rgba(255, 255, 255, 0.045);
   color: var(--text-soft);
   white-space: nowrap;
-  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
 .browser-tab:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
 .browser-tab.active {
@@ -3771,15 +3835,29 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   z-index: 1;
   pointer-events: none;
   background:
-    linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.55) 48%, transparent 100%) -45% 0 / 40% 100% no-repeat,
     linear-gradient(#eceaf1, #eceaf1) 28px 30px / 42% 18px no-repeat,
     linear-gradient(#e1dee8, #e1dee8) 28px 66px / 72% 12px no-repeat,
     linear-gradient(#e7e4ed, #e7e4ed) 28px 92px / 58% 12px no-repeat,
     linear-gradient(#f4f2f7, #f4f2f7);
+}
+.preview-placeholder.loading::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.55) 48%, transparent 100%);
+  transform: translateX(-120%);
   animation: browser-skeleton-sheen 1.05s ease-in-out infinite;
 }
 @keyframes browser-skeleton-sheen {
-  to { background-position: 145% 0, 28px 30px, 28px 66px, 28px 92px, 0 0; }
+  to { transform: translateX(340%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .preview-placeholder.loading::after { animation: none; opacity: 0; }
 }
 .preview-placeholder.loading .preview-empty {
   opacity: 0;
@@ -3996,31 +4074,21 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    <html data-theme="...">, persisted as settings.theme.
    ========================================================================== */
 
-/* Coven Purple used to live in :root and needed no block. That stopped being
-   true when the redesign restated :root as the neutral ramp — the default
-   theme kept its name and its violet accent but lost every surface tint, so
-   the one theme most windows run rendered flat grey while the other five kept
-   their colour. It gets an explicit block like everyone else now; :root stays
-   neutral as the fallback for an unrecognised data-theme. */
+/* Coven uses the canonical OpenCoven UI graphite surfaces and restrained
+   violet presence token. The persisted theme slug stays coven-purple for
+   compatibility, but color is now reserved for focus rather than surfaces. */
 :root[data-theme="coven-purple"] {
-  --rgb-accent: 184, 157, 255;
-  --accent: #b89dff;
-  --accent-strong: #9d80f0;
-  /* Surfaces sit on the accent's own violet axis (the r:g:b ratios of #b89dff)
-     rather than a generic blue, so chrome and accent read as one hue. Each
-     step was solved to hold the luminance of the original tinted ramp while
-     widening the channel spread ~4x, which is why every text and semantic
-     token keeps its contrast to two decimal places: --text 16.72:1 -> 16.73:1,
-     --muted 5.15:1 unchanged, --faint 3.67:1 -> 3.68:1 on bg/1. Saturation
-     moved; lightness did not. */
-  --rgb-deep: 15,  6,  39;
-  --rgb-s1:   22,  9,  58;
-  --rgb-s2:   30, 12,  79;
-  --rgb-s3:   40, 16, 103;
-  --rgb-term: 16,  6,  40;
-  --text: #f5f2fb;
-  --text-soft: #c8c2d8;
-  --muted: #8a8499;
+  --rgb-accent: 147, 134, 208;
+  --accent: #9386d0;
+  --accent-strong: #6b5bbf;
+  --rgb-deep: 11, 11, 13;
+  --rgb-s1: 19, 19, 21;
+  --rgb-s2: 26, 26, 30;
+  --rgb-s3: 32, 32, 36;
+  --rgb-term: 11, 11, 13;
+  --text: #f1eff4;
+  --text-soft: #b8b4c0;
+  --muted: #7d7883;
 }
 
 :root[data-theme="claude-orange"] {
@@ -4190,7 +4258,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 5px;
   color: var(--muted);
   font-size: 11px;
-  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .sidebar-settings > summary::-webkit-details-marker { display: none; }
 .sidebar-settings > summary:hover { background: var(--surface-2); color: var(--text-soft); }

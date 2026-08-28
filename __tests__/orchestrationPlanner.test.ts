@@ -76,6 +76,7 @@ function buildRequest(
   return {
     taskId: 'task-123',
     traceId: 'trace-123',
+    operationId: 'operation-123',
     projectRoot: testPaths.projectRoot,
     cwd: relativeToProject(testPaths.cwd),
     prompt: 'Implement feature',
@@ -224,6 +225,7 @@ describe('planOrchestrationTask', () => {
       buildRequest({
         taskId: '  task-123  ',
         traceId: '  trace-123  ',
+        operationId: '  operation-123  ',
         projectRoot: `${testPaths.projectRoot}${path.sep}.`,
         cwd: `.${path.sep}packages${path.sep}app`,
         prompt: '  Implement feature  ',
@@ -239,6 +241,7 @@ describe('planOrchestrationTask', () => {
     expect(plan).toMatchObject({
       taskId: 'task-123',
       traceId: 'trace-123',
+      operationId: 'operation-123',
       projectRoot: fs.realpathSync.native(testPaths.projectRoot),
       cwd: fs.realpathSync.native(testPaths.cwd),
       concurrency: 2,
@@ -248,6 +251,7 @@ describe('planOrchestrationTask', () => {
     expect(plan.lanes[0]).toMatchObject({
       taskId: 'task-123',
       traceId: 'trace-123',
+      operationId: 'operation-123',
       projectRoot: fs.realpathSync.native(testPaths.projectRoot),
       cwd: fs.realpathSync.native(testPaths.cwd),
       prompt: 'Implement feature',
@@ -283,6 +287,19 @@ describe('planOrchestrationTask', () => {
 
     expect(omittedTracePlan.traceId).toBe('task-missing-trace');
     expect(omittedTracePlan.lanes.every((lane) => lane.traceId === 'task-missing-trace')).toBe(true);
+  });
+
+  it('requires a bounded explicit operation identity', () => {
+    expectError(
+      () => planOrchestrationTask(buildRequest({ operationId: undefined })),
+      'invalid_orchestration_request',
+      /operationId/i,
+    );
+    expectError(
+      () => planOrchestrationTask(buildRequest({ operationId: 'x'.repeat(129) })),
+      'invalid_orchestration_request',
+      /operationId/i,
+    );
   });
 
   it('rejects duplicate lane ids after trimming', () => {

@@ -14,6 +14,7 @@ import {
   type TerminalPanePtyFactory,
   type VisibilityState,
 } from '../native/desktop/psyche-build-tauri/web/runtime/terminal-pane-controller';
+import { snapshotRuntimeResources } from '../native/desktop/psyche-build-tauri/web/runtime/runtime-entry';
 
 type Disposable = { dispose(): void };
 
@@ -509,6 +510,53 @@ describe('TerminalPaneController lifecycle', () => {
     expect(first.terminals[0].writes).toHaveLength(0);
   });
 
+  it('returns six streaming panes and every owned runtime resource to zero', async () => {
+    vi.useFakeTimers();
+    const frames = frameQueue();
+    const scheduler = new FrameScheduler(frames.requestFrame);
+    const panes = Array.from({ length: 6 }, (_, index) =>
+      createHarness(`resource-pane-${index}`, {
+        frames,
+        scheduler,
+        visibility: index < 3 ? visible : { ...visible, paneVisible: false },
+      }));
+
+    for (const [index, pane] of panes.entries()) {
+      pane.controller.receive(batch(`resource-pane-${index}`, 1, [index + 1]));
+    }
+    frames.flush();
+    panes[0].invoke.mockRejectedValueOnce(new Error('ack unavailable'));
+    panes[0].terminals[0].writes[0].complete();
+    await flushPromises();
+    panes[0].webgls[0].loseContext();
+
+    expect(snapshotRuntimeResources()).toEqual({
+      paneControllers: 6,
+      ptyClients: 6,
+      terminals: 6,
+      fitAddons: 6,
+      webglAddons: 5,
+      resizeObservers: 6,
+      intersectionObservers: 6,
+      timers: 4,
+      frameCallbacks: 1,
+    });
+
+    for (const pane of panes) pane.controller.dispose();
+
+    expect(snapshotRuntimeResources()).toEqual({
+      paneControllers: 0,
+      ptyClients: 0,
+      terminals: 0,
+      fitAddons: 0,
+      webglAddons: 0,
+      resizeObservers: 0,
+      intersectionObservers: 0,
+      timers: 0,
+      frameCallbacks: 0,
+    });
+  });
+
   it('loads WebGL after open and falls back safely when setup fails', () => {
     const lifecycleEvents: string[] = [];
     const success = createHarness('webgl-success', { lifecycleEvents });
@@ -892,6 +940,28 @@ describe('TerminalPaneController resize resilience', () => {
     expect(harness.controller.rendererSnapshot().effectiveVisible).toBe(true);
   });
 
+  it('applies a dequeued offscreen debounce to the latest visibility state only', async () => {
+    const harness = createObservedHarness('pane-stale-hide');
+
+    harness.intersect(false);
+    const debounce = harness.timers.shift();
+    expect(debounce?.delay).toBe(250);
+
+    await harness.controller.setVisibility({
+      documentVisible: false,
+      paneVisible: false,
+      intersecting: true,
+    });
+    debounce?.callback();
+    await flushPromises();
+
+    expect(harness.controller.rendererSnapshot().visibility).toEqual({
+      documentVisible: false,
+      paneVisible: false,
+      intersecting: false,
+    });
+  });
+
   it('drops a pending hide debounce on disposal', () => {
     const harness = createObservedHarness('pane-disposed');
 
@@ -966,4 +1036,5 @@ describe('Tauri terminal controller integration', () => {
     expect(runtimeBundle).toContain('webgl_recovery_failed');
     expect(runtimeBundle).toContain('webgl_recovery_cooldown');
   });
+
 });

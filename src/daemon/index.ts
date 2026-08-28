@@ -29,7 +29,6 @@ import {
   bridgeErrorMessage,
   buildScopedProject,
   capturePaneText,
-  dispatchOrchestrationRequest,
   getProjectCovenSession,
   listProjectCovenSessions,
   listScopedProjects,
@@ -58,9 +57,15 @@ import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
 import { Orchestrator, type LaneBackend } from '../orchestration/orchestrator.js';
+import { createDaemonOrchestrator } from './orchestrationBackend.js';
 import { PaneOutputFanout } from './paneOutputFanout.js';
 import { BrowserProviderBroker } from '../control/browserProviderBroker.js';
 import { BrowserSemanticSnapshotRegistry } from '../control/browserSemanticSnapshots.js';
+import { AGENT_CONTROL_LIMITS } from '../control/limits.js';
+import {
+  daemonOrchestrationControlIdempotencyKey,
+  daemonOrchestrationControlStepIdempotencyKey,
+} from '../orchestration/operationIdentity.js';
 
 export interface DaemonOptions {
   port: number;
@@ -68,9 +73,9 @@ export interface DaemonOptions {
   printToken: boolean;
   serverVersion: string;
   capabilityStrategies: readonly AgenticCapabilityStrategy[];
-  /** Optional lane backend for orchestration tasks. Defaults to a no-op. */
+  /** Optional lane backend override for orchestration tasks. */
   laneBackend?: LaneBackend;
-  /** Pre-constructed orchestrator. When omitted one is built from `laneBackend`. */
+  /** Pre-constructed orchestrator override. */
   orchestrator?: Orchestrator;
 }
 
@@ -203,11 +208,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     ],
   });
 
-  const defaultLaneBackend: LaneBackend = async () => ({});
-  const orchestrator = opts.orchestrator ?? new Orchestrator({
-    executeLane: opts.laneBackend ?? defaultLaneBackend,
-  });
-
   const token = await readOrCreateToken();
 
   if (opts.printToken) {
@@ -229,6 +229,10 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   // project owner fence before accepting any connection; a failed acquire must
   // fail startup loudly rather than fall back to unfenced mutation.
   const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const orchestrator = opts.orchestrator
+    ?? (opts.laneBackend
+      ? new Orchestrator({ executeLane: opts.laneBackend })
+      : createDaemonOrchestrator({ sessionName }));
   const paneObservations = new PaneObservationStore();
   const surfaces = new SurfaceRegistry();
   await refreshPaneSurfaces(canonicalProjectRoot, surfaces, paneObservations);
@@ -313,6 +317,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     projectRoot: canonicalProjectRoot,
     sessionName,
     capabilityRouter,
+    orchestrator,
     paneObservations,
     surfaces,
     refreshPaneSurfaces: () => paneRefresh.run(),
@@ -422,7 +427,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       paneOutput,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
-      orchestrator,
     });
     conn.bind();
   });
@@ -469,8 +473,6 @@ export interface ConnectionDeps {
   /** Current owner epoch, stamped onto every translated command. */
   ownerEpoch: number;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
-  /** Orchestrator for `orchestration.execute` requests. */
-  orchestrator?: Orchestrator;
 }
 
 /**
@@ -1184,22 +1186,97 @@ export class Connection {
         return;
       }
       case 'orchestration.execute': {
-        if (!this.deps.orchestrator) {
-          this.send({
-            type: 'error',
-            requestId: msg.requestId,
-            code: 'orchestration_unavailable',
-            message: 'orchestration is not configured for this daemon',
-          });
-          return;
-        }
         try {
-          const response = await dispatchOrchestrationRequest(
-            this.deps.projectRoot,
-            msg,
-            this.deps.orchestrator,
-          );
-          this.send(response);
+          const executionIdempotencyKey = daemonOrchestrationControlIdempotencyKey({
+            operationId: msg.operationId,
+            connectionId: this.actorId,
+            requestId: msg.requestId,
+          });
+          const leaseRequestIdempotencyKey = daemonOrchestrationControlStepIdempotencyKey({
+            executionIdempotencyKey,
+            connectionId: this.actorId,
+            step: 'lease-request',
+          });
+          const leaseGrantIdempotencyKey = daemonOrchestrationControlStepIdempotencyKey({
+            executionIdempotencyKey,
+            connectionId: this.actorId,
+            step: 'lease-grant',
+          });
+          const requestLease = await this.submitControl(this.buildCommand(
+            'lease.request',
+            {
+              taskId: msg.task.taskId,
+              ttlMs: AGENT_CONTROL_LIMITS.leaseTtlMs,
+              grants: [{
+                target: { kind: 'project', id: this.deps.projectRoot },
+                capabilities: ['pane.create'],
+              }],
+            },
+            {
+              actorKind: 'human',
+              idempotencyKey: leaseRequestIdempotencyKey,
+            },
+          ));
+          if (requestLease.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'orchestration_failed', requestLease);
+            return;
+          }
+          const leaseRequestId = (requestLease.value as { requestId?: string } | undefined)?.requestId;
+          if (!leaseRequestId) {
+            this.send({
+              type: 'error',
+              requestId: msg.requestId,
+              code: 'orchestration_failed',
+              message: 'control runtime returned no lease request ID',
+            });
+            return;
+          }
+          const grantLease = await this.submitControl(this.buildCommand(
+            'lease.grant',
+            { requestId: leaseRequestId },
+            {
+              actorKind: 'human',
+              idempotencyKey: leaseGrantIdempotencyKey,
+            },
+          ));
+          if (grantLease.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'orchestration_failed', grantLease);
+            return;
+          }
+          const lease = (grantLease.value as {
+            lease?: { id?: string; revision?: number };
+          } | undefined)?.lease;
+          if (!lease?.id || !lease.revision) {
+            this.send({
+              type: 'error',
+              requestId: msg.requestId,
+              code: 'orchestration_failed',
+              message: 'control runtime returned no orchestration lease',
+            });
+            return;
+          }
+          const outcome = await this.submitControl(this.buildCommand(
+            'orchestration.execute',
+            {
+              taskId: msg.task.taskId,
+              leaseId: lease.id,
+              leaseRevision: lease.revision,
+              request: msg.task,
+            },
+            {
+              actorKind: 'human',
+              idempotencyKey: executionIdempotencyKey,
+            },
+          ));
+          if (outcome.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'orchestration_failed', outcome);
+            return;
+          }
+          this.send({
+            type: 'orchestration.execute.result',
+            requestId: msg.requestId,
+            result: outcome.value as import('../orchestration/types.js').OrchestrationTaskResult,
+          });
           await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({

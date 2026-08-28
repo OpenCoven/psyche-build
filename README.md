@@ -10,8 +10,13 @@
 <p align="center">
   <a href="https://github.com/OpenCoven/psyche-build/releases"><strong>Releases</strong></a>
   ·
+  <a href="https://github.com/orgs/OpenCoven/projects/11"><strong>Roadmap</strong></a>
+  ·
   <a href="https://github.com/OpenCoven/psyche-build/issues"><strong>Issues</strong></a>
 </p>
+
+GitHub is the public planning mirror; [Beads](./.beads/README.md) remains the
+authoritative source for issue and roadmap state.
 
 ---
 
@@ -21,24 +26,28 @@
 
 ## Distribution
 
-When the `v0.0.1` GitHub Release and tap Cask are available, the only public
-macOS installation path is:
+The supported public macOS installation path for `v0.0.1` is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
 open -a "Psyche Build"
 ```
 
-The iOS build is internal TestFlight only. Authorized OpenCoven testers can
-install `Psyche Build` `0.0.1 (1)` if it is available to their account in
-TestFlight; this is not a public App Store or external TestFlight release.
+The [GitHub Release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1)
+contains signed and notarized Apple Silicon and Intel DMGs plus `SHA256SUMS`.
+The Homebrew Cask installs only `Psyche Build.app`; it does not install the
+Node CLI.
+
+The iOS companion remains an independently gated internal-beta track under
+[#200](https://github.com/OpenCoven/psyche-build/issues/200). This repository
+does not currently claim a live TestFlight build, public App Store release, or
+external TestFlight release.
 
 Source development is separate; follow [CONTRIBUTING.md](./CONTRIBUTING.md) to
 run the checkout. The Node CLI ships in the source tree and package archive,
 but it is not an npm release for `0.0.1`. Windows, Linux, Android, external
 TestFlight, and public App Store distribution are unavailable in `0.0.1`.
 
-The Cask installs only `Psyche Build.app`; it does not install the Node CLI.
 From a source checkout, invoke that CLI explicitly and verify the local setup
 with:
 
@@ -55,11 +64,9 @@ node /path/to/psyche-build/psyche
 
 Press `n` to create a new pane, type a prompt, pick one or more agents (or none for a plain terminal), and Psyche Build handles the rest — tmux pane, git worktree, branch, and agent launch.
 
-Press `u` to open rituals: reusable setup recipes for starting a project with a known pane layout. Built-ins include Start Coding, Terminal First, Review Stack, Release Check, and Fix OpenClaw. You can also save project rituals and attach a default ritual to a project.
+Press `u` to open rituals: reusable setup recipes for starting a project with a known pane layout. Built-ins include Start Coding, Terminal First, Review Stack, and Release Check. You can also save project rituals and attach a default ritual to a project.
 
 Open the selected pane menu with `m` when you want to inspect, merge, create a PR, attach another agent, or clean up.
-
-For the full Psyche Build + Coven walkthrough, see [Coven demo loop](./docs/COVEN-DEMO-LOOP.md).
 
 New to tmux? Run:
 
@@ -83,12 +90,27 @@ The doctor output also calls out supported agent CLIs and the Coven boundary:
 - Without Coven, Psyche Build still manages tmux panes, worktrees, merge, PR, settings, rituals, and local file browsing.
 - With a local Coven daemon, Psyche Build's CLI and bridge can list, open, and launch scoped Coven harness sessions.
 
+## The model
+
+Every Psyche Build workflow uses the same four definitions:
+
+- **Task** — one requested outcome.
+- **Lane** — one agent or terminal working on that task.
+- **Isolation mode** — an isolated worktree, a shared worktree, a plain
+  terminal, or an optional provider-managed session.
+- **Integration** — inspect, compare, merge, create a PR, archive, or clean up.
+
+A pane is the concrete surface a lane runs in; a worktree is the most common
+isolation mode. Psyche Build owns lane orchestration. Optional capability and
+session providers register bounded integrations; an explicitly unavailable
+provider fails closed instead of degrading silently.
+
 ## What it does
 
 Psyche Build creates a tmux pane for each task. Every work pane gets its own git worktree and branch so agents work in complete isolation. When a task is done, open the pane menu with `m` and choose Merge to bring it back into your main branch, or Create GitHub PR to push the branch and file a pull request.
 
-- **Worktree isolation** — each pane is a full working copy, no conflicts between agents
-- **Agent support** — Coven Code, Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, and Crush CLI
+- **Worktree isolation** — each pane is a full working copy, so parallel lanes do not edit the same checkout
+- **Agent support** — [Coven CLI](https://github.com/OpenCoven/coven), Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, and Crush CLI
 - **Multi-select launches** — choose any combination of enabled agents per prompt
 - **AI naming** — branches, pane labels, and commit messages can be generated automatically
 - **Smart merging** — review, auto-commit, merge, PR, and cleanup flows stay explicit
@@ -97,7 +119,6 @@ Psyche Build creates a tmux pane for each task. Every work pane gets its own git
 - **Pane visibility controls** — hide individual panes, isolate one project, or restore everything later without stopping work
 - **Multi-project cockpit** — add multiple repos to the same session and switch scope from the sidebar
 - **Rituals** — open, save, and attach reusable project setup recipes without restoring brittle tmux snapshots
-- **Fix OpenClaw cockpit** — a built-in ritual opens Coven repair, verification, diff watch, and session panes so rescue work stays visible
 - **Coven sessions** — the CLI sidebar can show live session status and `[o]` opens a session as a visible Psyche Build pane; the macOS app rail intentionally shows app-origin local threads only
 - **Lifecycle hooks** — run scripts on worktree create, pre-merge, post-merge, and more
 
@@ -130,7 +151,7 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 - tmux 3.0+
 - Node.js 20.10.0+
 - Git 2.20+
-- At least one supported agent CLI for agent panes (for example [Coven Code](https://github.com/OpenCoven/coven), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), [Cline CLI](https://docs.cline.bot/cline-cli/getting-started), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Qwen CLI](https://github.com/QwenLM/qwen-code), [Amp CLI](https://ampcode.com/manual), [pi CLI](https://www.npmjs.com/package/@mariozechner/pi-coding-agent), [Cursor CLI](https://docs.cursor.com/en/cli/overview), [Copilot CLI](https://github.com/github/copilot-cli), [Crush CLI](https://github.com/charmbracelet/crush)). Plain terminal panes work without an agent CLI.
+- At least one supported agent CLI for agent panes (for example [Coven CLI](https://github.com/OpenCoven/coven), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), [Cline CLI](https://docs.cline.bot/cline-cli/getting-started), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Qwen CLI](https://github.com/QwenLM/qwen-code), [Amp CLI](https://ampcode.com/manual), [pi CLI](https://www.npmjs.com/package/@mariozechner/pi-coding-agent), [Cursor CLI](https://docs.cursor.com/en/cli/overview), [Copilot CLI](https://github.com/github/copilot-cli), [Crush CLI](https://github.com/charmbracelet/crush)). Plain terminal panes work without an agent CLI.
 - [OpenRouter API key](https://openrouter.ai/) (optional, for AI branch names, status analysis, and commit messages)
 
 ## MCP server
@@ -254,31 +275,22 @@ both so you can inspect or merge the work; removing them stays an explicit
 action in the TUI, because a worktree can hold the only copy of uncommitted
 changes.
 
-## Coven and OpenCoven
+## Optional integrations
 
-Psyche Build works as a standalone tmux/worktree cockpit. Its CLI and bridge
-also speak to Coven when a local daemon is available, so OpenCoven-managed
-harness sessions can appear beside normal Psyche Build panes. The macOS app
-rail intentionally does not render daemon-discovered sessions.
+Psyche Build's tmux, worktree, terminal, agent, file-browser, merge,
+pull-request, ritual, settings, and cleanup workflows work independently.
+Supported coding agents and a compatible local session provider can extend
+those workflows without becoming prerequisites.
 
-Coven is the harness substrate. Psyche Build is the cockpit. OpenMeow and OpenClaw can sit above them as intake and orchestration layers.
-
-Demo loop:
-
-1. Open a project in Psyche Build.
-2. Launch a Coven-backed Codex or Claude Code session.
-3. Watch it as a visible pane/session.
-4. Inspect files and diffs.
-5. Merge, create a PR, archive, or clean up explicitly.
-
-See [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md) and the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md).
+For optional agent and local-session boundaries, see
+[Psyche Build integrations](./docs/INTEGRATIONS.md).
 
 ## Docs
 
 - [Documentation index](./docs/README.md)
 - [Breaking changes: comux → Psyche Build](./docs/BREAKING-CHANGES.md)
 - [Bridge and daemon security model](./docs/BRIDGE-SECURITY.md)
-- [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md)
+- [Psyche Build integrations](./docs/INTEGRATIONS.md)
 - [Product spec](./docs/PRODUCT-SPEC.md)
 - [Smoke test](./docs/SMOKE.md)
 - [Release runbook](./docs/RELEASE.md)

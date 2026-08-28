@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/macOS-schema.json",
+  "identifier": "browser-title-reporting",
+  "description": "Allows embedded browser webviews to report non-authoritative page titles",
+  "local": true,
+  "webviews": ["psyche-browser-*"],
+  "remote": {
+    "urls": ["http://*", "https://*"]
+  },
+  "permissions": ["allow-browser-report-title"]
+}

@@ -888,7 +888,7 @@ pub async fn control_provider_remove(
     project_root: String,
     tab_id: String,
     generation: u64,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     ensure_trusted_control_caller(webview.label())?;
     let root = canonical_root(&project_root)?;
     let connection = connection_for(&state, &root)?;
@@ -903,7 +903,7 @@ pub async fn control_provider_remove(
         },
     )
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 #[tauri::command]

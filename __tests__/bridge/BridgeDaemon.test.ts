@@ -1185,6 +1185,7 @@ describe("BridgeDaemon", () => {
     const fakeHub: any = {
       start() {}, stop() {}, sendInput() {},
       bufferFor: (_id: string) => buf,
+      bufferedPaneIds: () => [],
       forgetPane() {},
     };
 
@@ -1251,6 +1252,7 @@ describe("BridgeDaemon", () => {
     const fakeHub: any = {
       start() {}, stop() {}, sendInput() {},
       bufferFor: (_id: string) => buf,
+      bufferedPaneIds: () => [],
       forgetPane() {},
     };
 
@@ -1313,6 +1315,7 @@ describe("BridgeDaemon", () => {
     const fakeHub: any = {
       start() {}, stop() {}, sendInput() {},
       bufferFor: (_id: string) => buf,
+      bufferedPaneIds: () => [],
       forgetPane() {},
     };
     const tokenStore = new FakeTokenStore() as any;

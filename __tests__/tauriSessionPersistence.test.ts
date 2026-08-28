@@ -240,7 +240,6 @@ describe('Tauri workspace persistence model', () => {
       kind: 'coven-code',
       launchKind: 'coven-code',
       hidden: false,
-      covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
     });
   });
 
@@ -266,27 +265,50 @@ describe('Tauri workspace persistence model', () => {
     ).toBeNull();
   });
 
-  test('preserves canonical Coven Code identifiers needed for explicit retry', () => {
-    expect(
-      workspaceModel.sanitizeSessionDescriptor({
-        id: 'code-current',
-        projectId: 'project-a',
-        worktreePath: '/repo',
-        name: 'Coven Code',
-        kind: 'coven-code',
-        launchKind: 'coven-code',
-        covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
-      }),
-    ).toEqual({
+  test('migrates the exact default Coven Code name and drops stale code-mode ids', () => {
+    const descriptor = workspaceModel.sanitizeSessionDescriptor({
       id: 'code-current',
       projectId: 'project-a',
       worktreePath: '/repo',
       name: 'Coven Code',
       kind: 'coven-code',
       launchKind: 'coven-code',
-      hidden: false,
       covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
     });
+
+    expect(descriptor).toEqual({
+      id: 'code-current',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven CLI',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+    });
+    expect(descriptor).not.toHaveProperty('covenSessionId');
+  });
+
+  test('keeps custom Coven Code names unchanged while dropping stale ids', () => {
+    const descriptor = workspaceModel.sanitizeSessionDescriptor({
+      id: 'code-custom-name',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'My Coven Pairing',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
+
+    expect(descriptor).toEqual({
+      id: 'code-custom-name',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'My Coven Pairing',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+    });
+    expect(descriptor).not.toHaveProperty('covenSessionId');
   });
 
   test('normalizes legacy Coven metadata before workspace state is returned', () => {
@@ -301,7 +323,7 @@ describe('Tauri workspace persistence model', () => {
             id: 'code-legacy',
             projectId: 'project-a',
             worktreePath: '/repo',
-            name: 'Coven',
+            name: 'Coven Code',
             kind: 'coven-chat',
             launchKind: 'coven-chat',
             covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
@@ -320,11 +342,10 @@ describe('Tauri workspace persistence model', () => {
           id: 'code-legacy',
           projectId: 'project-a',
           worktreePath: '/repo',
-          name: 'Coven',
+          name: 'Coven CLI',
           kind: 'coven-code',
           launchKind: 'coven-code',
           hidden: false,
-          covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
         },
       ],
       filesPanes: [],
@@ -332,7 +353,7 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
-  test('persists restored legacy Coven sessions with canonical live metadata', () => {
+  test('restores legacy Coven CLI sessions without stale metrics or session ids', () => {
     const sessionId = '12345678-1234-4abc-8def-1234567890ab';
     const descriptor = workspaceModel.sanitizeSessionDescriptor({
       id: 'code-legacy-restored',
@@ -363,21 +384,104 @@ describe('Tauri workspace persistence model', () => {
       kind: 'coven-code',
       launch: {
         launchKind: 'coven-code',
-        covenSessionId: sessionId,
-        metricsProvider: 'coven',
+        metricsProvider: null,
       },
-      metrics: { provider: 'coven' },
+      metrics: null,
     });
+    expect(restored.launch).not.toHaveProperty('covenSessionId');
     expect(persistableSession(restored)).toEqual({
       id: 'code-legacy-restored',
       projectId: 'project-a',
       worktreePath: '/repo',
-      name: 'Coven Code',
+      name: 'Coven CLI',
       kind: 'coven-code',
       launchKind: 'coven-code',
       hidden: false,
-      covenSessionId: sessionId,
     });
+    expect(persistableSession(restored)).not.toHaveProperty('covenSessionId');
+  });
+
+  test('keeps attach ids and metrics only for restored attachments', () => {
+    const restoredSessionThread = compileFunction<(
+      saved: Record<string, unknown>,
+      project: { id: string; root: string },
+    ) => Record<string, any>>(functionSource('restoredSessionThread'), {
+      restoredSessionLaunch: compileFunction(functionSource('restoredSessionLaunch')),
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      loadingPaneMetrics: (launch: Record<string, unknown>) => ({
+        provider: launch.metricsProvider,
+        sessionId: launch.covenSessionId,
+      }),
+    });
+    const persistableSession = compileFunction<(
+      thread: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(functionSource('persistableSession'));
+
+    const restored = restoredSessionThread({
+      id: 'attach-restored',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Remote pair',
+      kind: 'coven-attach',
+      launchKind: 'coven-attach',
+      covenSessionId: 'remote-123',
+      hidden: false,
+      status: 'running',
+      persistentLive: true,
+    }, { id: 'project-a', root: '/repo' });
+
+    expect(restored).toMatchObject({
+      kind: 'coven-attach',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'remote-123',
+        metricsProvider: 'coven',
+      },
+      metrics: {
+        provider: 'coven',
+        sessionId: 'remote-123',
+      },
+    });
+    expect(persistableSession(restored)).toEqual({
+      id: 'attach-restored',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Remote pair',
+      kind: 'coven-attach',
+      launchKind: 'coven-attach',
+      hidden: false,
+      covenSessionId: 'remote-123',
+    });
+  });
+
+  test('persistable sessions drop stray coven ids for bare Coven CLI panes', () => {
+    const persistableSession = compileFunction<(
+      thread: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(functionSource('persistableSession'));
+
+    const persisted = persistableSession({
+      id: 'code-stray',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven CLI',
+      kind: 'coven-code',
+      hidden: false,
+      launch: {
+        launchKind: 'coven-code',
+        covenSessionId: 'stale-session-id',
+      },
+    });
+
+    expect(persisted).toEqual({
+      id: 'code-stray',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      name: 'Coven CLI',
+      kind: 'coven-code',
+      launchKind: 'coven-code',
+      hidden: false,
+    });
+    expect(persisted).not.toHaveProperty('covenSessionId');
   });
 
   test('collapses malformed, unknown, and duplicate pane leaves', () => {
@@ -1338,9 +1442,9 @@ describe('Tauri workspace persistence model', () => {
       'Shell — login shell<span class="new-pane-key">⌃T</span>',
     );
     expect(indexHtml).toContain(
-      'Agent — Coven Code<span class="new-pane-key">⌃A</span>',
+      'Agent — Coven CLI<span class="new-pane-key">⌃A</span>',
     );
     expect(mainSource).toContain('["New shell pane", "⌃T"]');
-    expect(mainSource).toContain('["New agent pane (Coven Code)", "⌃A"]');
+    expect(mainSource).toContain('["New agent pane (Coven CLI)", "⌃A"]');
   });
 });

@@ -15,6 +15,11 @@ export interface CodexSessionEventData {
   timestamp?: number;
 }
 
+export interface PaneAgentSessionPersistenceGuard {
+  expectedTmuxPaneId: string;
+  isCurrent?: () => boolean;
+}
+
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -86,7 +91,8 @@ export async function buildCodexAgentSessionReference(
 export async function persistPaneAgentSessionReference(
   panesFile: string | undefined,
   paneId: string,
-  agentSession: AgentSessionReference
+  agentSession: AgentSessionReference,
+  guard?: PaneAgentSessionPersistenceGuard,
 ): Promise<void> {
   if (!panesFile) return;
 
@@ -98,9 +104,14 @@ export async function persistPaneAgentSessionReference(
   }
 
   await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {
+    if (guard?.isCurrent && !guard.isCurrent()) return;
+
     const config = configRecord as unknown as PsycheConfig;
     const panes = Array.isArray(config.panes) ? config.panes : [];
-    const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
+    const pane = panes.find((candidate) => (
+      candidate.id === paneId
+      && (!guard || candidate.paneId === guard.expectedTmuxPaneId)
+    ));
     if (!pane) return;
 
     pane.agentSession = agentSession;

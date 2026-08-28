@@ -318,4 +318,68 @@ describe('createPanesForAgents', () => {
 
     expect(h.statuses).toContain('Created 2 panes');
   });
+
+  it('reports one bounded warning when launched panes lose orchestration metadata', async () => {
+    let n = 0;
+    createPaneMock.mockImplementation(async (options: any) => {
+      const createdPane = pane(`psyche-${++n}`);
+      await options.persistCreatedPane(createdPane);
+      return { pane: createdPane, needsAgentChoice: false };
+    });
+    const h = harness();
+    h.savePanes.mockImplementation(async (nextPanes: PsychePane[]) => {
+      if (nextPanes.some((nextPane) => nextPane.orchestration)) {
+        throw new Error(`disk full\n${'x'.repeat(2_000)}`);
+      }
+    });
+
+    const created = await h.api.createPanesForAgents(
+      'Fix auth',
+      ['coven-code', 'claude', 'codex'],
+    );
+
+    const warnings = h.statuses.filter((status) =>
+      status.includes('orchestration metadata was not saved')
+    );
+    expect(created).toHaveLength(3);
+    expect(h.loadPanes).toHaveBeenCalledTimes(1);
+    expect(h.savePanes).toHaveBeenCalledTimes(6);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(
+      /^3 panes launched, but orchestration metadata was not saved: disk full /,
+    );
+    expect(warnings[0].match(/disk full/g)).toHaveLength(1);
+    expect(warnings[0]).not.toContain('\n');
+    expect(warnings[0].length).toBeLessThanOrEqual(512);
+    expect(h.statuses.some((status) => status.includes('failed'))).toBe(false);
+  });
+
+  it('keeps lane failures visible when warning detail reaches the notice bound', async () => {
+    createPaneMock.mockImplementation(async (options: any) => {
+      if (options.agent === 'claude') {
+        throw new Error('launch failed');
+      }
+      const createdPane = pane('psyche-created');
+      await options.persistCreatedPane(createdPane);
+      return { pane: createdPane, needsAgentChoice: false };
+    });
+    const h = harness();
+    h.savePanes.mockImplementation(async (nextPanes: PsychePane[]) => {
+      if (nextPanes.some((nextPane) => nextPane.orchestration)) {
+        throw new Error('x'.repeat(2_000));
+      }
+    });
+
+    const created = await h.api.createPanesForAgents(
+      'Fix auth',
+      ['coven-code', 'claude'],
+    );
+
+    const warning = h.statuses.find((status) =>
+      status.includes('orchestration metadata was not saved')
+    );
+    expect(created).toHaveLength(1);
+    expect(warning).toContain('1 lane failed');
+    expect(warning?.length).toBeLessThanOrEqual(512);
+  });
 });

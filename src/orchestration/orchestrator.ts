@@ -6,11 +6,13 @@ import {
   type OrchestrationLaneResult,
   type OrchestrationTaskRequest,
   type OrchestrationTaskResult,
+  type OrchestrationWarning,
 } from './types.js';
 
 export interface LaneExecutionOutput {
   pane?: PsychePane;
   sessionId?: string;
+  warnings?: readonly OrchestrationWarning[];
 }
 
 /**
@@ -24,6 +26,10 @@ export interface OrchestratorOptions {
   executeLane: LaneBackend;
   /** Injectable for deterministic timestamps in tests. */
   clock?: () => string;
+}
+
+export interface OrchestrationExecutionOptions {
+  beforeLaneEffect?: (lane: OrchestrationLanePlan) => void | Promise<void>;
 }
 
 /**
@@ -44,7 +50,10 @@ export class Orchestrator {
     this.clock = options.clock ?? (() => new Date().toISOString());
   }
 
-  async execute(request: OrchestrationTaskRequest): Promise<OrchestrationTaskResult> {
+  async execute(
+    request: OrchestrationTaskRequest,
+    options: OrchestrationExecutionOptions = {},
+  ): Promise<OrchestrationTaskResult> {
     // Plan first, and let a bad request throw before any lane starts —
     // otherwise a task that is invalid halfway through would leave real
     // worktrees and panes behind with no result to clean up from.
@@ -55,25 +64,71 @@ export class Orchestrator {
     // survives lanes settling out of order.
     const results = new Array<OrchestrationLaneResult | undefined>(plan.lanes.length);
     let cursor = 0;
+    let effectStartTail = Promise.resolve();
+    let authorizationFailure: { error: unknown } | undefined;
+
+    const runAuthorizedLane = async (
+      lane: OrchestrationLanePlan,
+    ): Promise<OrchestrationLaneResult> => {
+      if (!options.beforeLaneEffect) return this.runLane(lane);
+      let release!: () => void;
+      const priorStart = effectStartTail;
+      effectStartTail = new Promise<void>((resolve) => { release = resolve; });
+      await priorStart;
+      try {
+        if (authorizationFailure) throw authorizationFailure.error;
+        await options.beforeLaneEffect(lane);
+        return this.runLane(lane);
+      } catch (error) {
+        authorizationFailure ??= { error };
+        throw error;
+      } finally {
+        release();
+      }
+    };
 
     const worker = async (): Promise<void> => {
-      while (cursor < plan.lanes.length) {
+      while (cursor < plan.lanes.length && !authorizationFailure) {
         const index = cursor++;
-        results[index] = await this.runLane(plan.lanes[index]);
+        const lane = plan.lanes[index];
+        results[index] = await runAuthorizedLane(lane);
       }
     };
 
     await Promise.all(
-      Array.from({ length: plan.concurrency }, () => worker()),
+      Array.from({ length: plan.concurrency }, () => worker().catch((error) => {
+        authorizationFailure ??= { error };
+      })),
     );
+    if (authorizationFailure) {
+      if (!results.some((result) => result !== undefined)) {
+        throw authorizationFailure.error;
+      }
+      const failure = normalizeAuthorizationFailure(authorizationFailure.error);
+      for (let index = 0; index < results.length; index += 1) {
+        if (results[index]) continue;
+        const timestamp = this.clock();
+        results[index] = {
+          id: plan.lanes[index].id,
+          status: 'failed',
+          error: failure,
+          startedAt: timestamp,
+          completedAt: timestamp,
+        };
+      }
+    }
 
     const lanes = results as OrchestrationLaneResult[];
     const completed = lanes.filter((lane) => lane.status === 'completed').length;
+    const hasUnknownEffect = lanes.some((lane) => (
+      lane.status === 'completed'
+      && lane.warnings?.some((warning) => warning.code === 'effect_unknown')
+    ));
 
     return {
       taskId: plan.taskId,
       traceId: plan.traceId,
-      status: completed === lanes.length
+      status: completed === lanes.length && !hasUnknownEffect
         ? 'completed'
         : completed === 0 ? 'failed' : 'partial',
       startedAt,
@@ -91,6 +146,7 @@ export class Orchestrator {
         status: 'completed',
         ...(output.pane ? { pane: output.pane } : {}),
         ...(output.sessionId ? { sessionId: output.sessionId } : {}),
+        ...(output.warnings ? { warnings: output.warnings } : {}),
         startedAt,
         completedAt: this.clock(),
       };
@@ -111,4 +167,21 @@ export class Orchestrator {
       };
     }
   }
+}
+
+function normalizeAuthorizationFailure(
+  error: unknown,
+): { code: 'lease_missing' | 'lease_expired' | 'lease_revision_mismatch' | 'effect_unknown'; message: string } {
+  const code = error && typeof error === 'object'
+    && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : '';
+  return {
+    code: code === 'lease_missing'
+      || code === 'lease_expired'
+      || code === 'lease_revision_mismatch'
+      ? code
+      : 'effect_unknown',
+    message: error instanceof Error ? error.message : String(error),
+  };
 }

@@ -77,7 +77,10 @@ through the identical authority checks and lands in the same journal.
 
 1. **Idempotency** — returns the prior `CommandOutcome` for a seen
    `idempotencyKey`, or joins an in-flight one (`pendingByIdempotencyKey`), so a
-   retried command never double-executes.
+   retried command never double-executes. The in-memory
+   `outcomesByIdempotencyKey` map is a bounded 1,000-entry hot cache; cold
+   retries fall back to the retained journal tail and the journal's durable
+   hash-addressed exact-outcome sidecar.
 2. **Owner epoch** — rejects any command whose `ownerEpoch` is older than the
    current owner (`rejectStaleOwnerEpoch`), fencing out a superseded daemon.
 3. **Lease + scope** — validates lane leases (`LaneLeaseStore`,
@@ -88,6 +91,47 @@ through the identical authority checks and lands in the same journal.
 5. **Durable journal** — the transaction is appended to the `ControlJournal`
    (`src/control/journal.ts`) *before* the effect is considered committed, so a
    crash mid-flight is recoverable (`recoverNonterminalCommands` on startup).
+   After a terminal append, the runtime remembers the exact outcome in memory,
+   tracks it as dirty until temp-file fsync, atomic rename, and containing-
+   directory fsync succeed, and refuses to compact that terminal key away until
+   authoritative durable replay data exists. Terminal journal events also carry
+   a SHA-256 digest of the exact `CommandOutcome`, and compaction verifies the
+   retained event digest against the durable sidecar before dropping older
+   evidence. Non-surface tail events can be reconstructed while they remain
+   retained; ordinary surface tail events fail closed when their exact sidecar
+   is missing or unverifiable. The one narrow exception is a recovery-generated
+   `command.unknown` with `reason: recovered-nonterminal`, which is treated as
+   an authoritative exact unknown, replayed from the retained journal, and kept
+   dirty until persistence succeeds. Legacy pre-digest surface terminals can
+   append a later digest attestation keyed by `(commandId, idempotencyKey)`
+   once the exact sidecar is loaded, after which compaction may treat that
+   attestation as the integrity source. Fresh execution shares one 256-slot
+   durability budget across dirty terminal outcomes and active fresh
+   reservations, so no new effect starts unless its terminal could still remain
+   replayable if sidecar persistence fails. Once that shared budget is full,
+   or compaction is already blocked on durability, new fresh commands are
+   rejected with `durability_unavailable` until a later repair/flush succeeds,
+   while hot/tail/sidecar retries remain available.
+   After the redacted snapshot is durable, every covered exact sidecar is
+   conditionally downgraded at the same hashed path to
+   `idempotency_outcome_compacted`. The replacement is serialized with normal
+   outcome publication and proceeds only while the current record still
+   matches the exact digest verified by that compaction attempt. A key whose
+   latest terminal is above the cutoff is excluded, and any concurrent terminal
+   publication aborts the attempt. Only after all marker publications succeed
+   may the journal prefix be removed. The exact payload retention window is
+   therefore bounded, while non-expiring idempotency still requires one small
+   durable fact per unique key. Total sidecar count is intentionally not
+   constant-bounded without an expiry policy.
+   Compaction persists a separate redacted durable projection rather than the
+   operator-facing `snapshot()`: owner/sequence metadata, bounded redacted
+   receipts, bounded completed-key markers, and at most 256 open transaction
+   identities. Raw command envelopes, terminal input, prompts, browser/script
+   results, live resources, and exact outcomes are omitted. A restored open
+   transaction is terminalized once as `command.unknown`, never re-executed.
+   `ENOENT` alone means no prior snapshot; malformed JSON, a missing or invalid
+   covered sequence, or any invalid durable projection fails startup closed as
+   `durable snapshot corruption`.
 6. **Handler dispatch** — only then does it call the matching `ControlHandlers`
    method to perform the effect and shape the `CommandOutcome`.
 
@@ -203,4 +247,4 @@ Relevant plans and specs:
 ## Related docs
 
 - [Bridge security](BRIDGE-SECURITY.md)
-- [Coven sessions](COVEN-SESSIONS.md)
+- [Psyche Build integrations](INTEGRATIONS.md)

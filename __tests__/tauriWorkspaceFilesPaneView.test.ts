@@ -166,6 +166,53 @@ describe('native Files pane view', () => {
     expect(source).toMatch(/closeFilesPane\(filesPane\)/);
   });
 
+  it('does not rerender Files on header-control pointerdown before click', () => {
+    const calls: string[] = [];
+    let focusCalls = 0;
+    const hide = new FakeElement();
+    hide.addEventListener('click', () => { calls.push('hide'); });
+    const mountFilesPane = compileFunction<(surface: Record<string, unknown>) => FakeElement>(
+      extractFunctionSource('mountFilesPane'),
+      {
+        document: {
+          createElement: (tagName: string) => Object.assign(new FakeElement(), { tagName }),
+        },
+        fileViewEl: new FakeElement(),
+        createPaneHideButton: () => hide,
+        togglePaneMaximize: () => { calls.push('maximize'); },
+        closeFilesPane: () => { calls.push('close'); },
+        focusCanvasSurface: () => { focusCalls += 1; },
+        filesPaneHasCanvasFocus: () => false,
+        startPaneReposition: () => undefined,
+      },
+    );
+    const pane = mountFilesPane({
+      id: 'files-a', workspaceRoot: '/worktree', kind: 'files',
+    });
+    const header = pane.children[0];
+    const controls = header.children.slice(-3);
+    const pointerdown = pane.listeners.get('pointerdown')?.[0];
+    const focusin = pane.listeners.get('focusin')?.[0];
+
+    expect(pointerdown).toBeTypeOf('function');
+    expect(focusin).toBeTypeOf('function');
+    for (const control of controls) {
+      const event = {
+        target: {
+          closest: (selector: string) => selector === 'button' ? control : null,
+        },
+      };
+      pointerdown?.(event);
+      focusin?.(event);
+    }
+    expect(focusCalls).toBe(0);
+
+    controls.forEach((control) => {
+      control.listeners.get('click')?.[0]?.({ stopPropagation: () => undefined });
+    });
+    expect(calls).toEqual(['hide', 'maximize', 'close']);
+  });
+
   it('repositions and maximizes Files from non-button header gestures', () => {
     const fileView = new FakeElement();
     const calls: Array<unknown> = [];

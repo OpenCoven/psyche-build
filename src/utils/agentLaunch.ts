@@ -12,8 +12,8 @@ import { sendPromptViaTmux } from './agentPromptDispatch.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
- * enabled-agents settings list, and the default-enabled set. Coven Code leads
- * because it is this project's own coding harness.
+ * enabled-agents settings list, and the default-enabled set. Coven CLI leads
+ * because Coven CLI is this project's own default agent experience.
  */
 export const AGENT_IDS = [
   'coven-code',
@@ -32,7 +32,7 @@ export const AGENT_IDS = [
 
 export type AgentName = typeof AGENT_IDS[number];
 export type PermissionMode = '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
-export type PromptTransport = 'positional' | 'option' | 'stdin' | 'send-keys';
+export type PromptTransport = 'launch-only' | 'positional' | 'option' | 'stdin' | 'send-keys';
 
 export interface AgentLaunchOption {
   id: string;
@@ -322,27 +322,22 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
   },
   'coven-code': {
     id: 'coven-code',
-    name: 'Coven Code',
+    name: 'Coven CLI',
     shortLabel: 'cv',
-    description: 'OpenCoven coding harness — Claurst-based TUI with familiar personas',
+    description: 'OpenCoven Coven CLI terminal interface',
     slugSuffix: 'coven-code',
-    installTestCommand: 'command -v coven-code 2>/dev/null || which coven-code 2>/dev/null',
+    installTestCommand: 'command -v coven 2>/dev/null || which coven 2>/dev/null',
     commonPaths: [
-      ...homePath('.local/bin/coven-code'),
-      '/opt/homebrew/bin/coven-code',
-      '/usr/local/bin/coven-code',
-      ...homePath('bin/coven-code'),
-      ...homePath('.npm-global/bin/coven-code'),
+      ...homePath('.local/bin/coven'),
+      '/opt/homebrew/bin/coven',
+      '/usr/local/bin/coven',
+      ...homePath('bin/coven'),
+      ...homePath('.npm-global/bin/coven'),
     ],
-    promptCommand: 'coven-code',
-    promptTransport: 'positional',
-    permissionFlags: {
-      plan: '--permission-mode plan',
-      acceptEdits: '--permission-mode accept-edits',
-      bypassPermissions: '--permission-mode bypass-permissions',
-    },
+    promptCommand: 'coven',
+    promptTransport: 'launch-only',
+    permissionFlags: {},
     defaultEnabled: true,
-    resumeCommandTemplate: 'coven-code --resume{permissions}',
   },
 };
 
@@ -506,20 +501,26 @@ export function getPermissionFlags(
 
 export function buildAgentCommand(
   agent: AgentName,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
 ): string {
   const definition = AGENT_REGISTRY[agent];
   const baseCommand = definition.noPromptCommand || definition.promptCommand;
-  return appendFlags(baseCommand, getPermissionFlags(agent, permissionMode));
+  return appendFlags(
+    baseCommand,
+    getPermissionFlags(agent, permissionMode)
+  );
 }
 
 export function buildInitialPromptCommand(
   agent: AgentName,
   promptToken: string,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
 ): string {
   const definition = AGENT_REGISTRY[agent];
-  if (definition.promptTransport === 'send-keys') {
+  if (
+    definition.promptTransport === 'launch-only'
+    || definition.promptTransport === 'send-keys'
+  ) {
     return buildAgentCommand(agent, permissionMode);
   }
 
@@ -624,6 +625,7 @@ export async function launchAgentInPane(
 
   const hasInitialPrompt = !!(prompt && prompt.trim());
   const promptTransport = getPromptTransport(agent);
+  const omitsPromptDelivery = promptTransport === 'launch-only';
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
@@ -637,7 +639,7 @@ export async function launchAgentInPane(
   }
 
   let launchCommand: string;
-  if (hasInitialPrompt && !shouldSendPromptViaTmux) {
+  if (hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery) {
     // Prefer a prompt file so the prompt never has to survive shell quoting.
     let promptFilePath: string | null = null;
     try {
@@ -651,7 +653,7 @@ export async function launchAgentInPane(
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
-        permissionMode
+        permissionMode,
       )}`;
     } else {
       const escapedPrompt = prompt
@@ -662,7 +664,7 @@ export async function launchAgentInPane(
       launchCommand = buildInitialPromptCommand(
         agent,
         `"${escapedPrompt}"`,
-        permissionMode
+        permissionMode,
       );
     }
   } else {

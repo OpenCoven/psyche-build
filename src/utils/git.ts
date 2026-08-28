@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import { execAsync, execAsyncRace } from './execAsync.js';
+import { EXEC_BULK_MAX_BYTES, isExecBufferOverflow } from './execBuffers.js';
 import type { PsychePane } from '../types.js';
 
 /** Regex for characters allowed in git branch names and branch prefixes */
@@ -169,9 +170,12 @@ export function getCurrentBranch(cwd?: string): string {
  */
 export async function hasUncommittedChangesAsync(cwd?: string): Promise<boolean> {
   try {
-    const status = await execAsync('git status --porcelain', { cwd, silent: true });
+    // Not silent: a status too large to buffer must be distinguishable from a
+    // clean tree, since this answer gates destructive worktree operations.
+    const status = await execAsync('git status --porcelain', { cwd });
     return status.trim().length > 0;
-  } catch {
+  } catch (error) {
+    if (isExecBufferOverflow(error)) return true;
     return false;
   }
 }
@@ -185,10 +189,15 @@ export function hasUncommittedChanges(cwd?: string): boolean {
     const status = execSync('git status --porcelain', {
       cwd,
       encoding: 'utf8',
-      stdio: 'pipe'
+      stdio: 'pipe',
+      maxBuffer: EXEC_BULK_MAX_BYTES,
     });
     return status.trim().length > 0;
-  } catch {
+  } catch (error) {
+    // Output large enough to blow the buffer is itself proof of changes, and
+    // this answer gates destructive worktree operations — reporting a filthy
+    // tree as clean is the one wrong way to fail here.
+    if (isExecBufferOverflow(error)) return true;
     return false;
   }
 }
@@ -219,7 +228,8 @@ export function getConflictedFiles(cwd?: string): string[] {
     const status = execSync('git status --porcelain', {
       cwd,
       encoding: 'utf8',
-      stdio: 'pipe'
+      stdio: 'pipe',
+      maxBuffer: EXEC_BULK_MAX_BYTES,
     });
 
     return status

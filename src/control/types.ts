@@ -1,4 +1,4 @@
-import type { OrchestrationTaskRequest } from '../orchestration/types.js';
+import type { OrchestrationTaskSubmission } from '../orchestration/types.js';
 import type {
   CapabilityLease,
   CapabilityLeaseHistoryEntry,
@@ -185,7 +185,7 @@ export interface PromptEnvelope {
 }
 
 export type ControlCommand =
-  | CommandBase<'orchestration.execute', AgentSurfaceAuthorization & { request: OrchestrationTaskRequest }>
+  | CommandBase<'orchestration.execute', AgentSurfaceAuthorization & { request: OrchestrationTaskSubmission }>
   | CommandBase<'lease.request', {
       taskId: string;
       ttlMs: number;

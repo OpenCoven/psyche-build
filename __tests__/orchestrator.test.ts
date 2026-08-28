@@ -8,6 +8,7 @@ const ROOT = process.cwd();
 function task(overrides: Partial<OrchestrationTaskRequest> = {}): OrchestrationTaskRequest {
   return {
     taskId: 'task-1',
+    operationId: 'operation-1',
     projectRoot: ROOT,
     prompt: 'Fix the failing tests',
     lanes: [{ id: 'a', mode: 'terminal' }],
@@ -84,6 +85,34 @@ describe('Orchestrator', () => {
     expect(peak).toBe(2);
   });
 
+  it('preserves lane concurrency while serializing authorization checks', async () => {
+    let active = 0;
+    let peak = 0;
+    const authorize = vi.fn(async () => undefined);
+    const orchestrator = new Orchestrator({
+      executeLane: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await sleep(20);
+        active -= 1;
+        return {};
+      },
+    });
+
+    await orchestrator.execute(task({
+      concurrency: 2,
+      lanes: [
+        { id: 'one', mode: 'terminal' },
+        { id: 'two', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: authorize,
+    });
+
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(peak).toBe(2);
+  });
+
   it('still runs every lane when concurrency is below the lane count', async () => {
     const seen: string[] = [];
     const orchestrator = new Orchestrator({
@@ -101,11 +130,142 @@ describe('Orchestrator', () => {
     expect(seen).toHaveLength(5);
   });
 
+  it('checks authority immediately before every lane effect', async () => {
+    const effects: string[] = [];
+    let authorized = true;
+    const orchestrator = new Orchestrator({
+      executeLane: async (lane) => {
+        effects.push(lane.id);
+        authorized = false;
+        return {};
+      },
+    });
+
+    const result = await orchestrator.execute(task({
+      concurrency: 1,
+      lanes: [
+        { id: 'first', mode: 'terminal' },
+        { id: 'second', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: () => {
+        if (!authorized) throw Object.assign(new Error('lease revoked'), { code: 'lease_missing' });
+      },
+    });
+
+    expect(effects).toEqual(['first']);
+    expect(result).toMatchObject({
+      status: 'partial',
+      lanes: [
+        { id: 'first', status: 'completed' },
+        {
+          id: 'second',
+          status: 'failed',
+          error: { code: 'lease_missing', message: 'lease revoked' },
+        },
+      ],
+    });
+  });
+
+  it('does not pre-authorize concurrent lane effects', async () => {
+    const effects: string[] = [];
+    let authorized = true;
+    const orchestrator = new Orchestrator({
+      executeLane: async (lane) => {
+        effects.push(lane.id);
+        authorized = false;
+        return {};
+      },
+    });
+
+    const result = await orchestrator.execute(task({
+      concurrency: 2,
+      lanes: [
+        { id: 'first', mode: 'terminal' },
+        { id: 'second', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: () => {
+        if (!authorized) throw Object.assign(new Error('lease revoked'), { code: 'lease_missing' });
+      },
+    });
+
+    expect(effects).toEqual(['first']);
+    expect(result).toMatchObject({
+      status: 'partial',
+      lanes: [
+        { id: 'first', status: 'completed' },
+        { id: 'second', status: 'failed', error: { code: 'lease_missing' } },
+      ],
+    });
+  });
+
+  it('uses effect_unknown when a later authority failure has no stable code', async () => {
+    let checks = 0;
+    const orchestrator = new Orchestrator({
+      executeLane: async (lane) => ({
+        pane: { id: `pane-${lane.id}`, slug: lane.id } as never,
+      }),
+    });
+
+    const result = await orchestrator.execute(task({
+      concurrency: 1,
+      lanes: [
+        { id: 'completed', mode: 'terminal' },
+        { id: 'unstarted', mode: 'terminal' },
+      ],
+    }), {
+      beforeLaneEffect: () => {
+        checks += 1;
+        if (checks === 2) throw new Error('authorization state unavailable');
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: 'partial',
+      lanes: [
+        {
+          id: 'completed',
+          status: 'completed',
+          pane: { id: 'pane-completed' },
+        },
+        {
+          id: 'unstarted',
+          status: 'failed',
+          error: {
+            code: 'effect_unknown',
+            message: 'authorization state unavailable',
+          },
+        },
+      ],
+    });
+  });
+
   describe('outcome aggregation', () => {
     it('reports completed when every lane succeeds', async () => {
       const orchestrator = new Orchestrator({ executeLane: async () => ({}) });
       const result = await orchestrator.execute(task());
       expect(result.status).toBe('completed');
+    });
+
+    it('counts a warning lane as completed and preserves its warning', async () => {
+      const pane = { id: 'pane-a', slug: 'pane-a' } as never;
+      const warning = {
+        code: 'orchestration_persistence_failed' as const,
+        message: 'Pane launched, but orchestration metadata persistence failed: disk full',
+      };
+      const orchestrator = new Orchestrator({
+        executeLane: async () => ({ pane, warnings: [warning] }),
+      });
+
+      const result = await orchestrator.execute(task());
+      const completed = result.lanes.filter((lane) => lane.status === 'completed');
+      const failed = result.lanes.filter((lane) => lane.status === 'failed');
+
+      expect(result.status).toBe('completed');
+      expect(completed).toHaveLength(1);
+      expect(failed).toHaveLength(0);
+      expect(completed[0]).toMatchObject({ pane, warnings: [warning] });
     });
 
     it('reports partial when some lanes fail, keeping the successes usable', async () => {

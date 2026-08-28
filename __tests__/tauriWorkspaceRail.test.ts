@@ -352,6 +352,13 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('onRailClick("sidebar-expand", function () { setSidebarOpen(true); });');
   });
 
+  it('keeps the collapsed sidebar rail inert outside its explicit expand control', () => {
+    expect(mainJs).toContain(
+      'onRailClick("sidebar-expand", function () { setSidebarOpen(true); });',
+    );
+    expect(mainJs).not.toContain('sidebarMiniEl.addEventListener("click"');
+  });
+
   it('discovers canonical Git worktrees through a read-only native command', () => {
     expect(tauri).toMatch(/fn\s+git_worktrees\(root:\s*String\)\s*->\s*Result<Vec<GitWorktree>/);
     expect(tauri).toMatch(/"worktree",\s*"list",\s*"--porcelain"/);
@@ -440,7 +447,7 @@ describe('Tauri project/worktree/pane rail', () => {
       'if (branchModel.expanded) {',
     );
     const worktreeContextMenu = renderSessionList.slice(contextMenuStart, contextMenuEnd);
-    expect(worktreeContextMenu).toContain('label: "Open Coven Terminal"');
+    expect(worktreeContextMenu).toContain('label: "Open Coven CLI"');
     expect(worktreeContextMenu).toContain(
       'await activateProjectWorktree(project, worktree.path)',
     );
@@ -562,7 +569,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('label: "Hide"');
     expect(mainJs).toContain('label: "Interrupt"');
     expect(mainJs).toContain('label: "Stop and close"');
-    expect(mainJs).toContain('label: "Open Coven Terminal"');
+    expect(mainJs).toContain('label: "Open Coven CLI"');
     expect(mainJs).toContain('" hidden session"');
     expect(styles).toMatch(/\.session-context-menu\s*\{/);
     expect(styles).toMatch(/\.session-context-item\.danger\s*\{/);

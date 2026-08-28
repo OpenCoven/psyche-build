@@ -16,6 +16,7 @@ import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 import { sameTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
+import { indexUniquePaneTitles } from '../utils/paneTitleIndex.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -99,24 +100,14 @@ export async function savePanesToFile(
     // Try to update pane IDs if they've changed (rebinding)
     try {
       const tmuxService = TmuxService.getInstance();
-      const titleToId = new Map<string, string>();
       const paneInfo = await tmuxService.getAllPaneInfo('session');
-
-      for (const pane of paneInfo) {
-        if (
-          pane.paneId &&
-          pane.paneId.startsWith('%') &&
-          pane.title &&
-          pane.title !== SPACER_PANE_TITLE
-        ) {
-          titleToId.set(pane.title.trim(), pane.paneId);
-        }
-      }
+      const { titleToId, allPaneIds } = indexUniquePaneTitles(
+        paneInfo,
+        SPACER_PANE_TITLE,
+      );
 
       // Only rebind IDs, don't filter out panes
       // This prevents losing panes during concurrent operations
-      // Note: We need to get allPaneIds to properly use rebindPaneByTitle
-      const allPaneIds = Array.from(titleToId.values());
       activePanes = nextPanes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds));
     } catch (error) {
       // If tmux command fails, keep panes as-is (prevents data loss during tmux instability)

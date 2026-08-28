@@ -7,6 +7,7 @@ import { TmuxService } from "./services/TmuxService.js"
 import usePanes from "./hooks/usePanes.js"
 import useProjectSettings from "./hooks/useProjectSettings.js"
 import useTerminalWidth from "./hooks/useTerminalWidth.js"
+import useLayoutWidth from "./hooks/useLayoutWidth.js"
 import useNavigation from "./hooks/useNavigation.js"
 import useAutoUpdater from "./hooks/useAutoUpdater.js"
 import useAgentStatus from "./hooks/useAgentStatus.js"
@@ -121,9 +122,14 @@ import {
   resolveProjectColorTheme,
 } from "./utils/paneColors.js"
 import {
+  flushPaneOptionCacheChanges,
   getPaneTitlePrefixValue,
   paneNeedsAnimatedTitlePrefix,
+  pruneDeadPaneOptionCacheEntries,
+  startPaneOptionSyncEffect,
+  type PaneOptionCacheChange,
   PANE_TITLE_BUSY_FRAMES,
+  PANE_TITLE_SPINNER_INTERVAL_MS,
 } from "./utils/paneTitlePrefix.js"
 import { getPaneTmuxDisplayTitle } from "./utils/paneTitle.js"
 import {
@@ -142,6 +148,10 @@ import {
 } from "./utils/shellPaneDetection.js"
 import type { InlineRenameState } from "./utils/inlineRename.js"
 import { createTransactionalPane } from "./utils/transactionalPaneCreation.js"
+import {
+  summarizeDurableEffectWarnings,
+  type DurableEffectWarning,
+} from "./utils/durableEffectWarnings.js"
 
 const SidePanelRail: React.FC = () => (
   <Box flexDirection="column" width={4} alignItems="center">
@@ -238,8 +248,10 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
   // Track terminal dimensions for responsive layout
   const terminalWidth = useTerminalWidth()
+  // Measured against the tmux window, not this pane — see useLayoutWidth.
+  const layoutWidth = useLayoutWidth()
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(() =>
-    shouldUseCompactSidePanel(terminalWidth)
+    shouldUseCompactSidePanel(layoutWidth)
   )
   const [sidePanelManualOverride, setSidePanelManualOverride] = useState(false)
   const sidePanelWidth = getSidePanelWidth(sidePanelCollapsed)
@@ -260,13 +272,13 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
     
     // Auto-collapse on small terminals
-    if (shouldUseCompactSidePanel(terminalWidth)) {
+    if (shouldUseCompactSidePanel(layoutWidth)) {
       setSidePanelCollapsed(true)
     } else {
       // Expand when terminal is large enough
       setSidePanelCollapsed(false)
     }
-  }, [terminalWidth, sidePanelManualOverride])
+  }, [layoutWidth, sidePanelManualOverride])
 
   // Track unread error and warning counts for logs badge
   const [unreadErrorCount, setUnreadErrorCount] = useState(0)
@@ -867,27 +879,52 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       const cachedLabels = paneTitleLabelCacheRef.current
       const cachedActiveBorderStyles = paneActiveBorderStyleCacheRef.current
       const activePaneIds = new Set(panes.map((pane) => pane.paneId))
-      const activeBorderStylePaneIds = new Set(activePaneIds)
+      const livePaneIds = new Set(activePaneIds)
       if (controlPaneId) {
-        activeBorderStylePaneIds.add(controlPaneId)
+        livePaneIds.add(controlPaneId)
       }
+      const activeBorderStylePaneIds = livePaneIds
+
+      pruneDeadPaneOptionCacheEntries(cachedPrefixes, livePaneIds)
+      pruneDeadPaneOptionCacheEntries(cachedLabels, livePaneIds)
+      pruneDeadPaneOptionCacheEntries(cachedActiveBorderStyles, livePaneIds)
+
+      const paneOptionChanges: PaneOptionCacheChange[] = []
 
       for (const paneId of Array.from(cachedPrefixes.keys())) {
         if (!activePaneIds.has(paneId)) {
-          tmuxService.unsetPaneOptionSync(paneId, '@psyche_title_prefix')
-          cachedPrefixes.delete(paneId)
+          paneOptionChanges.push({
+            cache: cachedPrefixes,
+            mutation: {
+              paneId,
+              option: '@psyche_title_prefix',
+              unset: true,
+            },
+          })
         }
       }
       for (const paneId of Array.from(cachedLabels.keys())) {
         if (!activePaneIds.has(paneId)) {
-          tmuxService.unsetPaneOptionSync(paneId, '@psyche_title_label')
-          cachedLabels.delete(paneId)
+          paneOptionChanges.push({
+            cache: cachedLabels,
+            mutation: {
+              paneId,
+              option: '@psyche_title_label',
+              unset: true,
+            },
+          })
         }
       }
       for (const paneId of Array.from(cachedActiveBorderStyles.keys())) {
         if (!activeBorderStylePaneIds.has(paneId)) {
-          tmuxService.unsetPaneOptionSync(paneId, '@psyche_active_border_style')
-          cachedActiveBorderStyles.delete(paneId)
+          paneOptionChanges.push({
+            cache: cachedActiveBorderStyles,
+            mutation: {
+              paneId,
+              option: '@psyche_active_border_style',
+              unset: true,
+            },
+          })
         }
       }
 
@@ -910,24 +947,32 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         )
         const activeBorderStyle = `fg=colour${getPsycheThemePalette(paneThemeName).activeBorder}`
 
-        if (cachedPrefixes.get(pane.paneId) !== prefixValue) {
-          tmuxService.setPaneOptionSync(pane.paneId, '@psyche_title_prefix', prefixValue)
-          cachedPrefixes.set(pane.paneId, prefixValue)
-        }
+        paneOptionChanges.push({
+          cache: cachedPrefixes,
+          mutation: {
+            paneId: pane.paneId,
+            option: '@psyche_title_prefix',
+            value: prefixValue,
+          },
+        })
 
-        if (cachedLabels.get(pane.paneId) !== labelValue) {
-          tmuxService.setPaneOptionSync(pane.paneId, '@psyche_title_label', labelValue)
-          cachedLabels.set(pane.paneId, labelValue)
-        }
+        paneOptionChanges.push({
+          cache: cachedLabels,
+          mutation: {
+            paneId: pane.paneId,
+            option: '@psyche_title_label',
+            value: labelValue,
+          },
+        })
 
-        if (cachedActiveBorderStyles.get(pane.paneId) !== activeBorderStyle) {
-          tmuxService.setPaneOptionSync(
-            pane.paneId,
-            '@psyche_active_border_style',
-            activeBorderStyle
-          )
-          cachedActiveBorderStyles.set(pane.paneId, activeBorderStyle)
-        }
+        paneOptionChanges.push({
+          cache: cachedActiveBorderStyles,
+          mutation: {
+            paneId: pane.paneId,
+            option: '@psyche_active_border_style',
+            value: activeBorderStyle,
+          },
+        })
 
         if (pane.paneId === activeBorderPaneId) {
           tmuxService.setSessionOptionSync(
@@ -938,14 +983,21 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         }
       }
 
-      if (controlPaneId && cachedActiveBorderStyles.get(controlPaneId) !== controlPaneActiveBorderStyle) {
-        tmuxService.setPaneOptionSync(
-          controlPaneId,
-          '@psyche_active_border_style',
-          controlPaneActiveBorderStyle
-        )
-        cachedActiveBorderStyles.set(controlPaneId, controlPaneActiveBorderStyle)
+      if (controlPaneId) {
+        paneOptionChanges.push({
+          cache: cachedActiveBorderStyles,
+          mutation: {
+            paneId: controlPaneId,
+            option: '@psyche_active_border_style',
+            value: controlPaneActiveBorderStyle,
+          },
+        })
       }
+
+      const paneOptionsFlushed = flushPaneOptionCacheChanges(
+        paneOptionChanges,
+        (mutations) => tmuxService.updatePaneOptionsSync(mutations)
+      )
 
       if (!focusedPane) {
         tmuxService.setSessionOptionSync(
@@ -954,6 +1006,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           controlPaneActiveBorderStyle
         )
       }
+
+      return paneOptionsFlushed
     }
 
     const hasAnimatedPrefix = panes.some(paneNeedsAnimatedTitlePrefix)
@@ -961,22 +1015,16 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       paneTitleSpinnerFrameRef.current = 0
     }
 
-    syncPaneTitlePrefixes()
-
-    if (!hasAnimatedPrefix) {
-      return
-    }
-
-    const interval = setInterval(() => {
-      paneTitleSpinnerFrameRef.current = (
-        paneTitleSpinnerFrameRef.current + 1
-      ) % PANE_TITLE_BUSY_FRAMES.length
-      syncPaneTitlePrefixes()
-    }, 90)
-
-    return () => {
-      clearInterval(interval)
-    }
+    return startPaneOptionSyncEffect({
+      hasAnimatedPrefix,
+      sync: syncPaneTitlePrefixes,
+      advanceFrame: () => {
+        paneTitleSpinnerFrameRef.current = (
+          paneTitleSpinnerFrameRef.current + 1
+        ) % PANE_TITLE_BUSY_FRAMES.length
+      },
+      intervalMs: PANE_TITLE_SPINNER_INTERVAL_MS,
+    })
   }, [
     panes,
     sidebarProjects,
@@ -1149,16 +1197,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setStatusMessage("Creating ritual terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
+      const nextId = getNextPsycheId(existingPanes)
       const shellPane = await createTransactionalPane({
         projectRoot: targetProjectRoot,
         sessionProjectRoot,
         operation: "ritual-terminal-pane",
+        slugBase: `shell-${nextId}`,
         tmuxService,
         allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
         createPane: async ({ paneId, tmuxServerIdentity }) => {
           const pane = await createShellPane(
             paneId,
-            getNextPsycheId(existingPanes),
+            nextId,
             undefined,
             { tmuxServerIdentity, setPaneTitle: false },
           )
@@ -1201,6 +1251,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   ) => {
     let workingPanes = panes
     let createdCount = 0
+    const recoveryWarnings: DurableEffectWarning[] = []
 
     for (const ritualProject of ritual.projects) {
       const targetProjectRoot = resolveRitualProjectRoot(
@@ -1219,6 +1270,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           if (pane) {
             workingPanes = [...workingPanes, pane]
             createdCount += 1
+            recoveryWarnings.push(...(pane.recoveryWarnings || []))
           }
           continue
         }
@@ -1261,10 +1313,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
 
     if (createdCount > 0) {
-      setStatusMessage(
-        `Opened ${ritual.name} (${createdCount} pane${createdCount === 1 ? "" : "s"})`
+      const recoveryNotice = summarizeDurableEffectWarnings(
+        recoveryWarnings,
+        `Opened ${createdCount} ritual pane${createdCount === 1 ? "" : "s"}`,
       )
-      setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
+      setStatusMessage(
+        recoveryNotice
+          || `Opened ${ritual.name} (${createdCount} pane${createdCount === 1 ? "" : "s"})`
+      )
+      setTimeout(
+        () => setStatusMessage(""),
+        recoveryNotice ? 5000 : STATUS_MESSAGE_DURATION_SHORT,
+      )
     } else {
       setStatusMessage(`Ritual did not create panes: ${ritual.name}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)

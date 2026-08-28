@@ -7,5 +7,8 @@
   "remote": {
     "urls": ["http://*", "https://*"]
   },
-  "permissions": ["allow-browser-app-shortcut", "allow-browser-automation-result"]
+  "permissions": [
+    "allow-browser-app-shortcut",
+    "allow-browser-automation-result"
+  ]
 }

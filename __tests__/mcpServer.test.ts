@@ -212,11 +212,15 @@ describe('MCP canonical delegation and read-only helpers', () => {
   });
 
   it('delegates multi-lane execute_task with normalized task request', async () => {
-    const fake = client({ submit: vi.fn(async () => ({ status: 'succeeded' })) });
+    const outcome = {
+      status: 'succeeded' as const,
+      value: { taskId: 'task-2', status: 'completed' },
+    };
+    const fake = client({ submit: vi.fn(async () => outcome) });
     inject({ controlClientForRoot: vi.fn(async () => fake), randomId: () => 'id-2' });
     const auth = { task_id: 'task-2', lease_id: 'lease-2', lease_revision: 1 };
 
-    await call('psyche_execute_task', {
+    const response = await call('psyche_execute_task', {
       ...auth, project_root: '/repo', prompt: 'Fix tests',
       lanes: [
         { id: 'codex', mode: 'isolated-worktree', agent: 'codex' },
@@ -225,6 +229,7 @@ describe('MCP canonical delegation and read-only helpers', () => {
       concurrency: 2,
     });
 
+    expect(payload(response)).toEqual(outcome);
     expect(fake.submit).toHaveBeenCalledOnce();
     const submitted = fake.submit.mock.calls[0][0];
     expect(submitted.kind).toBe('orchestration.execute');
@@ -237,6 +242,82 @@ describe('MCP canonical delegation and read-only helpers', () => {
         { id: 'codex', mode: 'isolated-worktree', agent: 'codex' },
         { id: 'claude', mode: 'isolated-worktree', agent: 'claude' },
       ],
+    });
+  });
+
+  it('reuses an explicit execute_task operation id after an ambiguous response', async () => {
+    const outcomes = new Map<string, { status: 'unknown'; code: string; message: string }>();
+    const effects = vi.fn();
+    let dropResponse = true;
+    const fake = client({
+      submit: vi.fn(async (submitted) => {
+        const prior = outcomes.get(submitted.idempotencyKey);
+        if (prior) return prior;
+        effects();
+        const outcome = {
+          status: 'unknown' as const,
+          code: 'effect_unknown',
+          message: 'effect outcome is unknown',
+        };
+        outcomes.set(submitted.idempotencyKey, outcome);
+        if (dropResponse) {
+          dropResponse = false;
+          throw new Error('control connection closed');
+        }
+        return outcome;
+      }),
+    });
+    let id = 0;
+    inject({
+      controlClientForRoot: vi.fn(async () => fake),
+      randomId: () => `random-${++id}`,
+    });
+    const args = {
+      task_id: 'task-2',
+      lease_id: 'lease-2',
+      lease_revision: 1,
+      project_root: '/repo',
+      operation_id: 'caller-operation-7',
+      prompt: 'Fix tests',
+      lanes: [{ id: 'codex', mode: 'isolated-worktree', agent: 'codex' }],
+    };
+
+    expect((await call('psyche_execute_task', args)).error.message).toBe('control connection closed');
+    expect((await call('psyche_execute_task', args)).error)
+      .toMatchObject({ data: { code: 'effect_unknown' } });
+    expect(effects).toHaveBeenCalledOnce();
+    expect(fake.submit.mock.calls[0][0].id).not.toBe(fake.submit.mock.calls[1][0].id);
+    expect(fake.submit.mock.calls[0][0].idempotencyKey)
+      .toBe(fake.submit.mock.calls[1][0].idempotencyKey);
+    expect(fake.submit.mock.calls[0][0].idempotencyKey)
+      .toBe('mcp:orchestration.execute:caller-operation-7');
+    expect(fake.submit.mock.calls[0][0].idempotencyKey).not.toContain('task-2');
+    expect(fake.submit.mock.calls[0][0].idempotencyKey).not.toContain('codex');
+  });
+
+  it('maps a rejected orchestration outcome to a JSON-RPC control error', async () => {
+    const fake = client({
+      submit: vi.fn(async () => ({
+        status: 'rejected',
+        code: 'capability_denied',
+        message: 'lease is stale',
+      })),
+    });
+    inject({ controlClientForRoot: vi.fn(async () => fake) });
+
+    await expect(call('psyche_execute_task', {
+      project_root: '/repo',
+      prompt: 'Fix tests',
+      lanes: [{ id: 'terminal', mode: 'terminal' }],
+      task_id: 'task-1',
+      lease_id: 'lease-1',
+      lease_revision: 1,
+    })).resolves.toMatchObject({
+      error: {
+        code: MCP_CONTROL_ERROR_CODE,
+        message: 'lease is stale',
+        data: { code: 'capability_denied' },
+      },
     });
   });
 

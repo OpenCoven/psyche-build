@@ -99,7 +99,7 @@ browser operations additionally require the current resource `generation`.
 | `psyche_browser_script` | `lease_id`, `lease_revision`, `tab_id`, `generation`, `source`; `task_id` optional when task-bound |
 | `psyche_control_action_status` | `action_id`; `task_id` optional for compatibility; replay results keep `resource.idDigest` instead of a live `resource.id` |
 | `psyche_list_panes` | `project_root` optional; `task_id` optional for compatibility |
-| `psyche_execute_task` | `prompt`, `lanes`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
+| `psyche_execute_task` | `prompt`, `lanes`, `lease_id`, `lease_revision`; `task_id` optional when task-bound; stable `operation_id` recommended for safe retry reconciliation |
 | `psyche_create_pane` | `prompt`, `agent`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
 | `psyche_kill_pane` | `pane_id`, `generation`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
 | `psyche_get_pane_output` | `pane_id`, `generation`, `lease_id`, `lease_revision`; `task_id` optional when task-bound |
@@ -107,6 +107,16 @@ browser operations additionally require the current resource `generation`.
 Compatibility aliases route through the same owner and task-resolution helper.
 Create, execute-task, kill, and pane-output operations require lease fields;
 missing authority returns `lease_missing` before an effect.
+
+Orchestration launch authority is separate from caller task, lane, and trace
+labels. Control execution derives a bounded operation identity from the
+canonical command idempotency key. Direct daemon clients should provide the
+top-level orchestration `operationId` for retry reconciliation across
+connections; `requestId` is response correlation only. Legacy requests without
+an operation ID are scoped to one connection, so a reused request ID after
+reconnect cannot inherit another launch. Each bridge pane launch hashes the
+authoritative operation identity with the lane ID, so the same operation/lane
+reconciles while another operation cannot inherit its persisted pane.
 
 If `psyche mcp` starts without a task binding, non-operator task-scoped MCP
 tools such as `psyche_control_list`, `psyche_control_lease status`,
@@ -192,6 +202,21 @@ identify the requested effect. Live in-memory control state may retain exact
 operational resource IDs until owner restart. Pane reads, semantic trees,
 screenshots, and script return values are bounded response data, not journal
 payloads.
+The runtime's `outcomesByIdempotencyKey` map is only a bounded 1,000-entry hot
+cache. Terminal outcome evidence remains authoritative in `ControlJournal`'s
+hash-addressed durable outcome sidecar, and cold retries consult the retained
+journal tail before that store. Those sidecars initially keep the exact prior
+result with restrictive permissions and a bounded per-record size. Once compaction has durably
+published its redacted snapshot, covered sidecars are atomically replaced by a
+small `idempotency_outcome_compacted` marker before journal evidence is
+removed. Replacement is serialized per key and compare-and-replace guarded by
+the exact digest verified for that attempt, so a newer terminal or exact
+publication cannot be overwritten. Exact payload retention is bounded, but
+non-expiring idempotency intentionally retains one durable marker per unique
+key; total disk usage is not constant-bounded without an explicit expiry
+policy.
+Sidecar lookup or write failures, JSON corruption, or key/outcome mismatches
+fail closed instead of silently re-executing a mutation.
 Task-scoped reads may expose only resources named by persisted capability-lease
 grants or pending lease requests for the authenticated subject, active
 approvals whose durable task/actor ownership matches that subject (with a
@@ -207,7 +232,33 @@ view.
 Psyche Build never retries a mutation whose delivery may have occurred. A
 timeout, provider disconnect after dispatch, navigation during script
 evaluation, or owner recovery reports `effect_unknown`; inspect state before
-deciding what to do next.
+deciding what to do next. Evicting a key from the 1,000-entry hot cache or
+restarting the owner does not authorize re-execution: terminal retries still
+dedupe from the retained journal tail or the durable outcome store, and
+compaction will not cover a terminal key until one of those exact replay paths
+is authoritative. Because surface journal events are redacted, a missing exact
+surface sidecar fails closed instead of being reconstructed approximately.
+The one narrow exception is a recovery-generated `command.unknown` with
+`reason: recovered-nonterminal`: even for a surface request it is treated as an
+authoritative exact unknown, replayed from retained journal metadata, and kept
+dirty until the exact sidecar durably persists. Retained terminal records carry
+only a digest of the exact outcome, so compaction and retained replay can
+verify the sidecar without exposing exact surface values in the journal.
+Legacy retained surface terminals created before those digests can append a
+later bounded attestation keyed by the full transaction once their exact
+sidecar is loaded. Fresh execution shares one 256-slot durability budget across
+dirty exact-outcome entries and active fresh reservations; once that combined
+budget is full, fresh commands fail with `durability_unavailable` until
+persistence drains or guarded compaction succeeds, but existing hot/tail/sidecar
+retries still deduplicate.
+Compaction persists a separate bounded recovery projection, not the
+operator-facing snapshot. It contains owner/sequence metadata, redacted
+receipts, completed-key markers, and open transaction identity only. Command
+envelopes, terminal input, prompts, browser/script results, sensitive resource
+values, and full resource payloads are omitted. A restored open transaction
+becomes one durable `command.unknown` before new commands are accepted.
+An absent snapshot is accepted only on `ENOENT`; any existing malformed
+snapshot or invalid durable projection fails startup closed.
 
 There is deliberately no accessibility, coordinate, screenshot-click, shell,
 raw tmux command, XPath, selector, or whole-desktop fallback.

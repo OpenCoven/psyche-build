@@ -3,7 +3,7 @@ export const meta = { title: 'Workflows' };
 export function render() {
   return `
     <h1>Workflows</h1>
-    <p class="lead">These are the common psyche loops: launch work, compare agents, inspect the result, merge cleanly, and keep background panes visible enough to trust.</p>
+    <p class="lead">These are the common psyche loops: launch a task in one or more lanes, compare lanes, inspect the result, integrate cleanly, and keep background lanes visible enough to trust. A <strong>task</strong> is one requested outcome, a <strong>lane</strong> is one agent or terminal working on it, and <strong>integration</strong> is how you inspect, merge, PR, or clean up that work.</p>
 
     <h2>Ship a Small Fix with One Agent</h2>
     <ol>
@@ -14,14 +14,14 @@ export function render() {
       <li>Press <kbd>m</kbd>, choose <strong>Merge</strong>, and let psyche auto-commit, merge, and clean up.</li>
     </ol>
 
-    <h2>Compare Two Agents on the Same Prompt</h2>
-    <p>A/B pairs are useful when you want different model/tooling instincts without manually duplicating the prompt.</p>
+    <h2>Compare Two Lanes on the Same Prompt</h2>
+    <p>Running two agents on one task is a two-lane comparison — a plain multi-select launch with two agents, not a special product mode. It is useful when you want different model or tooling instincts without manually duplicating the prompt.</p>
     <ol>
       <li>Press <kbd>n</kbd> and enter the task once.</li>
-      <li>Select an A/B pair such as <strong>Claude Code + Codex</strong>.</li>
-      <li>psyche creates two separate worktrees with the same prompt and agent-specific suffixes.</li>
+      <li>Select two agents such as <strong>Claude Code</strong> and <strong>Codex</strong>.</li>
+      <li>psyche creates two isolated lanes with the same prompt and agent-specific suffixes.</li>
       <li>Use <kbd>j</kbd>, <kbd>f</kbd>, and the pane menu to compare implementation quality.</li>
-      <li>Merge the better branch and close the other pane when you are done.</li>
+      <li>Merge the better branch and close the other lane when you are done.</li>
     </ol>
 
     <h2>Collaborate on One Worktree</h2>

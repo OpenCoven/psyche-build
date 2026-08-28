@@ -38,9 +38,10 @@ export class WorkerMessageBus extends EventEmitter {
     // Emit typed events for different message types
     this.emit(`worker:${message.type}`, { ...message, paneId });
 
-    // Notify type-specific subscribers
-    const handlers = this.subscribers.get(message.type) || new Set();
-    handlers.forEach(handler => {
+    // Notify type-specific subscribers. Messages arrive on a per-pane timer, so
+    // allocating an empty Set for every unsubscribed type is steady garbage.
+    const handlers = this.subscribers.get(message.type);
+    handlers?.forEach(handler => {
       try {
         handler(paneId, message);
       } catch (error) {
