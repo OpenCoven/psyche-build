@@ -1,13 +1,20 @@
 # Psyche Build v0.0.1 Release Runbook
 
-This runbook publishes one coordinated release from
-`.github/workflows/release.yml`:
+**Status:** macOS `v0.0.1` published 2026-08-23; retained as the reproducible
+release procedure and basis for subsequent release trains.
+
+`.github/workflows/release.yml` supports an explicitly selected desktop-only
+publication or a coordinated macOS/iOS release:
 
 - macOS app `Psyche Build`, as signed and notarized Apple Silicon and Intel
   DMGs;
 - iOS app `Psyche Build`, bundle ID `ai.opencoven.psyche-ios`, marketing
   version/build `0.0.1 (1)`, for internal TestFlight only;
 - a curated GitHub Release and a native Homebrew Cask update.
+
+The public `v0.0.1` macOS release used the verified desktop-only path, so iOS
+distribution was skipped. This repository still does not claim a live
+TestFlight build.
 
 The Node CLI ships in the source tree and npm package archive, but `0.0.1` is
 not an npm release. Windows, Linux, Android, external TestFlight, and public App
@@ -272,7 +279,7 @@ the failure is transient and manually dispatch the existing immutable tag from
 `main`:
 
 ```sh
-gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1
+gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=false
 ```
 
 Tag pushes always run the coordinated macOS and internal TestFlight release.
@@ -293,6 +300,17 @@ Desktop-only publication still requires `APPLE_CERTIFICATE`,
 requires the signed annotated tag, both signed and notarized DMGs, checksums,
 curated notes, protected-environment approval, and Homebrew notification.
 Desktop-only publication does not upload or claim TestFlight availability.
+The shared protocol/schema validation in the root test, typecheck, and build
+gate remains mandatory in both modes. Only iOS-specific XcodeGen setup,
+simulator availability, generated-project checking, Core/app/UI verification,
+distribution credentials, archive, and upload work is skipped.
+
+For either manual mode, retain the workflow run URL, exact release SHA, the
+resolved `desktop_only` output, and the `verify`, both `build-macos`,
+`upload-ios`, `publish`, and `notify-homebrew` job results. For desktop-only
+publication, the expected `upload-ios` result is `skipped`; for a coordinated
+release it must be `success`. A failed/cancelled shared verification or macOS
+build is not acceptable evidence and must not reach publication.
 
 The retry rebuilds the exact tag. Its App Store Connect preflight is
 fail-closed:

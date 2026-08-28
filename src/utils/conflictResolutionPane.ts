@@ -213,10 +213,12 @@ async function createConflictResolutionPaneWithReservation(
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
     await new Promise((resolve) => setTimeout(resolve, TMUX_LAYOUT_APPLY_DELAY));
 
-    const shouldSendPromptViaTmux = getPromptTransport(agent) === 'send-keys';
+    const promptTransport = getPromptTransport(agent);
+    const shouldSendPromptViaTmux = promptTransport === 'send-keys';
+    const omitsPromptDelivery = promptTransport === 'launch-only';
 
     let promptFilePath: string | null = null;
-    if (!shouldSendPromptViaTmux) {
+    if (!shouldSendPromptViaTmux && !omitsPromptDelivery) {
       try {
         promptFilePath = await writePromptFile(targetRepoPath, slug, prompt);
       } catch {
@@ -246,6 +248,8 @@ async function createConflictResolutionPaneWithReservation(
         settings.permissionMode
       )}`;
       promptFilePath = null;
+    } else if (omitsPromptDelivery) {
+      launchCommand = buildAgentCommand(agent, settings.permissionMode);
     } else {
       const escapedPrompt = prompt
         .replace(/\\/g, '\\\\')

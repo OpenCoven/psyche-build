@@ -2623,6 +2623,93 @@ describe('runtime graphics startup wiring', () => {
     expect(reportError).toHaveBeenCalledWith(failure, 'collect runtime graphics report');
   });
 
+  it('contains failures from consumer-provided error reporters', async () => {
+  const startupState = createRuntimeGraphicsStartupState();
+
+  await expect(ensureRuntimeGraphicsStartupSummary({
+    invoke: async () => {
+      throw new Error('runtime diagnostics unavailable');
+    },
+    reportError: () => {
+      throw new Error('error reporter unavailable');
+    },
+    navigatorTarget: {},
+    createCanvas: () => null,
+  }, startupState)).resolves.toBeNull();
+});
+
+it('contains failures from consumer-provided startup loggers', async () => {
+  const startupState = createRuntimeGraphicsStartupState();
+
+  await expect(ensureRuntimeGraphicsStartupSummary({
+    invoke: async () => ({
+      os: 'macos',
+      arch: 'aarch64',
+      engine: 'WKWebView',
+    }),
+    log: () => {
+      throw new Error('startup logger unavailable');
+    },
+    navigatorTarget: {},
+    createCanvas: () => null,
+  }, startupState)).resolves.toMatchObject({
+    os: 'macos',
+    arch: 'aarch64',
+    engine: 'WKWebView',
+    acceleration: 'unavailable',
+  });
+});
+
+it('does not cache a missing default invoke and retries once the bridge is available', async () => {
+  const startupState = createRuntimeGraphicsStartupState();
+  const globalTarget = globalThis as typeof globalThis & {
+    __TAURI__?: {
+      core?: {
+        invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+  };
+  const previousDescriptor = Object.getOwnPropertyDescriptor(globalTarget, '__TAURI__');
+
+  try {
+    Object.defineProperty(globalTarget, '__TAURI__', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+
+    await expect(ensureRuntimeGraphicsStartupSummary({
+      navigatorTarget: {},
+      createCanvas: () => null,
+    }, startupState)).resolves.toBeNull();
+    expect(startupState.inFlight).toBeNull();
+
+    const invoke = vi.fn(async () => ({
+      os: 'macos',
+      arch: 'aarch64',
+      engine: 'WKWebView',
+    }));
+    globalTarget.__TAURI__ = { core: { invoke } };
+
+    await expect(ensureRuntimeGraphicsStartupSummary({
+      navigatorTarget: {},
+      createCanvas: () => null,
+    }, startupState)).resolves.toMatchObject({
+      os: 'macos',
+      arch: 'aarch64',
+      engine: 'WKWebView',
+      acceleration: 'unavailable',
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  } finally {
+    if (previousDescriptor) {
+      Object.defineProperty(globalTarget, '__TAURI__', previousDescriptor);
+    } else {
+      delete globalTarget.__TAURI__;
+    }
+  }
+});
+
   it('reports malformed native runtime facts instead of failing silently', async () => {
     const startupState = createRuntimeGraphicsStartupState();
     const reportError = vi.fn();
