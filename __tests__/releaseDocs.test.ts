@@ -236,8 +236,6 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain(
       'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
     );
-    expect(runbook).toContain('{context: "TypeScript and Rust"}');
-    expect(runbook).toContain('{context: "iOS"}');
     expect(runbook).toContain('enforce_admins: true');
     expect(runbook).toContain('required_pull_request_reviews: null');
     expect(runbook).toContain('required_linear_history: true');
@@ -249,8 +247,15 @@ describe('v0.0.1 release documentation contract', () => {
       /jq -n '(\{[\s\S]*?\})' \| gh api --method PUT repos\/OpenCoven\/psyche-build\/branches\/main\/protection --input -/,
     )?.[1];
     expect(protectionPayload, 'missing the full main protection payload').toBeDefined();
+    expect(protectionPayload).toMatch(
+      /checks:\s*\[\s*\{context: "TypeScript and Rust", app_id: 15368\},\s*\{context: "iOS", app_id: 15368\}\s*\]/,
+    );
     expect(protectionPayload).toMatch(/required_pull_request_reviews:\s*null/);
     expect(protectionPayload).not.toMatch(/bypass_pull_request_allowances/);
+    expect(runbook).toMatch(
+      /\(\[\.required_status_checks\.checks\[\] \| \{context, app_id\}\] == \[\s*\{context: "TypeScript and Rust", app_id: 15368\},\s*\{context: "iOS", app_id: 15368\}\s*\]\)/,
+    );
+    expect(runbook).toMatch(/GitHub Actions integration pin is preserved/i);
 
     const rulesetVerificationIndex = runbook.indexOf(
       'verified_main_ruleset="$(gh api "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id")"',

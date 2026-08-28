@@ -269,15 +269,16 @@ printf '%s\n' "$verified_main_ruleset" |
 Only after that ruleset verification succeeds, replace the complete classic
 branch-protection document. Setting `required_pull_request_reviews` to `null`
 explicitly removes the classic review requirement so it cannot layer a second
-approval gate over the PR-only ruleset bypass. Preserve every other protection:
+approval gate over the PR-only ruleset bypass. Preserve every other protection;
+the GitHub Actions integration pin is preserved on each required check:
 
 ```sh
 jq -n '{
   required_status_checks: {
     strict: true,
     checks: [
-      {context: "TypeScript and Rust"},
-      {context: "iOS"}
+      {context: "TypeScript and Rust", app_id: 15368},
+      {context: "iOS", app_id: 15368}
     ]
   },
   enforce_admins: true,
@@ -347,7 +348,10 @@ gh api repos/OpenCoven/psyche-build/rules/branches/main |
 gh api repos/OpenCoven/psyche-build/branches/main/protection |
   jq -e '
     (.required_status_checks.strict == true) and
-    ([.required_status_checks.checks[].context] == ["TypeScript and Rust", "iOS"]) and
+    ([.required_status_checks.checks[] | {context, app_id}] == [
+      {context: "TypeScript and Rust", app_id: 15368},
+      {context: "iOS", app_id: 15368}
+    ]) and
     (.enforce_admins.enabled == true) and
     (has("required_pull_request_reviews") | not) and
     (.required_linear_history.enabled == true) and
