@@ -33,15 +33,13 @@ describe('agent repository contract', () => {
     expect(manifest).toContain('role: product-coding-cockpit');
     expect(manifest).toContain('lifecycle: active');
     expect(manifest).toContain('class: R4');
-    expect(manifest).toContain('node: ">=20.10.0"');
-    expect(manifest).toContain('pnpm: "10.34.5"');
-    expect(manifest).toContain('git: ">=2.20.0"');
-    expect(manifest).toContain('tmux: ">=3.0"');
     expect(manifest).toContain('bootstrap: ./scripts/agent-bootstrap');
     expect(manifest).toContain('fast: ./scripts/agent-check fast');
     expect(manifest).toContain('full: ./scripts/agent-check full');
     expect(manifest).toContain('node: package.json#engines.node');
     expect(manifest).toContain('pnpm: package.json#packageManager');
+    expect(manifest).toContain('git: ">=2.20.0"');
+    expect(manifest).toContain('tmux: ">=3.0"');
     expect(manifest).not.toContain('10.34.5');
     expect(manifest).not.toContain('20.10.0');
     expect(manifest).toContain('authority: github-issues-and-milestones');
@@ -121,7 +119,21 @@ describe('agent repository contract', () => {
       read('agent/manifest.yaml'),
     ]);
 
-    for (const path of [
+    const manifestPathList = (key: 'protected_paths' | 'generated_paths'): string[] => {
+      const section = manifest.match(
+        new RegExp(`^  ${key}:\\n((?:    - .+\\n)+)`, 'm'),
+      );
+      expect(section, `agent/manifest.yaml must declare ${key}`).not.toBeNull();
+      return (section as RegExpMatchArray)[1]
+        .trimEnd()
+        .split('\n')
+        .map((line) => line.replace('    - ', ''));
+    };
+
+    const protectedPaths = manifestPathList('protected_paths');
+    const generatedPaths = manifestPathList('generated_paths');
+
+    expect(protectedPaths).toEqual([
       'src/control/**',
       'src/services/bridge/**',
       'native/desktop/psyche-build-tauri/src-tauri/**',
@@ -132,19 +144,18 @@ describe('agent repository contract', () => {
       'scripts/build-macos-app.mjs',
       'scripts/beads-project-sync/**',
       '.beads/**',
-    ]) {
-      expect(guide).toContain(path);
-      expect(manifest).toContain(path);
-    }
+    ]);
 
-    for (const generatedPath of [
+    expect(generatedPaths).toEqual([
       'src/utils/generated-agents-doc.ts',
       'protocol-fixtures/**',
       'native/ios/Psyche.xcodeproj/**',
+      'native/ios/PsycheApp/Resources/Info.plist',
       'native/desktop/psyche-build-tauri/web/*.bundle.js',
-    ]) {
-      expect(guide).toContain(generatedPath);
-      expect(manifest).toContain(generatedPath);
+    ]);
+
+    for (const path of [...protectedPaths, ...generatedPaths]) {
+      expect(guide, `AGENTS.md must route ${path}`).toContain(path);
     }
   });
 });
