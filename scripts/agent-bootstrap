@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$repo_root"
+
+die() {
+  printf 'agent-bootstrap: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+version_ge() {
+  node - "$1" "$2" <<'NODE'
+const [actual, required] = process.argv.slice(2);
+const parse = (value) => value
+  .replace(/^v/, '')
+  .split(/[^0-9]+/)
+  .filter(Boolean)
+  .slice(0, 3)
+  .map(Number);
+const a = parse(actual);
+const b = parse(required);
+for (let index = 0; index < Math.max(a.length, b.length, 3); index += 1) {
+  const left = a[index] ?? 0;
+  const right = b[index] ?? 0;
+  if (left > right) process.exit(0);
+  if (left < right) process.exit(1);
+}
+NODE
+}
+
+require_command node
+require_command git
+require_command tmux
+
+node_minimum="$(node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));const m=String(p.engines?.node??'').match(/[0-9]+(?:\\.[0-9]+){1,2}/);if(!m)process.exit(1);process.stdout.write(m[0])")" \
+  || die "package.json does not declare a parseable Node.js minimum"
+node_actual="$(node --version | sed 's/^v//')"
+version_ge "$node_actual" "$node_minimum" \
+  || die "Node.js $node_actual is too old; require >=$node_minimum"
+
+pnpm_pin="$(node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));const v=String(p.packageManager??'');if(!v.startsWith('pnpm@'))process.exit(1);process.stdout.write(v.slice(5))")" \
+  || die "package.json does not pin pnpm"
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  die "pnpm $pnpm_pin is required; install Corepack, then run: corepack prepare pnpm@$pnpm_pin --activate"
+fi
+pnpm_actual="$(pnpm --version)"
+[[ "$pnpm_actual" == "$pnpm_pin" ]] \
+  || die "pnpm $pnpm_actual is active; require exactly $pnpm_pin (corepack prepare pnpm@$pnpm_pin --activate)"
+
+git_actual="$(git --version | awk '{print $3}')"
+version_ge "$git_actual" "2.20.0" || die "Git $git_actual is too old; require >=2.20.0"
+
+tmux_actual="$(tmux -V | awk '{print $2}')"
+version_ge "$tmux_actual" "3.0.0" || die "tmux $tmux_actual is too old; require >=3.0.0"
+
+[[ -f pnpm-lock.yaml ]] || die "pnpm-lock.yaml is missing"
+[[ -f pnpm-workspace.yaml ]] || die "pnpm-workspace.yaml is missing"
+
+before_status="$(git status --porcelain=v1 --untracked-files=all)"
+pnpm install --frozen-lockfile
+git diff --check
+
+after_status="$(git status --porcelain=v1 --untracked-files=all)"
+if [[ "$after_status" != "$before_status" ]]; then
+  printf '%s\n' "agent-bootstrap: dependency installation changed tracked or untracked repository state" >&2
+  git status --short >&2
+  exit 1
+fi
+
+printf 'Psyche Build bootstrap complete.\n'
+printf '  Node.js: %s (minimum %s)\n' "$node_actual" "$node_minimum"
+printf '  pnpm:   %s (pinned)\n' "$pnpm_actual"
+printf '  Git:    %s\n' "$git_actual"
+printf '  tmux:   %s\n' "$tmux_actual"
+printf 'Next: bash ./scripts/agent-check fast\n'
