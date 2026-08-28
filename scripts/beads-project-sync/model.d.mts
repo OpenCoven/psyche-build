@@ -18,6 +18,7 @@ export interface ParsedBead {
   specId: string | null;
   acceptanceCriteria: string | null;
   notes: string | null;
+  externalRef: string | null;
   status: BeadStatus;
   priority: BeadPriority;
   type: BeadType;

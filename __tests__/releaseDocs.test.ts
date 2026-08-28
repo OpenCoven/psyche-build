@@ -188,21 +188,173 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).not.toContain('protected-branch deployment policy');
   });
 
-  it('protects main with the exact CI checks and no administrative rewrite path', async () => {
+  it('layers classic checks with a PR-only owner ruleset bypass', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toContain('expected_bunsdev_id=68980965');
+    expect(runbook).toContain('gh api users/BunsDev --jq .id');
+    expect(runbook).toContain('name: "Main pull request governance"');
+    expect(runbook).toContain('target: "branch"');
+    expect(runbook).toContain('enforcement: "active"');
+    expect(runbook).toContain('include: ["refs/heads/main"]');
+    expect(runbook).toContain(
+      'bypass_actors: [{actor_id: $bunsdev_id, actor_type: "User", bypass_mode: "pull_request"}]',
+    );
+    expect(runbook).toContain('type: "pull_request"');
+    expect(runbook).toContain('allowed_merge_methods: ["merge", "squash", "rebase"]');
+    expect(runbook).toContain('dismiss_stale_reviews_on_push: true');
+    expect(runbook).toContain('require_code_owner_review: false');
+    expect(runbook).toContain('require_last_push_approval: true');
+    expect(runbook).toContain('required_approving_review_count: 1');
+    expect(runbook).toContain('required_review_thread_resolution: true');
+    expect(runbook).toContain(
+      'dismissal_restriction: {enabled: false, allowed_actors: []}',
+    );
+
+    const mainRulesetPayload = runbook.match(
+      /main_ruleset_payload="\$\(jq -cn[\s\S]*?'(\{[\s\S]*?\})'\s*\)"/,
+    )?.[1];
+    expect(mainRulesetPayload, 'missing main governance ruleset payload').toBeDefined();
+    expect(mainRulesetPayload!.match(/bypass_actors:/g)).toHaveLength(1);
+    expect(mainRulesetPayload!.match(/actor_type:\s*"User"/g)).toHaveLength(1);
+    expect(mainRulesetPayload).not.toMatch(
+      /actor_type:\s*"(?:Team|Integration|RepositoryRole|OrganizationAdmin|DeployKey)"/,
+    );
+    expect(mainRulesetPayload).not.toMatch(/bypass_mode:\s*"(?:always|exempt)"/);
+
+    expect(runbook).toMatch(
+      /select\(\.name == "Main pull request governance" and \.target == "branch"\)/,
+    );
+    expect(runbook).toMatch(/main_ruleset_match_count[\s\S]{0,160}-le 1/);
+    expect(runbook).toContain(
+      'gh api --method PATCH "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id"',
+    );
+    expect(runbook).toContain(
+      'gh api --method POST repos/OpenCoven/psyche-build/rulesets',
+    );
 
     expect(runbook).toContain(
       'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
     );
-    expect(runbook).toContain('{context: "TypeScript and Rust"}');
-    expect(runbook).toContain('{context: "iOS"}');
     expect(runbook).toContain('enforce_admins: true');
-    expect(runbook).toContain('required_approving_review_count: 1');
-    expect(runbook).toContain('require_last_push_approval: true');
+    expect(runbook).toContain('required_pull_request_reviews: null');
     expect(runbook).toContain('required_linear_history: true');
     expect(runbook).toContain('allow_force_pushes: false');
     expect(runbook).toContain('allow_deletions: false');
     expect(runbook).toContain('required_conversation_resolution: true');
+
+    const protectionPayload = runbook.match(
+      /jq -n '(\{[\s\S]*?\})' \| gh api --method PUT repos\/OpenCoven\/psyche-build\/branches\/main\/protection --input -/,
+    )?.[1];
+    expect(protectionPayload, 'missing the full main protection payload').toBeDefined();
+    expect(protectionPayload).toMatch(
+      /checks:\s*\[\s*\{context: "TypeScript and Rust", app_id: 15368\},\s*\{context: "iOS", app_id: 15368\}\s*\]/,
+    );
+    expect(protectionPayload).toMatch(/required_pull_request_reviews:\s*null/);
+    expect(protectionPayload).not.toMatch(/bypass_pull_request_allowances/);
+    expect(runbook).toMatch(
+      /\(\[\.required_status_checks\.checks\[\] \| \{context, app_id\}\] == \[\s*\{context: "TypeScript and Rust", app_id: 15368\},\s*\{context: "iOS", app_id: 15368\}\s*\]\)/,
+    );
+    expect(runbook).toMatch(/GitHub Actions integration pin is preserved/i);
+
+    const rulesetVerificationIndex = runbook.indexOf(
+      'verified_main_ruleset="$(gh api "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id")"',
+    );
+    const classicProtectionIndex = runbook.indexOf(
+      'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
+    );
+    expect(rulesetVerificationIndex).toBeGreaterThan(-1);
+    expect(classicProtectionIndex).toBeGreaterThan(rulesetVerificationIndex);
+
+    expect(runbook).toContain('repos/OpenCoven/psyche-build/rules/branches/main');
+    expect(runbook).toMatch(/direct-push rejection probe/i);
+    expect(runbook).toContain('git commit-tree');
+    expect(runbook).toMatch(/git push origin "\$probe_sha:refs\/heads\/main"/);
+    expect(runbook).toMatch(
+      /classic\s+`bypass_pull_request_allowances`[\s\S]{0,100}(?:must not|is not|never)/i,
+    );
+  });
+
+  it('fails closed before constructing governance payloads when the owner ID differs', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const actorFailureIndex = runbook.search(
+      /if test "\$bunsdev_id" != "\$expected_bunsdev_id"; then[\s\S]{0,240}ERROR:[\s\S]{0,160}exit 1[\s\S]{0,40}fi/,
+    );
+    const payloadIndex = runbook.indexOf('main_ruleset_payload=');
+
+    expect(actorFailureIndex).toBeGreaterThan(-1);
+    expect(payloadIndex).toBeGreaterThan(actorFailureIndex);
+    expect(runbook).not.toMatch(
+      /^test "\$bunsdev_id" = "\$expected_bunsdev_id"$/m,
+    );
+  });
+
+  it('treats only an attributable GitHub policy rejection as direct-push proof', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const actorPreflightIndex = runbook.indexOf('gh auth status --active');
+    const pushIndex = runbook.indexOf(
+      'git push origin "$probe_sha:refs/heads/main"',
+    );
+
+    expect(actorPreflightIndex).toBeGreaterThan(-1);
+    expect(pushIndex).toBeGreaterThan(actorPreflightIndex);
+    expect(runbook).toContain('gh api user --jq .login');
+    expect(runbook).toMatch(
+      /if test "\$active_gh_login" != "BunsDev"; then[\s\S]{0,240}exit 1/,
+    );
+    expect(runbook).toContain('StrictHostKeyChecking=yes');
+    expect(runbook).toContain('GIT_TERMINAL_PROMPT=0');
+    expect(runbook).toContain('Hi BunsDev!');
+    expect(runbook).toMatch(/Git HTTP actor[\s\S]{0,300}do not|do not[\s\S]{0,300}Git HTTP actor/i);
+    expect(runbook).toMatch(/tail -c 16384/);
+    expect(runbook).toContain('probe_status="${PIPESTATUS[0]}"');
+    expect(runbook).toMatch(/test "\$probe_status" -eq 0[\s\S]{0,240}exit 1/);
+    expect(runbook).toMatch(/GH\(006\|013\)/);
+    expect(runbook).toMatch(
+      /Changes must be made through a pull request|required pull request/i,
+    );
+    expect(runbook).toMatch(
+      /INCONCLUSIVE:[\s\S]{0,240}(?:network|authentication|credential|transport|other)[\s\S]{0,240}exit 1/i,
+    );
+  });
+
+  it('documents the recorded owner bypass without claiming self-approval', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
+    expect(runbook).toMatch(
+      /independent review[\s\S]{0,120}preferred[\s\S]{0,120}not\s+required[\s\S]{0,160}BunsDev[\s\S]{0,160}owner-authored administrative PR/i,
+    );
+    expect(runbook).toMatch(/direct pushes[\s\S]{0,120}platform-blocked/i);
+    expect(runbook).toMatch(
+      /PR-only bypass[\s\S]{0,240}admin merge[\s\S]{0,500}exact[- ]head[\s\S]{0,160}(?:terminal\s+and\s+successful|successful\s+required\s+checks)/i,
+    );
+    expect(runbook).toMatch(/resolved conversations/i);
+    expect(runbook).toMatch(/recorded[\s\S]{0,100}override reason[\s\S]{0,100}exact\s+SHA/i);
+    expect(runbook).toMatch(/retain(?:ed)?[\s\S]{0,100}audit\s+evidence/i);
+  });
+
+  it('keeps emergency changes within the single approved standing owner bypass', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const emergencyHeading = /^## Emergency change procedure for #31\s*$/im.exec(runbook);
+    expect(emergencyHeading, 'missing the #31 emergency-change procedure').not.toBeNull();
+    const following = runbook.slice(emergencyHeading!.index + emergencyHeading![0].length);
+    const nextHeading = following.search(/^## /m);
+    const procedure = nextHeading === -1 ? following : following.slice(0, nextHeading);
+
+    expect(procedure).toMatch(/incident issue/i);
+    expect(procedure).toMatch(/incident\/change reason/i);
+    expect(procedure).toMatch(/exact SHA/i);
+    expect(procedure).toMatch(/exact-head checks/i);
+    expect(procedure).toMatch(/bounded change/i);
+    expect(procedure).toMatch(/merge override/i);
+    expect(procedure).toMatch(/sanitized before\/after settings/i);
+    expect(procedure).toMatch(/post-event review/i);
+    expect(procedure).toMatch(/must not add[\s\S]{0,100}standing\s+bypass\s+actor/i);
+    expect(procedure).toMatch(/existing\s+PR-only[\s\S]{0,100}BunsDev`?\s+bypass/i);
+    expect(procedure).toMatch(/no new actor or bypass\s+mode/i);
+
+    expect(procedure).not.toMatch(/bypass_mode:\s*"(?:always|exempt)"/);
   });
 
   it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {
@@ -217,11 +369,8 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain('rules: [{type: "creation"}]');
     expect(runbook).toContain('bypass_actors: []');
     expect(runbook).toContain('rules: [{type: "update"}, {type: "deletion"}]');
-    expect(
-      runbook.match(
-        /gh api --method POST repos\/OpenCoven\/psyche-build\/rulesets --input -/g,
-      ),
-    ).toHaveLength(2);
+    expect(runbook.match(/name: "Release tag creation"/g)).toHaveLength(1);
+    expect(runbook.match(/name: "Immutable release tags"/g)).toHaveLength(1);
   });
 
   it('documents the executable release and recovery contracts', async () => {

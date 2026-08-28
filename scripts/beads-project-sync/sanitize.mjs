@@ -12,6 +12,7 @@ import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
 import { parseFragment } from 'parse5';
 import { normalizeBeadPriority } from './model.mjs';
+import { normalizeCanonicalOutcomeRef } from './outcomes.mjs';
 
 /** @typedef {import('./model.mjs').ParsedBead} ParsedBead */
 /** @typedef {import('./model.mjs').BeadPriority} BeadPriority */
@@ -58,6 +59,7 @@ import { normalizeBeadPriority } from './model.mjs';
  *   specId: string | null,
  *   acceptanceCriteria: string | null,
  *   notes: string | null,
+ *   externalRef: string | null,
  *   status: string,
  *   priority: BeadPriority,
  *   type: string,
@@ -5882,6 +5884,11 @@ export function toPublicBead(bead, config = {}) {
     specId: sanitizePublicText(bead.specId, config),
     acceptanceCriteria: sanitizePublicText(bead.acceptanceCriteria, config),
     notes: sanitizePublicText(bead.notes, config),
+    externalRef: normalizeCanonicalOutcomeRef(
+      bead.externalRef,
+      `Public bead "${bead.id}" externalRef`,
+      { allowNull: true },
+    ),
     status: sanitizeRequiredInlineText(bead.status, 'status', config),
     priority: normalizePriority(bead.priority),
     type: sanitizeRequiredInlineText(bead.type, 'type', config),

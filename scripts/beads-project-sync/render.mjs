@@ -6,6 +6,10 @@ import { gfm } from 'micromark-extension-gfm';
 import { parseFragment } from 'parse5';
 import { summarizeInventory } from './model.mjs';
 import {
+  canonicalOutcomeIssueNumber,
+  normalizeCanonicalOutcomeRef,
+} from './outcomes.mjs';
+import {
   DEFAULT_ISSUE_MARKER,
   DEFAULT_PROJECT_MARKER,
   issueBeadMarker,
@@ -41,6 +45,7 @@ import {
  * @typedef {{
  *   inventoryById?: ReadonlyMap<string, PublicBead> | Record<string, PublicBead>,
  *   mirroredIssueUrlsByBeadId?: ReadonlyMap<string, string> | Record<string, string>,
+ *   canonicalTargets?: import('./outcomes.mjs').CanonicalTargets,
  *   sourceRepositoryUrl?: string | null,
  *   sourceRef?: string | null,
  *   inventoryTimestamp?: string | null,
@@ -1107,6 +1112,57 @@ function renderClosedHistoryOmission(count) {
 }
 
 /**
+ * @param {readonly PublicBead[]} inventory
+ * @param {RenderContext} context
+ * @returns {string | null}
+ */
+function renderCanonicalOutcomeSection(inventory, context) {
+  const repositoryIdentity = resolveRepositoryIdentity(context);
+  const targets = context.canonicalTargets ?? {};
+  const byReference = new Map();
+
+  for (const bead of inventory) {
+    if (bead.status === 'closed' || bead.externalRef == null) {
+      continue;
+    }
+    const reference = /** @type {string} */ (normalizeCanonicalOutcomeRef(
+      bead.externalRef,
+      `Public bead "${bead.id}" externalRef`,
+    ));
+    if (!byReference.has(reference)) {
+      byReference.set(reference, bead);
+    }
+  }
+
+  const lines = [...byReference.entries()]
+    .sort(([left], [right]) =>
+      canonicalOutcomeIssueNumber(left) - canonicalOutcomeIssueNumber(right)
+      || compareStrings(left, right)
+    )
+    .map(([reference, bead]) => {
+      const issue = canonicalOutcomeIssueNumber(reference);
+      const target = targets[reference];
+      const sanitizedTitle = sanitizePublicText(target?.title ?? bead.title);
+      const title = normalizeInlineText(sanitizedTitle, `canonical target ${reference} title`);
+      const url = normalizeHttpUrl(
+        `https://github.com/${repositoryIdentity}/issues/${issue}`,
+        `canonical target ${reference} URL`,
+        {
+          clearSearch: true,
+          clearHash: true,
+          trimTrailingSlash: true,
+        },
+      );
+      if (url == null) {
+        fail(`Unable to render canonical target ${reference} URL`);
+      }
+      return `- [#${issue}](${url}) — ${title}`;
+    });
+
+  return renderSection('Canonical outcome', lines.length > 0 ? lines.join('\n') : null);
+}
+
+/**
  * @param {readonly string[]} beforeHistory
  * @param {string} historyBody
  * @param {readonly string[]} afterHistory
@@ -1364,6 +1420,7 @@ export function renderProjectReadme(inventory, context = {}) {
     ].join('\n')),
     renderSection('Type counts', renderTypeCountLines(summary.typeCounts)),
     renderSection('Priority counts', renderPriorityCountLines(inventory)),
+    renderCanonicalOutcomeSection(inventory, context),
   ].filter((section) => section != null);
   const afterHistory = [
     renderSection('Field guide', [
