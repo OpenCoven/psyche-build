@@ -9,20 +9,25 @@
   "trustedIssueAuthors": ["BunsDev"],
   "assigneeMap": {},
   "canonicalTargets": {
-    "gh-199": {
-      "issue": 199,
-      "title": "Operations, diagnostics, and recovery",
-      "priority": 1
+    "gh-198": {
+      "issue": 198,
+      "title": "Publish a public Beads inventory",
+      "priority": 0
     },
     "gh-200": {
       "issue": 200,
-      "title": "iOS internal beta and continuity",
+      "title": "Model Beads project inventory",
       "priority": 1
     },
-    "gh-246": {
-      "issue": 246,
-      "title": "Cross-platform Vim and keyboard-mode parity",
-      "priority": 2
+    "gh-201": {
+      "issue": 201,
+      "title": "Render the blocked task row",
+      "priority": 1
+    },
+    "gh-202": {
+      "issue": 202,
+      "title": "Track in-progress beads",
+      "priority": 0
     }
   },
   "massClose": {

@@ -10,6 +10,28 @@
   "assigneeMap": {
     "feature-owner@example.com": "missing-maintainer"
   },
+  "canonicalTargets": {
+    "gh-198": {
+      "issue": 198,
+      "title": "Publish a public Beads inventory",
+      "priority": 0
+    },
+    "gh-200": {
+      "issue": 200,
+      "title": "Model Beads project inventory",
+      "priority": 1
+    },
+    "gh-201": {
+      "issue": 201,
+      "title": "Render the blocked task row",
+      "priority": 1
+    },
+    "gh-202": {
+      "issue": 202,
+      "title": "Track in-progress beads",
+      "priority": 0
+    }
+  },
   "massClose": {
     "minimum": 5,
     "fraction": 0.25

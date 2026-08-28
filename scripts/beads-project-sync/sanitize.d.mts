@@ -12,6 +12,7 @@ export interface PublicBead {
   specId: string | null;
   acceptanceCriteria: string | null;
   notes: string | null;
+  externalRef: string | null;
   status: ParsedBead['status'];
   priority: BeadPriority;
   type: ParsedBead['type'];
