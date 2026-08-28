@@ -11,12 +11,17 @@ export interface DriftBead {
 }
 
 export interface DriftManagedIssue {
-  beadId: string;
+  beadId?: string | null;
   number: number;
   state: string;
   labels?: readonly string[];
   body?: string | null;
   renderHash?: string | null;
+  markerFindingKinds?: readonly (
+    | 'duplicate_bead_marker'
+    | 'empty_bead_marker'
+    | 'malformed_bead_marker'
+  )[];
 }
 
 export type TrackerDriftFindingKind =
@@ -27,15 +32,24 @@ export type TrackerDriftFindingKind =
   | 'priority_mismatch'
   | 'source_status_metadata_mismatch'
   | 'source_priority_metadata_mismatch'
-  | 'missing_render_hash';
+  | 'missing_render_hash'
+  | 'canonical_mapping_missing'
+  | 'canonical_mapping_malformed'
+  | 'canonical_mapping_unknown'
+  | 'canonical_priority_mismatch'
+  | 'duplicate_bead_marker'
+  | 'empty_bead_marker'
+  | 'malformed_bead_marker';
 
 export interface TrackerDriftFinding {
   kind: TrackerDriftFindingKind;
-  beadId: string;
+  beadId?: string;
   issueNumber?: number;
   sourceStatus?: string;
   mirrorState?: string;
   sourcePriority?: number;
+  mirrorSourceStatus?: string | null;
+  mirrorSourcePriority?: number | null;
 }
 
 export interface TrackerDriftReport {

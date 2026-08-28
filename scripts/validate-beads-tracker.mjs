@@ -6,10 +6,10 @@ import { pathToFileURL } from 'node:url';
 
 import { readSyncConfig } from './beads-project-sync/config.mjs';
 import { validateTrackerDrift } from './beads-project-sync/drift.mjs';
-import { parseBeadExport } from './beads-project-sync/model.mjs';
+import { BEAD_ID_PATTERN, parseBeadExport } from './beads-project-sync/model.mjs';
 import { loadBeadsSource } from './beads-project-sync/source.mjs';
 
-const MAX_GITHUB_ISSUE_PAGES = 10;
+const DEFAULT_MAX_GITHUB_ISSUE_PAGES = 1_000;
 const GITHUB_ISSUE_PAGE_SIZE = 100;
 
 function fail(message) {
@@ -19,6 +19,7 @@ function fail(message) {
 function parseOptions(argv) {
   let inventoryFile = null;
   let issuesFile = null;
+  let maxIssuePages = DEFAULT_MAX_GITHUB_ISSUE_PAGES;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--inventory-file' || argument === '--issues-file') {
@@ -29,9 +30,19 @@ function parseOptions(argv) {
       index += 1;
       continue;
     }
+    if (argument === '--max-issue-pages') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) fail(`${argument} requires a positive integer`);
+      maxIssuePages = Number(value);
+      if (!Number.isSafeInteger(maxIssuePages) || maxIssuePages <= 0) {
+        fail(`${argument} requires a positive integer`);
+      }
+      index += 1;
+      continue;
+    }
     fail(`Unknown argument: ${argument}`);
   }
-  return { inventoryFile, issuesFile };
+  return { inventoryFile, issuesFile, maxIssuePages };
 }
 
 function escapeRegExp(value) {
@@ -44,25 +55,35 @@ function objectRecord(value) {
     : {};
 }
 
-function normalizeIssue(rawValue, config) {
+function normalizeIssue(rawValue, config, trustedIssueAuthors) {
   const rawIssue = objectRecord(rawValue);
   if (Object.keys(rawIssue).length === 0 || rawIssue.pull_request != null) return null;
   const rawUser = objectRecord(rawIssue.user);
-  const author = typeof rawUser.login === 'string' ? rawUser.login.toLowerCase() : '';
-  if (!config.trustedIssueAuthors.includes(author)) return null;
+  const author = typeof rawUser.login === 'string' ? rawUser.login.trim().toLowerCase() : '';
+  if (!trustedIssueAuthors.has(author)) return null;
   const number = rawIssue.number;
   const body = typeof rawIssue.body === 'string' ? rawIssue.body : '';
   if (!Number.isSafeInteger(number) || number <= 0) return null;
 
   const marker = escapeRegExp(config.issueMarker);
   const beadMatches = [...body.matchAll(new RegExp(
-    `<!--\\s*${marker}\\s+bead-id=([^\\s>]+)\\s*-->`,
+    `<!--\\s*${marker}\\s+bead-id=([^>]*)-->`,
     'giu',
   ))];
   if (beadMatches.length === 0) return null;
-  if (beadMatches.length !== 1) fail(`Issue #${number} contains duplicate managed Bead markers`);
-  const beadId = beadMatches[0]?.[1];
-  if (!beadId) fail(`Issue #${number} contains an empty managed Bead id`);
+  const beadIds = beadMatches.map((match) => match[1]?.trim() ?? '');
+  const markerFindingKinds = [];
+  if (beadMatches.length > 1) markerFindingKinds.push('duplicate_bead_marker');
+  if (beadIds.some((beadId) => !beadId)) markerFindingKinds.push('empty_bead_marker');
+  if (beadIds.some((beadId) => beadId && !BEAD_ID_PATTERN.test(beadId))) {
+    markerFindingKinds.push('malformed_bead_marker');
+  }
+  const uniqueBeadIds = [...new Set(beadIds.filter((beadId) => BEAD_ID_PATTERN.test(beadId)))];
+  const beadId = uniqueBeadIds.length === 1 ? uniqueBeadIds[0] : null;
+  const state = rawIssue.state === 'closed' ? 'closed' : 'open';
+  if (markerFindingKinds.length > 0) {
+    return { beadId, number, state, markerFindingKinds };
+  }
 
   const renderMatches = [...body.matchAll(new RegExp(
     `<!--\\s*${marker}\\s+render-hash=([a-f0-9]{64})\\s*-->`,
@@ -81,20 +102,54 @@ function normalizeIssue(rawValue, config) {
   return {
     beadId,
     number,
-    state: rawIssue.state === 'closed' ? 'closed' : 'open',
+    state,
     labels,
     body,
     renderHash: renderMatches[0]?.[1] ?? null,
+    markerFindingKinds,
   };
 }
 
-async function loadPublicGitHubIssues(config, fetchImpl = fetch) {
+function nextPageUrl(linkHeader, config) {
+  if (typeof linkHeader !== 'string' || !linkHeader.trim()) return null;
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/^\s*<([^>]+)>\s*;\s*rel="([^"]+)"\s*$/iu);
+    if (match == null || !match[2].split(/\s+/u).includes('next')) continue;
+    const url = new URL(match[1]);
+    const namedRepositoryPath = `/repos/${config.owner}/${config.repository}/issues`.toLowerCase();
+    const repositoryIdPath = /^\/repositories\/[1-9]\d*\/issues$/u;
+    if (
+      url.protocol !== 'https:'
+      || url.hostname !== 'api.github.com'
+      || url.username
+      || url.password
+      || (
+        url.pathname.toLowerCase() !== namedRepositoryPath
+        && !repositoryIdPath.test(url.pathname)
+      )
+    ) {
+      fail('Public GitHub issue inventory returned an invalid next-page link');
+    }
+    return url;
+  }
+  return null;
+}
+
+export async function loadPublicGitHubIssues(
+  config,
+  fetchImpl = fetch,
+  options = {},
+) {
+  const maxPages = options.maxPages ?? DEFAULT_MAX_GITHUB_ISSUE_PAGES;
+  if (!Number.isSafeInteger(maxPages) || maxPages <= 0) {
+    fail('GitHub issue page safety bound must be a positive integer');
+  }
   const issues = [];
-  for (let page = 1; page <= MAX_GITHUB_ISSUE_PAGES; page += 1) {
-    const url = new URL(`https://api.github.com/repos/${config.owner}/${config.repository}/issues`);
-    url.searchParams.set('state', 'all');
-    url.searchParams.set('per_page', String(GITHUB_ISSUE_PAGE_SIZE));
-    url.searchParams.set('page', String(page));
+  let url = new URL(`https://api.github.com/repos/${config.owner}/${config.repository}/issues`);
+  url.searchParams.set('state', 'all');
+  url.searchParams.set('per_page', String(GITHUB_ISSUE_PAGE_SIZE));
+  url.searchParams.set('page', '1');
+  for (let pageCount = 1; ; pageCount += 1) {
     const response = await fetchImpl(url, {
       headers: {
         Accept: 'application/vnd.github+json',
@@ -109,9 +164,20 @@ async function loadPublicGitHubIssues(config, fetchImpl = fetch) {
     const pageItems = await response.json();
     if (!Array.isArray(pageItems)) fail('Public GitHub issue inventory returned a non-array payload');
     issues.push(...pageItems);
-    if (pageItems.length < GITHUB_ISSUE_PAGE_SIZE) return issues;
+    const linkedNextPage = nextPageUrl(response.headers.get('link'), config);
+    if (linkedNextPage == null && pageItems.length < GITHUB_ISSUE_PAGE_SIZE) {
+      return issues;
+    }
+    if (pageCount >= maxPages) {
+      fail(`Public GitHub issue inventory exceeded the configured safety bound of ${maxPages} pages`);
+    }
+    if (linkedNextPage != null) {
+      url = linkedNextPage;
+    } else {
+      const nextPage = Number(url.searchParams.get('page') ?? pageCount) + 1;
+      url.searchParams.set('page', String(nextPage));
+    }
   }
-  fail(`Public GitHub issue inventory exceeded ${MAX_GITHUB_ISSUE_PAGES} pages`);
 }
 
 async function loadIssueInventory(options, config, dependencies) {
@@ -120,7 +186,11 @@ async function loadIssueInventory(options, config, dependencies) {
     if (!Array.isArray(parsed)) fail('--issues-file must contain a JSON array of GitHub issue objects');
     return parsed;
   }
-  return loadPublicGitHubIssues(config, dependencies.fetchImpl);
+  return loadPublicGitHubIssues(
+    config,
+    dependencies.fetchImpl,
+    { maxPages: options.maxIssuePages },
+  );
 }
 
 export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
@@ -146,8 +216,11 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
     });
     const beads = parseBeadExport(source, { assigneeMap: config.assigneeMap });
     const rawIssues = dependencies.rawIssues ?? await loadIssueInventory(options, config, dependencies);
+    const trustedIssueAuthors = new Set(
+      config.trustedIssueAuthors.map((login) => login.trim().toLowerCase()),
+    );
     const managedIssues = rawIssues
-      .map((issue) => normalizeIssue(issue, config))
+      .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors))
       .filter((issue) => issue != null);
     const report = validateTrackerDrift(beads, managedIssues, config.canonicalTargets);
     dependencies.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

@@ -7,6 +7,10 @@ import {
   type DriftBead,
   type DriftManagedIssue,
 } from '../scripts/beads-project-sync/drift.mjs';
+import {
+  loadPublicGitHubIssues,
+  runTrackerDriftCheck,
+} from '../scripts/validate-beads-tracker.mjs';
 
 const canonicalTargets = {
   'gh-200': { issue: 200, title: 'iOS internal beta and continuity', priority: 1 as const },
@@ -44,6 +48,32 @@ function bead(overrides: Partial<DriftBead> = {}): DriftBead {
     priority: 1,
     externalRef: 'gh-200',
     ...overrides,
+  };
+}
+
+function rawIssue(
+  beadId: string,
+  number: number,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    number,
+    state: 'open',
+    body: body('open', 1).replace('psyche-test', beadId),
+    user: { login: 'BunsDev' },
+    labels: [{ name: 'bead' }, { name: 'priority:P1' }],
+    ...overrides,
+  };
+}
+
+function outputBuffer(): { write: (value: string) => boolean; value: () => string } {
+  let output = '';
+  return {
+    write(value) {
+      output += value;
+      return true;
+    },
+    value: () => output,
   };
 }
 
@@ -91,10 +121,28 @@ describe('tracker drift validation', () => {
       canonicalTargets,
     );
 
-    expect(report.findings.map((finding) => finding.kind)).toEqual([
-      'priority_mismatch',
-      'source_priority_metadata_mismatch',
-      'source_status_metadata_mismatch',
+    expect(report.findings).toEqual([
+      {
+        kind: 'priority_mismatch',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+        sourcePriority: 1,
+      },
+      {
+        kind: 'source_priority_metadata_mismatch',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+        sourcePriority: 1,
+        mirrorSourcePriority: 0,
+      },
+      {
+        kind: 'source_status_metadata_mismatch',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+        sourceStatus: 'in_progress',
+        mirrorState: 'open',
+        mirrorSourceStatus: 'open',
+      },
     ]);
   });
 
@@ -135,12 +183,253 @@ describe('tracker drift validation', () => {
     expect(JSON.stringify(report)).not.toContain('path');
   });
 
-  it('retains canonical outcome validation as the source-side P0/P1 contract', () => {
-    expect(() => validateTrackerDrift(
-      [bead({ status: 'in_progress', priority: 0, externalRef: 'gh-200' })],
-      [issue({ state: 'open', labels: ['priority:P0'], body: body('in_progress', 0) })],
-      canonicalTargets,
-    )).toThrow(/priority P0 does not match gh-200 priority P1/i);
+  it('reports canonical mapping failures as bounded source-side drift', () => {
+    const beads = [
+      bead({ id: 'canonical-missing', status: 'open', externalRef: null }),
+      bead({ id: 'canonical-malformed', status: 'open', externalRef: 'issue-200' }),
+      bead({ id: 'canonical-unknown', status: 'open', externalRef: 'gh-999' }),
+      bead({ id: 'canonical-priority', status: 'open', priority: 0, externalRef: 'gh-200' }),
+    ];
+    const issues = beads.map((source, index) => issue({
+      beadId: source.id,
+      number: 400 + index,
+      state: 'open',
+      labels: [`priority:P${source.priority}`],
+      body: body(source.status, source.priority),
+    }));
+
+    const report = validateTrackerDrift(beads, issues, canonicalTargets);
+
+    expect(report.result).toBe('fail');
+    expect(report.canonicalOutcomeCount).toBe(1);
+    expect(report.findings).toEqual([
+      {
+        kind: 'canonical_mapping_malformed',
+        beadId: 'canonical-malformed',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      },
+      {
+        kind: 'canonical_mapping_missing',
+        beadId: 'canonical-missing',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      },
+      {
+        kind: 'canonical_priority_mismatch',
+        beadId: 'canonical-priority',
+        issueNumber: 200,
+        sourceStatus: 'open',
+        sourcePriority: 0,
+      },
+      {
+        kind: 'canonical_mapping_unknown',
+        beadId: 'canonical-unknown',
+        issueNumber: 999,
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      },
+    ]);
+    expect(JSON.stringify(report)).not.toContain('issue-200');
+  });
+
+  it('counts canonical drift omitted beyond the retained finding limit', () => {
+    const beads = Array.from({ length: TRACKER_DRIFT_FINDING_LIMIT + 25 }, (_, index) =>
+      bead({
+        id: `canonical-missing-${String(index).padStart(3, '0')}`,
+        status: 'open',
+        externalRef: null,
+      }));
+    const issues = beads.map((source, index) => issue({
+      beadId: source.id,
+      number: 500 + index,
+      state: 'open',
+      labels: ['priority:P1'],
+      body: body('open', 1),
+    }));
+
+    const report = validateTrackerDrift(beads, issues, canonicalTargets);
+
+    expect(report.result).toBe('fail');
+    expect(report.findingCount).toBe(TRACKER_DRIFT_FINDING_LIMIT + 25);
+    expect(report.findings).toHaveLength(TRACKER_DRIFT_FINDING_LIMIT);
+    expect(report.findingsOmitted).toBe(25);
+  });
+
+  it('returns exit 1 with JSON evidence for canonical source drift', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+      '--issues-file',
+      '__tests__/fixtures/beads-project-sync/tracker-issues.json',
+    ], { stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value())).toMatchObject({
+      result: 'fail',
+      findings: [{
+        kind: 'canonical_mapping_missing',
+        beadId: 'tracker-open',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      }],
+    });
+  });
+
+  it('returns exit 2 when inventory evidence cannot be established', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/invalid-timestamp.jsonl',
+    ], { rawIssues: [], stdout, stderr });
+
+    expect(exitCode).toBe(2);
+    expect(stdout.value()).toBe('');
+    expect(stderr.value()).toMatch(/^Tracker drift validation failed:/u);
+  });
+
+  it('reports malformed managed markers without aborting the remaining inventory', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const privateBody = 'PRIVATE-BODY-SENTINEL';
+    const rawIssues = [
+      rawIssue('tracker-open', 301, {
+        body: [
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-open -->',
+          '<!-- psyche-bead-sync:v1 bead-id=tracker-open -->',
+          `<!-- psyche-bead-sync:v1 render-hash=${'c'.repeat(64)} -->`,
+          `<!-- psyche-bead-sync:v1 render-hash=${'d'.repeat(64)} -->`,
+          privateBody,
+        ].join('\n'),
+      }),
+      rawIssue('unused', 303, {
+        body: `<!-- psyche-bead-sync:v1 bead-id= -->\n${privateBody}`,
+      }),
+      rawIssue('tracker-closed', 302, {
+        state: 'closed',
+        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        labels: [{ name: 'bead' }, { name: 'priority:P0' }],
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value()).toBe('');
+    const report = JSON.parse(stdout.value());
+    expect(report.managedMirrorCount).toBe(3);
+    expect(report.findings).toEqual(expect.arrayContaining([
+      { kind: 'duplicate_bead_marker', beadId: 'tracker-open', issueNumber: 301 },
+      { kind: 'empty_bead_marker', issueNumber: 303 },
+      {
+        kind: 'missing_mirror',
+        beadId: 'tracker-open',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      },
+    ]));
+    expect(stdout.value()).not.toContain(privateBody);
+    expect(stderr.value()).not.toContain(privateBody);
+  });
+
+  it('matches trusted GitHub authors case-insensitively', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const rawIssues = [
+      rawIssue('tracker-open', 301, { user: { login: 'BUNSDEV' } }),
+      rawIssue('tracker-closed', 302, {
+        state: 'closed',
+        body: body('closed', 0).replace('psyche-test', 'tracker-closed'),
+        labels: [{ name: 'bead' }, { name: 'priority:P0' }],
+        user: { login: 'BuNsDeV' },
+      }),
+    ];
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], { rawIssues, stdout, stderr });
+
+    expect(exitCode).toBe(0);
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value())).toMatchObject({
+      result: 'pass',
+      managedMirrorCount: 2,
+    });
+  });
+
+  it('loads more than ten GitHub issue pages without ambient authorization', async () => {
+    const requests: Array<{ url: string; headers: RequestInit['headers'] }> = [];
+    const fetchImpl = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const page = Number(new URL(url).searchParams.get('page'));
+      requests.push({ url, headers: init?.headers });
+      const items = page <= 11
+        ? Array.from({ length: 100 }, (_, index) => ({
+          number: ((page - 1) * 100) + index + 1,
+          pull_request: {},
+        }))
+        : [];
+      const headers = page <= 11
+        ? { Link: `<https://api.github.com/repositories/1319246194/issues?state=all&per_page=100&page=${page + 1}>; rel="next"` }
+        : {};
+      return new Response(JSON.stringify(items), { status: 200, headers });
+    };
+
+    const issues = await loadPublicGitHubIssues(
+      { owner: 'OpenCoven', repository: 'psyche-build' },
+      fetchImpl,
+    );
+
+    expect(issues).toHaveLength(1_100);
+    expect(requests).toHaveLength(12);
+    for (const request of requests) {
+      expect(new Headers(request.headers).has('Authorization')).toBe(false);
+    }
+  });
+
+  it('terminates pagination at the configured safety bound', async () => {
+    let requests = 0;
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+      requests += 1;
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get('page'));
+      const items = Array.from({ length: 100 }, (_, index) => ({
+        number: ((page - 1) * 100) + index + 1,
+      }));
+      return new Response(JSON.stringify(items), {
+        status: 200,
+        headers: {
+          Link: `<https://api.github.com/repositories/1319246194/issues?state=all&per_page=100&page=${page + 1}>; rel="next"`,
+        },
+      });
+    };
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+      '--max-issue-pages',
+      '3',
+    ], { fetchImpl, stdout, stderr });
+
+    expect(exitCode).toBe(2);
+    expect(requests).toBe(3);
+    expect(stdout.value()).toBe('');
+    expect(stderr.value()).toMatch(/exceeded the configured safety bound of 3 pages/i);
   });
 
   it('runs the documented offline command without network or Beads bootstrap', () => {

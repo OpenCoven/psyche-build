@@ -1,6 +1,10 @@
 // @ts-check
 
-import { validateCanonicalOutcomes } from './outcomes.mjs';
+import {
+  CanonicalOutcomeValidationError,
+  canonicalOutcomeIssueNumber,
+  validateCanonicalOutcomes,
+} from './outcomes.mjs';
 
 export const TRACKER_DRIFT_REPORT_SCHEMA_VERSION = 1;
 export const TRACKER_DRIFT_FINDING_LIMIT = 100;
@@ -16,12 +20,17 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
 
 /**
  * @typedef {{
- *   beadId: string,
+ *   beadId?: string | null,
  *   number: number,
  *   state: string,
  *   labels?: readonly string[],
  *   body?: string | null,
  *   renderHash?: string | null,
+ *   markerFindingKinds?: readonly (
+ *     | 'duplicate_bead_marker'
+ *     | 'empty_bead_marker'
+ *     | 'malformed_bead_marker'
+ *   )[],
  * }} DriftManagedIssue
  */
 
@@ -35,12 +44,21 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  *     | 'priority_mismatch'
  *     | 'source_status_metadata_mismatch'
  *     | 'source_priority_metadata_mismatch'
- *     | 'missing_render_hash',
- *   beadId: string,
+ *     | 'missing_render_hash'
+ *     | 'canonical_mapping_missing'
+ *     | 'canonical_mapping_malformed'
+ *     | 'canonical_mapping_unknown'
+ *     | 'canonical_priority_mismatch'
+ *     | 'duplicate_bead_marker'
+ *     | 'empty_bead_marker'
+ *     | 'malformed_bead_marker',
+ *   beadId?: string,
  *   issueNumber?: number,
  *   sourceStatus?: string,
  *   mirrorState?: string,
  *   sourcePriority?: number,
+ *   mirrorSourceStatus?: string | null,
+ *   mirrorSourcePriority?: number | null,
  * }} TrackerDriftFinding
  */
 
@@ -57,22 +75,61 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  * }} TrackerDriftReport
  */
 
+/**
+ * @param {string} left
+ * @param {string} right
+ */
 function compareStrings(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** @param {string} status */
 function expectedMirrorState(status) {
   return status === 'closed' ? 'closed' : 'open';
 }
 
+/**
+ * @param {string | null} body
+ * @param {string} field
+ */
 function sourceMetadata(body, field) {
   if (typeof body !== 'string') return null;
   const escaped = field.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  return body.match(new RegExp(`^\\s*-\\s+${escaped}:\\s*([^\\r\\n]+)\\s*$`, 'imu'))?.[1]?.trim() ?? null;
+  const value = body.match(
+    new RegExp(`^\\s*-\\s+${escaped}:\\s*([^\\r\\n]+)\\s*$`, 'imu'),
+  )?.[1]?.trim() ?? null;
+  if (value == null) return null;
+  return value.startsWith('`') && value.endsWith('`') ? value.slice(1, -1).trim() : value;
 }
 
+/** @param {string | null} body */
+function safeMirrorSourceStatus(body) {
+  const value = sourceMetadata(body, 'Source status');
+  return value != null && /^[a-z][a-z0-9_-]{0,31}$/u.test(value) ? value : null;
+}
+
+/** @param {string | null} body */
+function safeMirrorSourcePriority(body) {
+  const value = sourceMetadata(body, 'Source priority');
+  const match = value?.match(/^P([0-4])$/u);
+  return match == null ? null : Number(match[1]);
+}
+
+/** @param {TrackerDriftFinding} finding */
 function findingSortKey(finding) {
-  return `${finding.beadId}\u0000${String(finding.issueNumber ?? 0).padStart(10, '0')}\u0000${finding.kind}`;
+  return `${finding.beadId ?? ''}\u0000${String(finding.issueNumber ?? 0).padStart(10, '0')}\u0000${finding.kind}`;
+}
+
+/**
+ * @param {DriftBead} bead
+ * @returns {number | undefined}
+ */
+function canonicalIssueNumber(bead) {
+  try {
+    return bead.externalRef == null ? undefined : canonicalOutcomeIssueNumber(bead.externalRef);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -86,11 +143,63 @@ function findingSortKey(finding) {
  * @returns {TrackerDriftReport}
  */
 export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
-  const canonical = validateCanonicalOutcomes(beads, canonicalTargets);
+  /** @type {TrackerDriftFinding[]} */
   const findings = [];
+  const sourceById = new Map(beads.map((bead) => [bead.id, bead]));
+  let preOmittedFindingCount = 0;
+  let canonical;
+  try {
+    canonical = validateCanonicalOutcomes(beads, canonicalTargets);
+  } catch (error) {
+    if (!(error instanceof CanonicalOutcomeValidationError)) throw error;
+    canonical = error.diagnostics;
+    /** @type {readonly [
+     *   TrackerDriftFinding['kind'],
+     *   readonly string[],
+     * ][]} */
+    const canonicalFindingGroups = [
+      ['canonical_mapping_missing', canonical.unmappedActiveBeadIds],
+      ['canonical_mapping_malformed', canonical.malformedTargetBeadIds],
+      ['canonical_mapping_unknown', canonical.unknownTargetBeadIds],
+      ['canonical_priority_mismatch', canonical.priorityMismatchBeadIds],
+    ];
+    const retainedCanonicalFindingCount = canonicalFindingGroups
+      .reduce((count, [, beadIds]) => count + beadIds.length, 0);
+    preOmittedFindingCount = Math.max(0, error.failureCount - retainedCanonicalFindingCount);
+    for (const [kind, beadIds] of canonicalFindingGroups) {
+      for (const beadId of beadIds) {
+        const bead = sourceById.get(beadId);
+        findings.push({
+          kind,
+          beadId,
+          ...(bead == null
+            ? {}
+            : {
+                sourceStatus: bead.status,
+                sourcePriority: bead.priority,
+              }),
+          ...(
+            kind === 'canonical_mapping_unknown' || kind === 'canonical_priority_mismatch'
+              ? { issueNumber: bead == null ? undefined : canonicalIssueNumber(bead) }
+              : {}
+          ),
+        });
+      }
+    }
+  }
   const mirrorsByBeadId = new Map();
 
   for (const issue of managedIssues) {
+    for (const kind of issue.markerFindingKinds ?? []) {
+      findings.push({
+        kind,
+        ...(issue.beadId == null ? {} : { beadId: issue.beadId }),
+        issueNumber: issue.number,
+      });
+    }
+    if (issue.beadId == null || (issue.markerFindingKinds?.length ?? 0) > 0) {
+      continue;
+    }
     const existing = mirrorsByBeadId.get(issue.beadId);
     if (existing != null) {
       findings.push({
@@ -102,8 +211,6 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
     }
     mirrorsByBeadId.set(issue.beadId, issue);
   }
-
-  const sourceById = new Map(beads.map((bead) => [bead.id, bead]));
 
   for (const bead of beads) {
     const issue = mirrorsByBeadId.get(bead.id);
@@ -138,24 +245,26 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
       });
     }
 
-    const sourceStatus = sourceMetadata(issue.body ?? null, 'Source status');
-    if (sourceStatus !== bead.status) {
+    const mirrorSourceStatus = safeMirrorSourceStatus(issue.body ?? null);
+    if (mirrorSourceStatus !== bead.status) {
       findings.push({
         kind: 'source_status_metadata_mismatch',
         beadId: bead.id,
         issueNumber: issue.number,
         sourceStatus: bead.status,
         mirrorState: issue.state,
+        mirrorSourceStatus,
       });
     }
 
-    const sourcePriority = sourceMetadata(issue.body ?? null, 'Source priority');
-    if (sourcePriority !== `P${bead.priority}`) {
+    const mirrorSourcePriority = safeMirrorSourcePriority(issue.body ?? null);
+    if (mirrorSourcePriority !== bead.priority) {
       findings.push({
         kind: 'source_priority_metadata_mismatch',
         beadId: bead.id,
         issueNumber: issue.number,
         sourcePriority: bead.priority,
+        mirrorSourcePriority,
       });
     }
 
@@ -169,7 +278,11 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
   }
 
   for (const issue of managedIssues) {
-    if (!sourceById.has(issue.beadId)) {
+    if (
+      issue.beadId != null
+      && (issue.markerFindingKinds?.length ?? 0) === 0
+      && !sourceById.has(issue.beadId)
+    ) {
       findings.push({
         kind: 'orphan_mirror',
         beadId: issue.beadId,
@@ -181,15 +294,16 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
 
   findings.sort((left, right) => compareStrings(findingSortKey(left), findingSortKey(right)));
   const bounded = findings.slice(0, TRACKER_DRIFT_FINDING_LIMIT).map((finding) => Object.freeze({ ...finding }));
+  const findingCount = findings.length + preOmittedFindingCount;
 
   return Object.freeze({
     schemaVersion: TRACKER_DRIFT_REPORT_SCHEMA_VERSION,
-    result: findings.length === 0 ? 'pass' : 'fail',
+    result: findingCount === 0 ? 'pass' : 'fail',
     sourceCount: beads.length,
     managedMirrorCount: managedIssues.length,
     canonicalOutcomeCount: canonical.mappedActiveCount,
-    findingCount: findings.length,
+    findingCount,
     findings: Object.freeze(bounded),
-    findingsOmitted: Math.max(0, findings.length - bounded.length),
+    findingsOmitted: Math.max(0, findingCount - bounded.length),
   });
 }

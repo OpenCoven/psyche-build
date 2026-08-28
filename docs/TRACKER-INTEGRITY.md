@@ -12,6 +12,15 @@ node scripts/validate-beads-tracker.mjs
 
 The command performs a read-only Beads export and fetches only the repository's **public GitHub issue inventory** using unauthenticated HTTPS. It does not read `GH_TOKEN`, `GITHUB_TOKEN`, or `BEADS_PROJECT_TOKEN`, and it makes no GitHub mutation.
 
+The public inventory follows GitHub REST `Link` pagination and, when a response
+omits `Link`, continues through full pages until it receives a short or empty
+page. The default safety bound is 1,000 pages rather than 1,000 issues. Override
+it explicitly when necessary:
+
+```bash
+node scripts/validate-beads-tracker.mjs --max-issue-pages 2000
+```
+
 For a clean checkout whose Beads database has not been initialized, bootstrap Beads explicitly, then rerun:
 
 ```bash
@@ -37,9 +46,12 @@ The validator composes two contracts rather than replacing the synchronizer:
 
 1. Existing canonical-outcome validation requires every **active** Bead to carry one configured `external_ref` (`gh-<issue>`) and requires its Beads priority to match that canonical outcome's configured priority.
 2. The drift validator compares every public Bead with its managed GitHub mirror and detects:
+   - missing, malformed, or unknown canonical mappings;
+   - canonical target priority disagreement;
    - missing mirrors;
    - orphan mirrors;
    - duplicate managed Bead IDs;
+   - duplicate, empty, or malformed managed Bead markers;
    - open/closed state disagreement;
    - `priority:Pn` label disagreement;
    - generated `Source status` disagreement;
@@ -49,8 +61,16 @@ The validator composes two contracts rather than replacing the synchronizer:
 The command exits:
 
 - `0` when no drift is found;
-- `1` when the bounded report contains drift findings;
-- `2` when the source/config/public-inventory check itself cannot be completed safely.
+- `1` when the bounded report contains drift or invariant findings, including
+  canonical source mapping failures and malformed managed issue markers;
+- `2` when evidence cannot be established, including network, authentication or
+  rate-limit failures, unreadable or invalid inventory input, invalid
+  configuration, or Beads bootstrap/tool execution failures.
+
+Managed issue authors are compared case-insensitively against
+`trustedIssueAuthors`, matching GitHub login semantics. A malformed managed
+issue contributes bounded findings and does not prevent validation of the
+remaining public inventory.
 
 ## Bounded retained evidence
 
@@ -69,7 +89,12 @@ Output is JSON and intentionally contains only bounded control-plane fields:
 }
 ```
 
-A failing report includes at most 100 findings. Findings contain only the finding kind, Bead ID, public issue number, source/mirror status, and source priority where applicable. Descriptions, prompts, terminal output, credentials, local paths, and full issue bodies are never copied into the report.
+A failing report includes at most 100 findings. Findings contain only the
+finding kind, Bead ID when safely available, public issue number, expected
+Beads status/priority, public issue state, and observed generated
+`mirrorSourceStatus`/`mirrorSourcePriority` metadata where applicable.
+Descriptions, prompts, terminal output, credentials, local paths, and full
+issue bodies are never copied into the report.
 
 ## Source-first repair
 

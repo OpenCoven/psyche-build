@@ -29,13 +29,14 @@
  * @typedef {{
  *   mappedActiveCount: number,
  *   unmappedActiveBeadIds: readonly string[],
+ *   malformedTargetBeadIds: readonly string[],
  *   unknownTargetBeadIds: readonly string[],
  *   priorityMismatchBeadIds: readonly string[],
  * }} CanonicalOutcomeValidation
  */
 
 export const CANONICAL_OUTCOME_REF_PATTERN = /^gh-([1-9]\d*)$/u;
-export const CANONICAL_OUTCOME_DIAGNOSTIC_ID_LIMIT = 50;
+export const CANONICAL_OUTCOME_DIAGNOSTIC_ID_LIMIT = 100;
 
 /**
  * @param {string} left
@@ -93,11 +94,13 @@ export class CanonicalOutcomeValidationError extends Error {
   /**
    * @param {string} message
    * @param {CanonicalOutcomeValidation} diagnostics
+   * @param {number} failureCount
    */
-  constructor(message, diagnostics) {
+  constructor(message, diagnostics, failureCount) {
     super(message);
     this.name = 'CanonicalOutcomeValidationError';
     this.diagnostics = diagnostics;
+    this.failureCount = failureCount;
   }
 }
 
@@ -120,6 +123,7 @@ export function validateCanonicalOutcomes(beads, canonicalTargets) {
 
   let mappedActiveCount = 0;
   const unmapped = [];
+  const malformed = [];
   const unknown = [];
   const mismatches = [];
   const reasons = [];
@@ -134,10 +138,17 @@ export function validateCanonicalOutcomes(beads, canonicalTargets) {
       continue;
     }
 
-    const reference = /** @type {string} */ (normalizeCanonicalOutcomeRef(
-      bead.externalRef,
-      `Bead "${bead.id}" external_ref`,
-    ));
+    let reference;
+    try {
+      reference = /** @type {string} */ (normalizeCanonicalOutcomeRef(
+        bead.externalRef,
+        `Bead "${bead.id}" external_ref`,
+      ));
+    } catch {
+      malformed.push(bead.id);
+      reasons.push(`${bead.id} has a malformed external_ref`);
+      continue;
+    }
     const target = canonicalTargets[reference];
     if (target == null) {
       unknown.push(bead.id);
@@ -157,6 +168,7 @@ export function validateCanonicalOutcomes(beads, canonicalTargets) {
   const diagnostics = Object.freeze({
     mappedActiveCount,
     unmappedActiveBeadIds: boundedSortedIds(unmapped),
+    malformedTargetBeadIds: boundedSortedIds(malformed),
     unknownTargetBeadIds: boundedSortedIds(unknown),
     priorityMismatchBeadIds: boundedSortedIds(mismatches),
   });
@@ -171,6 +183,7 @@ export function validateCanonicalOutcomes(beads, canonicalTargets) {
         omitted > 0 ? `; ${omitted} additional validation failures omitted` : ''
       }`,
       diagnostics,
+      reasons.length,
     );
   }
 
