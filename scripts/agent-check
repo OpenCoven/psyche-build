@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$repo_root"
+
+mode="${1:-}"
+case "$mode" in
+  fast|full) ;;
+  *)
+    printf 'usage: bash ./scripts/agent-check fast|full\n' >&2
+    exit 64
+    ;;
+esac
+
+die() {
+  printf 'agent-check: %s\n' "$*" >&2
+  exit 1
+}
+
+run() {
+  printf '\n==> %s\n' "$1"
+  shift
+  "$@"
+}
+
+command -v node >/dev/null 2>&1 || die "Node.js is missing; run bash ./scripts/agent-bootstrap"
+command -v pnpm >/dev/null 2>&1 || die "pnpm is missing; run bash ./scripts/agent-bootstrap"
+command -v git >/dev/null 2>&1 || die "Git is missing"
+
+pnpm_pin="$(node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));const v=String(p.packageManager??'');if(!v.startsWith('pnpm@'))process.exit(1);process.stdout.write(v.slice(5))")" \
+  || die "package.json does not pin pnpm"
+pnpm_actual="$(pnpm --version)"
+[[ "$pnpm_actual" == "$pnpm_pin" ]] \
+  || die "pnpm $pnpm_actual is active; require exactly $pnpm_pin"
+[[ -d node_modules ]] || die "dependencies are absent; run bash ./scripts/agent-bootstrap"
+
+before_status="$(git status --porcelain=v1 --untracked-files=all)"
+
+if [[ "$mode" == "fast" ]]; then
+  run "TypeScript and repository contract typecheck" pnpm typecheck
+  run "Agent repository contract" pnpm vitest --run __tests__/agentRepositoryContract.test.ts
+else
+  command -v cargo >/dev/null 2>&1 || die "Cargo is required for the full gate"
+
+  run "Unit and contract tests" pnpm test
+  run "Focused documentation contract" pnpm docs:focus:check
+  run "Documentation build" pnpm --dir docs build
+  run "TypeScript and repository contract typecheck" pnpm typecheck
+  run "Production build" pnpm build
+  run "Source smoke gate" pnpm smoke
+  run "Packaged-artifact smoke gate" pnpm smoke:pack
+  run "Deterministic desktop web bundles" pnpm --dir native/desktop/psyche-build-tauri build:web
+  run "Rust formatting" cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --all -- --check
+  run "Rust tests" cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+  run "Rust check" cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked
+
+  if [[ "${PSYCHE_AGENT_CHECK_IOS:-0}" == "1" ]]; then
+    [[ "$(uname -s)" == "Darwin" ]] || die "the opt-in iOS gate requires macOS"
+    command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild is required for the opt-in iOS gate"
+    command -v xcrun >/dev/null 2>&1 || die "xcrun is required for the opt-in iOS gate"
+    command -v xcodegen >/dev/null 2>&1 || die "XcodeGen is required for the opt-in iOS gate"
+
+    xcode_version="$(xcodebuild -version)"
+    grep -Fq "Xcode 26.2" <<<"$xcode_version" \
+      || die "iOS CI is pinned to Xcode 26.2"
+    grep -Fq "Build version 17C52" <<<"$xcode_version" \
+      || die "iOS CI is pinned to Xcode build 17C52"
+
+    destination="platform=iOS Simulator,name=iPhone 16 Pro,OS=26.2"
+    run "Generated iOS project parity" pnpm ios:project:check
+    run "PsycheCore simulator tests" \
+      xcodebuild test \
+        -project native/ios/Psyche.xcodeproj \
+        -scheme PsycheCore \
+        -destination "$destination" \
+        CODE_SIGNING_ALLOWED=NO
+    run "PsycheApp simulator build" \
+      xcodebuild build \
+        -project native/ios/Psyche.xcodeproj \
+        -scheme PsycheApp \
+        -destination "$destination" \
+        CODE_SIGNING_ALLOWED=NO
+    run "PsycheApp simulator tests" \
+      xcodebuild test \
+        -project native/ios/Psyche.xcodeproj \
+        -scheme PsycheApp \
+        -destination "$destination" \
+        CODE_SIGNING_ALLOWED=NO
+
+    printf '\nThe iOS gate proves only the pinned simulator path. Physical-device, signing, TestFlight, and distribution claims remain unasserted without release-acceptance evidence.\n'
+  else
+    printf '\nSkipping iOS simulator checks: not asserted. Set PSYCHE_AGENT_CHECK_IOS=1 on the pinned macOS/Xcode host.\n'
+  fi
+fi
+
+run "Whitespace and conflict-marker check" git diff --check
+
+after_status="$(git status --porcelain=v1 --untracked-files=all)"
+if [[ "$after_status" != "$before_status" ]]; then
+  printf '%s\n' "agent-check: checks changed tracked or untracked repository state; regenerate from canonical inputs and commit or revert the drift" >&2
+  git status --short >&2
+  exit 1
+fi
+
+printf '\nPsyche Build %s gate passed.\n' "$mode"
