@@ -12,7 +12,7 @@
 
 ## Canonical contracts consulted
 
-<!-- Link the relevant product, control, security, release, or protocol documents. -->
+<!-- Link the relevant product, control, security, support, release, or protocol documents. -->
 
 ## Verification evidence
 
@@ -20,8 +20,10 @@
 
 - [ ] Focused contract tests
 - [ ] `./scripts/agent-check fast` or an explained equivalent
+- [ ] User-path or production-path evidence for each affected supported flow, or an explicit not-applicable rationale
 - [ ] Required CI is terminal and successful on the exact PR head
 - [ ] Unsupported platform checks are named explicitly
+- [ ] All review threads are resolved on the final head
 
 ## Authority, security, and privacy
 

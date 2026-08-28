@@ -16,18 +16,23 @@ describe('repository community and security floor', () => {
     expect(security).toContain('/security/advisories/new');
     expect(security).toMatch(/Do \*\*not\*\* open a public issue/i);
     expect(security).toContain('Latest stable macOS release');
+    expect(security).toContain('SUPPORT.md');
+    expect(security).toContain('docs/SUPPORT-MATRIX.md');
     expect(security).toMatch(/iOS companion[\s\S]*not currently supported/i);
     expect(security).toMatch(/task-bound authentication|capability leases/i);
     expect(security).toMatch(publicDataWarning);
 
+    expect(support).toContain('docs/ROADMAP.md');
     expect(support).toContain('docs/SUPPORT-MATRIX.md');
+    expect(support).toContain('docs/RELEASE-ACCEPTANCE.md');
     expect(support).toContain('one-way sanitized mirror');
     expect(support).toContain('follow `SECURITY.md` and report privately');
     expect(support).toMatch(publicDataWarning);
+    expect(support).toMatch(/test, document, or source checkout[\s\S]*does not by itself prove/i);
     expect(support).toMatch(/best-effort[\s\S]*does not include an SLA/i);
   });
 
-  it('defines review ownership for authority, release, native, and generated surfaces', async () => {
+  it('defines review ownership for authority, release, native, documentation, and generated surfaces', async () => {
     const owners = await read('.github/CODEOWNERS');
 
     for (const path of [
@@ -38,6 +43,12 @@ describe('repository community and security floor', () => {
       '/native/ios/',
       '/scripts/beads-project-sync/',
       '/.beads/',
+      '/docs/',
+      '/README.md',
+      '/CONTRIBUTING.md',
+      '/SECURITY.md',
+      '/SUPPORT.md',
+      '/CODE_OF_CONDUCT.md',
       '/protocol-fixtures/',
       '/src/utils/generated-agents-doc.ts',
       '/native/ios/Psyche.xcodeproj/',
@@ -48,7 +59,7 @@ describe('repository community and security floor', () => {
     expect(owners).toMatch(/^\* @BunsDev/m);
   });
 
-  it('requires evidence, authority analysis, recovery, and redaction in pull requests', async () => {
+  it('requires evidence, authority analysis, recovery, redaction, and final review state in pull requests', async () => {
     const template = await read('.github/pull_request_template.md');
 
     for (const heading of [
@@ -65,6 +76,8 @@ describe('repository community and security floor', () => {
     }
 
     expect(template).toContain('exact PR head');
+    expect(template).toContain('User-path or production-path evidence');
+    expect(template).toContain('All review threads are resolved');
     expect(template).toContain('R3/R4');
     expect(template).toMatch(publicDataWarning);
   });

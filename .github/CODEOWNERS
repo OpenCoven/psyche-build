@@ -1,21 +1,30 @@
 # Default ownership. Path-specific rules below make sensitive review scope explicit.
 * @BunsDev
 
+# Repository governance and public contracts
 /.github/workflows/ @BunsDev
 /.github/CODEOWNERS @BunsDev
 /.github/ISSUE_TEMPLATE/ @BunsDev
 /.github/pull_request_template.md @BunsDev
+/AGENTS.md @BunsDev
+/README.md @BunsDev
+/CONTRIBUTING.md @BunsDev
+/SECURITY.md @BunsDev
+/SUPPORT.md @BunsDev
+/CODE_OF_CONDUCT.md @BunsDev
+/docs/ @BunsDev
 
+# Authority, runtime, and native surfaces
 /src/control/ @BunsDev
 /src/services/bridge/ @BunsDev
 /native/desktop/psyche-build-tauri/src-tauri/ @BunsDev
 /native/ios/ @BunsDev
 
+# Release, tracker, and generated surfaces
 /scripts/app-store-connect.mjs @BunsDev
 /scripts/build-macos-app.mjs @BunsDev
 /scripts/beads-project-sync/ @BunsDev
 /.beads/ @BunsDev
-
 /protocol-fixtures/ @BunsDev
 /src/utils/generated-agents-doc.ts @BunsDev
 /native/ios/Psyche.xcodeproj/ @BunsDev

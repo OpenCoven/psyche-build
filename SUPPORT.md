@@ -1,5 +1,18 @@
 # Support
 
+## Active contracts
+
+Use these repository documents together:
+
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) owns active public outcomes and phase gates.
+- [`docs/SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md) owns support-status claims.
+- [`docs/RELEASE-ACCEPTANCE.md`](docs/RELEASE-ACCEPTANCE.md) defines retained release evidence.
+- [`SECURITY.md`](SECURITY.md) owns private vulnerability reporting.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) owns the contributor verification workflow.
+
+A test, document, or source checkout does not by itself prove that a public
+product path is supported.
+
 ## Supported product state
 
 The supported public installation is the latest stable macOS release documented

@@ -5,6 +5,10 @@ browser and pane control, release artifacts, and optional external providers.
 Treat security reports as potentially sensitive even when the observed impact
 appears local.
 
+The current product boundary is defined in [`SUPPORT.md`](SUPPORT.md) and
+[`docs/SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md). A security report does not
+expand an unsupported surface into a supported distribution claim.
+
 ## Supported surfaces
 
 | Surface | Security support |
