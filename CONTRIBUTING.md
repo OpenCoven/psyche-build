@@ -2,10 +2,13 @@
 
 This project is built while running Psyche Build itself. The goal is a fast, repeatable loop for maintainers and contributors.
 
+Start with [`AGENTS.md`](AGENTS.md) for canonical ownership, risk classes,
+protected/generated paths, and completion-evidence requirements.
+
 ## Prerequisites
 
 - Node.js 20.10.0+
-- `pnpm`
+- The `pnpm` version pinned by `packageManager` in `package.json`
 - Corepack 0.31.0 (required for release validation)
 - `tmux` 3.0+
 - Git 2.20+
@@ -19,11 +22,15 @@ npm install --global corepack@0.31.0
 
 ## Local Development (Dogfood Loop)
 
-1. Install dependencies:
+1. Bootstrap the locked dependency graph and verify the public toolchain contract:
 
 ```bash
-pnpm install
+./scripts/agent-bootstrap
 ```
+
+The bootstrap derives Node and pnpm requirements from `package.json`, installs
+with `--frozen-lockfile`, and fails if the checkout changes. It does not mint
+credentials, mutate GitHub or Beads, publish packages, or create releases.
 
 2. Start Psyche Build in local dev mode:
 
@@ -201,18 +208,15 @@ If this generated file changes only because the date rolled forward, revert it b
 
 1. One pane/worktree per PR branch.
 2. Merge through Psyche Build when possible to dogfood merge + cleanup paths.
-3. Ensure local checks pass:
+3. Run focused checks for the affected contract, then the bounded repository gate:
 
 ```bash
-pnpm run typecheck
-pnpm run test
+./scripts/agent-check fast
 ```
 
-`pnpm run typecheck` covers both trees: `tsc --noEmit` for `src/`, then
-`typecheck:tests` for `__tests__/` via `tsconfig.test.json`. The test tree
-needs its own config because the base one sets `rootDir` to `./src` so `tsc`
-emits `dist/` with the right layout — which means `__tests__` can never be part
-of it. Run `pnpm run typecheck:tests` alone when you only touched tests.
+`./scripts/agent-check fast` runs TypeScript validation and the repository
+entrypoint contract. Run narrower Vitest, Rust, desktop, or iOS checks first when
+the change touches those surfaces.
 
 When you touch startup, onboarding, or the tmux session lifecycle, also run:
 
@@ -228,26 +232,46 @@ portable. See `docs/SMOKE.md`.
 4. For docs/package changes, also verify package contents:
 
 ```bash
-npm pack --dry-run
+pnpm smoke:pack
 ```
 
-5. Open PR from the feature branch created for that pane.
+5. Before requesting merge, run the full public handoff gate:
+
+```bash
+./scripts/agent-check full
+```
+
+The full gate covers docs, TypeScript, unit tests, build/package smoke, real
+tmux startup smoke, desktop web bundles, and desktop Rust. iOS evidence is an
+explicit compatible-Mac gate:
+
+```bash
+PSYCHE_AGENT_CHECK_IOS=1 ./scripts/agent-check full
+```
+
+An unrequested or unsupported iOS run is named as a skip, never represented as
+successful iOS evidence.
+
+6. Open the PR from the feature branch created for that pane and complete the
+repository PR template with exact commands, authority impact, rollback, and
+remaining uncertainty.
 
 ## Maintainer Checklist (Before Release)
 
-Run the complete reproducible local validation suite with the pnpm version pinned in `package.json`:
+Run the same package-metadata-derived bootstrap and complete handoff gate used by
+contributors:
 
 ```bash
-corepack pnpm@10.14.0 test
-corepack pnpm@10.14.0 typecheck
-corepack pnpm@10.14.0 clean
-corepack pnpm@10.14.0 build
-corepack pnpm@10.14.0 smoke
-corepack pnpm@10.14.0 smoke:pack
+./scripts/agent-bootstrap
+./scripts/agent-check full
 ```
 
-`pnpm smoke` and `pnpm smoke:pack` check different things and both belong
-here: one proves the built cockpit starts, the other proves the tarball carries
-what it should. A package can pack correctly and still fail to launch.
+`agent-bootstrap` enforces the exact `packageManager` pin from `package.json`;
+do not copy a pnpm version into this document. `pnpm smoke` and
+`pnpm smoke:pack` check different things and both run in the full gate: one
+proves the built cockpit starts, the other proves the tarball carries what it
+should. A package can pack correctly and still fail to launch.
 
-Do not publish, tag, push protected branches, or merge release work without explicit maintainer approval.
+Release publication, signing, notarization, TestFlight, GitHub/Beads mutation,
+tagging, and protected-branch changes require explicit maintainer approval and
+the relevant protected environment. See `docs/RELEASE.md` for publication.
