@@ -1,8 +1,10 @@
 import type { PublicBead } from './sanitize.mjs';
+import type { CanonicalTargets } from './outcomes.mjs';
 
 export interface RenderContext {
   inventoryById?: ReadonlyMap<string, PublicBead> | Record<string, PublicBead>;
   mirroredIssueUrlsByBeadId?: ReadonlyMap<string, string> | Record<string, string>;
+  canonicalTargets?: CanonicalTargets;
   sourceRepositoryUrl?: string | null;
   sourceRef?: string | null;
   inventoryTimestamp?: string | null;

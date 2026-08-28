@@ -7,6 +7,10 @@ import {
   DEFAULT_PROJECT_MARKER,
   normalizeMarker,
 } from './markers.mjs';
+import {
+  canonicalOutcomeIssueNumber,
+  normalizeCanonicalOutcomeRef,
+} from './outcomes.mjs';
 
 export const SUPPORTED_PROJECT_MARKER = DEFAULT_PROJECT_MARKER;
 export const SUPPORTED_ISSUE_MARKER = DEFAULT_ISSUE_MARKER;
@@ -26,6 +30,7 @@ export const APPLY_LOCK_REF_ENDPOINT = `heads/${APPLY_LOCK_BRANCH}`;
  *   trustedIssueAuthors: readonly string[],
  *   legacyProjectMarkers?: readonly string[],
  *   assigneeMap: Record<string, string>,
+ *   canonicalTargets: import('./outcomes.mjs').CanonicalTargets,
  *   massClose: {
  *     minimum: number,
  *     fraction: number,
@@ -182,6 +187,68 @@ function assigneeMap(value) {
 
 /**
  * @param {unknown} value
+ * @returns {import('./outcomes.mjs').CanonicalTargets}
+ */
+function canonicalTargets(value) {
+  const input = record(value, '"canonicalTargets"');
+  const entries = Object.entries(input);
+  if (entries.length === 0) {
+    fail('"canonicalTargets" must be a non-empty object');
+  }
+
+  /** @type {Record<string, import('./outcomes.mjs').CanonicalTarget>} */
+  const normalized = {};
+  const issueNumbers = new Set();
+  for (const [rawReference, rawTarget] of entries) {
+    let reference;
+    try {
+      reference = /** @type {string} */ (normalizeCanonicalOutcomeRef(
+        rawReference,
+        `canonicalTargets key "${rawReference}"`,
+      ));
+    } catch (error) {
+      fail(error instanceof Error ? error.message : '"canonicalTargets" key is invalid');
+    }
+    const target = record(rawTarget, `"canonicalTargets.${reference}"`);
+    assertExactKeys(
+      target,
+      ['issue', 'title', 'priority'],
+      `"canonicalTargets.${reference}"`,
+    );
+
+    const issue = target.issue;
+    if (typeof issue !== 'number' || !Number.isSafeInteger(issue) || issue <= 0) {
+      fail(`"canonicalTargets.${reference}.issue" must be a positive integer`);
+    }
+    if (issueNumbers.has(issue)) {
+      fail(`"canonicalTargets" contains duplicate issue number ${issue}`);
+    }
+    issueNumbers.add(issue);
+    if (issue !== canonicalOutcomeIssueNumber(reference)) {
+      fail(`"canonicalTargets.${reference}.issue" must match key ${reference}`);
+    }
+
+    const priority = target.priority;
+    if (
+      typeof priority !== 'number'
+      || !Number.isInteger(priority)
+      || priority < 0
+      || priority > 4
+    ) {
+      fail(`"canonicalTargets.${reference}.priority" must be an integer from 0 to 4`);
+    }
+
+    normalized[reference] = Object.freeze({
+      issue,
+      title: requiredString(target.title, `canonicalTargets.${reference}.title`),
+      priority: /** @type {0 | 1 | 2 | 3 | 4} */ (priority),
+    });
+  }
+  return Object.freeze(normalized);
+}
+
+/**
+ * @param {unknown} value
  * @returns {{minimum: number, fraction: number}}
  */
 function massClose(value) {
@@ -220,6 +287,7 @@ export function parseSyncConfig(value) {
     'issueMarker',
     'trustedIssueAuthors',
     'assigneeMap',
+    'canonicalTargets',
     'massClose',
   ], 'root', ['applyLockRef', 'legacyProjectMarkers']);
 
@@ -240,6 +308,7 @@ export function parseSyncConfig(value) {
     trustedIssueAuthors: trustedIssueAuthors(input.trustedIssueAuthors),
     ...(legacyProjectMarkers == null ? {} : { legacyProjectMarkers }),
     assigneeMap: Object.freeze(assigneeMap(input.assigneeMap)),
+    canonicalTargets: canonicalTargets(input.canonicalTargets),
     massClose: Object.freeze(massClose(input.massClose)),
   });
 }

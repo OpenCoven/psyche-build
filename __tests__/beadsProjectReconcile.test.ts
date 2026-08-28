@@ -54,6 +54,7 @@ function makeBead(id: string, overrides: Partial<PublicBead> = {}): PublicBead {
     specId: 'docs/superpowers/plans/2026-08-21-public-beads-project.md',
     acceptanceCriteria: `- ${id} is mirrored safely.`,
     notes: `Notes for ${id}.`,
+    externalRef: null,
     status: 'open',
     priority: 0,
     type: 'task',

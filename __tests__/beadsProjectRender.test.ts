@@ -2503,6 +2503,7 @@ describe('Beads project renderers', () => {
       specId: planDocPath,
       acceptanceCriteria: '- Expose hierarchy and blockers.\n- Keep assignee mapping safe.',
       notes: 'Local scratch output lived in ~/private/log.txt.',
+      externalRef: 'gh-200',
       status: 'open',
       priority: 1,
       type: 'feature',
@@ -3238,7 +3239,7 @@ describe('Beads project renderers', () => {
     const canonicalBead = {
       ...buildPublicInventory()[0]!,
       id: 'pb-ios-beta',
-      title: 'iOS internal beta and continuity',
+      title: 'Implementation work for the iOS beta',
       notes: 'Historical note mentions gh-999 and #777 but must not control the canonical outcome.',
     } as PublicBead & { externalRef: string };
     canonicalBead.externalRef = 'gh-200';
@@ -3247,6 +3248,13 @@ describe('Beads project renderers', () => {
       [canonicalBead],
       buildContext([canonicalBead], {
         mirroredIssueUrlsByBeadId: {},
+        canonicalTargets: {
+          'gh-200': {
+            issue: 200,
+            title: 'iOS internal beta and continuity',
+            priority: 1,
+          },
+        },
       }),
     );
 

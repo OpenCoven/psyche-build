@@ -1,5 +1,6 @@
 import type { createGhClient, GhClient } from './github.mjs';
 import type { InventorySummary } from './model.mjs';
+import type { CanonicalOutcomeValidation } from './outcomes.mjs';
 import type {
   ReconciliationClosureCandidate,
   ReconciliationOperationCounts,
@@ -43,6 +44,7 @@ export interface CliDependencies {
 export interface CliSummary {
   mode: CliMode;
   inventory: InventorySummary;
+  canonicalOutcomes: CanonicalOutcomeValidation;
   plannedOperationCount: number;
   appliedOperationCount: number;
   operationCounts: ReconciliationOperationCounts;

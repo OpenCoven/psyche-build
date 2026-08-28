@@ -1,5 +1,7 @@
 // @ts-check
 
+import { normalizeCanonicalOutcomeRef } from './outcomes.mjs';
+
 /**
  * @typedef {0 | 1 | 2 | 3 | 4} BeadPriority
  */
@@ -23,6 +25,7 @@
  *   spec_id?: unknown,
  *   acceptance_criteria?: unknown,
  *   notes?: unknown,
+ *   external_ref?: unknown,
  *   status?: unknown,
  *   priority?: unknown,
  *   labels?: unknown,
@@ -43,6 +46,7 @@
  *   specId: string | null,
  *   acceptanceCriteria: string | null,
  *   notes: string | null,
+ *   externalRef: string | null,
  *   status: string,
  *   priority: BeadPriority,
  *   type: string,
@@ -491,6 +495,11 @@ function normalizeRecord(record, lineNumber, assigneeMap) {
       beadRecord.notes,
       'notes',
       `Beads record "${id}" on line ${lineNumber}`,
+    ),
+    externalRef: normalizeCanonicalOutcomeRef(
+      beadRecord.external_ref,
+      `Beads record "${id}" on line ${lineNumber} field "external_ref"`,
+      { allowNull: true },
     ),
     status: normalizeRequiredString(
       beadRecord.status,

@@ -52,6 +52,10 @@ const mappedAssigneeConfigPath = join(
   repositoryRoot,
   '__tests__/fixtures/beads-project-sync/mapped-assignee-config.json',
 );
+const fixtureConfigPath = join(
+  repositoryRoot,
+  '__tests__/fixtures/beads-project-sync/canonical-targets-config.json',
+);
 const configPath = join(repositoryRoot, '.github/beads-project-sync.json');
 const token = 'github_pat_DO_NOT_LEAK';
 const projectNodeId = 'PVT_kwDOECXnmc4BhMIA';
@@ -180,6 +184,8 @@ function canonicalTargetConfig(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+const testCanonicalTargets = canonicalTargetConfig().canonicalTargets;
 
 function createFakeGh(options: FakeGhOptions = {}) {
   const calls: string[] = [];
@@ -404,7 +410,7 @@ async function runCli(
   const fakeGh = options.fakeGh ?? createFakeGh();
 
   const exitCode = await runBeadsProjectCli(args, {
-    configPath: options.configPath ?? configPath,
+    configPath: options.configPath ?? fixtureConfigPath,
     cwd: repositoryRoot,
     env: options.env ?? {},
     run: options.run,
@@ -490,6 +496,23 @@ describe('Beads project sync configuration', () => {
       applyLockRef: APPLY_LOCK_REF,
       trustedIssueAuthors: ['bunsdev'],
       assigneeMap: {},
+      canonicalTargets: {
+        'gh-199': {
+          issue: 199,
+          title: 'Operations, diagnostics, and recovery',
+          priority: 1,
+        },
+        'gh-200': {
+          issue: 200,
+          title: 'iOS internal beta and continuity',
+          priority: 1,
+        },
+        'gh-246': {
+          issue: 246,
+          title: 'Cross-platform Vim and keyboard-mode parity',
+          priority: 2,
+        },
+      },
       massClose: {
         minimum: 5,
         fraction: 0.25,
@@ -514,6 +537,24 @@ describe('Beads project sync configuration', () => {
     });
   });
 
+  it.each([
+    ['missing canonicalTargets', {}, /canonicalTargets/i],
+    ['missing issue', { 'gh-200': { title: 'Outcome', priority: 1 } }, /issue/i],
+    ['missing title', { 'gh-200': { issue: 200, priority: 1 } }, /title/i],
+    ['missing priority', { 'gh-200': { issue: 200, title: 'Outcome' } }, /priority/i],
+    ['wrong issue type', { 'gh-200': { issue: '200', title: 'Outcome', priority: 1 } }, /issue/i],
+    ['wrong title type', { 'gh-200': { issue: 200, title: 200, priority: 1 } }, /title/i],
+    ['wrong priority type', { 'gh-200': { issue: 200, title: 'Outcome', priority: '1' } }, /priority/i],
+  ])('rejects canonical target configuration with %s', (_name, canonicalTargets, expected) => {
+    const config = { ...canonicalTargetConfig() } as Record<string, unknown>;
+    if (Object.keys(canonicalTargets).length === 0) {
+      delete config.canonicalTargets;
+    } else {
+      config.canonicalTargets = canonicalTargets;
+    }
+    expect(() => parseSyncConfig(config)).toThrow(expected);
+  });
+
   it('pins the apply lock to its dedicated branch ref', () => {
     expect(APPLY_LOCK_REF).toBe('refs/heads/psyche-beads-project-sync-lock');
     expect(parseSyncConfig({
@@ -526,6 +567,7 @@ describe('Beads project sync configuration', () => {
       applyLockRef: APPLY_LOCK_REF,
       trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     }).applyLockRef).toBe(APPLY_LOCK_REF);
     expect(() => parseSyncConfig({
@@ -538,6 +580,7 @@ describe('Beads project sync configuration', () => {
       applyLockRef: 'refs/tags/psyche-beads-project-sync-lock',
       trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     })).toThrow(/applyLockRef.*refs\/heads/i);
   });
@@ -552,6 +595,7 @@ describe('Beads project sync configuration', () => {
       issueMarker: 'psyche-bead-sync:v1',
       trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
     };
 
     for (const minimum of [true, false, '5', 1.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -589,6 +633,7 @@ describe('Beads project sync configuration', () => {
       issueMarker: 'psyche-bead-sync:v1',
       trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     };
 
@@ -624,6 +669,7 @@ describe('Beads project sync configuration', () => {
       trustedIssueAuthors: ['BunsDev'],
       legacyProjectMarkers: ['prior-project-sync:v1'],
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     })).toMatchObject({
       projectMarker: 'custom-project-sync:v2',
@@ -640,6 +686,7 @@ describe('Beads project sync configuration', () => {
       issueMarker: 'custom-issue-sync:v2',
       trustedIssueAuthors: ['BunsDev'],
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     })).toThrow(/safe machine marker/i);
   });
@@ -653,6 +700,7 @@ describe('Beads project sync configuration', () => {
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
       assigneeMap: {},
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     };
 
@@ -686,6 +734,7 @@ describe('Beads project sync configuration', () => {
       projectMarker: 'psyche-beads-project-sync:v1',
       issueMarker: 'psyche-bead-sync:v1',
       trustedIssueAuthors: ['BunsDev'],
+      canonicalTargets: testCanonicalTargets,
       massClose: { minimum: 5, fraction: 0.25 },
     };
 
@@ -1124,6 +1173,12 @@ describe('Beads project sync CLI', () => {
         closed: 1,
         blocked: 1,
         inProgress: 1,
+      },
+      canonicalOutcomes: {
+        mappedActiveCount: 4,
+        unmappedActiveBeadIds: [],
+        unknownTargetBeadIds: [],
+        priorityMismatchBeadIds: [],
       },
       appliedOperationCount: 0,
       operationCounts: {
