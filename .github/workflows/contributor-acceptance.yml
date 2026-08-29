@@ -30,8 +30,8 @@ permissions:
 jobs:
   clean-checkout:
     name: Clean checkout contributor loop
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - name: Checkout without persisted credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -47,6 +47,14 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        with:
+          toolchain: 1.91.0
+
+      - name: Install public system prerequisite
+        run: brew install tmux
+
       - name: Bootstrap exactly as a new contributor
         shell: bash
         run: bash scripts/agent-bootstrap
@@ -58,21 +66,13 @@ jobs:
           __tests__/agentRepositoryContract.test.ts
           __tests__/repositoryMapContract.test.ts
           __tests__/communityHealthContract.test.ts
+          __tests__/contributorAcceptanceWorkflow.test.ts
 
-      - name: Run bounded contributor handoff gate
+      - name: Run complete documented contributor handoff gate
         shell: bash
-        run: bash scripts/agent-check fast
-
-      - name: Verify generated desktop web path
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm --dir native/desktop/psyche-build-tauri build:web
-          git diff --exit-code -- native/desktop/psyche-build-tauri/web
-
-      - name: Verify desktop Rust compiles from the clean checkout
-        shell: bash
-        run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml
+        env:
+          PSYCHE_AGENT_CHECK_IOS: "0"
+        run: bash scripts/agent-check full
 
       - name: Assert platform-specific iOS routing remains explicit
         shell: bash
