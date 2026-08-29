@@ -102,6 +102,14 @@ describe('agent repository contract', () => {
     expect(manifest).toContain('Xcode 26.2 build 17C52');
   });
 
+  it('keeps Rust build artifacts outside the checkout during the full gate', () => {
+    expect(check).toContain('mktemp -d');
+    expect(check).toContain('psyche-build-agent-check-cargo.XXXXXX');
+    expect(check).toContain('export CARGO_TARGET_DIR="$cargo_target_dir"');
+    expect(check).toContain("trap 'rm -rf \"$cargo_target_dir\"' EXIT");
+    expect(check).not.toContain('src-tauri/target');
+  });
+
   it('names generated outputs and their canonical generators', () => {
     const generatedContracts = [
       ['src/utils/generated-agents-doc.ts', 'pnpm generate:hooks-docs'],
