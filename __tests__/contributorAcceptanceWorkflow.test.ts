@@ -17,21 +17,36 @@ describe('clean contributor acceptance workflow', () => {
     expect(workflow).not.toMatch(/contents:\s*write/u);
   });
 
-  it('uses the repository-owned bootstrap and handoff gates', () => {
+  it('uses the repository-owned bootstrap and complete handoff gate', () => {
+    expect(workflow).toContain('runs-on: macos-15');
+    expect(workflow).toContain('brew install tmux');
+    expect(workflow).toContain('toolchain: 1.91.0');
     expect(workflow).toContain('bash scripts/agent-bootstrap');
-    expect(workflow).toContain('bash scripts/agent-check fast');
+    expect(workflow).toContain('bash scripts/agent-check full');
+    expect(workflow).toContain('PSYCHE_AGENT_CHECK_IOS: "0"');
     expect(workflow).toContain('__tests__/agentRepositoryContract.test.ts');
     expect(workflow).toContain('__tests__/repositoryMapContract.test.ts');
     expect(workflow).toContain('__tests__/communityHealthContract.test.ts');
+    expect(workflow).toContain('__tests__/contributorAcceptanceWorkflow.test.ts');
   });
 
-  it('proves desktop generated output and Rust from a clean checkout', () => {
-    expect(workflow).toContain('pnpm --dir native/desktop/psyche-build-tauri build:web');
-    expect(workflow).toContain('git diff --exit-code -- native/desktop/psyche-build-tauri/web');
-    expect(workflow).toContain('cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml');
+  it('inherits generated-output, smoke, packaging, and Rust proof from the full gate', () => {
+    const agentCheck = readFileSync(resolve(root, 'scripts/agent-check'), 'utf8');
+    for (const command of [
+      'pnpm test',
+      'pnpm docs:focus:check',
+      'pnpm --dir docs build',
+      'pnpm smoke',
+      'pnpm smoke:pack',
+      'pnpm --dir native/desktop/psyche-build-tauri build:web',
+      'cargo test',
+      'cargo check',
+    ]) {
+      expect(agentCheck).toContain(command);
+    }
   });
 
-  it('keeps iOS acceptance explicitly platform-gated instead of pretending Linux proves it', () => {
+  it('keeps iOS acceptance explicitly opt-in instead of treating an unrun check as success', () => {
     expect(workflow).toContain("grep -F 'pnpm ios:project:check' docs/REPOSITORY-MAP.md");
     expect(workflow).toContain("grep -F 'compatible macOS host' AGENTS.md");
     expect(workflow).not.toMatch(/xcodebuild/u);
