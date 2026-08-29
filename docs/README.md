@@ -112,16 +112,19 @@ TestFlight, and public App Store distribution are unavailable. See the
 ## Product, architecture, and security
 
 - [Product spec](PRODUCT-SPEC.md)
+- [Contributor repository map](REPOSITORY-MAP.md)
 - [Control-plane architecture](CONTROL-PLANE.md)
 - [Agent surface control](AGENT-SURFACE-CONTROL.md)
 - [Bridge and daemon security model](BRIDGE-SECURITY.md)
 - [Psyche compatibility map](PSYCHE-COMPATIBILITY-MAP.md)
+- [Tracker integrity](TRACKER-INTEGRITY.md)
 - [Psyche Build integrations](INTEGRATIONS.md)
 - [Breaking changes](BREAKING-CHANGES.md)
 
 ## Contributing
 
 - [Contributing guide](../CONTRIBUTING.md)
+- [Repository map and change routing](REPOSITORY-MAP.md)
 - [Repository test guide](https://github.com/OpenCoven/psyche-build/blob/main/__tests__/README.md)
 
 When a change alters support status, roadmap dependencies, execution order, or
