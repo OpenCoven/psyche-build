@@ -1,0 +1,89 @@
+name: Contributor Acceptance
+
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - "SUPPORT.md"
+      - "CODE_OF_CONDUCT.md"
+      - "agent/**"
+      - "scripts/agent-*"
+      - "docs/REPOSITORY-MAP.md"
+      - "docs/SUPPORT-MATRIX.md"
+      - "docs/CONTROL-PLANE.md"
+      - "docs/AGENT-SURFACE-CONTROL.md"
+      - "docs/BRIDGE-SECURITY.md"
+      - "docs/PSYCHE-COMPATIBILITY-MAP.md"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/CODEOWNERS"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/workflows/contributor-acceptance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-checkout:
+    name: Clean checkout contributor loop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout without persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm from packageManager
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Bootstrap exactly as a new contributor
+        shell: bash
+        run: bash scripts/agent-bootstrap
+
+      - name: Run focused repository-contract proof
+        shell: bash
+        run: >-
+          pnpm vitest --run
+          __tests__/agentRepositoryContract.test.ts
+          __tests__/repositoryMapContract.test.ts
+          __tests__/communityHealthContract.test.ts
+
+      - name: Run bounded contributor handoff gate
+        shell: bash
+        run: bash scripts/agent-check fast
+
+      - name: Verify generated desktop web path
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --dir native/desktop/psyche-build-tauri build:web
+          git diff --exit-code -- native/desktop/psyche-build-tauri/web
+
+      - name: Verify desktop Rust compiles from the clean checkout
+        shell: bash
+        run: cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml
+
+      - name: Assert platform-specific iOS routing remains explicit
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'pnpm ios:project:check' docs/REPOSITORY-MAP.md
+          grep -F 'compatible macOS host' AGENTS.md
+
+      - name: Verify no acceptance step dirtied the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
