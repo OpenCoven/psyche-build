@@ -17,6 +17,16 @@ validation checklist, install the pinned version when `corepack` is unavailable:
 npm install --global corepack@0.31.0
 ```
 
+The repository's canonical pnpm version is the `packageManager` value in
+`package.json`. Do not duplicate that version in contributor commands. Activate
+that exact pin with Corepack before validation:
+
+```bash
+corepack enable
+corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+pnpm --version
+```
+
 ## Local Development (Dogfood Loop)
 
 1. Install dependencies:
@@ -235,15 +245,16 @@ npm pack --dry-run
 
 ## Maintainer Checklist (Before Release)
 
-Run the complete reproducible local validation suite with the pnpm version pinned in `package.json`:
+Run the complete reproducible local validation suite only after activating the
+`packageManager` pin from `package.json` as shown above:
 
 ```bash
-corepack pnpm@10.14.0 test
-corepack pnpm@10.14.0 typecheck
-corepack pnpm@10.14.0 clean
-corepack pnpm@10.14.0 build
-corepack pnpm@10.14.0 smoke
-corepack pnpm@10.14.0 smoke:pack
+pnpm test
+pnpm typecheck
+pnpm clean
+pnpm build
+pnpm smoke
+pnpm smoke:pack
 ```
 
 `pnpm smoke` and `pnpm smoke:pack` check different things and both belong
