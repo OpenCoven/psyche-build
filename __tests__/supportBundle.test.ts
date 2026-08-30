@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { serialize as serializeProtocolFixture } from '../scripts/generate-protocol-fixtures.js';
 import {
@@ -139,6 +140,14 @@ describe('support bundle v1', () => {
     expect((JSON.parse(serialized) as typeof bundle).redaction.categories).toHaveProperty('secret-field');
   });
 
+  it('keeps redaction accounting stable across repeated serialization', () => {
+    const bundle = buildSupportBundle({ lifecycle: { password: 'secret' } });
+    const first = serializeSupportBundle(bundle);
+
+    expect(serializeSupportBundle(bundle)).toBe(first);
+    expect(JSON.parse(first).redaction).toEqual(JSON.parse(serializeSupportBundle(bundle)).redaction);
+  });
+
   it('preserves the complete action-state vocabulary without exposing receipt payloads', () => {
     const receipts = SUPPORT_ACTION_STATES.map((state, index) => ({
       schema: 'psyche.control.receipt/v1' as const,
@@ -190,6 +199,23 @@ describe('support bundle v1', () => {
     expect(serializedBundle.truncation.terminalLinesOmitted).toBeGreaterThan(0);
   });
 
+  it('selects over-cap records deterministically before applying the record cap', () => {
+    const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
+      sequence,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'test',
+      event: 'event',
+    }));
+    const options = { now: () => 1_767_225_600_000 };
+    const first = buildSupportBundle({ records }, options);
+    const second = buildSupportBundle({ records: [...records].reverse() }, options);
+
+    expect(serializeSupportBundle(first)).toBe(serializeSupportBundle(second));
+    expect(first.records.map((record) => record.sequence)).toEqual(
+      Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords }, (_, sequence) => sequence),
+    );
+  });
+
   it('returns recovery_required when a bounded collector times out', async () => {
     const bundle = await collectSupportBundle([
       {
@@ -218,6 +244,28 @@ describe('support bundle v1', () => {
 
     expect(bundle.status).toBe('recovery_required');
     expect(bundle.errors.some((error) => error.recoveryRequired === true)).toBe(true);
+  });
+
+  it('rejects non-async collectors before they can block the elapsed-time budget', async () => {
+    let called = false;
+    const bundle = await collectSupportBundle([{
+      name: 'synchronous-collector',
+      collect: (() => {
+        called = true;
+        const deadline = Date.now() + 50;
+        while (Date.now() < deadline) {
+          // This must never execute: synchronous collector implementations are
+          // outside the bounded async collection contract.
+        }
+        return Promise.resolve({ lifecycle: { state: 'ready' } });
+      }) as never,
+    }], { maxElapsedMs: 5 });
+
+    expect(called).toBe(false);
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
   });
 
   it('never returns complete after cancellation or a late normalization deadline', async () => {
@@ -521,6 +569,34 @@ describe('support bundle v1', () => {
       .toThrow(/schema|compatibility/i);
   });
 
+  it('rejects unsafe unknown fields at every typed validation boundary', () => {
+    const fixture = createSafeSupportBundleFixture();
+    expect(isSupportBundleV1({
+      ...fixture,
+      provenance: { ...fixture.provenance, secret: 'must not pass' },
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      project: { ...fixture.project, secret: 'must not pass' },
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      records: [{ ...fixture.records[0], futureSecret: 'must not pass' }],
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      errors: [{ collector: 'fixture', code: 'failed', at: 'unknown', message: 'must not pass' }],
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      receipts: [{ ...fixture.receipts[0], message: 'must not pass' }],
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      lifecycle: { alice: true, userId: 'ready' },
+    } as unknown)).toBe(false);
+  });
+
   it('drops malformed receipt revisions without serializing their payload', () => {
     const bundle = buildSupportBundle({
       receipts: [{
@@ -539,6 +615,7 @@ describe('support bundle v1', () => {
 
   it('validates normalized collection entries and bounds at the type guard boundary', () => {
     const fixture = createSafeSupportBundleFixture();
+    expect(isSupportBundleV1(fixture)).toBe(true);
     expect(isSupportBundleV1({ ...fixture, records: [{}] } as unknown)).toBe(false);
     expect(isSupportBundleV1({ ...fixture, terminalTail: [123] } as unknown)).toBe(false);
     expect(isSupportBundleV1({
@@ -622,6 +699,22 @@ describe('support bundle v1', () => {
     expect(buildSupportBundle({ project: { relativePath: '~/.ssh/id_rsa' } }).project?.relativePath).toBeUndefined();
     expect(buildSupportBundle({ project: { relativePath: 'src/ghp_01234567890123456789' } }).project?.relativePath)
       .toBeUndefined();
+    expect(buildSupportBundle({ project: { relativePath: 'src/glpat-01234567890123456789' } }).project?.relativePath)
+      .toBeUndefined();
+    expect(buildSupportBundle({ project: { relativePath: '.ssh/id_rsa' } }).project?.relativePath).toBeUndefined();
+    expect(buildSupportBundle({ project: { relativePath: 'config/credentials.json' } }).project?.relativePath)
+      .toBeUndefined();
+    const rawIdentifier = 'a'.repeat(64);
+    const rawReceipt = buildSupportBundle({ receipts: [{
+      schema: 'psyche.control.receipt/v1',
+      actionId: rawIdentifier,
+      state: 'queued',
+      resource: { kind: 'project', id: 'project' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }] });
+    expect(rawReceipt.receipts[0]?.actionId).toBe(createHash('sha256').update(rawIdentifier).digest('hex'));
+    expect(buildSupportBundle({ errors: [null] as never }).status).toBe('recovery_required');
+    expect(buildSupportBundle({ lifecycle: { alice: true, userId: 'ready' } }).lifecycle).toEqual({});
     expect(buildSupportBundle({ records: [{
       sequence: 1,
       at: '2026-02-31T00:00:00.000Z',
@@ -668,6 +761,16 @@ describe('support bundle v1', () => {
       })),
     });
     expect(overflowing.truncation.errorsOmitted).toBeGreaterThan(0);
+
+    const normalized = buildSupportBundle({ lifecycle: { password: 'secret' } }) as unknown as {
+      truncation: Record<string, unknown>;
+      redaction: { categories: Record<string, number> };
+    };
+    normalized.truncation.recordsOmitted = 999_999;
+    normalized.redaction.categories['forged'] = 999_999;
+    const reserialized = JSON.parse(serializeSupportBundle(normalized as unknown as SupportBundle)) as SupportBundle;
+    expect(reserialized.truncation.recordsOmitted).toBe(0);
+    expect(reserialized.redaction.categories).not.toHaveProperty('forged');
   });
 
   it('fails closed for untyped state strings and numbers', () => {

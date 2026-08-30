@@ -184,10 +184,11 @@ interface NormalizationBudget {
   deadlineAt?: number;
 }
 
-const REDACTION_AUDIT = Symbol('supportBundleRedactionAudit');
-type AuditedSupportBundle = SupportBundle & {
-  readonly [REDACTION_AUDIT]?: SupportRedactionManifest;
-};
+// Normalized metadata is an internal trust boundary. A symbol is still
+// discoverable and mutable through reflection, so keep the provenance and
+// truncation state outside the caller-visible object graph.
+const REDACTION_AUDITS = new WeakMap<object, SupportRedactionManifest>();
+const TRUSTED_TRUNCATIONS = new WeakMap<object, Partial<SupportTruncationManifest>>();
 
 const ROOT_FIELDS = new Set([
   'generatedAt',
@@ -230,7 +231,7 @@ const ABSOLUTE_PATH_FRAGMENT = /(?<![A-Za-z0-9])(?:\/[^\s"'`<>|]+(?:[ \t]+[^\s"'
 const ANSI = /(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001bP[\s\S]*?\u001b\\|\u001b\[[0-?]*[ -/]*[@-~]|\u001b[()][0-2A-Za-z]|\u001b[=>])/g;
 const BEARER = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const PEM = /-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/gi;
-const API_TOKEN = /\b(?:github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{12,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{16})\b/g;
+const API_TOKEN = /\b(?:github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{16})\b/g;
 const SENSITIVE_ASSIGNMENT = /\b(?:[A-Z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|API_KEY|PRIVATE_KEY))\s*=\s*[^\s]+/gi;
 const CLOUD_CREDENTIAL_ASSIGNMENT = /\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*[^\s]+/gi;
 const AUTHORIZATION_LABELED_VALUE = /["']?authorization(?:[_-]?header)?["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\r\n,;}]+)/gi;
@@ -238,6 +239,7 @@ const SENSITIVE_LABELED_VALUE = /["']?(?:token|secret|password|passwd|passphrase
 const SENSITIVE_PHRASE = /\b(?:token|secret|password|passwd|passphrase|credential|authorization(?:header)?|auth|cookie)\b\s+(?:is\s+|value\s+)?[^\r\n]+/gi;
 const SAFE_ATTRIBUTE_KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const SAFE_CATEGORY_VALUE = /^[a-z0-9][a-z0-9._-]{0,95}$/;
+const SENSITIVE_RELATIVE_PATH = /(?:^|\/)(?:\.ssh(?:\/|$)|\.env(?:$|[./])|credentials?(?:$|[._/-])|id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._/-]))/i;
 const SAFE_DIAGNOSTIC_VALUES = new Set([
   'accelerated', 'active', 'available', 'cancelled', 'complete', 'connected',
   'current', 'degraded', 'denied', 'disabled', 'enabled', 'executing', 'expired',
@@ -272,12 +274,12 @@ const SAFE_REDACTION_CATEGORY_VALUES = new Set([
   'invalid-lease-revision', 'invalid-record', 'invalid-receipt', 'invalid-status',
   'invalid-timestamp',
   'non-authoritative-receipt', 'non-finite-number', 'non-normalized-receipt',
-  'record-count', 'record-omitted', 'record-size', 'receipt-identity-too-large',
+  'record-count', 'record-omitted', 'record-size', 'receipt-count', 'receipt-identity-too-large',
   'secret-assignment', 'secret-field', 'secret-labeled-value', 'secret-phrase',
   'sensitive-text', 'terminal-field', 'terminal-omitted', 'terminal-redaction',
   'token', 'untyped-category', 'untyped-number', 'untyped-string', 'unknown-root-field',
   'unknown-root-field-limit', 'unsafe-category', 'unsafe-field-name', 'unsafe-relative-path',
-  'unsupported-value', 'relative-path-too-long', 'project-identity-too-large',
+  'unsupported-value', 'relative-path-too-long', 'project-identity-too-large', 'unsafe-state-key',
   'collection-invalid-output', 'identifier-too-large', 'unsafe-identifier',
 ]);
 const SAFE_PROVENANCE_APPLICATION_VALUES = new Set(['psyche-build']);
@@ -313,12 +315,46 @@ const NORMALIZED_RECORD_KEYS = new Set([
   'sequence', 'at', 'component', 'event', 'outcome', 'durationMs', 'attributes', 'truncated',
 ]);
 const COLLECTOR_ERROR_KEYS = new Set(['collector', 'code', 'at', 'message', 'recoveryRequired']);
+const NORMALIZED_ERROR_KEYS = new Set(['collector', 'code', 'at', 'recoveryRequired']);
+const SUPPORT_PROVENANCE_KEYS = new Set(['application', 'releaseVersion', 'sourceSha', 'platform', 'architecture']);
+const SUPPORT_PROJECT_KEYS = new Set(['idDigest', 'relativePath']);
+const SUPPORT_RECEIPT_KEYS = new Set([
+  'sourceSchema', 'actionId', 'state', 'sourceState', 'resource', 'createdAt', 'taskId', 'actorId',
+  'leaseId', 'leaseRevision', 'completedAt', 'code', 'durationMs',
+]);
+const SUPPORT_RECEIPT_RESOURCE_KEYS = new Set(['kind', 'idDigest', 'generation']);
+const SUPPORT_REDACTION_KEYS = new Set(['version', 'redactedFields', 'omittedFields', 'categories']);
+const SUPPORT_TRUNCATION_KEYS = new Set([
+  'recordsOmitted', 'receiptsOmitted', 'errorsOmitted', 'stateFieldsOmitted',
+  'terminalLinesOmitted', 'bytesOmitted', 'fieldsTruncated', 'totalPayloadBounded',
+]);
+const SUPPORT_COMPATIBILITY_KEYS = new Set(['policy', 'minimumReaderVersion']);
+// State maps are intentionally narrower than record attributes. A state key
+// is part of the public diagnostic vocabulary, not an arbitrary identifier
+// supplied by a collector.
+const SAFE_STATE_KEYS = new Set([
+  ...SAFE_DIAGNOSTIC_VALUES,
+  'accelerated', 'backend', 'browser', 'capability', 'connected', 'diagnosticNote',
+  'engine', 'fallback', 'graphics', 'healthy', 'mode', 'panes', 'provider',
+  'recoveryRequired', 'renderer', 'safeState', 'status', 'state', 'surface',
+  'supported', 'support', 'tmux', 'version', 'visible', 'webgl', 'wayland', 'x11',
+  ...SAFE_DIAGNOSTIC_NUMBER_KEYS,
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   try {
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
+}
+
+function isAsyncCollector(collector: SupportCollector): boolean {
+  try {
+    return typeof collector.collect === 'function'
+      && collector.collect.constructor?.name === 'AsyncFunction';
   } catch {
     return false;
   }
@@ -517,7 +553,7 @@ function seededAudit(input: SupportBundleInput, deadlineAt?: number): MutableAud
   // A caller-provided enumerable manifest is data, not evidence. Only a
   // manifest attached by our own normalization pass may be carried through a
   // second serialization pass; this prevents forged counters/categories.
-  const manifest = (input as unknown as AuditedSupportBundle)[REDACTION_AUDIT];
+  const manifest = isRecord(input) ? REDACTION_AUDITS.get(input) : undefined;
   if (manifest?.version !== 1) return audit;
   const redactedFields = finiteNonNegativeInteger(manifest.redactedFields);
   const omittedFields = finiteNonNegativeInteger(manifest.omittedFields);
@@ -581,14 +617,19 @@ function safeCategory(value: unknown, audit: MutableAudit, key: string): string 
   return omit(audit, 'unsafe-category');
 }
 
-function safeIdentifierDigest(value: unknown, audit: MutableAudit, key: string): string | undefined {
+function safeIdentifierDigest(
+  value: unknown,
+  audit: MutableAudit,
+  key: string,
+  acceptDigest = true,
+): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'string'
     || value.length > MAX_TEXT_SCAN_CHARS
     || byteLength(value) > SUPPORT_BUNDLE_LIMITS.maxStringBytes) {
     return omit(audit, 'identifier-too-large');
   }
-  if (SHA256_DIGEST.test(value)) return value.toLowerCase();
+  if (acceptDigest && SHA256_DIGEST.test(value)) return value.toLowerCase();
   const text = boundedText(value, audit, key);
   if (!text || text !== value || !SAFE_CATEGORY_VALUE.test(text)) {
     return omit(audit, 'unsafe-identifier');
@@ -686,6 +727,7 @@ function note(audit: MutableAudit, category: string): void {
 }
 
 function redact(value: unknown, audit: MutableAudit, category: string): string {
+  if (value === '[redacted]') return '[redacted]';
   audit.redactedFields += 1;
   note(audit, category);
   return '[redacted]';
@@ -713,6 +755,7 @@ function isSafeRelativePath(value: string): boolean {
     && byteLength(normalized) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes
     && !normalized.startsWith('/')
     && !normalized.split('/').some((segment) => segment === '..')
+    && !SENSITIVE_RELATIVE_PATH.test(normalized)
     && !hasSensitiveToken(normalized)
     && /^[A-Za-z0-9._/-]+$/.test(normalized);
 }
@@ -753,6 +796,7 @@ function safeUnknown(
   key: string,
   depth: number,
   homeDirectory: string | undefined,
+  stateKeyPolicy = false,
 ): unknown {
   assertNormalizationDeadline(audit.deadlineAt);
   if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth) return omit(audit, 'attribute-depth');
@@ -780,7 +824,7 @@ function safeUnknown(
   if (Array.isArray(value)) {
     const output: unknown[] = [];
     for (const item of value.slice(0, SUPPORT_BUNDLE_LIMITS.maxAttributeItems)) {
-      const safe = safeUnknown(item, audit, key, depth + 1, homeDirectory);
+      const safe = safeUnknown(item, audit, key, depth + 1, homeDirectory, stateKeyPolicy);
       if (safe !== undefined) output.push(safe);
     }
     if (value.length > output.length) {
@@ -800,7 +844,11 @@ function safeUnknown(
   for (const [childKey, childValue] of selectedEntries) {
     const outputKey = safeAttributeKey(childKey, audit);
     if (!outputKey) continue;
-    const safe = safeUnknown(childValue, audit, childKey, depth + 1, homeDirectory);
+    if (stateKeyPolicy && !SAFE_STATE_KEYS.has(childKey)) {
+      omit(audit, 'unsafe-state-key');
+      continue;
+    }
+    const safe = safeUnknown(childValue, audit, childKey, depth + 1, homeDirectory, stateKeyPolicy);
     if (safe !== undefined) output[outputKey] = safe;
   }
   if (entries.length > selectedEntries.length) {
@@ -818,7 +866,12 @@ function boundedEntries(value: Record<string, unknown>, audit: MutableAudit): Ar
   return undefined;
 }
 
-function safeMap(value: unknown, audit: MutableAudit, homeDirectory?: string): Readonly<Record<string, unknown>> {
+function safeMap(
+  value: unknown,
+  audit: MutableAudit,
+  homeDirectory?: string,
+  stateKeyPolicy = false,
+): Readonly<Record<string, unknown>> {
   assertNormalizationDeadline(audit.deadlineAt);
   if (!isRecord(value)) return {};
   const entries = boundedEntries(value, audit);
@@ -831,7 +884,11 @@ function safeMap(value: unknown, audit: MutableAudit, homeDirectory?: string): R
   for (const [key, child] of selectedEntries) {
     const outputKey = safeAttributeKey(key, audit);
     if (!outputKey) continue;
-    const safe = safeUnknown(child, audit, key, 0, homeDirectory);
+    if (stateKeyPolicy && !SAFE_STATE_KEYS.has(key)) {
+      omit(audit, 'unsafe-state-key');
+      continue;
+    }
+    const safe = safeUnknown(child, audit, key, 0, homeDirectory, stateKeyPolicy);
     if (safe !== undefined) output[outputKey] = safe;
   }
   if (entries.length > selectedEntries.length) {
@@ -874,8 +931,9 @@ function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvena
   };
 }
 
-function isNormalizedProvenance(value: unknown): value is SupportProvenance {
+function isNormalizedProvenance(value: unknown, deadlineAt?: number): value is SupportProvenance {
   return isRecord(value)
+    && hasOnlyKeys(value, SUPPORT_PROVENANCE_KEYS, deadlineAt)
     && SAFE_PROVENANCE_APPLICATION_VALUES.has(value.application as string)
     && (value.releaseVersion === 'unknown'
       || (typeof value.releaseVersion === 'string' && SAFE_VERSION_VALUE.test(value.releaseVersion)))
@@ -917,7 +975,7 @@ function sanitizeProject(value: unknown, audit: MutableAudit, homeDirectory?: st
 }
 
 function sanitizeState(value: unknown, audit: MutableAudit, homeDirectory?: string): Readonly<Record<string, unknown>> {
-  return safeMap(value, audit, homeDirectory);
+  return safeMap(value, audit, homeDirectory, true);
 }
 
 function sanitizeStatus(value: unknown, audit: MutableAudit): SupportBundleStatus {
@@ -1076,6 +1134,7 @@ function hasBoundedReceiptIdentity(value: ActionStatusReceipt): boolean {
 function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value is SupportReceipt {
   assertNormalizationDeadline(deadlineAt);
   if (!isRecord(value)
+    || !hasOnlyKeys(value, SUPPORT_RECEIPT_KEYS, deadlineAt)
     || value.sourceSchema !== 'psyche.control.receipt/v1'
     || typeof value.actionId !== 'string'
     || !SHA256_DIGEST.test(value.actionId)
@@ -1097,6 +1156,11 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
         || value.durationMs < 0 || value.durationMs > 86_400_000))) return false;
   const resource = value.resource;
   return (resource !== undefined)
+    && hasOnlyKeys(
+      resource,
+      resource.kind === 'project' ? new Set(['kind', 'idDigest']) : SUPPORT_RECEIPT_RESOURCE_KEYS,
+      deadlineAt,
+    )
     && (resource.kind === 'project' || resource.kind === 'pane' || resource.kind === 'browser_tab')
     && typeof resource.idDigest === 'string'
     && /^[a-f0-9]{64}$/i.test(resource.idDigest)
@@ -1162,12 +1226,12 @@ function sanitizeReceipt(
     note(audit, 'receipt-identity-too-large');
     return undefined;
   }
-  const actionId = safeIdentifierDigest(value.actionId, audit, 'actionId');
+  const actionId = safeIdentifierDigest(value.actionId, audit, 'actionId', false);
   const createdAt = safeTimestamp(value.createdAt, audit, 'createdAt');
   if (!actionId || !createdAt) return undefined;
-  const taskId = value.taskId === undefined ? undefined : safeIdentifierDigest(value.taskId, audit, 'taskId');
-  const actorId = value.actorId === undefined ? undefined : safeIdentifierDigest(value.actorId, audit, 'actorId');
-  const leaseId = value.leaseId === undefined ? undefined : safeIdentifierDigest(value.leaseId, audit, 'leaseId');
+  const taskId = value.taskId === undefined ? undefined : safeIdentifierDigest(value.taskId, audit, 'taskId', false);
+  const actorId = value.actorId === undefined ? undefined : safeIdentifierDigest(value.actorId, audit, 'actorId', false);
+  const leaseId = value.leaseId === undefined ? undefined : safeIdentifierDigest(value.leaseId, audit, 'leaseId', false);
   const completedAt = safeTimestamp(value.completedAt, audit, 'completedAt');
   const code = safeDiagnosticCategory(value.code, audit, 'code');
   const leaseRevision = safeLeaseRevision(value.leaseRevision, audit);
@@ -1277,6 +1341,7 @@ function isBoundedNormalizedValue(
   seen = new Set<object>(),
   budget: NormalizationBudget = { remaining: MAX_ATTRIBUTE_NODES },
   key = '',
+  stateKeyPolicy = false,
 ): boolean {
   assertNormalizationDeadline(budget.deadlineAt);
   if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth) return false;
@@ -1300,7 +1365,7 @@ function isBoundedNormalizedValue(
   if (Array.isArray(value)) {
     valid = value.length <= SUPPORT_BUNDLE_LIMITS.maxAttributeItems;
     for (let index = 0; valid && index < value.length; index += 1) {
-      valid = isBoundedNormalizedValue(value[index], depth + 1, seen, budget, key);
+      valid = isBoundedNormalizedValue(value[index], depth + 1, seen, budget, key, stateKeyPolicy);
     }
   } else {
     if (!isRecord(value)) return false;
@@ -1308,9 +1373,10 @@ function isBoundedNormalizedValue(
     valid = entries !== undefined && entries.length <= SUPPORT_BUNDLE_LIMITS.maxAttributeKeys;
     for (const [key, child] of entries ?? []) {
       if (!SAFE_ATTRIBUTE_KEY.test(key)
+        || (stateKeyPolicy && !SAFE_STATE_KEYS.has(key))
         || SENSITIVE_KEY.test(key)
         || CONTENT_KEY.test(key)
-        || !isBoundedNormalizedValue(child, depth + 1, seen, budget, key)) {
+        || !isBoundedNormalizedValue(child, depth + 1, seen, budget, key, stateKeyPolicy)) {
         valid = false;
         break;
       }
@@ -1327,6 +1393,7 @@ function isNormalizedRecord(
 ): value is SupportRecord {
   assertNormalizationDeadline(deadlineAt);
   if (!isRecord(value)
+    || !hasOnlyKeys(value, NORMALIZED_RECORD_KEYS, deadlineAt)
     || finiteNonNegativeInteger(value.sequence) === undefined
     || safeCanonicalTimestamp(value.at) === undefined
     || typeof value.component !== 'string'
@@ -1354,6 +1421,7 @@ function isNormalizedRecord(
 function isNormalizedError(value: unknown, deadlineAt?: number): value is SupportCollectionError {
   assertNormalizationDeadline(deadlineAt);
   if (!isRecord(value)
+    || !hasOnlyKeys(value, NORMALIZED_ERROR_KEYS, deadlineAt)
     || (typeof value.collector !== 'string' || !SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(value.collector))
     || (typeof value.code !== 'string' || !SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(value.code))
     || (value.at !== 'unknown' && safeCanonicalTimestamp(value.at) === undefined)
@@ -1374,6 +1442,7 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
   try {
     assertNormalizationDeadline(deadlineAt);
     if (!isRecord(value)
+      || !hasOnlyKeys(value, ROOT_FIELDS, deadlineAt)
       || value.schema !== SUPPORT_BUNDLE_SCHEMA
       || value.version !== SUPPORT_BUNDLE_VERSION
       || !isRecord(value.compatibility)
@@ -1404,30 +1473,34 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
     const provenanceKeys = ['application', 'releaseVersion', 'sourceSha', 'platform', 'architecture'] as const;
     const project = value.project;
     const stateBudget: NormalizationBudget = { remaining: MAX_ATTRIBUTE_NODES * 4, deadlineAt };
-    const structurallyValid = value.compatibility.policy === SUPPORT_BUNDLE_COMPATIBILITY.policy
+    const structurallyValid = hasOnlyKeys(value.compatibility, SUPPORT_COMPATIBILITY_KEYS, deadlineAt)
+      && value.compatibility.policy === SUPPORT_BUNDLE_COMPATIBILITY.policy
       && value.compatibility.minimumReaderVersion === SUPPORT_BUNDLE_COMPATIBILITY.minimumReaderVersion
-      && isNormalizedProvenance(provenance)
+      && isNormalizedProvenance(provenance, deadlineAt)
       && provenanceKeys.every((key) => typeof provenance[key] === 'string'
         && byteLength(provenance[key]) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes)
       && (value.status !== 'complete' || isCompleteProvenance(provenance))
       && (value.status !== 'complete' || value.errors.length === 0)
       && (value.ownerEpoch === undefined || finiteNonNegativeInteger(value.ownerEpoch) !== undefined)
       && (project === undefined || (isRecord(project)
+        && hasOnlyKeys(project, SUPPORT_PROJECT_KEYS, deadlineAt)
         && typeof project.idDigest === 'string'
         && SHA256_DIGEST.test(project.idDigest)
         && project.name === undefined
         && (project.relativePath === undefined || (typeof project.relativePath === 'string'
           && byteLength(project.relativePath) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes
           && isSafeRelativePath(project.relativePath)))))
-      && isBoundedNormalizedValue(value.lifecycle, 0, new Set<object>(), stateBudget)
-      && isBoundedNormalizedValue(value.providers, 0, new Set<object>(), stateBudget)
-      && isBoundedNormalizedValue(value.persistence, 0, new Set<object>(), stateBudget)
-      && isBoundedNormalizedValue(value.updater, 0, new Set<object>(), stateBudget)
-      && (value.graphics === undefined || isBoundedNormalizedValue(value.graphics, 0, new Set<object>(), stateBudget))
+      && isBoundedNormalizedValue(value.lifecycle, 0, new Set<object>(), stateBudget, '', true)
+      && isBoundedNormalizedValue(value.providers, 0, new Set<object>(), stateBudget, '', true)
+      && isBoundedNormalizedValue(value.persistence, 0, new Set<object>(), stateBudget, '', true)
+      && isBoundedNormalizedValue(value.updater, 0, new Set<object>(), stateBudget, '', true)
+      && (value.graphics === undefined || isBoundedNormalizedValue(value.graphics, 0, new Set<object>(), stateBudget, '', true))
+      && hasOnlyKeys(redaction, SUPPORT_REDACTION_KEYS, deadlineAt)
       && redaction.version === 1
       && finiteNonNegativeInteger(redaction.redactedFields) !== undefined
       && finiteNonNegativeInteger(redaction.omittedFields) !== undefined
       && isNormalizedCounterMap(redaction.categories, deadlineAt)
+      && hasOnlyKeys(truncation, SUPPORT_TRUNCATION_KEYS, deadlineAt)
       && finiteNonNegativeInteger(truncation.recordsOmitted) !== undefined
       && finiteNonNegativeInteger(truncation.receiptsOmitted) !== undefined
       && finiteNonNegativeInteger(truncation.errorsOmitted) !== undefined
@@ -1579,10 +1652,12 @@ function buildSupportBundleWithReceiptMode(
   const maxRecordBytes = optionLimit(options.maxRecordBytes, SUPPORT_BUNDLE_LIMITS.maxRecordBytes);
   const maxReceipts = optionLimit(options.maxReceipts, SUPPORT_BUNDLE_LIMITS.maxReceipts);
   const maxBundleBytes = optionLimit(options.maxBundleBytes, SUPPORT_BUNDLE_LIMITS.maxBundleBytes);
-  const records: SupportRecord[] = [];
+  const recordCandidates: SupportRecord[] = [];
   const rawRecords = Array.isArray(input.records) ? input.records : [];
   let invalidRecords = 0;
-  for (const raw of rawRecords.slice(0, maxRecords)) {
+  // Normalize the bounded candidate window before selecting the cap. This
+  // makes over-cap inputs independent of collector/input insertion order.
+  for (const raw of rawRecords.slice(0, MAX_ATTRIBUTE_SCAN_KEYS)) {
     assertNormalizationDeadline(deadlineAt);
     const record = sanitizeRecord(raw, audit, homeDirectory);
     if (!record) {
@@ -1602,58 +1677,71 @@ function buildSupportBundleWithReceiptMode(
         event: record.event,
         truncated: true,
       };
-      if (byteLength(serializeForSize(compact, deadlineAt)) <= maxRecordBytes) records.push(compact);
+      if (byteLength(serializeForSize(compact, deadlineAt)) <= maxRecordBytes) recordCandidates.push(compact);
       else {
         audit.omittedFields += 1;
         note(audit, 'record-omitted');
       }
       continue;
     }
-    records.push(record);
+    recordCandidates.push(record);
   }
-  if (rawRecords.length > records.length) {
-    audit.fieldsTruncated += Math.max(0, rawRecords.length - records.length);
-    note(audit, 'record-count');
-  }
-  records.sort((a, b) => a.sequence - b.sequence
+  recordCandidates.sort((a, b) => a.sequence - b.sequence
     || compareCodeUnits(a.at, b.at)
     || compareCodeUnits(a.component, b.component)
     || compareCodeUnits(a.event, b.event)
     || compareStableValues(a, b, deadlineAt));
+  const records = recordCandidates.slice(0, maxRecords);
+  if (rawRecords.length > records.length) {
+    audit.fieldsTruncated += rawRecords.length - records.length;
+    note(audit, 'record-count');
+  }
+  if (rawRecords.length > MAX_ATTRIBUTE_SCAN_KEYS) note(audit, 'record-count');
 
-  let receipts: SupportReceipt[] = [];
-  const receiptIds = new Set<string>();
-  const duplicateReceiptIds = new Set<string>();
-  let duplicateReceiptActionId = false;
+  const receiptCandidates: SupportReceipt[] = [];
+  let invalidReceipts = 0;
   const rawReceipts = Array.isArray(input.receipts) ? input.receipts : [];
-  for (const raw of rawReceipts.slice(0, maxReceipts)) {
+  for (const raw of rawReceipts.slice(0, MAX_ATTRIBUTE_SCAN_KEYS)) {
     assertNormalizationDeadline(deadlineAt);
     const receipt = sanitizeReceipt(raw, audit, receiptMode);
-    if (receipt) {
-      if (receiptIds.has(receipt.actionId)) {
-        duplicateReceiptActionId = true;
-        duplicateReceiptIds.add(receipt.actionId);
-        note(audit, 'duplicate-action-id');
-        continue;
-      }
-      receiptIds.add(receipt.actionId);
-      receipts.push(receipt);
+    if (receipt) receiptCandidates.push(receipt);
+    else {
+      invalidReceipts += 1;
+      audit.omittedFields += 1;
+      note(audit, 'invalid-receipt');
     }
-    else { audit.omittedFields += 1; note(audit, 'invalid-receipt'); }
   }
-  if (duplicateReceiptIds.size > 0) {
-    // A conflicting action ID has no canonical winner. Omit every revision so
-    // input order cannot change the emitted bytes or digest.
-    receipts = receipts.filter((receipt) => !duplicateReceiptIds.has(receipt.actionId));
-  }
-  receipts.sort((a, b) => compareCodeUnits(a.actionId, b.actionId)
+  receiptCandidates.sort((a, b) => compareCodeUnits(a.actionId, b.actionId)
     || compareCodeUnits(a.sourceState, b.sourceState)
     || compareCodeUnits(a.createdAt, b.createdAt)
     || compareStableValues(a, b, deadlineAt));
+  const receiptIds = new Set<string>();
+  const duplicateReceiptIds = new Set<string>();
+  let duplicateReceiptActionId = false;
+  for (const receipt of receiptCandidates) {
+    if (receiptIds.has(receipt.actionId)) {
+      duplicateReceiptActionId = true;
+      duplicateReceiptIds.add(receipt.actionId);
+      note(audit, 'duplicate-action-id');
+      continue;
+    }
+    receiptIds.add(receipt.actionId);
+  }
+  let receipts = receiptCandidates.filter((receipt) => !duplicateReceiptIds.has(receipt.actionId));
+  receipts = receipts.slice(0, maxReceipts);
+  if (rawReceipts.length > receipts.length) {
+    audit.fieldsTruncated += rawReceipts.length - receipts.length;
+    note(audit, 'receipt-count');
+  }
+  if (rawReceipts.length > MAX_ATTRIBUTE_SCAN_KEYS) note(audit, 'receipt-count');
 
   const errors: SupportCollectionError[] = [];
-  const priorTruncation = isRecord(input.truncation) ? input.truncation : {};
+  // Only a prior result from this module can carry truncation accounting
+  // forward. Public input is allowed to contain a similarly shaped field, but
+  // its counters are data and must not be treated as audit evidence.
+  const priorTruncation = isRecord(input) ? TRUSTED_TRUNCATIONS.get(input) ?? {} : {};
   let errorsOmitted = suppliedCount(priorTruncation.errorsOmitted);
+  let invalidErrors = 0;
   const appendError = (error: SupportCollectionError): void => {
     if (appendBoundedError(errors, error)) errorsOmitted += 1;
   };
@@ -1662,7 +1750,10 @@ function buildSupportBundleWithReceiptMode(
     assertNormalizationDeadline(deadlineAt);
     const error = sanitizeError(raw, audit);
     if (error) appendError(error);
-    else if (raw !== undefined) errorsOmitted += 1;
+    else {
+      invalidErrors += 1;
+      errorsOmitted += 1;
+    }
   }
   if (rawErrors.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) {
     errorsOmitted += rawErrors.length - SUPPORT_BUNDLE_LIMITS.maxErrorChain;
@@ -1678,6 +1769,14 @@ function buildSupportBundleWithReceiptMode(
     appendError({
       collector: 'support-bundle',
       code: 'invalid_record',
+      at: 'unknown',
+      recoveryRequired: true,
+    });
+  }
+  if (invalidReceipts > 0 || invalidErrors > 0) {
+    appendError({
+      collector: 'support-bundle',
+      code: 'collection_invalid_output',
       at: 'unknown',
       recoveryRequired: true,
     });
@@ -1743,11 +1842,8 @@ function buildSupportBundleWithReceiptMode(
     },
   };
   const fitted = fitBundle(base, maxBundleBytes, deadlineAt).bundle;
-  Object.defineProperty(fitted, REDACTION_AUDIT, {
-    configurable: false,
-    enumerable: false,
-    value: auditManifest(audit),
-  });
+  REDACTION_AUDITS.set(fitted, auditManifest(audit));
+  TRUSTED_TRUNCATIONS.set(fitted, Object.freeze({ ...fitted.truncation }));
   return fitted;
 }
 
@@ -1924,6 +2020,12 @@ export async function collectSupportBundle(
       const collectorName = collectorNames[index] ?? `collector-${index}`;
       try {
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
+        if (!isAsyncCollector(collector)) {
+          throw Object.assign(new Error('support bundle collectors must be async functions'), {
+            code: 'collection_invalid_output',
+            recoveryRequired: true,
+          });
+        }
         const result = await Promise.race([
           deadline,
           Promise.resolve().then(async () => {
@@ -1942,15 +2044,19 @@ export async function collectSupportBundle(
         collected.push({ index, name: collectorName, result });
       } catch (error) {
         const timedOut = controller.signal.aborted;
+        const invalidCollector = error instanceof Error
+          && (error as Error & { code?: unknown }).code === 'collection_invalid_output';
         collected.push({
           index,
           name: collectorName,
           error: {
             collector: collectorName,
-            code: timedOut ? 'collection_timeout_or_cancelled' : 'collection_failed',
+            code: timedOut
+              ? 'collection_timeout_or_cancelled'
+              : invalidCollector ? 'collection_invalid_output' : 'collection_failed',
             at: collectionAt,
             ...(error instanceof Error ? { message: error.message } : {}),
-            ...(timedOut ? { recoveryRequired: true } : {}),
+            ...((timedOut || invalidCollector) ? { recoveryRequired: true } : {}),
           },
         });
       }
@@ -1981,6 +2087,7 @@ export async function collectSupportBundle(
         errorsOmitted,
       },
     };
+    TRUSTED_TRUNCATIONS.set(recoveryInput, { errorsOmitted });
     try {
       return buildSupportBundleWithReceiptMode(recoveryInput, options, 'raw', deadlineAt);
     } catch (recoveryError) {
@@ -2157,6 +2264,11 @@ export async function collectSupportBundle(
       errorsOmitted,
     };
   }
+  TRUSTED_TRUNCATIONS.set(merged, {
+    recordsOmitted,
+    receiptsOmitted,
+    errorsOmitted,
+  });
   if (normalizationInterrupted()) return recoveryBundle(normalizationError());
   let bundle: SupportBundle;
   try {
