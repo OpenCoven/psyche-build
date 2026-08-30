@@ -1113,6 +1113,18 @@ describe('support bundle v1', () => {
     };
     expect(() => parseSupportBundle(JSON.stringify(uppercaseProof), codec))
       .toThrow(/schema is invalid/i);
+
+    const uppercaseReceipt = {
+      ...fixture,
+      receipts: [{ ...fixture.receipts[0], actionId: fixture.receipts[0]!.actionId.toUpperCase() }],
+    };
+    expect(isSupportBundleV1(uppercaseReceipt)).toBe(false);
+    expect(() => parseSupportBundle(JSON.stringify(uppercaseReceipt), codec))
+      .toThrow(/schema is invalid/i);
+
+    const forgedProof = { ...fixture, accountingProof: '0'.repeat(64) };
+    expect(isSupportBundleV1(forgedProof)).toBe(false);
+    expect(isSupportBundleV1(forgedProof, codec)).toBe(false);
   });
 
   it('rejects unsupported record attribute shapes and over-deep compatibility values', () => {

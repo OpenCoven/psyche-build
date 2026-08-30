@@ -360,8 +360,16 @@ function isNonZeroDigest(value: string): boolean {
   return SHA256_DIGEST.test(value) && !/^0+$/i.test(value);
 }
 
+function isCanonicalDigest(value: string): boolean {
+  return isNonZeroDigest(value) && value === value.toLowerCase();
+}
+
 function isNonZeroSourceSha(value: string): boolean {
   return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value) && !/^0+$/i.test(value);
+}
+
+function isCanonicalSourceSha(value: string): boolean {
+  return isNonZeroSourceSha(value) && value === value.toLowerCase();
 }
 
 function isAccountingProof(value: unknown): value is string {
@@ -697,13 +705,10 @@ function seededAudit(
 
 function normalizedSourceFingerprint(value: object, deadlineAt?: number): string | undefined {
   try {
-    const sourceValue = value as Record<string, unknown>;
-    const {
-      redaction: _redaction,
-      truncation: _truncation,
-      accountingProof: _accountingProof,
-      ...source
-    } = sourceValue;
+    const entries = limitedEntries(value as Record<string, unknown>, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
+    if (entries === undefined) return undefined;
+    const source = Object.fromEntries(entries.filter(([key]) =>
+      key !== 'redaction' && key !== 'truncation' && key !== 'accountingProof'));
     return createHash('sha256').update(serializeForSize(source, deadlineAt), 'utf8').digest('hex');
   } catch {
     return undefined;
@@ -1106,9 +1111,8 @@ function sanitizeProvenance(
     application,
     releaseVersion,
     sourceSha: sourceSha
-      && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sourceSha)
-      && !/^0+$/i.test(sourceSha)
-      ? sourceSha
+      && isNonZeroSourceSha(sourceSha)
+      ? sourceSha.toLowerCase()
       : 'unknown',
     platform,
     architecture,
@@ -1123,7 +1127,7 @@ function isNormalizedProvenance(value: unknown, deadlineAt?: number): value is S
     && (value.releaseVersion === 'unknown'
       || (typeof value.releaseVersion === 'string' && SAFE_VERSION_VALUE.test(value.releaseVersion)))
     && (value.sourceSha === 'unknown'
-      || (typeof value.sourceSha === 'string' && isNonZeroSourceSha(value.sourceSha)))
+      || (typeof value.sourceSha === 'string' && isCanonicalSourceSha(value.sourceSha)))
     && SAFE_PROVENANCE_PLATFORM_VALUES.has(value.platform as string)
     && SAFE_PROVENANCE_ARCHITECTURE_VALUES.has(value.architecture as string)
     && (value.verification === undefined || value.verification === 'unverified')
@@ -1208,7 +1212,8 @@ function minimalRecoveryBundle(
   codec?: SupportBundleCodec,
 ): SupportBundle {
   const generatedAt = new Date(Date.now()).toISOString();
-  const safeErrors = additionalErrors
+  const retainedAdditionalErrors = additionalErrors.slice(0, SUPPORT_BUNDLE_LIMITS.maxErrorChain - 1);
+  const safeErrors = retainedAdditionalErrors
     .map((error) => ({
       collector: SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(error.collector) ? error.collector : 'support-bundle',
       code: SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(error.code) ? error.code : 'collection_failed',
@@ -1244,7 +1249,7 @@ function minimalRecoveryBundle(
     truncation: {
       recordsOmitted: 0,
       receiptsOmitted: 0,
-      errorsOmitted: 0,
+      errorsOmitted: boundedCount(additionalErrors.length - retainedAdditionalErrors.length),
       stateFieldsOmitted: 0,
       terminalLinesOmitted: 0,
       bytesOmitted: 0,
@@ -1335,15 +1340,15 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
     || !hasOnlyKeys(value, SUPPORT_RECEIPT_KEYS, deadlineAt)
     || value.sourceSchema !== 'psyche.control.receipt/v1'
     || typeof value.actionId !== 'string'
-    || !isNonZeroDigest(value.actionId)
+    || !isCanonicalDigest(value.actionId)
     || byteLength(value.actionId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes
     || !isActionReceiptState(value.sourceState)
     || !(SUPPORT_ACTION_STATES as readonly unknown[]).includes(value.state)
     || value.state !== mapActionState(value.sourceState)
     || safeCanonicalTimestamp(value.createdAt) === undefined || !isRecord(value.resource)
-    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || !isNonZeroDigest(value.taskId) || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
-    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || !isNonZeroDigest(value.actorId) || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
-    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || !isNonZeroDigest(value.leaseId) || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || !isCanonicalDigest(value.taskId) || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || !isCanonicalDigest(value.actorId) || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || !isCanonicalDigest(value.leaseId) || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
     || (value.leaseRevision !== undefined && finiteNonNegativeInteger(value.leaseRevision) === undefined)
     || (value.completedAt !== undefined && safeCanonicalTimestamp(value.completedAt) === undefined)
     || (value.code !== undefined && (typeof value.code !== 'string'
@@ -1362,7 +1367,7 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
     )
     && (resource.kind === 'project' || resource.kind === 'pane' || resource.kind === 'browser_tab')
     && typeof resource.idDigest === 'string'
-    && isNonZeroDigest(resource.idDigest)
+    && isCanonicalDigest(resource.idDigest)
     && (resource.kind === 'project'
       ? resource.generation === undefined
       : typeof resource.generation === 'number'
@@ -1784,7 +1789,7 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       && (project === undefined || (isRecord(project)
         && hasOnlyKeys(project, SUPPORT_PROJECT_KEYS, deadlineAt)
         && typeof project.idDigest === 'string'
-        && isNonZeroDigest(project.idDigest)
+        && isCanonicalDigest(project.idDigest)
         && project.name === undefined
         && (project.relativePath === undefined || (typeof project.relativePath === 'string'
           && byteLength(project.relativePath) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes
@@ -1995,8 +2000,12 @@ function hasSupportBundleEnvelope(value: unknown): value is SupportBundleInput {
     && safeCanonicalTimestamp(value.generatedAt) !== undefined;
 }
 
-export function isSupportBundleV1(value: unknown): value is SupportBundle {
-  return isSupportBundleV1AtDeadline(value, Date.now() + SUPPORT_BUNDLE_LIMITS.maxElapsedMs);
+export function isSupportBundleV1(value: unknown, codec?: SupportBundleCodec): value is SupportBundle {
+  const deadlineAt = Date.now() + SUPPORT_BUNDLE_LIMITS.maxElapsedMs;
+  if (!isSupportBundleV1AtDeadline(value, deadlineAt)) return false;
+  if (value.status !== 'complete') return true;
+  const resolvedCodec = codec ?? SUPPORT_BUNDLE_CODECS.get(value);
+  return resolvedCodec !== undefined && hasValidAccountingProof(value, resolvedCodec, deadlineAt);
 }
 
 function fitBundle(
