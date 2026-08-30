@@ -11,9 +11,9 @@ Start with [AGENTS.md](AGENTS.md) and the [repository map](docs/REPOSITORY-MAP.m
 The repository derives its exact package-manager contract from `package.json`. You need:
 
 - Node.js satisfying `package.json#engines.node`;
-- the exact pnpm version in `package.json#packageManager`;
+- the exact pnpm version in `package.json#packageManager` (Corepack supplies it: `corepack prepare <version from package.json#packageManager> --activate`);
 - Git;
-- tmux for the full source smoke path;
+- tmux 3.0+ — required by bootstrap itself, not only by the smoke path: `scripts/agent-bootstrap` exits before installing dependencies if `tmux` is absent;
 - Rust/Cargo for the full desktop gate;
 - macOS with the pinned Xcode/XcodeGen toolchain only when validating the iOS surface.
 
@@ -246,6 +246,7 @@ Do not publish tokens, passwords, private keys, signing material, raw private pr
 - Security vulnerabilities: follow [SECURITY.md](SECURITY.md) and use GitHub's private vulnerability-reporting route.
 - Ordinary support: follow [SUPPORT.md](SUPPORT.md).
 - Product status and active priorities: use [docs/ROADMAP.md](docs/ROADMAP.md).
+- Community surfaces and the GitHub community-health measurement: use [docs/COMMUNITY-HEALTH.md](docs/COMMUNITY-HEALTH.md).
 - Historical design context: use [`docs/superpowers/README.md`](docs/superpowers/README.md); dated records are not an executable backlog.
 
 ## Local macOS app channels

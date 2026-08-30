@@ -72,6 +72,13 @@ body:
         - Unknown
     validations:
       required: true
+  - type: textarea
+    id: recovery_impact
+    attributes:
+      label: Recovery impact, if any
+      description: State whether uncommitted or in-progress work, worktrees, panes, or sessions were lost, blocked, or stranded, and how you recovered. Write "not applicable" when recovery is not involved.
+    validations:
+      required: false
   - type: checkboxes
     id: safety
     attributes:
