@@ -12163,9 +12163,17 @@ mod workspace_panel_tests {
         assert!(PendingPtyStart::reserve(&thread_id).is_ok());
     }
 
-    fn run_test_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) {
-        let output = std::process::Command::new("git")
+    fn test_git_command(root: &Path) -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        command
             .current_dir(root)
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS");
+        command
+    }
+
+    fn run_test_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) {
+        let output = test_git_command(root)
             .envs(env.iter().copied())
             .args(args)
             .output()
@@ -12181,10 +12189,8 @@ mod workspace_panel_tests {
     fn run_test_git(root: &Path, args: &[&str]) {
         run_test_git_with_env(root, args, &[]);
     }
-
     fn run_test_git_stdout_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
-        let output = std::process::Command::new("git")
-            .current_dir(root)
+        let output = test_git_command(root)
             .envs(env.iter().copied())
             .args(args)
             .output()

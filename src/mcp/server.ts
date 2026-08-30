@@ -45,7 +45,7 @@ import type { OrchestrationTaskSubmission } from '../orchestration/types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_NAME = 'psyche';
-const SERVER_VERSION = '0.0.1';
+const SERVER_VERSION = '0.0.2';
 
 type JsonRpcId = string | number | null;
 interface JsonRpcRequest {

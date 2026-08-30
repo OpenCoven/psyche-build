@@ -15,6 +15,7 @@ const relativePaths = {
   tauriConfig: 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
   iosProjectYml: 'native/ios/project.yml',
   iosXcodeProject: 'native/ios/Psyche.xcodeproj/project.pbxproj',
+  mcpServer: 'src/mcp/server.ts',
 };
 
 const labels = {
@@ -25,6 +26,7 @@ const labels = {
   tauriConfig: relativePaths.tauriConfig,
   iosProjectYml: relativePaths.iosProjectYml,
   iosXcodeProject: relativePaths.iosXcodeProject,
+  mcpServer: relativePaths.mcpServer,
 };
 
 export function normalizeReleaseTag(value) {
@@ -70,6 +72,14 @@ function readCargoLockVersion(contents, filePath) {
     throw new Error(`${filePath} does not contain the psyche-build-tauri package`);
   }
   return match[1];
+}
+
+function readMcpServerVersion(contents, filePath) {
+  const matches = [...contents.matchAll(/^const SERVER_VERSION = '([^']+)';$/gm)];
+  if (matches.length !== 1) {
+    throw new Error(`${filePath} must contain exactly one SERVER_VERSION constant`);
+  }
+  return matches[0][1];
 }
 
 function assignmentFromMatch(match, lineOffset) {
@@ -252,6 +262,7 @@ export function readReleaseVersions(root = process.cwd()) {
       findXcodeMarketingVersionAssignments(readFileSync(paths.iosXcodeProject, 'utf8')),
       paths.iosXcodeProject,
     ),
+    mcpServer: readMcpServerVersion(readFileSync(paths.mcpServer, 'utf8'), paths.mcpServer),
   };
 }
 
@@ -298,6 +309,14 @@ function replaceCargoLockVersion(contents, version, filePath) {
   return contents.replace(packageVersion, `$1${version}$2`);
 }
 
+function replaceMcpServerVersion(contents, version, filePath) {
+  readMcpServerVersion(contents, filePath);
+  return contents.replace(
+    /(^const SERVER_VERSION = ')[^']+(';$)/m,
+    `$1${version}$2`,
+  );
+}
+
 function replaceMarketingVersions(contents, version, filePath, findAssignments) {
   const assignments = findAssignments(contents);
   readMarketingVersion(assignments, filePath);
@@ -338,6 +357,7 @@ export async function setReleaseVersion(root, value) {
       paths.iosXcodeProject,
       findXcodeMarketingVersionAssignments,
     ),
+    mcpServer: replaceMcpServerVersion(contents.mcpServer, version, paths.mcpServer),
   };
 
   await Promise.all(

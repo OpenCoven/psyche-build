@@ -102,8 +102,8 @@ describe('post-release execution documentation', () => {
 
     expect(execution).toMatch(/#236[\s\S]{0,160}\*\*Closed as superseded\*\*/i);
     expect(roadmap).toMatch(/#236[\s\S]{0,160}\*\*Closed as superseded\*\*/i);
-    expect(execution).toMatch(/No listed active implementation PR is merge-ready/i);
-    expect(roadmap).toMatch(/No active implementation PR above is merge-ready/i);
+    expect(execution).toMatch(/listed source-material PRs are not merge-ready/i);
+    expect(roadmap).toMatch(/source-material PRs above are not merge-ready/i);
   });
 
   it('retains dependency gates and keeps unrelated PR #254 outside Stage 0', async () => {
@@ -129,8 +129,10 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toMatch(/#197[\s\S]{0,160}P1 dependency gate/i);
       expect(source, filePath).toMatch(/#201\/#253[\s\S]{0,160}P2 dependency gate/i);
       expect(source, filePath).toMatch(/#246[\s\S]{0,160}P2 dependency gate/i);
-      expect(source, filePath).toContain(pullUrl(254));
-      expect(source, filePath).toMatch(/PR #254 remains outside Stage 0/i);
+      expect(source, filePath).toContain(pullUrl(262));
+      expect(source, filePath).toMatch(
+        /PR #262 is the\s+focused replacement for #254(?:'s)? mapping\s+scope/i,
+      );
     }
   });
 

@@ -44,7 +44,7 @@ describe('iOS production release configuration', () => {
     expect(projectYml).toContain('PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios');
     expect(projectYml).toContain('CFBundleDisplayName: Psyche Build');
     expect(projectYml).toContain('PRODUCT_NAME: Psyche Build');
-    expect(projectYml).toContain('MARKETING_VERSION: 0.0.1');
+    expect(projectYml).toContain('MARKETING_VERSION: 0.0.2');
     expect(projectYml).toContain('CURRENT_PROJECT_VERSION: 1');
     expect(projectYml).toContain('CODE_SIGN_STYLE: Automatic');
     expect(projectYml).toContain('path: PsycheApp/Resources/Info.plist');
