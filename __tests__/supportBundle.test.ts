@@ -465,6 +465,7 @@ describe('support bundle v1', () => {
   });
 
   it('omits every conflicting receipt revision deterministically', () => {
+    const now = () => 1_767_225_600_000;
     const receipt = (state: 'queued' | 'failed') => ({
       schema: 'psyche.control.receipt/v1' as const,
       actionId: 'same-action',
@@ -472,8 +473,8 @@ describe('support bundle v1', () => {
       resource: { kind: 'project' as const, id: 'project' },
       createdAt: '2026-01-01T00:00:00.000Z',
     });
-    const queuedFirst = buildSupportBundle({ receipts: [receipt('queued'), receipt('failed')] });
-    const failedFirst = buildSupportBundle({ receipts: [receipt('failed'), receipt('queued')] });
+    const queuedFirst = buildSupportBundle({ receipts: [receipt('queued'), receipt('failed')] }, { now });
+    const failedFirst = buildSupportBundle({ receipts: [receipt('failed'), receipt('queued')] }, { now });
     expect(queuedFirst.receipts).toEqual([]);
     expect(failedFirst.receipts).toEqual([]);
     expect(serializeSupportBundle(queuedFirst)).toBe(serializeSupportBundle(failedFirst));
