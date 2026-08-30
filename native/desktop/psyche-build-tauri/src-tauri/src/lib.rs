@@ -54,6 +54,7 @@ use webview2_com::{
 #[cfg(target_os = "windows")]
 use windows::core::{Interface, PWSTR};
 mod browser_focus;
+mod composition;
 mod control_provider;
 mod coven_sessions;
 mod metrics;
@@ -8617,6 +8618,18 @@ fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
         .collect())
 }
 
+/// Desktop composition root (issue #197 slice 1: application lifecycle and
+/// command registration).
+///
+/// Startup inventory, in assembly order: environment logging; runtime
+/// diagnostics service construction (`RuntimeDiagnosticsState::from_startup`);
+/// plugin assembly (macOS frame pacing must register before any webview
+/// exists, then opener, dialog, and clipboard); managed service state
+/// registration; the public Tauri command registration inventoried by
+/// `composition::REGISTERED_COMMANDS`; the window/webview lifecycle hook
+/// (`composition::on_app_setup` delegating to the `platform` adapter); and
+/// the event loop run. Shutdown remains with the Tauri event loop plus the
+/// per-session exit shutdown hooks owned by `pty_transport`.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
@@ -8693,12 +8706,7 @@ pub fn run() {
             runtime_diagnostics,
             runtime_process_metrics,
         ])
-        .setup(|app| {
-            if let Err(error) = platform::configure_window(app) {
-                log::warn!("optional window configuration unavailable: {error}");
-            }
-            Ok(())
-        })
+        .setup(|app| composition::on_app_setup(app))
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
