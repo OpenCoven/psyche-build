@@ -8,12 +8,14 @@ describe('mobile action executor registration', () => {
     expect(source).toContain('const live = mobileActionStateRef.current');
     expect(source).toContain('panes: live.panes');
     expect(source).toContain('savePanes: live.savePanes');
+    expect(source).toContain('sessionProjectRoot,');
+    expect(source).toContain('getTmuxServerIdentity: () => TmuxService.getInstance().getServerIdentity?.(),');
     expect(source).toContain('onPaneUpdate: (updatedPane) =>');
     expect(source).toContain('onPaneRemove: (removedPaneId) =>');
     expect(source).toContain('bridgeDaemon.setActionExecutor(async');
     expect(source).toContain('return () => bridgeDaemon.setActionExecutor(null)');
     expect(source).toMatch(
-      /return \(\) => bridgeDaemon\.setActionExecutor\(null\)\s*\n\s*}, \[bridgeDaemon, projectName, sessionName, setPanes\]\)/,
+      /return \(\) => bridgeDaemon\.setActionExecutor\(null\)\s*\n\s*}, \[bridgeDaemon, projectName, sessionName, sessionProjectRoot, setPanes\]\)/,
     );
   });
 
