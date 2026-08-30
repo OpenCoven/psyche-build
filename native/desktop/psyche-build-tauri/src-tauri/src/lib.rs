@@ -2646,7 +2646,14 @@ impl PtyExitShutdown {
         // any OS thread that ignored cancellation; the cancelled pump rejects
         // late output, so the lifecycle entry can leave Exiting without an
         // unbounded reaper or a permanently reserved thread id.
+        if let Err(error) = self.reader_cancellation.cancel() {
+            log::warn!(
+                "failed to re-cancel PTY reader before detaching '{}': {error}",
+                self.token.thread_id
+            );
+        }
         self.pump.cancel();
+        self.pump.abandon_worker();
         if self.reader_thread.take().is_some() {
             log::warn!(
                 "detaching PTY reader after bounded cleanup for '{}'",
@@ -3198,25 +3205,33 @@ async fn diagnostics_cycle_window(
         .minimize()
         .map_err(|error| format!("failed to minimize diagnostics window: {error}"))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let cycle_result = window
-        .unminimize()
-        .map_err(|error| format!("failed to restore diagnostics window: {error}"))
-        .and_then(|()| {
-            window
-                .set_focus()
-                .map_err(|error| format!("failed to focus restored diagnostics window: {error}"))
-        });
-    if let Err(error) = cycle_result {
-        let rollback_result = window
+    let mut cycle_result: Result<(), String> =
+        Err("failed to restore diagnostics window: no restore attempt was made".to_string());
+    for _attempt in 0..3 {
+        cycle_result = window
             .unminimize()
-            .and_then(|()| window.set_focus())
-            .map_err(|rollback_error| {
-                format!("failed to rollback diagnostics window state: {rollback_error}")
+            .map_err(|error| format!("failed to restore diagnostics window: {error}"))
+            .and_then(|()| {
+                window.set_focus().map_err(|error| {
+                    format!("failed to focus restored diagnostics window: {error}")
+                })
             });
-        return match rollback_result {
-            Ok(()) => Err(format!("{error}; diagnostics window rollback succeeded")),
-            Err(rollback_error) => Err(format!("{error}; {rollback_error}")),
-        };
+        if cycle_result.is_ok() {
+            return Ok(());
+        }
+    }
+    if let Err(error) = cycle_result {
+        let mut rollback_error: Option<String> = None;
+        for _attempt in 0..3 {
+            match window.unminimize().and_then(|()| window.set_focus()) {
+                Ok(()) => return Err(format!("{error}; diagnostics window rollback succeeded")),
+                Err(error) => rollback_error = Some(error.to_string()),
+            }
+        }
+        return Err(format!(
+            "{error}; failed to rollback diagnostics window state: {}",
+            rollback_error.unwrap_or_else(|| "unknown rollback error".to_string()),
+        ));
     }
     Ok(())
 }

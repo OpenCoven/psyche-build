@@ -1412,6 +1412,14 @@ impl OutputPump {
         }
     }
 
+    /// Release the join handle after bounded cancellation has failed. The
+    /// worker observes the cancelled state before processing more batches; if
+    /// an external emitter is still blocked, dropping this handle detaches it
+    /// without keeping the PTY lifecycle owned forever.
+    pub(crate) fn abandon_worker(&self) {
+        let _ = lock_unpoisoned(&self.shared.worker).take();
+    }
+
     pub fn snapshot(&self) -> OutputPumpSnapshot {
         let guard = lock_unpoisoned(&self.shared.state);
         let runtime_metrics = &guard.metrics;

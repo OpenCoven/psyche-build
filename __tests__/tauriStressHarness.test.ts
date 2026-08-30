@@ -9,6 +9,7 @@ import {
   stressFocusId,
   type StressFixture,
   type StressHarnessDependencies,
+  type StressPhase,
   type StressResource,
 } from '../native/desktop/psyche-build-tauri/web/runtime/stress-harness';
 
@@ -64,6 +65,9 @@ function createResource(id: string, disposed: string[]): StressResource {
     id,
     async dispose() {
       disposed.push(id);
+    },
+    forceDispose() {
+      disposed.push(`force-${id}`);
     },
   };
 }
@@ -283,7 +287,6 @@ describe('Tauri diagnostics stress harness', () => {
     expect(restored).toEqual(hidden.map(([id]) => [id, true]));
     expect(disposed).toHaveLength(51);
     expect(frames.pending()).toBe(0);
-    expect(frames.cancelled.length).toBeGreaterThan(0);
   });
 
   it.each(['terminal', 'editor', 'browser'] as const)(
@@ -463,7 +466,7 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
-  it('does not compensate a resource after the late-result quarantine closes', async () => {
+  it('force-invalidates a resource after the late-result quarantine closes', async () => {
     vi.useFakeTimers();
     try {
       const controller = new AbortController();
@@ -513,6 +516,7 @@ describe('Tauri diagnostics stress harness', () => {
       late.resolve(createResource('late-after-quarantine', disposed));
       await vi.runAllTimersAsync();
       expect(disposed).not.toContain('late-after-quarantine');
+      expect(disposed).toContain('force-late-after-quarantine');
     } finally {
       vi.useRealTimers();
     }
@@ -713,6 +717,62 @@ describe('Tauri diagnostics stress harness', () => {
     expect(result.finishedAt - result.startedAt).toBe(4 * 45_000);
     expect(result.scenarios.map((scenario) => scenario.finishedAt - scenario.startedAt))
       .toEqual([45_000, 45_000, 45_000, 45_000]);
+  });
+
+  it('does not let synchronous frame work move the phase start past its deadline', async () => {
+    const controller = new AbortController();
+    let now = 0;
+    let frameRequests = 0;
+    let resizeCalls = 0;
+    const focusPhases: StressPhase[] = [];
+    let currentPhase: StressPhase = 'setup';
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusPhases.push(currentPhase);
+        controller.abort(abortError());
+      },
+      resize() {
+        resizeCalls += 1;
+        if (resizeCalls === 1) now = 10_000;
+      },
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+      },
+      requestFrame(callback) {
+        frameRequests += 1;
+        if (frameRequests === 1) callback(0);
+        return frameRequests;
+      },
+      cancelFrame() {},
+      now: () => now,
+      onProgress(progress) {
+        currentPhase = progress.phase;
+      },
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusPhases).toEqual(['measure']);
   });
 
   it('keeps focus operations on absolute 250 ms boundaries when focusing is slow', async () => {
