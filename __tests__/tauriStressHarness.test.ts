@@ -444,15 +444,16 @@ describe('Tauri diagnostics stress harness', () => {
       const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
       await started.promise;
       controller.abort(abortError());
-      await vi.advanceTimersByTimeAsync(4_000);
-      late.resolve(createResource('late-after-cutoff', disposed));
-
+      await vi.advanceTimersByTimeAsync(6_001);
       const error = await observed;
       expect(error).toBeInstanceOf(AggregateError);
       expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'AbortError' }),
         expect.objectContaining({ message: 'stress resource creation did not settle after cancellation' }),
       ]));
+      late.resolve(createResource('late-after-cutoff', disposed));
+      await vi.runAllTimersAsync();
+
       expect(disposed).toContain('late-after-cutoff');
     } finally {
       vi.useRealTimers();

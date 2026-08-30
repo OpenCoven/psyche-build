@@ -13,7 +13,7 @@ use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -480,6 +480,11 @@ impl std::fmt::Display for PtyProcessTerminatorSetupError {
 #[cfg(windows)]
 #[derive(Debug)]
 struct WindowsProcessTreeKiller {
+    // portable-pty's Windows child implementation owns a dedicated Job Object
+    // configured with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and assigns the child
+    // through PROC_THREAD_ATTRIBUTE_JOB_LIST. ChildKiller therefore carries a
+    // duplicated job handle; retaining that capability avoids PID-reuse races
+    // and terminates descendants with the PTY root.
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
@@ -492,6 +497,9 @@ impl WindowsProcessTreeKiller {
     }
 
     fn terminate(&self) -> std::io::Result<()> {
+        // This is TerminateJobObject through portable-pty's Windows killer,
+        // rather than a raw PID termination. It is intentionally idempotent at
+        // the job boundary: an already-exited job is handled by the backend.
         self.killer.lock().kill()
     }
 }
@@ -2341,10 +2349,18 @@ struct UnixPtyReaderCancellation {
     cancelled: AtomicBool,
 }
 
+#[cfg(windows)]
+struct WindowsPtyReaderCancellation {
+    cancelled: AtomicBool,
+    reader_thread: Mutex<Option<std::os::windows::io::OwnedHandle>>,
+}
+
 #[derive(Clone)]
 struct PtyReaderCancellation {
     #[cfg(unix)]
     inner: Arc<UnixPtyReaderCancellation>,
+    #[cfg(windows)]
+    inner: Arc<WindowsPtyReaderCancellation>,
 }
 
 impl PtyReaderCancellation {
@@ -2376,10 +2392,50 @@ impl PtyReaderCancellation {
                 return Err(error);
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.inner.cancelled.store(true, Ordering::Release);
+            let reader_thread = self.inner.reader_thread.lock();
+            let Some(reader_thread) = reader_thread.as_ref() else {
+                // The reader installs its handle at thread start. If it has
+                // not started yet, the atomic check makes its first read a
+                // clean EOF and no synchronous I/O is pending to cancel.
+                return Ok(());
+            };
+            let result = unsafe {
+                windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(
+                    std::os::windows::io::AsRawHandle::as_raw_handle(reader_thread),
+                ))
+            };
+            match result {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if error.code()
+                        == windows::core::HRESULT::from_win32(
+                            windows::Win32::Foundation::ERROR_NOT_FOUND,
+                        ) =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(std::io::Error::other(error.to_string())),
+            }
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             Ok(())
         }
+    }
+
+    #[cfg(windows)]
+    fn install_current_thread(&self) -> std::io::Result<()> {
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::System::Threading::{GetCurrentThreadId, OpenThread, THREAD_TERMINATE};
+
+        let handle = unsafe { OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId()) }
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.0) };
+        *self.inner.reader_thread.lock() = Some(owned);
+        Ok(())
     }
 }
 
@@ -2407,7 +2463,50 @@ fn prepare_pty_reader(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+struct WindowsPtyReader {
+    reader: Box<dyn Read + Send>,
+    cancellation: Arc<WindowsPtyReaderCancellation>,
+}
+
+#[cfg(windows)]
+impl Read for WindowsPtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancellation.cancelled.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let result = self.reader.read(buffer);
+        if self.cancellation.cancelled.load(Ordering::Acquire) {
+            Ok(0)
+        } else {
+            result
+        }
+    }
+}
+
+#[cfg(windows)]
+fn prepare_pty_reader(
+    master: &dyn MasterPty,
+) -> Result<(Box<dyn Read + Send>, PtyReaderCancellation), String> {
+    let cancellation = Arc::new(WindowsPtyReaderCancellation {
+        cancelled: AtomicBool::new(false),
+        reader_thread: Mutex::new(None),
+    });
+    let reader = master
+        .try_clone_reader()
+        .map_err(|error| error.to_string())?;
+    Ok((
+        Box::new(WindowsPtyReader {
+            reader,
+            cancellation: cancellation.clone(),
+        }),
+        PtyReaderCancellation {
+            inner: cancellation,
+        },
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn prepare_pty_reader(
     master: &dyn MasterPty,
 ) -> Result<(Box<dyn Read + Send>, PtyReaderCancellation), String> {
@@ -2505,7 +2604,7 @@ impl PtyExitShutdown {
         }
     }
 
-    fn finish_terminated_threads(&mut self, timeout: std::time::Duration) {
+    fn finish_terminated_threads(&mut self, timeout: std::time::Duration) -> bool {
         let started_at = std::time::Instant::now();
         let deadline = started_at.checked_add(timeout).unwrap_or(started_at);
         if !self.reader_completion_known {
@@ -2520,22 +2619,26 @@ impl PtyExitShutdown {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .unwrap_or(std::time::Duration::ZERO);
-        if self.pump.wait_for_worker_timeout(remaining) == CompletionOutcome::Completed {
-            if self.pump.join_worker_after_completion().is_err() {
-                log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
-            }
-        } else {
-            log::warn!(
-                "PTY output worker did not finish after terminating '{}'",
-                self.token.thread_id
-            );
-        }
+        let worker_completed =
+            if self.pump.wait_for_worker_timeout(remaining) == CompletionOutcome::Completed {
+                if self.pump.join_worker_after_completion().is_err() {
+                    log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+                }
+                true
+            } else {
+                log::warn!(
+                    "PTY output worker did not finish after terminating '{}'",
+                    self.token.thread_id
+                );
+                false
+            };
         if !self.reader_completion_known {
             log::warn!(
                 "PTY reader did not finish after terminating and cancelling '{}'",
                 self.token.thread_id
             );
         }
+        self.reader_completion_known && worker_completed
     }
 
     fn finish_terminated_threads_to_completion(&mut self) {
@@ -2959,7 +3062,13 @@ fn register_pty_client(
 
     let reader_pump = pump.clone();
     let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
+    #[cfg(windows)]
+    let reader_cancellation_for_thread = reader_cancellation.clone();
     let data_thread = std::thread::spawn(move || {
+        #[cfg(windows)]
+        if let Err(error) = reader_cancellation_for_thread.install_current_thread() {
+            log::warn!("failed to retain Windows PTY reader thread handle: {error}");
+        }
         let reader_result = pump_pty_reader(&mut reader, reader_pump);
         let _ = reader_done_tx.send(reader_result);
     });
@@ -3008,15 +3117,22 @@ fn register_pty_client(
             );
         }
         // Timeout cleanup has its own bounded budget, so it must happen only after
-        // observers receive the exit. Keep the generation reserved until the old
-        // reader and worker can no longer collide with a replacement session.
+        // observers receive the exit. If reader or worker cleanup is still
+        // incomplete, hand the shutdown object to a reaper and retain the
+        // lifecycle entry in Exiting until both handles have quiesced. This
+        // prevents a late old-generation emission from colliding with a new
+        // session that reuses the same thread id.
         if outcome == ExitShutdownOutcome::TimedOut {
-            shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT);
-            shutdown.finish_terminated_threads_to_completion();
+            if !shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT) {
+                std::thread::spawn(move || {
+                    let mut shutdown = shutdown;
+                    shutdown.finish_terminated_threads_to_completion();
+                    finish_pty_lifecycle(&shutdown);
+                });
+                return;
+            }
         }
-        if shutdown.exit_event_allowed {
-            PTY_LIFECYCLES.lock().finish_exit(&exit_token);
-        }
+        finish_pty_lifecycle(&shutdown);
     });
 
     if let InstallSessionOutcome::StopImmediately(session) = install_outcome {
@@ -3030,6 +3146,16 @@ fn register_pty_client(
     }
 
     Ok(())
+}
+
+fn finish_pty_lifecycle(shutdown: &PtyExitShutdown) {
+    if shutdown.exit_event_allowed && !PTY_LIFECYCLES.lock().finish_exit(&shutdown.token) {
+        log::debug!(
+            "PTY lifecycle entry was already finalized for '{}' generation {}",
+            shutdown.token.thread_id,
+            shutdown.token.generation,
+        );
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -10094,6 +10220,42 @@ mod pty_runtime_tests {
         let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
         let (reader_tx, reader_rx) = mpsc::channel();
         std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = reader_tx.send(reader.read_to_end(&mut bytes));
+        });
+
+        assert!(matches!(
+            reader_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        reader_cancellation.cancel().unwrap();
+        reader_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader cancellation must release the blocked PTY read")
+            .expect("cancelled PTY reader must exit cleanly");
+
+        drop(pair.slave);
+        drop(pair.master);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_cancellation_releases_a_blocked_pty_read() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+        let reader_cancellation_for_thread = reader_cancellation.clone();
+        let (reader_tx, reader_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            reader_cancellation_for_thread
+                .install_current_thread()
+                .expect("reader thread handle must be retained");
             let mut bytes = Vec::new();
             let _ = reader_tx.send(reader.read_to_end(&mut bytes));
         });
