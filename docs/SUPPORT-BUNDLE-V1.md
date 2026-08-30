@@ -91,7 +91,11 @@ repositories, terminals, and secrets.
 
 `collectSupportBundle` accepts named collectors and an `AbortSignal`. It runs
 collectors with a shared elapsed-time budget, preflights their complete bounded
-input graph, and converts failures into bounded collection errors. A future CLI
+input graph, and converts failures into bounded collection errors. The deadline
+is cooperative for in-process JavaScript: a collector must yield, and native
+bridges must move blocking work off-thread before returning their promise because
+the event loop cannot preempt synchronous code. An overrun is still fail-closed
+and reported as `recovery_required`. A future CLI
 or UI may request a fresh snapshot, display the redacted preview, and offer
 copy/clear actions, but it must not silently upload
 or execute anything. The later surface must preserve cancellation, timeout,

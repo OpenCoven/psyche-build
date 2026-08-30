@@ -93,6 +93,11 @@ export interface SupportBundleCompatibility {
 
 export interface SupportCollector {
   readonly name: string;
+  /**
+   * The callback must yield while doing work so the shared deadline can be
+   * observed. JavaScript cannot preempt a synchronous callback; native
+   * bridges must perform blocking work off-thread and return a promise.
+   */
   readonly collect: (signal: AbortSignal) => Promise<SupportBundleInput>;
 }
 
@@ -726,8 +731,7 @@ function hasReusablePrivateMetadata(input: SupportBundleInput, deadlineAt?: numb
   if (manifest !== undefined && !metadataMatches(input.redaction, manifest, deadlineAt)) return false;
   const truncation = TRUSTED_TRUNCATIONS.get(input);
   if (truncation !== undefined
-    && input.truncation !== undefined
-    && !metadataMatches(input.truncation, truncation, deadlineAt)) return false;
+    && (input.truncation === undefined || !metadataMatches(input.truncation, truncation, deadlineAt))) return false;
   return manifest !== undefined
     || truncation !== undefined
     || TRUSTED_SUPPORT_FIELDS.has(input);
@@ -1561,12 +1565,13 @@ function signAccountingProof(
 ): string {
   const payload = accountingPayload(bundle, deadlineAt);
   const proof = codec.sign(payload);
-  if (!isAccountingProof(proof) || !codec.verify(payload, proof)) {
+  const canonicalProof = typeof proof === 'string' ? proof.toLowerCase() : proof;
+  if (!isAccountingProof(canonicalProof) || !codec.verify(payload, canonicalProof)) {
     throw Object.assign(new Error('support bundle codec returned an invalid accounting proof'), {
       code: 'support_bundle_accounting_proof_invalid',
     });
   }
-  return proof.toLowerCase();
+  return canonicalProof;
 }
 
 function hasValidAccountingProof(
@@ -1667,15 +1672,16 @@ function isNormalizedRecord(
       && (typeof value.durationMs !== 'number' || !Number.isSafeInteger(value.durationMs)
         || value.durationMs < 0 || value.durationMs > 86_400_000))
     || (value.truncated !== undefined && typeof value.truncated !== 'boolean')
-    || (value.attributes !== undefined && !isBoundedNormalizedValue(
-      value.attributes,
-      0,
-      new Set<object>(),
-      budget,
-      '',
-      false,
-      SAFE_RECORD_ATTRIBUTE_KEYS,
-    ))) return false;
+    || (value.attributes !== undefined && (!isRecord(value.attributes)
+      || !isBoundedNormalizedValue(
+        value.attributes,
+        0,
+        new Set<object>(),
+        budget,
+        '',
+        false,
+        SAFE_RECORD_ATTRIBUTE_KEYS,
+      )))) return false;
   try {
     return byteLength(serializeForSize(value, deadlineAt)) <= SUPPORT_BUNDLE_LIMITS.maxRecordBytes;
   } catch {
@@ -1791,16 +1797,23 @@ function stripKnownObjectFields(
   allowed: ReadonlySet<string>,
   deadlineAt: number,
   nestedPolicy?: ReadonlySet<string>,
+  depth = 0,
+  budget: NormalizationBudget = { remaining: MAX_COLLECTOR_RESULT_NODES },
 ): unknown {
   if (!isRecord(value)) return value;
+  assertNormalizationDeadline(deadlineAt);
+  if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth || budget.remaining <= 0) {
+    throw new Error('support bundle compatibility value is not bounded');
+  }
+  budget.remaining -= 1;
   const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
-  if (entries === undefined) return {};
+  if (entries === undefined) throw new Error('support bundle compatibility map is not bounded');
   const output: Record<string, unknown> = {};
   for (const [key, child] of entries) {
     if (!allowed.has(key)) continue;
     output[key] = nestedPolicy === undefined
       ? child
-      : stripNormalizedValue(child, nestedPolicy, deadlineAt);
+      : stripNormalizedValue(child, nestedPolicy, deadlineAt, depth + 1, budget);
   }
   return output;
 }
@@ -1809,16 +1822,32 @@ function stripNormalizedValue(
   value: unknown,
   keyPolicy: ReadonlySet<string>,
   deadlineAt: number,
+  depth = 0,
+  budget: NormalizationBudget = { remaining: MAX_COLLECTOR_RESULT_NODES },
 ): unknown {
   assertNormalizationDeadline(deadlineAt);
-  if (Array.isArray(value)) {
-    return value.map((child) => stripNormalizedValue(child, keyPolicy, deadlineAt));
+  if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth || budget.remaining <= 0) {
+    throw new Error('support bundle compatibility value is not bounded');
   }
-  return stripKnownObjectFields(value, keyPolicy, deadlineAt, keyPolicy);
+  if (Array.isArray(value)) {
+    if (value.length > MAX_ATTRIBUTE_SCAN_KEYS) {
+      throw new Error('support bundle compatibility array is not bounded');
+    }
+    budget.remaining -= 1;
+    return value.map((child) => stripNormalizedValue(child, keyPolicy, deadlineAt, depth + 1, budget));
+  }
+  if (isRecord(value)) {
+    return stripKnownObjectFields(value, keyPolicy, deadlineAt, keyPolicy, depth, budget);
+  }
+  budget.remaining -= 1;
+  return value;
 }
 
 function stripSupportBundleUnknownFields(value: unknown, deadlineAt: number): SupportBundle | undefined {
   if (!isRecord(value)) return undefined;
+  const budget: NormalizationBudget = { remaining: MAX_COLLECTOR_RESULT_NODES, deadlineAt };
+  if (budget.remaining <= 0) return undefined;
+  budget.remaining -= 1;
   const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
   if (entries === undefined) return undefined;
   const output: Record<string, unknown> = {};
@@ -1826,27 +1855,40 @@ function stripSupportBundleUnknownFields(value: unknown, deadlineAt: number): Su
     if (!ROOT_FIELDS.has(key)) continue;
     switch (key) {
       case 'compatibility':
-        output[key] = stripKnownObjectFields(child, SUPPORT_COMPATIBILITY_KEYS, deadlineAt);
+        output[key] = stripKnownObjectFields(child, SUPPORT_COMPATIBILITY_KEYS, deadlineAt, undefined, 0, budget);
         break;
       case 'provenance':
-        output[key] = stripKnownObjectFields(child, SUPPORT_PROVENANCE_KEYS, deadlineAt);
+        output[key] = stripKnownObjectFields(child, SUPPORT_PROVENANCE_KEYS, deadlineAt, undefined, 0, budget);
         break;
       case 'project':
-        output[key] = stripKnownObjectFields(child, SUPPORT_PROJECT_KEYS, deadlineAt);
+        output[key] = stripKnownObjectFields(child, SUPPORT_PROJECT_KEYS, deadlineAt, undefined, 0, budget);
         break;
       case 'lifecycle':
       case 'providers':
       case 'persistence':
       case 'updater':
       case 'graphics':
-        output[key] = stripNormalizedValue(child, SAFE_STATE_KEYS, deadlineAt);
+        output[key] = stripNormalizedValue(child, SAFE_STATE_KEYS, deadlineAt, 0, budget);
         break;
       case 'records':
         output[key] = Array.isArray(child) ? child.map((record) => {
           if (!isRecord(record)) return record;
-          const stripped = stripKnownObjectFields(record, NORMALIZED_RECORD_KEYS, deadlineAt) as Record<string, unknown>;
+          const stripped = stripKnownObjectFields(
+            record,
+            NORMALIZED_RECORD_KEYS,
+            deadlineAt,
+            undefined,
+            0,
+            budget,
+          ) as Record<string, unknown>;
           if (stripped.attributes !== undefined) {
-            stripped.attributes = stripNormalizedValue(stripped.attributes, SAFE_RECORD_ATTRIBUTE_KEYS, deadlineAt);
+            stripped.attributes = stripNormalizedValue(
+              stripped.attributes,
+              SAFE_RECORD_ATTRIBUTE_KEYS,
+              deadlineAt,
+              0,
+              budget,
+            );
           }
           return stripped;
         }) : child;
@@ -1854,12 +1896,22 @@ function stripSupportBundleUnknownFields(value: unknown, deadlineAt: number): Su
       case 'receipts':
         output[key] = Array.isArray(child) ? child.map((receipt) => {
           if (!isRecord(receipt)) return receipt;
-          const stripped = stripKnownObjectFields(receipt, SUPPORT_RECEIPT_KEYS, deadlineAt) as Record<string, unknown>;
+          const stripped = stripKnownObjectFields(
+            receipt,
+            SUPPORT_RECEIPT_KEYS,
+            deadlineAt,
+            undefined,
+            0,
+            budget,
+          ) as Record<string, unknown>;
           if (stripped.resource !== undefined) {
             stripped.resource = stripKnownObjectFields(
               stripped.resource,
               SUPPORT_RECEIPT_RESOURCE_KEYS,
               deadlineAt,
+              undefined,
+              0,
+              budget,
             );
           }
           return stripped;
@@ -1867,19 +1919,39 @@ function stripSupportBundleUnknownFields(value: unknown, deadlineAt: number): Su
         break;
       case 'errors':
         output[key] = Array.isArray(child)
-          ? child.map((error) => stripKnownObjectFields(error, NORMALIZED_ERROR_KEYS, deadlineAt))
+          ? child.map((error) => stripKnownObjectFields(
+            error,
+            NORMALIZED_ERROR_KEYS,
+            deadlineAt,
+            undefined,
+            0,
+            budget,
+          ))
           : child;
         break;
       case 'redaction': {
-        const redaction = stripKnownObjectFields(child, SUPPORT_REDACTION_KEYS, deadlineAt) as Record<string, unknown>;
+        const redaction = stripKnownObjectFields(
+          child,
+          SUPPORT_REDACTION_KEYS,
+          deadlineAt,
+          undefined,
+          0,
+          budget,
+        ) as Record<string, unknown>;
         if (redaction.categories !== undefined) {
-          redaction.categories = stripNormalizedValue(redaction.categories, SAFE_REDACTION_CATEGORY_VALUES, deadlineAt);
+          redaction.categories = stripNormalizedValue(
+            redaction.categories,
+            SAFE_REDACTION_CATEGORY_VALUES,
+            deadlineAt,
+            0,
+            budget,
+          );
         }
         output[key] = redaction;
         break;
       }
       case 'truncation':
-        output[key] = stripKnownObjectFields(child, SUPPORT_TRUNCATION_KEYS, deadlineAt);
+        output[key] = stripKnownObjectFields(child, SUPPORT_TRUNCATION_KEYS, deadlineAt, undefined, 0, budget);
         break;
       default:
         output[key] = child;
@@ -2359,19 +2431,32 @@ export function parseSupportBundle(serialized: string, codec?: SupportBundleCode
       code: 'support_bundle_json_invalid',
     });
   }
-  const normalized = stripSupportBundleUnknownFields(parsed, deadlineAt);
+  let normalized: SupportBundle | undefined;
+  try {
+    normalized = stripSupportBundleUnknownFields(parsed, deadlineAt);
+  } catch (error) {
+    if (isNormalizationDeadlineError(error)) {
+      throw Object.assign(new Error('support bundle normalization deadline exceeded'), {
+        code: 'support_bundle_normalization_timeout',
+      });
+    }
+    throw Object.assign(new Error('support bundle schema is invalid'), {
+      code: 'support_bundle_schema_invalid',
+    });
+  }
   if (normalized === undefined || !isSupportBundleV1AtDeadline(normalized, deadlineAt)) {
     throw Object.assign(new Error('support bundle schema is invalid'), {
       code: 'support_bundle_schema_invalid',
     });
   }
   if (codec === undefined) {
-    if (normalized.status !== 'complete') {
-      const { accountingProof: _accountingProof, ...unsigned } = normalized;
-      return unsigned;
-    }
+    const { accountingProof: _accountingProof, ...unsigned } = normalized;
     return buildSupportBundleWithReceiptMode(
-      { ...normalized, status: 'partial', accountingProof: undefined },
+      {
+        ...unsigned,
+        ...(normalized.status === 'complete' ? { status: 'partial' } : {}),
+        accountingProof: undefined,
+      },
       {},
       'projected',
       deadlineAt,
@@ -2529,6 +2614,10 @@ export async function collectSupportBundle(
               throw timeoutError;
             }
             const collectedResult = collector.collect(controller.signal);
+            if (Date.now() >= deadlineAt) {
+              controller.abort(timeoutError);
+              throw timeoutError;
+            }
             if (!isPromiseLike(collectedResult)) {
               throw Object.assign(new Error('support bundle collectors must return a promise'), {
                 code: 'collection_invalid_output',
@@ -2773,6 +2862,10 @@ export async function collectSupportBundle(
     });
   }
   if (duplicateReceiptIds.size > 0) {
+    // A duplicate action ID invalidates the original retained receipt as well
+    // as every later duplicate. Count that original before removing the whole
+    // ambiguous identity group from the published projection.
+    receiptsOmitted += duplicateReceiptIds.size;
     receipts = receipts.filter((receipt) => !duplicateReceiptIds.has(receipt.actionId));
   }
   const status = combineStatus(requestedStatus ?? 'complete', errors);

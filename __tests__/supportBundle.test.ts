@@ -611,6 +611,7 @@ describe('support bundle v1', () => {
     expect(collected.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'duplicate_action_id', recoveryRequired: true }),
     ]));
+    expect(collected.truncation.receiptsOmitted).toBe(2);
 
     const saturated = buildSupportBundle({
       errors: [
@@ -952,6 +953,10 @@ describe('support bundle v1', () => {
     const reserialized = JSON.parse(serializeSupportBundle(normalized as unknown as SupportBundle)) as SupportBundle;
     expect(reserialized.truncation.recordsOmitted).toBe(0);
     expect(reserialized.redaction.categories).not.toHaveProperty('forged');
+
+    delete normalized.truncation.recordsOmitted;
+    const missingTruncation = JSON.parse(serializeSupportBundle(normalized as unknown as SupportBundle)) as SupportBundle;
+    expect(missingTruncation.truncation.recordsOmitted).toBe(0);
   });
 
   it('fails closed for untyped state strings and numbers', () => {
@@ -1040,13 +1045,46 @@ describe('support bundle v1', () => {
     expect(parsed).not.toHaveProperty('futureRootField');
   });
 
+  it('rejects unsupported record attribute shapes and over-deep compatibility values', () => {
+    const fixture = createSafeSupportBundleFixture();
+    const scalarAttributes = {
+      ...fixture,
+      records: [{ ...fixture.records[0], attributes: 'ready' }],
+    };
+    expect(() => parseSupportBundle(JSON.stringify(scalarAttributes))).toThrow(/schema is invalid/i);
+
+    let nested: unknown = 'ready';
+    for (let depth = 0; depth < SUPPORT_BUNDLE_LIMITS.maxAttributeDepth + 2; depth += 1) {
+      nested = { state: nested };
+    }
+    expect(() => parseSupportBundle(JSON.stringify({ ...fixture, lifecycle: nested })))
+      .toThrow(/schema is invalid/i);
+  });
+
   it('parses unsigned partial bundles without requiring an application codec', () => {
-    const bundle = buildSupportBundle({ lifecycle: { password: 'secret' } });
+    const bundle = buildSupportBundle({
+      lifecycle: { password: 'secret' },
+      receipts: [{
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'unsigned-action',
+        state: 'succeeded',
+        resource: { kind: 'project', id: 'unsigned-project' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }],
+    });
     const parsed = parseSupportBundle(serializeSupportBundle(bundle));
 
     expect(parsed.status).toBe('partial');
     expect(parsed).not.toHaveProperty('accountingProof');
     expect(parsed.provenance.verification).toBe('unverified');
+    expect(parsed.receipts[0]?.verification).toBe('unverified');
+
+    const forged = JSON.parse(serializeSupportBundle(bundle)) as unknown as {
+      truncation: Record<string, unknown>;
+    };
+    forged.truncation.recordsOmitted = 1_234;
+    const reparsed = parseSupportBundle(JSON.stringify(forged));
+    expect(reparsed.truncation.recordsOmitted).toBe(0);
   });
 
   it('preserves the codec on minimal recovery bundles', () => {
