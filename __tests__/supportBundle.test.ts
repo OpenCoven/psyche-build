@@ -175,6 +175,15 @@ describe('support bundle v1', () => {
     expect(createSafeSupportBundleFixture().status).toBe('complete');
   });
 
+  it('does not accept unverified receipts as a complete normalized bundle', () => {
+    const fixture = createSafeSupportBundleFixture();
+    expect(isSupportBundleV1({
+      ...fixture,
+      status: 'complete',
+      receipts: fixture.receipts.map((receipt) => ({ ...receipt, verification: 'unverified' as const })),
+    })).toBe(false);
+  });
+
   it('does not treat forged normalized JSON as authoritative and rejects tampering', () => {
     const codec = createSupportBundleCodec('support-bundle-proof-test-key-v1');
     const fixture = createSafeSupportBundleFixture();
@@ -261,6 +270,21 @@ describe('support bundle v1', () => {
     const serializedBundle = JSON.parse(serialized) as typeof bundle;
     expect(serializedBundle.truncation.recordsOmitted).toBeGreaterThan(0);
     expect(serializedBundle.truncation.terminalLinesOmitted).toBeGreaterThan(0);
+  });
+
+  it('keeps fitted byte accounting inside the validator bound', () => {
+    const bundle = buildSupportBundle({
+      records: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords }, (_, sequence) => ({
+        sequence,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'test',
+        event: 'sample',
+        attributes: { values: Array.from({ length: 32 }, () => 'ready') },
+      })),
+    }, { maxBundleBytes: 1_024 });
+
+    expect(bundle.truncation.bytesOmitted).toBeGreaterThan(0);
+    expect(isSupportBundleV1(bundle)).toBe(true);
   });
 
   it('selects over-cap records deterministically before applying the record cap', () => {
@@ -857,6 +881,20 @@ describe('support bundle v1', () => {
     expect(serializeSupportBundle(bundle)).not.toContain('forged-project');
   });
 
+  it('keeps record attributes inside the bounded diagnostic vocabulary', () => {
+    const bundle = buildSupportBundle({
+      records: [{
+        sequence: 1,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'diagnostics',
+        event: 'sample',
+        attributes: { arbitraryFlag: true, safeState: 'ready' },
+      }],
+    });
+
+    expect(bundle.records[0]?.attributes).toEqual({ safeState: 'ready' });
+  });
+
   it('rejects direct arrays beyond the scan bound instead of selecting an order-dependent prefix', () => {
     const records = Array.from({ length: 1_025 }, (_, sequence) => ({
       sequence,
@@ -984,6 +1022,41 @@ describe('support bundle v1', () => {
     expect(serialized).not.toContain('futureReaderHint');
     expect(serialized).not.toContain('futureState');
     expect(serialized).not.toContain('futureRecordField');
+  });
+
+  it('ignores unknown fields while verifying a supported serialized bundle', () => {
+    const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
+    const fixture = createSafeSupportBundleFixture();
+    const extended = {
+      ...fixture,
+      futureRootField: 'ignored',
+      compatibility: { ...fixture.compatibility, futureReaderHint: 'ignored' },
+      lifecycle: { ...fixture.lifecycle, futureState: 'ignored' },
+      records: [{ ...fixture.records[0], futureRecordField: 'ignored' }],
+    };
+
+    const parsed = parseSupportBundle(JSON.stringify(extended), codec);
+    expect(serializeSupportBundle(parsed, codec)).toBe(serializeSupportBundle(fixture));
+    expect(parsed).not.toHaveProperty('futureRootField');
+  });
+
+  it('parses unsigned partial bundles without requiring an application codec', () => {
+    const bundle = buildSupportBundle({ lifecycle: { password: 'secret' } });
+    const parsed = parseSupportBundle(serializeSupportBundle(bundle));
+
+    expect(parsed.status).toBe('partial');
+    expect(parsed).not.toHaveProperty('accountingProof');
+    expect(parsed.provenance.verification).toBe('unverified');
+  });
+
+  it('preserves the codec on minimal recovery bundles', () => {
+    const codec = createSupportBundleCodec('support-bundle-recovery-proof-v1');
+    const bundle = buildSupportBundle({ lifecycle: { state: 'ready' } }, { maxElapsedMs: 0, codec });
+    const parsed = parseSupportBundle(serializeSupportBundle(bundle), codec);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.accountingProof).toMatch(/^[a-f0-9]{64}$/);
+    expect(parsed.status).toBe('recovery_required');
   });
 
   it('omits arbitrary terminal text by default', () => {
