@@ -7,6 +7,7 @@ import {
   buildSupportBundle,
   collectSupportBundle,
   createSafeSupportBundleFixture,
+  isSupportBundleV1,
   serializeSupportBundle,
   supportBundleDigest,
   type SupportBundle,
@@ -74,6 +75,10 @@ describe('support bundle v1', () => {
       terminalTail: [
         '\u001b[31mBearer very-secret-value\u001b[0m',
         'API_KEY=another-secret',
+        'password: terminal-secret',
+        '{"apiKey":"json-secret"}',
+        '/tmp/workspace/private.txt',
+        '\\\\server\\share\\private.txt',
       ],
       records: [{
         sequence: 1,
@@ -92,6 +97,10 @@ describe('support bundle v1', () => {
 
     expect(serialized).not.toContain('very-secret-value');
     expect(serialized).not.toContain('another-secret');
+    expect(serialized).not.toContain('terminal-secret');
+    expect(serialized).not.toContain('json-secret');
+    expect(serialized).not.toContain('/tmp/workspace/private.txt');
+    expect(serialized).not.toContain('server\\share');
     expect(serialized).not.toContain('do not include this prompt');
     expect(serialized).not.toContain('source should never be here');
     expect(serialized).not.toContain('internal.example.test');
@@ -171,6 +180,36 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('fails closed when a collector returns an invalid shape', async () => {
+    const bundle = await collectSupportBundle([
+      {
+        name: 'malformed',
+        collect: async () => ({ unexpected: 'not-a-contract' } as never),
+      },
+    ]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collector: 'malformed', code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
+  it('merges authoritative receipts from every collector deterministically', async () => {
+    const receipt = (actionId: string) => ({
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId,
+      state: 'queued' as const,
+      resource: { kind: 'project' as const, id: `project-${actionId}` },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const bundle = await collectSupportBundle([
+      { name: 'zeta', collect: async () => ({ receipts: [receipt('zeta')] }) },
+      { name: 'alpha', collect: async () => ({ receipts: [receipt('alpha')] }) },
+    ]);
+
+    expect(bundle.receipts.map((item) => item.actionId)).toEqual(['alpha', 'zeta']);
+  });
+
   it('produces a safe fixture with no content-heavy fields', () => {
     const fixture = createSafeSupportBundleFixture();
     expect(fixture.schema).toBe(SUPPORT_BUNDLE_SCHEMA);
@@ -184,6 +223,13 @@ describe('support bundle v1', () => {
     const serialized = serializeSupportBundle(bundle);
     expect(serialized).not.toContain('must not serialize');
     expect(() => serializeSupportBundle({ ...bundle, version: 2 } as unknown as SupportBundle)).toThrow(/schema|compatibility/i);
+    expect(isSupportBundleV1({
+      schema: SUPPORT_BUNDLE_SCHEMA,
+      version: 1,
+      compatibility: bundle.compatibility,
+    })).toBe(false);
+    expect(() => serializeSupportBundle({ ...bundle, generatedAt: 'not-a-timestamp' } as unknown as SupportBundle))
+      .toThrow(/schema|compatibility/i);
   });
 
   it('fails closed for invalid or recovery-sensitive collection status', () => {
