@@ -655,6 +655,35 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('does not sort a stateful collector array element after it changes shape', async () => {
+    let firstRecordReads = 0;
+    const validRecord = {
+      sequence: 1,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'ready',
+    };
+    const records: unknown[] = [undefined, validRecord];
+    Object.defineProperty(records, 0, {
+      enumerable: true,
+      get: () => {
+        firstRecordReads += 1;
+        return firstRecordReads >= 3 ? null : validRecord;
+      },
+    });
+    const bundle = await collectSupportBundle([{
+      name: 'changing-payload',
+      collect: async () => ({ records } as never),
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.records).toEqual([expect.objectContaining({ sequence: 1 })]);
+    expect(bundle.truncation.recordsOmitted).toBe(1);
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
   it('degrades conflicting singleton collector sections to recovery_required', async () => {
     const bundle = await collectSupportBundle([
       { name: 'alpha', collect: async () => ({ lifecycle: { state: 'ready' } }) },

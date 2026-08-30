@@ -602,7 +602,7 @@ function isBoundedInputValue(
   return valid;
 }
 
-function isCollectorRecordShape(value: unknown): boolean {
+function isCollectorRecordShape(value: unknown): value is SupportRecord {
   if (!isRecord(value)
     || !hasOnlyKeys(value, NORMALIZED_RECORD_KEYS)
     || finiteNonNegativeInteger(value.sequence) === undefined
@@ -621,13 +621,13 @@ function isCollectorRecordShape(value: unknown): boolean {
   return true;
 }
 
-function isCollectorReceiptShape(value: unknown): boolean {
+function isCollectorReceiptShape(value: unknown): value is ActionStatusReceipt {
   return isRecord(value)
     && hasOnlyKeys(value, CONTROL_RECEIPT_KEYS)
     && isActionStatusReceipt(value);
 }
 
-function isCollectorErrorShape(value: unknown): boolean {
+function isCollectorErrorShape(value: unknown): value is SupportCollectionError {
   if (!isRecord(value)
     || !hasOnlyKeys(value, COLLECTOR_ERROR_KEYS)
     || typeof value.collector !== 'string'
@@ -641,6 +641,30 @@ function isCollectorErrorShape(value: unknown): boolean {
     || (value.message !== undefined && (typeof value.message !== 'string' || value.message.length > MAX_TEXT_SCAN_CHARS))
     || (value.recoveryRequired !== undefined && typeof value.recoveryRequired !== 'boolean')) return false;
   return true;
+}
+
+function safeCollectorRecordShape(value: unknown): value is SupportRecord {
+  try {
+    return isCollectorRecordShape(value);
+  } catch {
+    return false;
+  }
+}
+
+function safeCollectorReceiptShape(value: unknown): value is ActionStatusReceipt {
+  try {
+    return isCollectorReceiptShape(value);
+  } catch {
+    return false;
+  }
+}
+
+function safeCollectorErrorShape(value: unknown): value is SupportCollectionError {
+  try {
+    return isCollectorErrorShape(value);
+  } catch {
+    return false;
+  }
 }
 
 function collectorResultViolation(
@@ -1272,20 +1296,29 @@ function compareSupportErrors(left: SupportCollectionError, right: SupportCollec
 }
 
 function safeRecoveryError(value: unknown): SupportCollectionError {
-  const input = isRecord(value) ? value : {};
-  const collector = typeof input.collector === 'string' && SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(input.collector)
-    ? input.collector
-    : 'support-bundle';
-  const code = typeof input.code === 'string' && SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(input.code)
-    ? input.code
-    : 'collection_failed';
-  const at = safeCanonicalTimestamp(input.at) ?? 'unknown';
-  return {
-    collector,
-    code,
-    at,
-    recoveryRequired: true,
-  };
+  try {
+    const input = isRecord(value) ? value : {};
+    const collector = typeof input.collector === 'string' && SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(input.collector)
+      ? input.collector
+      : 'support-bundle';
+    const code = typeof input.code === 'string' && SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(input.code)
+      ? input.code
+      : 'collection_failed';
+    const at = safeCanonicalTimestamp(input.at) ?? 'unknown';
+    return {
+      collector,
+      code,
+      at,
+      recoveryRequired: true,
+    };
+  } catch {
+    return {
+      collector: 'support-bundle',
+      code: 'collection_failed',
+      at: 'unknown',
+      recoveryRequired: true,
+    };
+  }
 }
 
 function attachRecoveryMetadata(
@@ -2917,7 +2950,18 @@ export async function collectSupportBundle(
             },
           });
       }
-      throw recoveryError;
+      return minimalRecoveryBundle('collection_invalid_output', recoveryErrors, options.codec,
+        optionLimit(options.maxBundleBytes, SUPPORT_BUNDLE_LIMITS.maxBundleBytes), {
+          records: recoveryRecords,
+          receipts: recoveryReceipts,
+          terminalTail: recoveryTerminalTail,
+          truncation: {
+            recordsOmitted,
+            receiptsOmitted,
+            errorsOmitted,
+            terminalLinesOmitted,
+          },
+        });
     }
   };
   if (normalizationInterrupted()) return recoveryBundle(normalizationError());
@@ -3051,7 +3095,19 @@ export async function collectSupportBundle(
         for (let index = 0; index < values.length; index += 1) {
           activePayload.nextIndex = index;
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
-          recordCandidates.push(values[index] as SupportRecord);
+          const record = values[index];
+          if (!safeCollectorRecordShape(record)) {
+            recordsOmitted += 1;
+            appendError({
+              collector: item.name,
+              code: 'collection_invalid_output',
+              at: collectionAt,
+              recoveryRequired: true,
+            });
+            activePayload.nextIndex = index + 1;
+            continue;
+          }
+          recordCandidates.push(record);
           activePayload.nextIndex = index + 1;
         }
         activePayload = undefined;
@@ -3076,9 +3132,15 @@ export async function collectSupportBundle(
           activePayload.nextIndex = index;
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
           const receipt = values[index];
-          if (!isActionStatusReceipt(receipt)) {
+          if (!safeCollectorReceiptShape(receipt)) {
             aggregateOverflow = true;
             receiptsOmitted += 1;
+            appendError({
+              collector: item.name,
+              code: 'collection_invalid_output',
+              at: collectionAt,
+              recoveryRequired: true,
+            });
             continue;
           }
           if (receiptIds.has(receipt.actionId)) {
@@ -3104,7 +3166,19 @@ export async function collectSupportBundle(
         for (let index = 0; index < values.length; index += 1) {
           activePayload.nextIndex = index;
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
-          appendError(values[index] as SupportCollectionError);
+          const error = values[index];
+          if (!safeCollectorErrorShape(error)) {
+            errorsOmitted += 1;
+            appendError({
+              collector: item.name,
+              code: 'collection_invalid_output',
+              at: collectionAt,
+              recoveryRequired: true,
+            });
+            activePayload.nextIndex = index + 1;
+            continue;
+          }
+          appendError(error);
           activePayload.nextIndex = index + 1;
         }
         activePayload.nextIndex = values.length;
@@ -3143,7 +3217,12 @@ export async function collectSupportBundle(
         || compareStableValues(a, b, deadlineAt));
     } catch (error) {
       if (isNormalizationDeadlineError(error)) return recoveryBundle(normalizationError());
-      throw error;
+      return recoveryBundle({
+        collector: 'support-bundle',
+        code: 'collection_invalid_output',
+        at: collectionAt,
+        recoveryRequired: true,
+      });
     }
   }
   if (recordCandidates.length > maxRecords) {
