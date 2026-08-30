@@ -1231,7 +1231,7 @@ describe('Tauri agent picker', () => {
         hidePalette: () => { hidden += 1; },
         syncComposerChrome: () => { synced += 1; },
       },
-      { agentPickerIndex: 1 },
+      { agentPickerIndex: 1, agentLaunchInFlight: false },
     );
 
     await expect(controller.fn()).resolves.toBe('codex');
@@ -1266,7 +1266,7 @@ describe('Tauri agent picker', () => {
         hidePalette: () => undefined,
         syncComposerChrome: () => undefined,
       },
-      { agentPickerIndex: 0 },
+      { agentPickerIndex: 0, agentLaunchInFlight: false },
     );
 
     await expect(controller.fn()).resolves.toBeNull();
@@ -1299,7 +1299,7 @@ describe('Tauri agent picker', () => {
           status = [message, kind];
         },
       },
-      { agentPickerIndex: 0 },
+      { agentPickerIndex: 0, agentLaunchInFlight: false },
     );
 
     await expect(controller.fn()).resolves.toBeNull();
@@ -1309,6 +1309,58 @@ describe('Tauri agent picker', () => {
     ]);
     expect(commandInput.value).toBe('Fix the failing tests');
     expect(focused).toBe(1);
+  });
+
+  it('serializes prompt-backed launches until the first PTY startup settles', async () => {
+    let resolveLaunch!: (thread: string) => void;
+    const pendingLaunch = new Promise<string>((resolve) => {
+      resolveLaunch = resolve;
+    });
+    let spawnCalls = 0;
+    let closeCalls = 0;
+    const statuses: Array<[string, string]> = [];
+    const commandInput = {
+      value: 'Fix the failing tests',
+      focus: () => undefined,
+    };
+    const controller = compileFunctionWithState<() => Promise<string | null>>(
+      functionSource('launchSelectedAgent'),
+      {
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI' },
+        ],
+        closeAgentPicker: () => { closeCalls += 1; },
+        spawnAgentThread: () => {
+          spawnCalls += 1;
+          return pendingLaunch;
+        },
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        commandInput,
+        hidePalette: () => undefined,
+        syncComposerChrome: () => undefined,
+        setStatus: (message: string, kind: string) => {
+          statuses.push([message, kind]);
+        },
+      },
+      { agentPickerIndex: 0, agentLaunchInFlight: false },
+    );
+
+    const firstLaunch = controller.fn();
+    expect(controller.snapshot().agentLaunchInFlight).toBe(true);
+
+    await expect(controller.fn()).resolves.toBeNull();
+    expect(spawnCalls).toBe(1);
+    expect(statuses).toEqual([
+      ['Wait for the current agent launch to finish', 'warn'],
+    ]);
+    expect(commandInput.value).toBe('Fix the failing tests');
+
+    resolveLaunch('codex');
+    await expect(firstLaunch).resolves.toBe('codex');
+
+    expect(closeCalls).toBe(2);
+    expect(commandInput.value).toBe('');
+    expect(controller.snapshot().agentLaunchInFlight).toBe(false);
   });
 
   it('does not persist an agent preference and always reselects Coven CLI', () => {

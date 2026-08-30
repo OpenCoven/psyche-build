@@ -1361,6 +1361,7 @@
   var agentPickerListEl = document.getElementById("agent-picker-list");
   var agentPickerIndex = 0;
   var agentPickerPreviousFocus = null;
+  var agentLaunchInFlight = false;
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
@@ -13960,44 +13961,52 @@
     var entry = agentLaunchOptions()[agentPickerIndex];
     if (!entry) return null;
     var project = activeProject();
-    var prompt = entry.id === "coven-code"
-      ? ""
-      : String(commandInput && commandInput.value || "").trim();
+    var promptBacked = entry.id !== "coven-code";
+    var prompt = promptBacked
+      ? String(commandInput && commandInput.value || "").trim()
+      : "";
+    if (promptBacked && agentLaunchInFlight) {
+      closeAgentPicker();
+      setStatus("Wait for the current agent launch to finish", "warn");
+      return null;
+    }
     closeAgentPicker();
-    var thread;
+    if (promptBacked) agentLaunchInFlight = true;
     try {
-      thread = await spawnAgentThread(entry.id, project, prompt);
+      var thread = await spawnAgentThread(entry.id, project, prompt);
+      if (!thread) {
+        if (
+          promptBacked &&
+          commandInput &&
+          typeof commandInput.focus === "function"
+        ) {
+          commandInput.focus();
+        }
+        return null;
+      }
+      if (
+        promptBacked &&
+        commandInput &&
+        commandInput.value.trim() === prompt
+      ) {
+        commandInput.value = "";
+        hidePalette();
+        syncComposerChrome();
+      }
+      return thread;
     } catch (error) {
       setStatus(entry.label + " failed to start: " + String(error), "error");
       if (
-        entry.id !== "coven-code" &&
+        promptBacked &&
         commandInput &&
         typeof commandInput.focus === "function"
       ) {
         commandInput.focus();
       }
       return null;
+    } finally {
+      if (promptBacked) agentLaunchInFlight = false;
     }
-    if (!thread) {
-      if (
-        entry.id !== "coven-code" &&
-        commandInput &&
-        typeof commandInput.focus === "function"
-      ) {
-        commandInput.focus();
-      }
-      return null;
-    }
-    if (
-      entry.id !== "coven-code" &&
-      commandInput &&
-      commandInput.value.trim() === prompt
-    ) {
-      commandInput.value = "";
-      hidePalette();
-      syncComposerChrome();
-    }
-    return thread;
   }
 
   async function spawnAgentThread(agentId, project, prompt) {
