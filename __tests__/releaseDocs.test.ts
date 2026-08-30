@@ -15,7 +15,8 @@ const releaseDocs = [
 ] as const;
 
 const historicalDocDirectories = new Set([
-  path.join('docs', 'superpowers'),
+  path.join('docs', 'superpowers', 'plans'),
+  path.join('docs', 'superpowers', 'specs'),
 ]);
 
 const generatedAgentsDoc = path.join('src', 'utils', 'generated-agents-doc.ts');
