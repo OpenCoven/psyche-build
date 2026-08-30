@@ -13,6 +13,7 @@ import {
   acquireProjectPaneSlugAllocationLock,
   mutateProjectPaneConfig,
   mutateProjectPaneSettings,
+  readProjectPaneConfig,
   readProjectPaneConfigUnderLock,
   removeProjectPaneConfigPaneIdentities,
   replaceProjectPaneConfigPaneIdentity,
@@ -44,6 +45,23 @@ function createProject(): string {
 }
 
 describe('project pane config mutation', () => {
+  it.each([null, 42, 'pane', []])(
+    'rejects a non-object pane record as corrupt: %j',
+    async (pane) => {
+      const projectRoot = createProject();
+      const configDir = join(projectRoot, '.psyche');
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(
+        join(configDir, 'psyche.config.json'),
+        JSON.stringify({ panes: [pane] }),
+      );
+
+      await expect(readProjectPaneConfig(projectRoot)).rejects.toMatchObject({
+        code: 'config_corrupt',
+      });
+    },
+  );
+
   it('serializes sibling slug allocation across distinct same-basename worktrees', async () => {
     expect(acquireProjectPaneSlugAllocationLock).toEqual(expect.any(Function));
     const projectRoot = createProject();
