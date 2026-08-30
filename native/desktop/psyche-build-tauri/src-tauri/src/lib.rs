@@ -480,11 +480,10 @@ impl std::fmt::Display for PtyProcessTerminatorSetupError {
 #[cfg(windows)]
 #[derive(Debug)]
 struct WindowsProcessTreeKiller {
-    // portable-pty's Windows child implementation owns a dedicated Job Object
-    // configured with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and assigns the child
-    // through PROC_THREAD_ATTRIBUTE_JOB_LIST. ChildKiller therefore carries a
-    // duplicated job handle; retaining that capability avoids PID-reuse races
-    // and terminates descendants with the PTY root.
+    // portable-pty's Windows child implementation owns a dedicated kill-on-close
+    // job and assigns the child through its process-creation attributes.
+    // ChildKiller therefore carries a duplicated job handle; retaining that
+    // capability avoids PID-reuse races and terminates descendants with the PTY root.
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
@@ -497,7 +496,7 @@ impl WindowsProcessTreeKiller {
     }
 
     fn terminate(&self) -> std::io::Result<()> {
-        // This is TerminateJobObject through portable-pty's Windows killer,
+        // This is a job-wide termination through portable-pty's Windows killer,
         // rather than a raw PID termination. It is intentionally idempotent at
         // the job boundary: an already-exited job is handled by the backend.
         self.killer.lock().kill()
@@ -3132,7 +3131,9 @@ fn register_pty_client(
                 return;
             }
         }
-        finish_pty_lifecycle(&shutdown);
+        if shutdown.exit_event_allowed {
+            PTY_LIFECYCLES.lock().finish_exit(&exit_token);
+        }
     });
 
     if let InstallSessionOutcome::StopImmediately(session) = install_outcome {
