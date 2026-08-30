@@ -36,9 +36,7 @@
     "state": "current",
     "version": "0.0.2"
   },
-  "terminalTail": [
-    "fixture: diagnostics ready"
-  ],
+  "terminalTail": [],
   "records": [
     {
       "sequence": 1,
@@ -66,18 +64,20 @@
   ],
   "errors": [],
   "redaction": {
-    "version": 1,
+    "categories": {
+      "terminal-omitted": 1
+    },
+    "omittedFields": 1,
     "redactedFields": 0,
-    "omittedFields": 0,
-    "categories": {}
+    "version": 1
   },
   "truncation": {
-    "recordsOmitted": 0,
-    "receiptsOmitted": 0,
-    "stateFieldsOmitted": 0,
-    "terminalLinesOmitted": 0,
-    "bytesOmitted": 0,
+    "bytesOmitted": 1,
     "fieldsTruncated": 0,
+    "receiptsOmitted": 0,
+    "recordsOmitted": 0,
+    "stateFieldsOmitted": 0,
+    "terminalLinesOmitted": 1,
     "totalPayloadBounded": true
   }
 }

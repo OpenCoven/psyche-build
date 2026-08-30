@@ -67,6 +67,8 @@ describe('support bundle v1', () => {
       },
       lifecycle: {
         accessToken: 'ghp_01234567890123456789',
+        auth: 'auth-secret',
+        passwd: 'passwd-secret',
         prompt: 'do not include this prompt',
         upstreamUrl: 'https://internal.example.test/repo.git?token=secret',
         cwd: '/home/alice/private-project',
@@ -86,6 +88,10 @@ describe('support bundle v1', () => {
         'password is spaced-secret',
         'cwd /tmp/private.txt',
         'AWS_SECRET_ACCESS_KEY=aws-secret',
+        'github_pat_012345678901234567890123456789',
+        'password: one two three',
+        '/tmp/workspace/private file.txt',
+        'C:\\Users\\alice\\private file.txt',
       ],
       records: [{
         sequence: 1,
@@ -113,6 +119,11 @@ describe('support bundle v1', () => {
     expect(serialized).not.toContain('hash-secret');
     expect(serialized).not.toContain('spaced-secret');
     expect(serialized).not.toContain('aws-secret');
+    expect(serialized).not.toContain('auth-secret');
+    expect(serialized).not.toContain('passwd-secret');
+    expect(serialized).not.toContain('012345678901234567890123456789');
+    expect(serialized).not.toContain('one two three');
+    expect(serialized).not.toContain('private file.txt');
     expect(serialized).not.toContain('do not include this prompt');
     expect(serialized).not.toContain('source should never be here');
     expect(serialized).not.toContain('internal.example.test');
@@ -132,12 +143,9 @@ describe('support bundle v1', () => {
       state: state === 'pending' ? 'queued' as const
         : state === 'executing' ? 'running' as const
           : state === 'invalidated' ? 'expired' as const
-            : state === 'recovery_required' ? 'unknown' as const
-              : state === 'failed' ? 'failed' as const
-                : state === 'unknown' ? 'unknown' as const
-                  : state === 'requested' ? 'queued' as const
-                    : state === 'accepted' ? 'running' as const
-                      : 'succeeded' as const,
+            : state === 'failed' ? 'failed' as const
+              : state === 'unknown' ? 'unknown' as const
+                : 'succeeded' as const,
       resource: { kind: 'project' as const, id: `project-${index}` },
       createdAt: `2026-01-01T00:00:0${index}.000Z`,
       message: 'private outcome detail',
@@ -146,10 +154,10 @@ describe('support bundle v1', () => {
     const bundle = buildSupportBundle({ receipts });
 
     expect(bundle.receipts.map((receipt) => receipt.sourceState)).toEqual([
-      'queued', 'queued', 'running', 'running', 'succeeded', 'failed', 'unknown', 'expired', 'unknown',
+      'queued', 'running', 'succeeded', 'failed', 'unknown', 'expired',
     ]);
     expect(bundle.receipts.map((receipt) => receipt.state)).toEqual([
-      'pending', 'pending', 'executing', 'executing', 'succeeded', 'failed', 'unknown', 'invalidated', 'unknown',
+      'pending', 'executing', 'succeeded', 'failed', 'unknown', 'invalidated',
     ]);
     expect(serializeSupportBundle(bundle)).not.toContain('private outcome detail');
     expect(serializeSupportBundle(bundle)).not.toContain('private');
@@ -191,6 +199,30 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'slow-recovery', code: 'collection_timeout_or_cancelled', recoveryRequired: true }),
     ]));
+  });
+
+  it('never returns complete after cancellation or a late normalization deadline', async () => {
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const cancelledBundle = await collectSupportBundle([], { signal: cancelled.signal });
+    expect(cancelledBundle.status).toBe('recovery_required');
+
+    const originalDateNow = Date.now;
+    let dateNowCalls = 0;
+    Date.now = () => {
+      dateNowCalls += 1;
+      const now = originalDateNow();
+      return dateNowCalls >= 6 ? now + 60_000 : now;
+    };
+    try {
+      const lateBundle = await collectSupportBundle([{
+        name: 'late-normalization',
+        collect: async () => ({ lifecycle: { state: 'ready' } }),
+      }], { maxElapsedMs: SUPPORT_BUNDLE_LIMITS.maxElapsedMs, now: () => 1_767_225_600_000 });
+      expect(lateBundle.status).toBe('recovery_required');
+    } finally {
+      Date.now = originalDateNow;
+    }
   });
 
   it('fails closed when a collector returns an invalid shape', async () => {
@@ -249,6 +281,65 @@ describe('support bundle v1', () => {
     expect(bundle.receipts.map((item) => item.actionId)).toEqual(['alpha', 'zeta']);
   });
 
+  it('rejects malformed, projected, and overflowing collector output', async () => {
+    const validRecord = {
+      sequence: 1,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'ready',
+    };
+    const validReceipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'overflow-action',
+      state: 'queued' as const,
+      resource: { kind: 'project' as const, id: 'project' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const cases = [
+      { records: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, () => validRecord) },
+      { receipts: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxReceipts + 1 }, () => validReceipt) },
+      { errors: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxErrorChain + 1 }, () => ({ collector: 'c', code: 'failed', at: '2026-01-01T00:00:00.000Z' })) },
+      { terminalTail: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxTerminalLines + 1 }, () => 'arbitrary') },
+      { records: [{ ...validRecord, sequence: 'not-a-number' }] },
+      { receipts: [{ sourceSchema: 'psyche.control.receipt/v1', actionId: 'projected', state: 'pending', sourceState: 'queued', resource: { kind: 'project', idDigest: 'a'.repeat(64) }, createdAt: '2026-01-01T00:00:00.000Z' }] },
+    ];
+
+    for (const result of cases) {
+      const bundle = await collectSupportBundle([{
+        name: 'malformed-or-overflowing',
+        collect: async () => result as never,
+      }]);
+      expect(bundle.status).toBe('recovery_required');
+      expect(bundle.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ recoveryRequired: true }),
+      ]));
+    }
+  });
+
+  it('detects duplicate and conflicting action IDs as recovery-required', async () => {
+    const receipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'same-action',
+      state: 'queued' as const,
+      resource: { kind: 'project' as const, id: 'project' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const direct = buildSupportBundle({ receipts: [receipt, { ...receipt, state: 'failed' as const }] });
+    expect(direct.status).toBe('recovery_required');
+    expect(direct.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'duplicate_action_id', recoveryRequired: true }),
+    ]));
+
+    const collected = await collectSupportBundle([
+      { name: 'alpha', collect: async () => ({ receipts: [receipt] }) },
+      { name: 'beta', collect: async () => ({ receipts: [{ ...receipt, state: 'failed' as const }] }) },
+    ]);
+    expect(collected.status).toBe('recovery_required');
+    expect(collected.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'duplicate_action_id', recoveryRequired: true }),
+    ]));
+  });
+
   it('produces a safe fixture with no content-heavy fields', () => {
     const fixture = createSafeSupportBundleFixture();
     expect(fixture.schema).toBe(SUPPORT_BUNDLE_SCHEMA);
@@ -295,6 +386,40 @@ describe('support bundle v1', () => {
       ...fixture,
       records: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, () => fixture.records[0]),
     } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      lifecycle: Object.fromEntries(Array.from({ length: 5_000 }, (_, index) => [`key-${index}`, 'value'])),
+    } as unknown)).toBe(false);
+    const largeState = Object.fromEntries(Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxAttributeKeys }, (_, index) => [
+      `key-${index}`, 'x'.repeat(SUPPORT_BUNDLE_LIMITS.maxStringBytes),
+    ]));
+    expect(isSupportBundleV1({
+      ...fixture,
+      lifecycle: largeState,
+      providers: largeState,
+      persistence: largeState,
+      updater: largeState,
+      graphics: largeState,
+    } as unknown)).toBe(false);
+  });
+
+  it('omits long valid relative paths without emitting an invalid ellipsis', () => {
+    const longRelativePath = `${'segment/'.repeat(100)}file.ts`;
+    const bundle = buildSupportBundle({
+      project: { id: 'project', relativePath: longRelativePath },
+      records: [{
+        sequence: 1,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'path-test',
+        event: 'path',
+        attributes: { relativePath: longRelativePath },
+      }],
+    });
+
+    expect(bundle.project?.relativePath).toBeUndefined();
+    expect(bundle.records[0]?.attributes?.relativePath).toBeUndefined();
+    expect(serializeSupportBundle(bundle)).not.toContain('…');
+    expect(serializeSupportBundle(bundle)).not.toContain(longRelativePath);
   });
 
   it('fails closed for invalid or recovery-sensitive collection status', () => {
@@ -316,14 +441,15 @@ describe('support bundle v1', () => {
     expect(first.redaction.categories).toHaveProperty('unsafe-field-name');
   });
 
-  it('keeps the newest terminal lines and strips OSC/DCS control sequences', () => {
+  it('omits arbitrary terminal text by default', () => {
     const lines = Array.from({ length: 64 }, (_, index) => `line-${index}-${'x'.repeat(480)}`);
     lines[63] = '\u001b]0;OSC_SECRET\u0007newest';
     const bundle = buildSupportBundle({ terminalTail: lines });
     const serialized = serializeSupportBundle(bundle);
     expect(serialized).not.toContain('OSC_SECRET');
-    expect(bundle.terminalTail.at(-1)).toBe('newest');
-    expect(bundle.truncation.terminalLinesOmitted).toBeGreaterThan(0);
+    expect(bundle.terminalTail).toEqual([]);
+    expect(bundle.truncation.terminalLinesOmitted).toBe(lines.length);
+    expect(bundle.redaction.categories).toHaveProperty('terminal-omitted');
   });
 
   it('keeps the checked-in safe fixture equal to the canonical fixture generator', async () => {

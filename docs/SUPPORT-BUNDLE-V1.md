@@ -11,11 +11,11 @@ or authority source. The schema foundation lives in
 Every bundle contains a schema identifier, format version, generation time,
 status, safe application provenance, bounded state maps, ordered diagnostic
 records, redacted action receipts, collection errors, and redaction/truncation
-manifests. The action vocabulary is explicit: `pending`, `requested`,
-`accepted`, `executing`, `succeeded`, `failed`, `unknown`, `invalidated`, and
-`recovery_required`. A diagnostic bundle reports state; it cannot authorize,
-retry, or execute an action. The existing control-plane owner, lease,
-approval, idempotency, and receipt contracts remain authoritative.
+manifests. The receipt projection vocabulary is derived and explicit:
+`pending`, `executing`, `succeeded`, `failed`, `unknown`, and `invalidated`.
+A diagnostic bundle reports state; it cannot authorize, retry, or execute an
+action. The existing control-plane owner, lease, approval, idempotency, and
+receipt contracts remain authoritative.
 
 The compatibility policy rejects an unknown major schema/version and permits a
 reader to ignore unknown fields within a supported major version. Receipt
@@ -25,8 +25,8 @@ states `queued` and `approval_required` map to `pending`, `running` maps to
 The projection keeps only bounded authority metadata and a resource digest; it
 never copies receipt messages or values.
 
-`requested`, `accepted`, and `recovery_required` remain part of the broader
-diagnostic action vocabulary for journal/collection state; they are not
+Collection state uses the separate bundle status vocabulary
+`complete`, `partial`, `unknown`, and `recovery_required`; those values are not
 invented as receipt projections when the authoritative control receipt has no
 such source state.
 
@@ -50,11 +50,12 @@ The v1 implementation enforces the following defaults before serialization:
 | Attribute nesting | 5 levels |
 | Collection error chain | 4 |
 | Action receipts | 64 |
-| Terminal tail | 64 lines / 4 KiB |
+| Raw terminal input | 64 lines / 16K characters per line; never emitted |
 
-When the payload approaches its cap, oldest records are removed before terminal
-tail lines, then the largest state fields and finally receipts. The truncation
-manifest records what was removed. A collector
+When the payload approaches its cap, oldest records are removed, then the
+largest state fields and finally receipts. Raw terminal input is omitted during
+normalization before payload fitting. The truncation manifest records what was
+removed. A collector
 timeout, cancellation, or recovery-sensitive failure produces
 `recovery_required`; ordinary collector failures produce `partial`. No failed
 collector is represented as complete success.
@@ -72,9 +73,12 @@ are omitted and counted. The redaction manifest records categories and counts,
 never original values.
 
 The support contract intentionally does not capture screenshots, network bodies,
-full process arguments, complete file paths, credentials, or source contents.
-The safe fixture is generated from literal test data only and must remain free of
-real logs, prompts, repositories, and secrets.
+full process arguments, complete file paths, credentials, source contents, or
+arbitrary terminal text. `terminalTail` is reserved for a future typed,
+enumerated diagnostic-event contract; raw terminal lines are omitted and
+counted in the truncation/redaction manifests. The safe fixture is generated
+from literal test data only and must remain free of real logs, prompts,
+repositories, terminals, and secrets.
 
 ## Collection and later surfaces
 
