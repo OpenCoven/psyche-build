@@ -239,7 +239,7 @@ describe('Tauri agent picker', () => {
   it('renders an accessible picker shell', () => {
     expect(indexHtml).toMatch(/id="agent-picker-overlay" hidden/);
     expect(indexHtml).toContain(
-      '<span class="agent-picker-hint">composer prompt required · enter to launch · esc to close</span>',
+      '<span class="agent-picker-hint">prompt required except Coven CLI · enter to launch · esc to close</span>',
     );
     expect(indexHtml).toMatch(
       /id="agent-picker"[\s\S]*role="dialog"[\s\S]*aria-modal="true"[\s\S]*aria-labelledby="agent-picker-title"/,
@@ -1271,6 +1271,43 @@ describe('Tauri agent picker', () => {
     await expect(controller.fn()).resolves.toBeNull();
     expect(commandInput.value).toBe('Keep this draft');
     expect(focused).toBe(0);
+  });
+
+  it('surfaces rejected agent launches without leaving an unhandled promise rejection', async () => {
+    let focused = 0;
+    let status: [string, string] | null = null;
+    const commandInput = {
+      value: 'Fix the failing tests',
+      focus: () => { focused += 1; },
+    };
+    const controller = compileFunctionWithState<() => Promise<null>>(
+      functionSource('launchSelectedAgent'),
+      {
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI' },
+        ],
+        closeAgentPicker: () => undefined,
+        spawnAgentThread: async () => {
+          throw new Error('launch exploded');
+        },
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        commandInput,
+        hidePalette: () => undefined,
+        syncComposerChrome: () => undefined,
+        setStatus: (message: string, kind: string) => {
+          status = [message, kind];
+        },
+      },
+      { agentPickerIndex: 0 },
+    );
+
+    await expect(controller.fn()).resolves.toBeNull();
+    expect(status).toEqual([
+      'Codex CLI failed to start: Error: launch exploded',
+      'error',
+    ]);
+    expect(commandInput.value).toBe('Fix the failing tests');
+    expect(focused).toBe(1);
   });
 
   it('does not persist an agent preference and always reselects Coven CLI', () => {

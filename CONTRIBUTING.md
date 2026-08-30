@@ -41,31 +41,6 @@ Before editing, identify the canonical owner in `docs/REPOSITORY-MAP.md` and the
 
 For Beads-specific operation, migration, synchronization, and credential boundaries, use [`.beads/README.md`](.beads/README.md). Maintainer-only tracker credentials are not part of the public contributor loop.
 
-### Maintainer Beads Project synchronization
-
-The synchronizer is bound to the immutable GitHub Project node ID
-`PVT_kwDOECXnmc4BhMIA`. If that pinned Project is private, synchronization
-fails closed; a maintainer must manually verify its identity and contents,
-change its visibility to public, and rerun a dry-run rather than repointing the
-configuration.
-
-Configure both protected environments on the main branch:
-
-- The `beads-project-sync-automation` environment has no required reviewers so
-  scheduled runs remain unattended.
-- The `beads-project-sync` environment has required reviewers so manual runs remain
-  reviewer-gated.
-
-Install the environment secret `BEADS_PROJECT_TOKEN` in both environments. Its
-fine-grained token permissions are repository **Contents: read and write**,
-**Issues: read and write**, and **Metadata: read**, plus organization
-**Projects: read and write**.
-
-Actions dry-run may bootstrap an ephemeral runner database from the
-authoritative Beads remote before running the read-only plan. Local dry-run is
-read-only and does not bootstrap or mutate Beads. Every local or Actions apply
-uses the same GitHub-backed apply lock; dry-runs never acquire it.
-
 ### 4. Run focused proof while iterating
 
 Run the smallest relevant test or build for the surface you changed. Examples include:

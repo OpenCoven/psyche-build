@@ -13956,7 +13956,20 @@
       ? ""
       : String(commandInput && commandInput.value || "").trim();
     closeAgentPicker();
-    var thread = await spawnAgentThread(entry.id, project, prompt);
+    var thread;
+    try {
+      thread = await spawnAgentThread(entry.id, project, prompt);
+    } catch (error) {
+      setStatus(entry.label + " failed to start: " + String(error), "error");
+      if (
+        entry.id !== "coven-code" &&
+        commandInput &&
+        typeof commandInput.focus === "function"
+      ) {
+        commandInput.focus();
+      }
+      return null;
+    }
     if (!thread) {
       if (
         entry.id !== "coven-code" &&
