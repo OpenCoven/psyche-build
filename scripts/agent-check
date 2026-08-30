@@ -43,6 +43,10 @@ if [[ "$mode" == "fast" ]]; then
 else
   command -v cargo >/dev/null 2>&1 || die "Cargo is required for the full gate"
 
+  cargo_target_dir="$(mktemp -d "${TMPDIR:-/tmp}/psyche-build-agent-check-cargo.XXXXXX")"
+  trap 'rm -rf "$cargo_target_dir"' EXIT
+  export CARGO_TARGET_DIR="$cargo_target_dir"
+
   run "Unit and contract tests" pnpm test
   run "Focused documentation contract" pnpm docs:focus:check
   run "Documentation build" pnpm --dir docs build

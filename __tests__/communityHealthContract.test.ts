@@ -10,7 +10,9 @@ const requiredFiles = [
   'SECURITY.md',
   'SUPPORT.md',
   'CODE_OF_CONDUCT.md',
+  'CONTRIBUTING.md',
   'docs/CONTRIBUTOR-SAFETY.md',
+  'docs/superpowers/README.md',
   '.github/CODEOWNERS',
   '.github/pull_request_template.md',
   '.github/ISSUE_TEMPLATE/config.yml',
@@ -118,5 +120,34 @@ describe('community health contract', () => {
     expect(safety).toMatch(/simulator build into physical-device availability/i);
     expect(pullRequest).toContain('docs/RELEASE-ACCEPTANCE.md');
     expect(pullRequest).toMatch(/test counts, source presence, hosted compilation, or simulator success/i);
+  });
+
+  it('makes PR scope, design escalation, and evidence expectations explicit', () => {
+    const contributing = read('CONTRIBUTING.md');
+
+    expect(contributing).toMatch(/approximately \*\*800 non-generated changed lines\*\*/i);
+    expect(contributing).toMatch(/design\/ADR \*\*before implementation\*\*/i);
+    expect(contributing).toContain('bash ./scripts/agent-bootstrap');
+    expect(contributing).toContain('bash ./scripts/agent-check fast');
+    expect(contributing).toContain('bash ./scripts/agent-check full');
+    expect(contributing).toMatch(/required exact-head GitHub checks must succeed/i);
+    expect(contributing).toMatch(/unresolved current review threads\/findings/i);
+    expect(contributing).toMatch(/Objective and acceptance criteria/i);
+    expect(contributing).toMatch(/Authority\/security impact/i);
+    expect(contributing).toMatch(/Remaining uncertainty/i);
+  });
+
+  it('keeps dated superpowers records historical by default', () => {
+    const history = read('docs/superpowers/README.md');
+
+    expect(history).toContain('docs/superpowers/plans/*.md');
+    expect(history).toContain('docs/superpowers/specs/*.md');
+    expect(history).toMatch(/classified \*\*`reference`\*\*/i);
+    expect(history).toMatch(/not.*executable backlog/i);
+    expect(history).toContain('active');
+    expect(history).toContain('implemented');
+    expect(history).toContain('superseded');
+    expect(history).toContain('reference');
+    expect(history).toMatch(/Do not rewrite the historical document/i);
   });
 });
