@@ -426,7 +426,9 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         panes: live.panes,
         currentPaneId: paneId,
         sessionName,
+        sessionProjectRoot,
         projectName,
+        getTmuxServerIdentity: () => TmuxService.getInstance().getServerIdentity?.(),
         savePanes: live.savePanes,
         removePaneFromConfig: live.removePaneFromConfig,
         removePanesFromConfig: live.removePanesFromConfig,
@@ -443,7 +445,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       })
     })
     return () => bridgeDaemon.setActionExecutor(null)
-  }, [bridgeDaemon, projectName, sessionName, setPanes])
+  }, [bridgeDaemon, projectName, sessionName, sessionProjectRoot, setPanes])
 
   const covenSessionsState = useCovenSessions(
     sessionProjectRoot,
