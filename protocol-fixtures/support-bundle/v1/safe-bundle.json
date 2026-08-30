@@ -1,0 +1,75 @@
+{
+  "schema": "psyche.diagnostics/v1",
+  "version": 1,
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "status": "complete",
+  "provenance": {
+    "application": "psyche-build",
+    "releaseVersion": "0.0.2",
+    "sourceSha": "0123456789abcdef0123456789abcdef01234567",
+    "platform": "darwin",
+    "architecture": "arm64"
+  },
+  "ownerEpoch": 7,
+  "project": {
+    "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035",
+    "name": "sample-project",
+    "relativePath": "sample-project"
+  },
+  "lifecycle": {
+    "panes": 2,
+    "state": "ready"
+  },
+  "providers": {
+    "browser": "unavailable",
+    "tmux": "available"
+  },
+  "persistence": {
+    "recoveryRequired": false,
+    "state": "healthy"
+  },
+  "updater": {
+    "state": "current",
+    "version": "0.0.2"
+  },
+  "terminalTail": [
+    "fixture: diagnostics ready"
+  ],
+  "records": [
+    {
+      "sequence": 1,
+      "at": "2026-01-01T00:00:00.000Z",
+      "component": "fixture",
+      "event": "ready",
+      "outcome": "succeeded"
+    }
+  ],
+  "receipts": [
+    {
+      "actionId": "fixture-action",
+      "state": "succeeded",
+      "resource": {
+        "kind": "project",
+        "idDigest": "0123456789abcdef0123456789abcdef"
+      },
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "completedAt": "2026-01-01T00:00:00.010Z",
+      "code": "fixture_ok",
+      "durationMs": 10
+    }
+  ],
+  "errors": [],
+  "redaction": {
+    "version": 1,
+    "redactedFields": 0,
+    "omittedFields": 0,
+    "categories": {}
+  },
+  "truncation": {
+    "recordsOmitted": 0,
+    "terminalLinesOmitted": 0,
+    "bytesOmitted": 0,
+    "fieldsTruncated": 0,
+    "totalPayloadBounded": true
+  }
+}

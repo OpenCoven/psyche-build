@@ -1,0 +1,88 @@
+# Support bundle v1
+
+`psyche.diagnostics/v1` is a local-only, inspectable support contract. It is a
+bounded snapshot of safe application state, not a transcript, telemetry stream,
+or authority source. The schema foundation lives in
+`src/diagnostics/supportBundle.ts`; the fixture at
+`protocol-fixtures/support-bundle/v1/safe-bundle.json` contains no user data.
+
+## Contract
+
+Every bundle contains a schema identifier, format version, generation time,
+status, safe application provenance, bounded state maps, ordered diagnostic
+records, redacted action receipts, collection errors, and redaction/truncation
+manifests. The action vocabulary is explicit: `pending`, `requested`,
+`accepted`, `executing`, `succeeded`, `failed`, `unknown`, `invalidated`, and
+`recovery_required`. A diagnostic bundle reports state; it cannot authorize,
+retry, or execute an action. The existing control-plane owner, lease,
+approval, idempotency, and receipt contracts remain authoritative.
+
+Serialization sorts object keys and deterministic record/receipt collections.
+`supportBundleDigest` hashes that stable UTF-8 representation, so two bundles
+with the same safe facts can be compared without depending on insertion order.
+
+## Bounds
+
+The v1 implementation enforces the following defaults before serialization:
+
+| Surface | Bound |
+| --- | ---: |
+| Collection elapsed time | 30 seconds |
+| Diagnostic records | 256 |
+| One record | 4 KiB |
+| Complete payload | 64 KiB |
+| One scalar string | 512 UTF-8 bytes |
+| Attribute keys/items | 32 each |
+| Attribute nesting | 5 levels |
+| Collection error chain | 4 |
+| Action receipts | 64 |
+| Terminal tail | 64 lines / 4 KiB |
+
+When the payload approaches its cap, oldest records are removed before terminal
+tail lines. The truncation manifest records what was removed. A collector
+timeout, cancellation, or recovery-sensitive failure produces
+`recovery_required`; ordinary collector failures produce `partial`. No failed
+collector is represented as complete success.
+
+## Threat model and redaction
+
+There are two safety boundaries: input normalization and final deterministic
+serialization. Secret-shaped keys, authorization values, bearer/basic tokens,
+API-token formats, PEM material, sensitive assignments, infrastructure URLs,
+and absolute paths are redacted or omitted. Prompts, unrestricted terminal or
+repository content, diffs, environment maps, and source contents are omitted.
+Only explicitly bounded terminal tails, project-relative paths, enum-like
+states, digests, and categorized errors may survive. Unknown top-level fields
+are omitted and counted. The redaction manifest records categories and counts,
+never original values.
+
+The support contract intentionally does not capture screenshots, network bodies,
+full process arguments, complete file paths, credentials, or source contents.
+The safe fixture is generated from literal test data only and must remain free of
+real logs, prompts, repositories, and secrets.
+
+## Collection and later surfaces
+
+`collectSupportBundle` accepts named collectors and an `AbortSignal`. It runs
+collectors with a shared elapsed-time budget and converts failures into bounded
+collection errors. A future CLI or UI may request a fresh snapshot, display the
+redacted preview, and offer copy/clear actions, but it must not silently upload
+or execute anything. The later surface must preserve cancellation, timeout,
+partial-failure, and `recovery_required` semantics and must show the exact
+payload before copying.
+
+The reusable recovery harness in #239 is intentionally separate. Once #239 has
+operator-observed cases, those cases may be mapped to fixture-only collector
+scenarios without copying private evidence into this schema or its tests.
+Graphics facts are optional and non-blocking; unsupported or conflicting
+evidence must remain absent or `unknown`.
+
+## Rollback and recovery
+
+This foundation is additive and has no persistence migration. A caller can
+stop using the module and discard generated snapshots without changing project
+state. If a future persistence adapter is added, it must apply the same
+normalization before disk I/O, preserve valid prior records after a corrupt
+tail, and surface storage failure as `partial` or `recovery_required` rather
+than blocking application startup. A later CLI/UI integration requires its own
+focused review for authority, clipboard, and clear-confirmation behavior.
