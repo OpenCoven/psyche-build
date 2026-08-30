@@ -73,10 +73,10 @@ files. Not fixed here (out of slice; not caused by it).
 
 ## Exact head SHA
 
-- Final commit on this branch: `PENDING_FINAL_COMMIT` (filled below after commit)
-
-Final head SHA: see the PR's head for the authoritative value; recorded post-commit in the PR
-status comment.
+- Deliverable commit: `438da065950e5069d00aad894b81ccfa3c9843e6` (all four files).
+- Final branch head: the commit recording this note plus the PR head — the
+  authoritative exact-head value is the head SHA shown on the fork PR for
+  `psyche/issue-229-gpu-slice4-evidence`.
 
 ## Proof gaps (honest)
 
