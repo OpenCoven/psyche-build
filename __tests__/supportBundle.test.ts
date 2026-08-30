@@ -321,6 +321,26 @@ describe('support bundle v1', () => {
     );
   });
 
+  it('normalizes every bounded error before applying the error cap', () => {
+    const errors = [
+      { collector: 'zeta', code: 'write_failed', at: '2026-01-01T00:00:00.000Z' },
+      { collector: 'alpha', code: 'failed', at: '2026-01-01T00:00:00.000Z' },
+      { collector: 'gamma', code: 'effect_failed', at: '2026-01-01T00:00:00.000Z' },
+      { collector: 'beta', code: 'collection_failed', at: '2026-01-01T00:00:00.000Z' },
+      { collector: 'zeta', code: 'collection_conflict', at: '2026-01-01T00:00:00.000Z', recoveryRequired: true },
+      { collector: 'alpha', code: 'duplicate_action_id', at: '2026-01-01T00:00:00.000Z', recoveryRequired: true },
+      { collector: 'gamma', code: 'collection_invalid_output', at: '2026-01-01T00:00:00.000Z', recoveryRequired: true },
+      { collector: 'beta', code: 'collection_output_overflow', at: '2026-01-01T00:00:00.000Z', recoveryRequired: true },
+    ];
+    const options = { now: () => 1_767_225_600_000 };
+    const first = buildSupportBundle({ errors }, options);
+    const second = buildSupportBundle({ errors: [...errors].reverse() }, options);
+
+    expect(serializeSupportBundle(first)).toBe(serializeSupportBundle(second));
+    expect(first.truncation.errorsOmitted).toBeGreaterThan(0);
+    expect(first.errors).toEqual(second.errors);
+  });
+
   it('returns recovery_required when a bounded collector times out', async () => {
     const bundle = await collectSupportBundle([
       {
@@ -411,6 +431,146 @@ describe('support bundle v1', () => {
     } finally {
       Date.now = originalDateNow;
     }
+  });
+
+  it('preserves deterministic recovery payloads and omission accounting across interruption', async () => {
+    const originalDateNow = Date.now;
+    let dateNowCalls = 0;
+    Date.now = () => {
+      dateNowCalls += 1;
+      const now = originalDateNow();
+      return dateNowCalls >= 10 ? now + 60_000 : now;
+    };
+    try {
+      const records = Array.from({ length: 3 }, (_, sequence) => ({
+        sequence,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'collector',
+        event: 'sample',
+      }));
+      const receipts = [1, 2].map((index) => ({
+        schema: 'psyche.control.receipt/v1' as const,
+        actionId: `recovery-action-${index}`,
+        state: 'queued' as const,
+        resource: { kind: 'project' as const, id: `recovery-project-${index}` },
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }));
+      const errors = Array.from({ length: 8 }, (_, index) => ({
+        collector: 'alpha',
+        code: (['failed', 'collection_failed', 'effect_failed', 'write_failed', 'collection_conflict',
+          'duplicate_action_id', 'collection_invalid_output', 'collection_output_overflow'] as const)[index],
+        at: '2026-01-01T00:00:00.000Z',
+        ...(index >= 4 ? { recoveryRequired: true } : {}),
+      }));
+      const bundle = await collectSupportBundle([{
+        name: 'alpha',
+        collect: async () => ({ records, receipts, errors, terminalTail: ['first', 'second'] }),
+      }], {
+        maxElapsedMs: 1_000,
+        maxBundleBytes: 2_048,
+        now: () => 1_767_225_600_000,
+      });
+      const serialized = serializeSupportBundle(bundle);
+      const roundTripped = JSON.parse(serialized) as SupportBundle;
+
+      expect(bundle.status).toBe('recovery_required');
+      expect(bundle.truncation.recordsOmitted).toBe(records.length);
+      expect(bundle.truncation.receiptsOmitted).toBe(receipts.length);
+      expect(bundle.truncation.errorsOmitted).toBeGreaterThan(0);
+      expect(bundle.truncation.terminalLinesOmitted).toBe(2);
+      expect(roundTripped.truncation).toEqual(bundle.truncation);
+      expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(2_048);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  it('retains accumulated records and receipts when cancellation interrupts before the deadline', async () => {
+    const cancelled = new AbortController();
+    const record = {
+      sequence: 1,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'sample',
+    };
+    const receipt = {
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'cancelled-action',
+      state: 'queued' as const,
+      resource: { kind: 'project' as const, id: 'cancelled-project' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const bundle = await collectSupportBundle([
+      {
+        name: 'alpha',
+        collect: () => new Promise((resolve) => {
+          resolve({
+            records: [record],
+            receipts: [receipt],
+            errors: [{ collector: 'alpha', code: 'failed', at: '2026-01-01T00:00:00.000Z' }],
+            terminalTail: ['alpha-terminal'],
+          });
+          setTimeout(() => cancelled.abort(), 0);
+        }),
+      },
+      {
+        name: 'beta',
+        collect: async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          return { lifecycle: { state: 'ready' } };
+        },
+      },
+    ], {
+      signal: cancelled.signal,
+      maxElapsedMs: 30_000,
+      now: () => 1_767_225_600_000,
+    });
+    const serialized = serializeSupportBundle(bundle);
+    const roundTripped = JSON.parse(serialized) as SupportBundle;
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.records).toHaveLength(1);
+    expect(bundle.receipts).toHaveLength(1);
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'normalization_cancelled', recoveryRequired: true }),
+    ]));
+    expect(bundle.truncation.terminalLinesOmitted).toBe(1);
+    expect(roundTripped.truncation).toEqual(bundle.truncation);
+  });
+
+  it('selects interrupted recovery errors independently of collector completion order', async () => {
+    const names = ['alpha', 'beta', 'gamma', 'zeta', 'a', 'b'];
+    const run = async (reverseCompletion: boolean) => {
+      const originalDateNow = Date.now;
+      let dateNowCalls = 0;
+      Date.now = () => {
+        dateNowCalls += 1;
+        const now = originalDateNow();
+        return dateNowCalls >= 10 ? now + 60_000 : now;
+      };
+      try {
+        return await collectSupportBundle(names.map((name, index) => ({
+          name,
+          collect: async () => {
+            const delay = reverseCompletion ? index * 5 : (names.length - index) * 5;
+            await new Promise<void>((resolve) => setTimeout(resolve, delay));
+            throw new Error('collector failure');
+          },
+        })), {
+          maxElapsedMs: 1_000,
+          now: () => 1_767_225_600_000,
+        });
+      } finally {
+        Date.now = originalDateNow;
+      }
+    };
+
+    const first = await run(false);
+    const second = await run(true);
+    expect(first.status).toBe('recovery_required');
+    expect(first.errors.map(({ collector, code }) => `${collector}:${code}`))
+      .toEqual(second.errors.map(({ collector, code }) => `${collector}:${code}`));
+    expect(first.truncation.errorsOmitted).toBe(second.truncation.errorsOmitted);
   });
 
   it('fails closed when a collector returns an invalid shape', async () => {
@@ -580,6 +740,21 @@ describe('support bundle v1', () => {
         expect.objectContaining({ recoveryRequired: true }),
       ]));
     }
+  });
+
+  it('accounts for terminal lines discarded during collector overflow preflight', async () => {
+    const terminalTail = Array.from(
+      { length: SUPPORT_BUNDLE_LIMITS.maxTerminalLines + 3 },
+      (_, index) => `line-${index}`,
+    );
+    const bundle = await collectSupportBundle([{
+      name: 'terminal-overflow',
+      collect: async () => ({ terminalTail }),
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.terminalTail).toEqual([]);
+    expect(bundle.truncation.terminalLinesOmitted).toBe(terminalTail.length);
   });
 
   it('bounds the total collector normalization graph before merging sections', async () => {
@@ -1077,6 +1252,13 @@ describe('support bundle v1', () => {
     const parsed = parseSupportBundle(JSON.stringify(extended), codec);
     expect(serializeSupportBundle(parsed, codec)).toBe(serializeSupportBundle(fixture));
     expect(parsed).not.toHaveProperty('futureRootField');
+
+    const knownFieldTampered = {
+      ...extended,
+      lifecycle: { ...fixture.lifecycle, state: 'stale' },
+    };
+    expect(() => parseSupportBundle(JSON.stringify(knownFieldTampered), codec))
+      .toThrow(/accounting proof/i);
   });
 
   it('rejects noncanonical signed metadata and inconsistent normalized projections', () => {
@@ -1125,6 +1307,24 @@ describe('support bundle v1', () => {
     const forgedProof = { ...fixture, accountingProof: '0'.repeat(64) };
     expect(isSupportBundleV1(forgedProof)).toBe(false);
     expect(isSupportBundleV1(forgedProof, codec)).toBe(false);
+  });
+
+  it('verifies supplied proofs on partial bundles while retaining unsigned compatibility', () => {
+    const codec = createSupportBundleCodec('support-bundle-partial-proof-v1');
+    const unsigned = buildSupportBundle({ lifecycle: { state: 'ready' } });
+    const signed = buildSupportBundle({ lifecycle: { state: 'ready' } }, { codec });
+    const forged = { ...signed, accountingProof: '0'.repeat(64) };
+
+    expect(unsigned.status).toBe('partial');
+    expect(isSupportBundleV1(unsigned)).toBe(true);
+    expect(signed.status).toBe('partial');
+    expect(isSupportBundleV1(signed, codec)).toBe(true);
+    expect(isSupportBundleV1(forged, codec)).toBe(false);
+    expect(() => parseSupportBundle(JSON.stringify(forged), codec)).toThrow(/accounting proof/i);
+
+    const unsignedProjection = parseSupportBundle(JSON.stringify(forged));
+    expect(unsignedProjection.status).toBe('partial');
+    expect(unsignedProjection).not.toHaveProperty('accountingProof');
   });
 
   it('rejects unsupported record attribute shapes and over-deep compatibility values', () => {
