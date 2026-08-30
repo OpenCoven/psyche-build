@@ -124,6 +124,22 @@ function routeCommand(line: string) {
 }
 
 describe('Tauri composer target', () => {
+  it('keeps the bottom composer ultra-slim', () => {
+    expect(stylesCss).toMatch(/--composer-h:\s*36px;/);
+    expect(stylesCss).toMatch(
+      /\.composer\s*\{[^}]*gap:\s*6px;[^}]*padding:\s*0 8px;[^}]*height:\s*var\(--composer-h\);/s,
+    );
+    expect(stylesCss).toMatch(
+      /#command-input\s*\{[^}]*height:\s*26px;[^}]*border-radius:\s*6px;[^}]*font-size:\s*11\.5px;/s,
+    );
+    expect(stylesCss).toMatch(
+      /\.composer-btn\s*\{[^}]*width:\s*26px;[^}]*height:\s*26px;[^}]*border-radius:\s*6px;/s,
+    );
+    expect(stylesCss).toMatch(
+      /\.composer-send\s*\{[^}]*height:\s*26px;[^}]*padding:\s*0 10px;[^}]*border-radius:\s*6px;/s,
+    );
+  });
+
   it('removes the composer scope picker and all of its implementation hooks', () => {
     expect(indexHtml).not.toContain('id="scope-btn"');
     expect(indexHtml).not.toContain('id="scope-menu"');
