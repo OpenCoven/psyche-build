@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "consumer": {
+    "repository": "OpenCoven/psyche-build",
+    "commitSha": "f32387942063d4ed1b31f32329be3a511f8f4505"
+  },
+  "profile": {
+    "id": "opencoven.psyche.consumer@0.1.0",
+    "major": 0,
+    "source": "https://github.com/OpenCoven/psyche/releases/tag/consumer-profile-v0.1.0"
+  },
+  "artifact": {
+    "uri": "https://github.com/OpenCoven/psyche/releases/download/consumer-profile-v0.1.0/consumer-profile-v0.1.0.json",
+    "digestAlgorithm": "sha256",
+    "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "digestSource": "https://github.com/OpenCoven/psyche/releases/tag/consumer-profile-v0.1.0#release-evidence"
+  },
+  "compatibility": {
+    "unknownFieldPolicy": "reject",
+    "unknownEnumPolicy": "reject",
+    "readableProfiles": [
+      "opencoven.psyche.consumer@0.1.0"
+    ]
+  },
+  "status": "active",
+  "pinnedAt": "2026-08-30T00:00:00Z"
+}

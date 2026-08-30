@@ -1,7 +1,8 @@
 # Psyche Build → Psyche compatibility map
 
 Date: 2026-08-28  
-Status: Current-state mapping for issue #253; **not** a protocol-conformance claim
+Status: Current-state mapping for issue #253; **not** a protocol-conformance claim  
+Follow-on design: [Psyche adapter plan](PSYCHE-ADAPTER-PLAN.md) — immutable pin, canary, and incremental-adapter state machines for delivery slices 2–4
 
 ## Purpose
 

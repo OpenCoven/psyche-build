@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "psyche-canary-stale-lease-revision-negative",
+  "category": "stale-correlation",
+  "kind": "negative",
+  "profile": "opencoven.psyche.consumer@0.1.0",
+  "description": "Negative: an assertion carrying a stale lease revision or a mismatched task/actor correlation is refused (lease_revision_mismatch / approval_identity_mismatch); the adapter must not re-bind the stale correlation to the live lane.",
+  "input": {
+    "profileVectorId": "correlation/assert.stale-revision.v1",
+    "payload": {}
+  },
+  "expectation": {
+    "result": "reject",
+    "mustNot": [
+      "effect-executed",
+      "identity-forked"
+    ]
+  }
+}

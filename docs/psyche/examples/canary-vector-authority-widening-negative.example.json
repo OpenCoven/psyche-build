@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "psyche-canary-lease-target-widening-negative",
+  "category": "authority-widening",
+  "kind": "negative",
+  "profile": "opencoven.psyche.consumer@0.1.0",
+  "description": "Negative: a translated lease assertion that names a target outside the granted lease (or an extra capability) must be refused exactly like the local store refuses it (capability_denied); the wider action must never execute.",
+  "input": {
+    "profileVectorId": "lease/assert.target-widening.v1",
+    "payload": {}
+  },
+  "expectation": {
+    "result": "deny",
+    "mustNot": [
+      "effect-executed",
+      "authority-widened",
+      "success-receipt"
+    ]
+  }
+}

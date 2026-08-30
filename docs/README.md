@@ -117,6 +117,7 @@ TestFlight, and public App Store distribution are unavailable. See the
 - [Agent surface control](AGENT-SURFACE-CONTROL.md)
 - [Bridge and daemon security model](BRIDGE-SECURITY.md)
 - [Psyche compatibility map](PSYCHE-COMPATIBILITY-MAP.md)
+- [Psyche adapter plan](PSYCHE-ADAPTER-PLAN.md)
 - [Tracker integrity](TRACKER-INTEGRITY.md)
 - [Psyche Build integrations](INTEGRATIONS.md)
 - [Breaking changes](BREAKING-CHANGES.md)

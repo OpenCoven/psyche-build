@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenCoven/psyche-build/blob/main/docs/psyche/canary-vector.schema.json",
+  "title": "Psyche compatibility canary vector",
+  "description": "One positive or negative compatibility canary vector for the pinned OpenCoven/psyche consumer profile. Build-owned definition; the payload stays opaque to Build because exact wire shapes are blocked on OpenCoven/psyche#11. Design reference for OpenCoven/psyche-build#253 delivery slice 3; see docs/PSYCHE-ADAPTER-PLAN.md sections 4.2 and 4.4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "category",
+    "kind",
+    "profile",
+    "description",
+    "input",
+    "expectation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^psyche-canary-[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64
+    },
+    "category": {
+      "enum": [
+        "negotiation",
+        "lifecycle",
+        "denial",
+        "authority-widening",
+        "stale-correlation",
+        "duplicate-retry",
+        "ambiguity-fence",
+        "restart",
+        "downgrade",
+        "unknown-enum",
+        "unknown-version",
+        "cancellation"
+      ]
+    },
+    "kind": { "enum": ["positive", "negative"] },
+    "profile": { "$ref": "#/$defs/profileId" },
+    "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profileVectorId", "payload"],
+      "properties": {
+        "profileVectorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Vector id inside the pinned profile's own vector set."
+        },
+        "payload": {
+          "description": "Opaque to Build by design; handed to the profile runner after the pin verifies."
+        }
+      }
+    },
+    "expectation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result", "must"],
+          "properties": {
+            "result": { "const": "accepted" },
+            "must": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "minItems": 1,
+              "maxItems": 16
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result", "mustNot"],
+          "properties": {
+            "result": { "enum": ["reject", "deny", "ambiguous-unknown", "quarantine", "fail-closed"] },
+            "mustNot": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "effect-executed",
+                  "success-receipt",
+                  "authority-widened",
+                  "identity-forked"
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 4,
+              "uniqueItems": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "profileId": {
+      "type": "string",
+      "pattern": "^opencoven\\.psyche\\.consumer@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    }
+  }
+}

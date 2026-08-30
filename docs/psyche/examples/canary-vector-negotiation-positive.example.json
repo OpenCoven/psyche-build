@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "psyche-canary-negotiation-hello-positive",
+  "category": "negotiation",
+  "kind": "positive",
+  "profile": "opencoven.psyche.consumer@0.1.0",
+  "description": "Positive negotiation: a hello/profile exchange for the pinned profile is accepted and returns a session whose declared profile id and declared policies equal the pin.",
+  "input": {
+    "profileVectorId": "negotiation/hello.accepted.v1",
+    "payload": {}
+  },
+  "expectation": {
+    "result": "accepted",
+    "must": [
+      "declared profile id equals the pinned profile id",
+      "no effect executes during negotiation"
+    ]
+  }
+}

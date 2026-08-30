@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenCoven/psyche-build/blob/main/docs/psyche/pin.schema.json",
+  "title": "Psyche consumer profile pin manifest",
+  "description": "Build-owned record of exactly one immutable, released OpenCoven/psyche consumer profile artifact. Committed to the repository, never pointing at a moving ref. Fails closed on unknown major, unsupported profile, or digest mismatch. Design reference for OpenCoven/psyche-build#253 delivery slice 2; see docs/PSYCHE-ADAPTER-PLAN.md section 3.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "consumer",
+    "profile",
+    "artifact",
+    "compatibility",
+    "status",
+    "pinnedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "consumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commitSha"],
+      "properties": {
+        "repository": { "const": "OpenCoven/psyche-build" },
+        "commitSha": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "major", "source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/profileId" },
+        "major": { "type": "integer", "minimum": 0 },
+        "source": {
+          "type": "string",
+          "pattern": "^https://",
+          "description": "Release source URL of the pinned profile. Never a branch and never main."
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "digestAlgorithm", "digest", "digestSource"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "digestAlgorithm": { "const": "sha256" },
+        "digest": { "$ref": "#/$defs/sha256Hex" },
+        "digestSource": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Out-of-band publication of the digest (release evidence), independent of the artifact bytes."
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unknownFieldPolicy", "unknownEnumPolicy", "readableProfiles"],
+      "properties": {
+        "unknownFieldPolicy": { "enum": ["reject", "ignore-and-record"] },
+        "unknownEnumPolicy": { "const": "reject" },
+        "readableProfiles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/profileId" },
+          "uniqueItems": true,
+          "description": "Explicit downgrade window: profile ids that remain readable for compatibility reads."
+        }
+      }
+    },
+    "status": { "enum": ["active", "quarantined", "retired"] },
+    "pinnedAt": { "$ref": "#/$defs/iso8601Utc" }
+  },
+  "$defs": {
+    "sha256Hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "profileId": {
+      "type": "string",
+      "pattern": "^opencoven\\.psyche\\.consumer@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "iso8601Utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    }
+  }
+}

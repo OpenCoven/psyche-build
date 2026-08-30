@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "local": {
+    "taskId": "coven-local-task-2026-08-30-001",
+    "actionId": "coven-local-action-2026-08-30-001"
+  },
+  "protocol": {
+    "profileId": "opencoven.psyche.consumer@0.1.0",
+    "taskId": "psy-tk-7f3a9c02",
+    "laneId": "psy-ln-2b81d4e5",
+    "boundAt": "2026-08-30T12:00:00Z"
+  },
+  "binding": {
+    "state": "bound",
+    "conflictPolicy": "reject"
+  }
+}

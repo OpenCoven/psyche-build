@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "consumer": {
+    "repository": "OpenCoven/psyche-build",
+    "commitSha": "f32387942063d4ed1b31f32329be3a511f8f4505"
+  },
+  "profile": {
+    "id": "opencoven.psyche.consumer@0.1.0",
+    "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "artifactDigestVerified": true,
+  "environment": {
+    "ci": true
+  },
+  "vectors": [
+    {
+      "id": "psyche-canary-negotiation-hello-positive",
+      "category": "negotiation",
+      "kind": "positive",
+      "result": "pass"
+    },
+    {
+      "id": "psyche-canary-lifecycle-task-receipt-positive",
+      "category": "lifecycle",
+      "kind": "positive",
+      "result": "pass"
+    },
+    {
+      "id": "psyche-canary-lease-target-widening-negative",
+      "category": "authority-widening",
+      "kind": "negative",
+      "result": "pass",
+      "notes": "observed deny; no effect, no receipt"
+    },
+    {
+      "id": "psyche-canary-stale-lease-revision-negative",
+      "category": "stale-correlation",
+      "kind": "negative",
+      "result": "pass",
+      "notes": "observed reject; correlation preserved"
+    },
+    {
+      "id": "psyche-canary-restart-same-identity",
+      "category": "restart",
+      "kind": "positive",
+      "result": "pass"
+    }
+  ],
+  "summary": {
+    "positive": { "total": 3, "passed": 3, "failed": 0 },
+    "negative": { "total": 2, "passed": 2, "failed": 0 }
+  },
+  "result": "pass",
+  "generatedAt": "2026-08-30T12:00:00Z"
+}

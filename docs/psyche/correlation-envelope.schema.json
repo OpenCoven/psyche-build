@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenCoven/psyche-build/blob/main/docs/psyche/correlation-envelope.schema.json",
+  "title": "Psyche correlation envelope (adapter seam A)",
+  "description": "Build-owned additive correlation record pairing current local identifiers with optional protocol-owned ids assigned by the pinned profile's authority. Absent protocol ids preserve existing behavior; once bound, conflicting ids are rejected; protocol ids never derive from pane ids, paths, branches, provider sessions, Beads, GitHub issues, or UI selections. Design reference for OpenCoven/psyche-build#253 delivery slice 4; see docs/PSYCHE-ADAPTER-PLAN.md section 5.2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "local", "binding"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "local": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Current Build control task id, normalized per src/control/taskIdentity.ts (MAX_CONTROL_TASK_ID_LENGTH)."
+        },
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profileId", "boundAt"],
+      "description": "Present only when bound. Ids are assigned by the pinned profile's authority, never minted by Build from product-local state.",
+      "properties": {
+        "profileId": { "$ref": "#/$defs/profileId" },
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "laneId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "receiptId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "boundAt": { "$ref": "#/$defs/iso8601Utc" }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "conflictPolicy"],
+      "properties": {
+        "state": { "enum": ["local-only", "bound", "quarantined"] },
+        "conflictPolicy": {
+          "const": "reject",
+          "description": "A conflicting caller/local id for a bound slot fails closed."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "binding": { "properties": { "state": { "const": "local-only" } } } }
+      },
+      "then": { "properties": { "protocol": false } }
+    },
+    {
+      "if": {
+        "properties": { "binding": { "properties": { "state": { "const": "bound" } } } }
+      },
+      "then": { "required": ["protocol"] }
+    }
+  ],
+  "$defs": {
+    "profileId": {
+      "type": "string",
+      "pattern": "^opencoven\\.psyche\\.consumer@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "iso8601Utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    }
+  }
+}
