@@ -205,7 +205,8 @@ describe('Tauri PTY command threading contract', () => {
     const prepare = rustFunctionSource(source, 'prepare_pty_start');
     const install = implMethodSource(source, 'PendingPtyStart', 'install');
     const command = commandSource(source, 'pty_start');
-    const blocking = rustFunctionSource(source, 'pty_start_blocking');
+    const blockingEntry = rustFunctionSource(source, 'pty_start_blocking');
+    const blocking = rustFunctionSource(source, 'pty_start_blocking_with_launch');
     const register = rustFunctionSource(source, 'register_pty_client');
 
     const reserve = prepare.indexOf('PendingPtyStart::reserve(&thread_id)?');
@@ -216,6 +217,7 @@ describe('Tauri PTY command threading contract', () => {
     expect(install).toContain('.install(&self.token, session)');
     expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_start\b/);
     expect(command).toMatch(/tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_start_blocking\s*\(/);
+    expect(blockingEntry).toContain('pty_start_blocking_with_launch(app, options, None)');
 
     const openPty = blocking.indexOf('.openpty(');
     const spawnCommand = blocking.indexOf('.spawn_command(');
