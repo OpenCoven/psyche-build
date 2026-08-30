@@ -690,6 +690,7 @@ final class HostReadinessMachineTests: XCTestCase {
 
     /// Drives a full successful pairing to `ready`, so tests that need a
     /// previously authoritative host have something real on screen.
+    @discardableResult
     private func driveToReady(
         _ machine: HostReadinessMachine,
         recorder: ReadinessBoundaryRecorder,
@@ -726,7 +727,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(state, .ready)
         XCTAssertEqual(presentation, .live(hostID: "new-host", confirmedAt: fixedDate))
         XCTAssertEqual(committed, host)
-        XCTAssertNil(await machine.lastFailure)
+        XCTAssertNil(failure)
     }
 
     func testReconnectionFromAStoredHostReachesReadyThroughTheSameSpine() async throws {
@@ -951,10 +952,11 @@ final class HostReadinessMachineTests: XCTestCase {
         let state = await machine.state
         let committed = await machine.committedHost
         let failure = await machine.lastFailure
+        let stalePresentation = await machine.presentation
         XCTAssertEqual(state, .revoked)
         XCTAssertEqual(committed, oldHost, "committed authority must not be overwritten")
         XCTAssertEqual(
-            await machine.presentation,
+            stalePresentation,
             .stale(hostID: "old-host", confirmedAt: fixedDate)
         )
         XCTAssertEqual(recorder.calls, ["commit:old-host", "validate:5", "apply:5"])
@@ -1118,7 +1120,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(state, .revoked)
         XCTAssertEqual(presentation, .stale(hostID: "old-host", confirmedAt: fixedDate))
         let stillCommitted = await machine.committedHost
-        XCTAssertEqual(committed, makeHost(serverID: "old-host", clientID: "client-old"))
+        XCTAssertEqual(stillCommitted, makeHost(serverID: "old-host", clientID: "client-old"))
 
         // Recovery is the explicit path: discovery, then a fresh pairing.
         _ = try await machine.beginDiscovery()
@@ -1153,7 +1155,8 @@ final class HostReadinessMachineTests: XCTestCase {
         } catch {
             // Expected.
         }
-        XCTAssertEqual(await machine.state, .degraded)
+        let degradedState = await machine.state
+        XCTAssertEqual(degradedState, .degraded)
 
         // Recovery runs the same spine against the committed authority.
         let retry = try await machine.beginReconnection()
