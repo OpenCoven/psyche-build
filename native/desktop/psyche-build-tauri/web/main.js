@@ -2378,6 +2378,14 @@
     refreshTabs();
     // The controller's initial keyed frame fits before this later spawn frame,
     // so the PTY starts at the visible xterm size instead of 80x24.
+    if (opts.waitForPtyStart) {
+      await new Promise(function (resolve) { requestAnimationFrame(resolve); });
+      if (!isLiveThread(thread)) return null;
+      var started = isPersistentThread(thread)
+        ? await attachThreadClient(thread)
+        : await spawnPty(thread);
+      return started ? thread : null;
+    }
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
       if (isPersistentThread(thread)) attachThreadClient(thread);
@@ -14035,6 +14043,7 @@
       launchKind: null,
       projectRoot: project.root,
       cwd: worktree.path,
+      waitForPtyStart: true,
     });
   }
 

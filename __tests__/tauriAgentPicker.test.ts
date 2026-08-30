@@ -138,6 +138,7 @@ describe('Tauri agent picker', () => {
       projectRoot: '/repo',
       cwd: '/repo/worktree',
       worktreePath: '/repo/worktree',
+      waitForPtyStart: true,
     });
     expect(created.args).not.toBe(registryArgs);
   });
