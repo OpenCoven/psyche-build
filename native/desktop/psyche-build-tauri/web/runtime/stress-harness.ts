@@ -89,6 +89,7 @@ export interface StressHarnessDependencies {
   setVisible(id: string, visible: boolean, signal: AbortSignal): Promise<void>;
   cycleWindow(signal: AbortSignal): Promise<void>;
   loseGraphicsContext(signal: AbortSignal): Promise<boolean>;
+  restoreGraphicsContext?: (signal: AbortSignal) => Promise<void>;
   resetMetrics(): void;
   snapshotMetrics(): unknown;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -275,6 +276,12 @@ interface AbortableOperationOptions<T> {
   readonly onLateTimeout?: (error: Error) => void;
 }
 
+type InvokeStressOperation = <T>(
+  operation: () => Promise<T> | T,
+  signal: AbortSignal,
+  onLateResolve?: () => Promise<void> | void,
+) => Promise<T>;
+
 const LATE_RESOURCE_RESULT_TIMEOUT_MS = 2_000;
 
 async function invokeAbortable<T>(
@@ -291,10 +298,21 @@ async function invokeAbortable<T>(
   let lateReject: ((reason?: unknown) => void) | undefined;
   let lateTimeout: ReturnType<typeof setTimeout> | undefined;
   let lateHardTimeout: ReturnType<typeof setTimeout> | undefined;
-  let lateSettlementClosed = false;
+  let lateCutoff = false;
+  let lateCompensationStarted = false;
+  let lateSettlementFinished = false;
+  let lateCutoffError: Error | undefined;
   const clearLateTimeouts = (): void => {
     if (lateTimeout !== undefined) clearTimeout(lateTimeout);
     if (lateHardTimeout !== undefined) clearTimeout(lateHardTimeout);
+  };
+  const finishLate = (reason?: unknown): void => {
+    if (lateSettlementFinished) return;
+    lateSettlementFinished = true;
+    clearLateTimeouts();
+    if (reason === undefined) lateResolve?.();
+    else lateReject?.(reason);
+    if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
   };
   const lateSettlement = options.onLateResolve === undefined
     ? undefined
@@ -324,43 +342,56 @@ async function invokeAbortable<T>(
       lateHardTimeout = setTimeout(() => {
         // This is the compensation cutoff. A result that arrives after it must
         // not start native cleanup after the scenario is allowed to finalize.
-        lateSettlementClosed = true;
-        lateReject?.(error);
-        options.lateSettlements?.delete(lateSettlement);
+        // If compensation already started, retain the tracked settlement until
+        // that bounded cleanup promise settles; otherwise finalization could
+        // race an in-flight dispose/forceDispose operation.
+        lateCutoff = true;
+        lateCutoffError = error;
+        if (!lateCompensationStarted) finishLate(error);
       }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
   };
   const settleLate = (value: T): void => {
-    if (lateSettlementClosed) {
+    if (lateCutoff || lateSettlementFinished) {
       if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
       return;
     }
+    lateCompensationStarted = true;
     let work: Promise<void> | void;
     try {
       work = options.onLateResolve?.(value);
     } catch (error) {
-      lateReject?.(error);
-      clearLateTimeouts();
-      if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+      finishLate(error);
       return;
     }
     void Promise.resolve(work).then(
-      () => lateResolve?.(),
-      (error) => lateReject?.(error),
-    ).finally(() => {
-      clearLateTimeouts();
-      if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
-    }).catch(() => undefined);
+      () => finishLate(lateCutoffError),
+      (error) => finishLate(error),
+    ).catch(() => undefined);
   };
   return new Promise<T>((resolve, reject) => {
     let settled = false;
+    let abortTimer: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const clearAbortTimer = (): void => {
+      if (abortTimer !== undefined) clearTimeout(abortTimer);
+      abortTimer = undefined;
+    };
     const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      armLateTimeout();
-      cleanup();
-      reject(abortReason(signal));
+      if (settled || abortTimer !== undefined) return;
+      // Give an operation that has already resolved in the current turn a
+      // chance to win before classifying it as late. This avoids compensating
+      // an operation that synchronously observed cancellation after completing
+      // its native work, while an actually pending native promise still enters
+      // the late-settlement path on the next turn.
+      abortTimer = setTimeout(() => {
+        abortTimer = undefined;
+        if (settled) return;
+        settled = true;
+        armLateTimeout();
+        cleanup();
+        reject(abortReason(signal));
+      }, 0);
     };
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) {
@@ -374,24 +405,24 @@ async function invokeAbortable<T>(
           return;
         }
         settled = true;
+        clearAbortTimer();
         cleanup();
         clearLateTimeouts();
-        if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+        finishLate();
         resolve(value);
       },
       (error) => {
         if (settled) {
           // A late rejection is still observed by this handler. There is no
           // resource to compensate, so release the tracked settlement.
-          lateResolve?.();
-          clearLateTimeouts();
-          if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+          finishLate();
           return;
         }
         settled = true;
+        clearAbortTimer();
         cleanup();
         clearLateTimeouts();
-        if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+        finishLate();
         reject(error);
       },
     );
@@ -473,6 +504,9 @@ async function runActivePhase(
   phase: 'warmup' | 'measure',
   durationMs: number,
   focusOrder: readonly string[],
+  invokeOperation: InvokeStressOperation = (operation, operationSignal) => (
+    invokeAbortable(operation, operationSignal)
+  ),
 ): Promise<void> {
   const phaseController = new AbortController();
   throwIfAborted(signal);
@@ -533,9 +567,12 @@ async function runActivePhase(
       if (elapsedBeforeFocus >= durationMs) break;
       if (focusNow < nextFocusAt) continue;
       throwIfAborted(phaseController.signal);
-      await invokeAbortable(
+      await invokeOperation(
         () => dependencies.focus(stressFocusId(focusOrder, focusStep), phaseController.signal),
         phaseController.signal,
+        () => invokeBoundedCleanup((cleanupSignal) => (
+          dependencies.focus(focusOrder[0] ?? stressFocusId(focusOrder, 0), cleanupSignal)
+        )),
       );
       throwIfAborted(phaseController.signal);
       focusStep += 1;
@@ -576,14 +613,20 @@ async function restoreHiddenPanes(
   dependencies: StressHarnessDependencies,
   hiddenPaneIds: Set<string>,
   signal?: AbortSignal,
+  invokeOperation: InvokeStressOperation = (operation, operationSignal) => (
+    invokeAbortable(operation, operationSignal)
+  ),
 ): Promise<void> {
   const errors: unknown[] = [];
   for (const id of [...hiddenPaneIds]) {
     try {
       if (signal) {
-        await invokeAbortable(
+        await invokeOperation(
           () => dependencies.setVisible(id, true, signal),
           signal,
+          () => invokeBoundedCleanup((cleanupSignal) => (
+            dependencies.setVisible(id, true, cleanupSignal)
+          )),
         );
       } else {
         await invokeBoundedCleanup((cleanupSignal) => (
@@ -633,6 +676,13 @@ async function runStressScenario(
     // scenario has finished reporting its cleanup outcome.
     if (!lateCleanupClosed) cleanupErrors.push(error);
   };
+  const invokeTracked: InvokeStressOperation = (operation, operationSignal, onLateResolve) => (
+    invokeAbortable(operation, operationSignal, onLateResolve === undefined ? {} : {
+      lateSettlements: pendingLateSettlements,
+      onLateResolve: () => onLateResolve(),
+      onLateTimeout: recordCleanupError,
+    })
+  );
   let primaryError: unknown;
   let result: StressScenarioResult | undefined;
   const startedAt = dependencies.now();
@@ -696,15 +746,19 @@ async function runStressScenario(
       'warmup',
       scenarioValue.warmupMs,
       focusOrder,
+      invokeTracked,
     );
 
     throwIfAborted(signal);
     const hiddenStart = Math.ceil(terminalIds.length / 2);
     for (const id of terminalIds.slice(hiddenStart)) {
       hiddenPaneIds.add(id);
-      await invokeAbortable(
+      await invokeTracked(
         () => dependencies.setVisible(id, false, signal),
         signal,
+        () => invokeBoundedCleanup((cleanupSignal) => (
+          dependencies.setVisible(id, true, cleanupSignal)
+        )),
       );
       throwIfAborted(signal);
     }
@@ -725,6 +779,7 @@ async function runStressScenario(
       'measure',
       scenarioValue.measureMs,
       measurementFocusOrder,
+      invokeTracked,
     );
     throwIfAborted(signal);
     const afterMeasurement = dependencies.snapshotMetrics();
@@ -738,16 +793,27 @@ async function runStressScenario(
       scenarioValue.restoreMs,
     );
     const restoreStartedAt = dependencies.now();
-    await invokeAbortable(
+    await invokeTracked(
       () => dependencies.cycleWindow(signal),
       signal,
+      () => invokeBoundedCleanup((cleanupSignal) => (
+        dependencies.cycleWindow(cleanupSignal)
+      )),
     );
     throwIfAborted(signal);
-    await restoreHiddenPanes(dependencies, hiddenPaneIds, signal);
+    await restoreHiddenPanes(dependencies, hiddenPaneIds, signal, invokeTracked);
     throwIfAborted(signal);
-    const contextLossSupported = await invokeAbortable(
+    const contextLossSupported = await invokeTracked(
       () => dependencies.loseGraphicsContext(signal),
       signal,
+      () => {
+        if (dependencies.restoreGraphicsContext === undefined) {
+          throw new Error('late graphics-context loss has no compensation');
+        }
+        return invokeBoundedCleanup((cleanupSignal) => (
+          dependencies.restoreGraphicsContext?.(cleanupSignal)
+        ));
+      },
     );
     const restoreElapsedMs = Math.max(0, dependencies.now() - restoreStartedAt);
     const restoreRemainingMs = Math.max(0, scenarioValue.restoreMs - restoreElapsedMs);

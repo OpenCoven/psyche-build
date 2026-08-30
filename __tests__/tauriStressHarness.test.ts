@@ -459,6 +459,83 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
+  it('waits for an in-flight late compensation before finalizing at the cutoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposalStarted = deferred<void>();
+      const disposal = deferred<void>();
+      const disposed: string[] = [];
+      const lateResource: StressResource = {
+        id: 'late-in-flight',
+        async dispose() {
+          disposalStarted.resolve();
+          await disposal.promise;
+          disposed.push('late-in-flight');
+        },
+        forceDispose() {
+          disposed.push('force-late-in-flight');
+        },
+      };
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      let settled = false;
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(3_999);
+      late.resolve(lateResource);
+      await disposalStarted.promise;
+      await vi.advanceTimersByTimeAsync(1);
+      void observed.finally(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(disposed).toContain('force-late-in-flight');
+      expect(settled).toBe(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns after a timed-out disposal and invokes the force path', async () => {
     vi.useFakeTimers();
     try {

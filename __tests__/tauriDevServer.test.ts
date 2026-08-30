@@ -70,8 +70,24 @@ describe('Tauri development web server', () => {
       expect(asset.status).toBe(200);
     } finally {
       if (server.exitCode === null) {
-        const stopped = new Promise<void>((resolve) => server.once('exit', () => resolve()));
-        server.kill();
+        const stopped = new Promise<void>((resolve) => {
+          let stopTimer: ReturnType<typeof setTimeout> | undefined;
+          const finish = (): void => {
+            if (stopTimer !== undefined) clearTimeout(stopTimer);
+            resolve();
+          };
+          // A spawn error can leave a ChildProcess without an exit event. The
+          // bounded fallback keeps this smoke test from hanging on a missing
+          // pnpm/Vite executable while still allowing normal process teardown.
+          server.once('exit', finish);
+          server.once('error', finish);
+          stopTimer = setTimeout(finish, 2_000);
+          try {
+            server.kill();
+          } catch {
+            finish();
+          }
+        });
         await stopped;
       }
     }
