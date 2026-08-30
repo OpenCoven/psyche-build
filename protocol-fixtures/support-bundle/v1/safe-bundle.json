@@ -1,4 +1,5 @@
 {
+  "accountingProof": "7a010ffdeb9b6e988d9d9b30107a59aa0da321adaa368ef2d8c22791fc0c1750",
   "compatibility": {
     "minimumReaderVersion": 1,
     "policy": "readers-reject-unknown-major-and-ignore-unknown-fields-within-major"

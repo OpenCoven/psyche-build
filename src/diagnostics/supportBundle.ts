@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { isActionReceiptState, isActionStatusReceipt } from '../control/types.js';
 import type { ActionStatusReceipt, ActionReceiptState } from '../control/types.js';
@@ -53,7 +53,18 @@ export interface SupportBundleInput {
   readonly records?: unknown;
   readonly receipts?: unknown;
   readonly errors?: unknown;
+  readonly accountingProof?: unknown;
   readonly [key: string]: unknown;
+}
+
+/**
+ * Application-held signing boundary for serialized support-bundle metadata.
+ * The codec key must remain in the control-plane/runtime boundary; callers
+ * cannot manufacture a verified bundle from shape-valid JSON alone.
+ */
+export interface SupportBundleCodec {
+  readonly sign: (canonicalPayload: string) => string;
+  readonly verify: (canonicalPayload: string, proof: string) => boolean;
 }
 
 export interface SupportBundleOptions {
@@ -64,7 +75,16 @@ export interface SupportBundleOptions {
   readonly maxBundleBytes?: number;
   readonly maxReceipts?: number;
   readonly homeDirectory?: string;
+  /** Only the control-plane bridge can hold this opaque capability. */
+  readonly authority?: SupportBundleAuthority;
+  /** Optional application-held codec used to authenticate serialized metadata. */
+  readonly codec?: SupportBundleCodec;
 }
+
+declare const SUPPORT_BUNDLE_AUTHORITY_BRAND: unique symbol;
+export type SupportBundleAuthority = {
+  readonly [SUPPORT_BUNDLE_AUTHORITY_BRAND]: true;
+};
 
 export interface SupportBundleCompatibility {
   readonly policy: typeof SUPPORT_BUNDLE_COMPATIBILITY.policy;
@@ -82,6 +102,8 @@ export interface SupportProvenance {
   readonly sourceSha: string;
   readonly platform: string;
   readonly architecture: string;
+  /** Present when the values were supplied without a control-plane proof. */
+  readonly verification?: 'unverified';
 }
 
 export interface SupportProjectIdentity {
@@ -119,6 +141,8 @@ export interface SupportReceipt {
   readonly completedAt?: string;
   readonly code?: string;
   readonly durationMs?: number;
+  /** Present when the receipt shape was supplied without a control-plane proof. */
+  readonly verification?: 'unverified';
 }
 
 export interface SupportCollectionError {
@@ -167,6 +191,8 @@ export interface SupportBundle {
   readonly errors: readonly SupportCollectionError[];
   readonly redaction: SupportRedactionManifest;
   readonly truncation: SupportTruncationManifest;
+  /** HMAC-like proof over the canonical bundle with this field excluded. */
+  readonly accountingProof?: string;
 }
 
 interface MutableAudit {
@@ -189,6 +215,16 @@ interface NormalizationBudget {
 // truncation state outside the caller-visible object graph.
 const REDACTION_AUDITS = new WeakMap<object, SupportRedactionManifest>();
 const TRUSTED_TRUNCATIONS = new WeakMap<object, Partial<SupportTruncationManifest>>();
+type TrustedSupportField = 'provenance' | 'receipts';
+const TRUSTED_SUPPORT_FIELDS = new WeakMap<object, ReadonlySet<TrustedSupportField>>();
+const SUPPORT_BUNDLE_CODECS = new WeakMap<object, SupportBundleCodec>();
+// This capability is intentionally not exported as a value. The future
+// control-plane bridge must keep its own private integration point; arbitrary
+// support-bundle callers can only produce unverified/partial metadata.
+const CONTROL_PLANE_AUTHORITY = Object.freeze({}) as SupportBundleAuthority;
+// The fixture is the only in-module serialized control-plane sample. Real
+// integrations supply their own application-held codec at the runtime boundary.
+const CONTROL_PLANE_FIXTURE_CODEC = createSupportBundleCodec('psyche-build-support-fixture-v1');
 
 const ROOT_FIELDS = new Set([
   'generatedAt',
@@ -210,6 +246,7 @@ const ROOT_FIELDS = new Set([
   'errors',
   'redaction',
   'truncation',
+  'accountingProof',
 ]);
 
 const COLLECTOR_ARRAY_FIELDS = ['terminalTail', 'records', 'receipts', 'errors'] as const;
@@ -299,8 +336,14 @@ const INFRASTRUCTURE_URL = /\b(?:https?|ssh|git|ftp):\/\/[^\s"'`]+/gi;
 const MAX_ATTRIBUTE_SCAN_KEYS = 1_024;
 const MAX_SUPPORT_COLLECTORS = 64;
 const MAX_ATTRIBUTE_NODES = 4_096;
+// Audit metadata is itself part of the bounded public format. Keep enough
+// room for every bounded input node plus collector overhead, while rejecting
+// caller-injected values that are merely plausible-looking counters.
+const MAX_AUDIT_COUNT = MAX_ATTRIBUTE_NODES * 8;
 const MAX_TEXT_SCAN_CHARS = 16_384;
 const SHA256_DIGEST = /^[a-f0-9]{64}$/i;
+const ACCOUNTING_PROOF = /^[a-f0-9]{64}$/i;
+const ACCOUNTING_PROOF_PLACEHOLDER = '0'.repeat(64);
 
 function isNonZeroDigest(value: string): boolean {
   return SHA256_DIGEST.test(value) && !/^0+$/i.test(value);
@@ -308,6 +351,33 @@ function isNonZeroDigest(value: string): boolean {
 
 function isNonZeroSourceSha(value: string): boolean {
   return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value) && !/^0+$/i.test(value);
+}
+
+function isAccountingProof(value: unknown): value is string {
+  return typeof value === 'string' && ACCOUNTING_PROOF.test(value);
+}
+
+/** Create a deterministic application-held HMAC-SHA-256 bundle codec. */
+export function createSupportBundleCodec(secret: string | Uint8Array): SupportBundleCodec {
+  const key = Buffer.from(secret);
+  if (key.length < 16) {
+    throw new TypeError('support bundle codec secrets must be at least 16 bytes');
+  }
+  return Object.freeze({
+    sign: (canonicalPayload: string): string => createHmac('sha256', key)
+      .update(canonicalPayload, 'utf8')
+      .digest('hex'),
+    verify: (canonicalPayload: string, proof: string): boolean => {
+      if (!isAccountingProof(proof)) return false;
+      try {
+        const expected = createHmac('sha256', key).update(canonicalPayload, 'utf8').digest();
+        const provided = Buffer.from(proof, 'hex');
+        return provided.length === expected.length && timingSafeEqual(provided, expected);
+      } catch {
+        return false;
+      }
+    },
+  });
 }
 // A collector result is preflighted with one shared graph budget. This keeps
 // the synchronous validation/normalization work bounded across all of its
@@ -324,11 +394,13 @@ const NORMALIZED_RECORD_KEYS = new Set([
 ]);
 const COLLECTOR_ERROR_KEYS = new Set(['collector', 'code', 'at', 'message', 'recoveryRequired']);
 const NORMALIZED_ERROR_KEYS = new Set(['collector', 'code', 'at', 'recoveryRequired']);
-const SUPPORT_PROVENANCE_KEYS = new Set(['application', 'releaseVersion', 'sourceSha', 'platform', 'architecture']);
+const SUPPORT_PROVENANCE_KEYS = new Set([
+  'application', 'releaseVersion', 'sourceSha', 'platform', 'architecture', 'verification',
+]);
 const SUPPORT_PROJECT_KEYS = new Set(['idDigest', 'relativePath']);
 const SUPPORT_RECEIPT_KEYS = new Set([
   'sourceSchema', 'actionId', 'state', 'sourceState', 'resource', 'createdAt', 'taskId', 'actorId',
-  'leaseId', 'leaseRevision', 'completedAt', 'code', 'durationMs',
+  'leaseId', 'leaseRevision', 'completedAt', 'code', 'durationMs', 'verification',
 ]);
 const SUPPORT_RECEIPT_RESOURCE_KEYS = new Set(['kind', 'idDigest', 'generation']);
 const SUPPORT_REDACTION_KEYS = new Set(['version', 'redactedFields', 'omittedFields', 'categories']);
@@ -548,6 +620,17 @@ function finiteNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+function boundedMetadataCount(value: unknown): number | undefined {
+  const count = finiteNonNegativeInteger(value);
+  return count !== undefined && count <= MAX_AUDIT_COUNT ? count : undefined;
+}
+
+function boundedCount(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0
+    ? Math.min(value, MAX_AUDIT_COUNT)
+    : 0;
+}
+
 function seededAudit(input: SupportBundleInput, deadlineAt?: number): MutableAudit {
   const audit: MutableAudit = {
     redactedFields: 0,
@@ -563,15 +646,15 @@ function seededAudit(input: SupportBundleInput, deadlineAt?: number): MutableAud
   // second serialization pass; this prevents forged counters/categories.
   const manifest = isRecord(input) ? REDACTION_AUDITS.get(input) : undefined;
   if (manifest?.version !== 1) return audit;
-  const redactedFields = finiteNonNegativeInteger(manifest.redactedFields);
-  const omittedFields = finiteNonNegativeInteger(manifest.omittedFields);
+  const redactedFields = boundedMetadataCount(manifest.redactedFields);
+  const omittedFields = boundedMetadataCount(manifest.omittedFields);
   if (redactedFields !== undefined) audit.redactedFields = redactedFields;
   if (omittedFields !== undefined) audit.omittedFields = omittedFields;
   for (const [category, count] of limitedEntries(manifest.categories, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt)
     ?.slice(0, SUPPORT_BUNDLE_LIMITS.maxAttributeKeys) ?? []) {
     assertNormalizationDeadline(deadlineAt);
-    if (!SAFE_CATEGORY_VALUE.test(category)) continue;
-    const safeCount = finiteNonNegativeInteger(count);
+    if (!SAFE_REDACTION_CATEGORY_VALUES.has(category)) continue;
+    const safeCount = boundedMetadataCount(count);
     if (safeCount !== undefined) audit.categories.set(category, safeCount);
   }
   return audit;
@@ -594,9 +677,7 @@ function optionElapsedLimit(value: number | undefined): number {
 }
 
 function suppliedCount(value: unknown): number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? Math.min(value, Number.MAX_SAFE_INTEGER)
-    : 0;
+  return boundedMetadataCount(value) ?? 0;
 }
 
 function boundedText(value: unknown, audit: MutableAudit, key = ''): string | undefined {
@@ -906,7 +987,11 @@ function safeMap(
   return output;
 }
 
-function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvenance {
+function sanitizeProvenance(
+  value: unknown,
+  audit: MutableAudit,
+  trustedControlPlane = false,
+): SupportProvenance {
   const input = isRecord(value) ? value : {};
   const application = safeAllowlistedValue(
     input.application,
@@ -940,6 +1025,7 @@ function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvena
       : 'unknown',
     platform,
     architecture,
+    ...(trustedControlPlane ? {} : { verification: 'unverified' as const }),
   };
 }
 
@@ -953,12 +1039,14 @@ function isNormalizedProvenance(value: unknown, deadlineAt?: number): value is S
       || (typeof value.sourceSha === 'string' && isNonZeroSourceSha(value.sourceSha)))
     && SAFE_PROVENANCE_PLATFORM_VALUES.has(value.platform as string)
     && SAFE_PROVENANCE_ARCHITECTURE_VALUES.has(value.architecture as string)
+    && (value.verification === undefined || value.verification === 'unverified')
     && ['application', 'releaseVersion', 'sourceSha', 'platform', 'architecture']
       .every((key) => typeof value[key] === 'string' && byteLength(value[key] as string) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes);
 }
 
 function isCompleteProvenance(value: unknown): value is SupportProvenance {
   return isNormalizedProvenance(value)
+    && value.verification === undefined
     && value.application !== 'unknown'
     && value.releaseVersion !== 'unknown'
       && isNonZeroSourceSha(value.sourceSha)
@@ -1000,11 +1088,13 @@ function combineStatus(
   requested: SupportBundleStatus,
   errors: readonly SupportCollectionError[],
   provenanceComplete = true,
+  receiptsAuthoritative = true,
 ): SupportBundleStatus {
   if (requested === 'recovery_required' || errors.some((error) => error.recoveryRequired)) return 'recovery_required';
   if (requested === 'unknown') return 'unknown';
   if (requested === 'partial' || errors.length > 0) return 'partial';
   if (!provenanceComplete) return 'partial';
+  if (!receiptsAuthoritative) return 'partial';
   return 'complete';
 }
 
@@ -1165,7 +1255,8 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
       || byteLength(value.code) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
     || (value.durationMs !== undefined
       && (typeof value.durationMs !== 'number' || !Number.isSafeInteger(value.durationMs)
-        || value.durationMs < 0 || value.durationMs > 86_400_000))) return false;
+        || value.durationMs < 0 || value.durationMs > 86_400_000))
+    || (value.verification !== undefined && value.verification !== 'unverified')) return false;
   const resource = value.resource;
   return (resource !== undefined)
     && hasOnlyKeys(
@@ -1183,7 +1274,11 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
         && resource.generation >= 1);
 }
 
-function sanitizeProjectedReceipt(value: SupportReceipt, audit: MutableAudit): SupportReceipt | undefined {
+function sanitizeProjectedReceipt(
+  value: SupportReceipt,
+  audit: MutableAudit,
+  trustedControlPlane = false,
+): SupportReceipt | undefined {
   if (!isSupportReceiptProjection(value, audit.deadlineAt)) return undefined;
   const actionId = safeIdentifierDigest(value.actionId, audit, 'actionId');
   const createdAt = safeTimestamp(value.createdAt, audit, 'createdAt');
@@ -1215,6 +1310,9 @@ function sanitizeProjectedReceipt(value: SupportReceipt, audit: MutableAudit): S
     ...(completedAt ? { completedAt } : {}),
     ...(code ? { code } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(value.verification === 'unverified' || !trustedControlPlane
+      ? { verification: 'unverified' as const }
+      : {}),
   };
 }
 
@@ -1222,13 +1320,14 @@ function sanitizeReceipt(
   value: unknown,
   audit: MutableAudit,
   mode: 'raw' | 'projected' = 'raw',
+  trustedControlPlane = false,
 ): SupportReceipt | undefined {
   if (mode === 'projected') {
     if (!isSupportReceiptProjection(value, audit.deadlineAt)) {
       if (value !== undefined) note(audit, 'non-normalized-receipt');
       return undefined;
     }
-    return sanitizeProjectedReceipt(value, audit);
+    return sanitizeProjectedReceipt(value, audit, trustedControlPlane);
   }
   if (!isActionStatusReceipt(value)) {
     if (value !== undefined) note(audit, 'non-authoritative-receipt');
@@ -1269,6 +1368,7 @@ function sanitizeReceipt(
     ...(completedAt ? { completedAt } : {}),
     ...(code ? { code } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(trustedControlPlane ? {} : { verification: 'unverified' as const }),
   };
 }
 
@@ -1342,14 +1442,62 @@ function byteLength(value: string): number {
 function auditManifest(audit: MutableAudit): SupportRedactionManifest {
   return {
     version: 1,
-    redactedFields: audit.redactedFields,
-    omittedFields: audit.omittedFields,
-    categories: Object.fromEntries([...audit.categories.entries()].sort(([a], [b]) => compareCodeUnits(a, b))),
+    redactedFields: boundedCount(audit.redactedFields),
+    omittedFields: boundedCount(audit.omittedFields),
+    categories: Object.fromEntries([...audit.categories.entries()]
+      .filter(([category, count]) => SAFE_REDACTION_CATEGORY_VALUES.has(category) && boundedMetadataCount(count) !== undefined)
+      .map(([category, count]) => [category, boundedCount(count)] as const)
+      .sort(([a], [b]) => compareCodeUnits(a, b))),
   };
 }
 
 function serializeForSize(value: unknown, deadlineAt?: number): string {
   return JSON.stringify(stableValue(value, { remaining: MAX_ATTRIBUTE_NODES * 4, deadlineAt }));
+}
+
+function accountingPayload(bundle: SupportBundle, deadlineAt?: number): string {
+  const { accountingProof: _accountingProof, ...unsignedBundle } = bundle;
+  return serializeForSize(unsignedBundle, deadlineAt);
+}
+
+function signAccountingProof(
+  bundle: SupportBundle,
+  codec: SupportBundleCodec,
+  deadlineAt?: number,
+): string {
+  const payload = accountingPayload(bundle, deadlineAt);
+  const proof = codec.sign(payload);
+  if (!isAccountingProof(proof) || !codec.verify(payload, proof)) {
+    throw Object.assign(new Error('support bundle codec returned an invalid accounting proof'), {
+      code: 'support_bundle_accounting_proof_invalid',
+    });
+  }
+  return proof.toLowerCase();
+}
+
+function hasValidAccountingProof(
+  bundle: unknown,
+  codec: SupportBundleCodec,
+  deadlineAt: number,
+): bundle is SupportBundle {
+  if (!isSupportBundleV1AtDeadline(bundle, deadlineAt)
+    || !isAccountingProof(bundle.accountingProof)) return false;
+  try {
+    return codec.verify(accountingPayload(bundle, deadlineAt), bundle.accountingProof);
+  } catch {
+    return false;
+  }
+}
+
+function verifiedSupportFields(bundle: SupportBundle): ReadonlySet<TrustedSupportField> {
+  const fields = new Set<TrustedSupportField>();
+  if (!(isRecord(bundle.provenance) && bundle.provenance.verification === 'unverified')) {
+    fields.add('provenance');
+  }
+  if (!bundle.receipts.some((receipt) => receipt.verification === 'unverified')) {
+    fields.add('receipts');
+  }
+  return Object.freeze(fields);
 }
 
 function isBoundedNormalizedValue(
@@ -1452,7 +1600,7 @@ function isNormalizedCounterMap(value: unknown, deadlineAt?: number): boolean {
   return entries !== undefined
     && entries.length <= SUPPORT_BUNDLE_LIMITS.maxAttributeKeys
     && entries.every(([key, count]) => SAFE_REDACTION_CATEGORY_VALUES.has(key)
-      && finiteNonNegativeInteger(count) !== undefined);
+      && boundedMetadataCount(count) !== undefined);
 }
 
 function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value is SupportBundle {
@@ -1475,7 +1623,8 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       || !Array.isArray(value.receipts)
       || !Array.isArray(value.errors)
       || !isRecord(value.redaction)
-      || !isRecord(value.truncation)) return false;
+      || !isRecord(value.truncation)
+      || (value.accountingProof !== undefined && !isAccountingProof(value.accountingProof))) return false;
     if (value.terminalTail.length !== 0
       || value.records.length > SUPPORT_BUNDLE_LIMITS.maxRecords
       || value.receipts.length > SUPPORT_BUNDLE_LIMITS.maxReceipts
@@ -1498,6 +1647,7 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
         && byteLength(provenance[key]) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes)
       && (value.status !== 'complete' || isCompleteProvenance(provenance))
       && (value.status !== 'complete' || value.errors.length === 0)
+      && (value.status !== 'complete' || isAccountingProof(value.accountingProof))
       && (value.ownerEpoch === undefined || finiteNonNegativeInteger(value.ownerEpoch) !== undefined)
       && (project === undefined || (isRecord(project)
         && hasOnlyKeys(project, SUPPORT_PROJECT_KEYS, deadlineAt)
@@ -1514,17 +1664,17 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       && (value.graphics === undefined || isBoundedNormalizedValue(value.graphics, 0, new Set<object>(), stateBudget, '', true))
       && hasOnlyKeys(redaction, SUPPORT_REDACTION_KEYS, deadlineAt)
       && redaction.version === 1
-      && finiteNonNegativeInteger(redaction.redactedFields) !== undefined
-      && finiteNonNegativeInteger(redaction.omittedFields) !== undefined
+      && boundedMetadataCount(redaction.redactedFields) !== undefined
+      && boundedMetadataCount(redaction.omittedFields) !== undefined
       && isNormalizedCounterMap(redaction.categories, deadlineAt)
       && hasOnlyKeys(truncation, SUPPORT_TRUNCATION_KEYS, deadlineAt)
-      && finiteNonNegativeInteger(truncation.recordsOmitted) !== undefined
-      && finiteNonNegativeInteger(truncation.receiptsOmitted) !== undefined
-      && finiteNonNegativeInteger(truncation.errorsOmitted) !== undefined
-      && finiteNonNegativeInteger(truncation.stateFieldsOmitted) !== undefined
-      && finiteNonNegativeInteger(truncation.terminalLinesOmitted) !== undefined
-      && finiteNonNegativeInteger(truncation.bytesOmitted) !== undefined
-      && finiteNonNegativeInteger(truncation.fieldsTruncated) !== undefined
+      && boundedMetadataCount(truncation.recordsOmitted) !== undefined
+      && boundedMetadataCount(truncation.receiptsOmitted) !== undefined
+      && boundedMetadataCount(truncation.errorsOmitted) !== undefined
+      && boundedMetadataCount(truncation.stateFieldsOmitted) !== undefined
+      && boundedMetadataCount(truncation.terminalLinesOmitted) !== undefined
+      && boundedMetadataCount(truncation.bytesOmitted) !== undefined
+      && boundedMetadataCount(truncation.fieldsTruncated) !== undefined
       && truncation.totalPayloadBounded === true;
     if (!structurallyValid) return false;
     return byteLength(serializeForSize(value, deadlineAt)) <= SUPPORT_BUNDLE_LIMITS.maxBundleBytes;
@@ -1665,6 +1815,11 @@ function buildSupportBundleWithReceiptMode(
   const audit = seededAudit(input, deadlineAt);
   assertNormalizationDeadline(deadlineAt);
   const homeDirectory = options.homeDirectory;
+  const controlPlaneAuthorized = options.authority === CONTROL_PLANE_AUTHORITY;
+  const trustedInputFields = isRecord(input) ? TRUSTED_SUPPORT_FIELDS.get(input) : undefined;
+  const trustedProvenance = receiptMode === 'raw'
+    ? controlPlaneAuthorized || trustedInputFields?.has('provenance') === true
+    : trustedInputFields?.has('provenance') === true;
   const maxRecords = optionLimit(options.maxRecords, SUPPORT_BUNDLE_LIMITS.maxRecords);
   const maxRecordBytes = optionLimit(options.maxRecordBytes, SUPPORT_BUNDLE_LIMITS.maxRecordBytes);
   const maxReceipts = optionLimit(options.maxReceipts, SUPPORT_BUNDLE_LIMITS.maxReceipts);
@@ -1722,10 +1877,13 @@ function buildSupportBundleWithReceiptMode(
   const receiptCandidates: SupportReceipt[] = [];
   let invalidReceipts = 0;
   const rawReceipts = Array.isArray(input.receipts) ? input.receipts : [];
+  const trustedReceipts = receiptMode === 'raw'
+    ? controlPlaneAuthorized || trustedInputFields?.has('receipts') === true
+    : trustedInputFields?.has('receipts') === true;
   const receiptsInputOverflow = rawReceipts.length > MAX_ATTRIBUTE_SCAN_KEYS;
   for (const raw of receiptsInputOverflow ? [] : rawReceipts) {
     assertNormalizationDeadline(deadlineAt);
-    const receipt = sanitizeReceipt(raw, audit, receiptMode);
+    const receipt = sanitizeReceipt(raw, audit, receiptMode, trustedReceipts);
     if (receipt) receiptCandidates.push(receipt);
     else {
       invalidReceipts += 1;
@@ -1840,16 +1998,27 @@ function buildSupportBundleWithReceiptMode(
     || compareCodeUnits(a.code, b.code)
     || compareStableValues(a, b, deadlineAt));
   const project = sanitizeProject(input.project, audit, homeDirectory);
-  const provenance = sanitizeProvenance(input.provenance, audit);
+  const provenance = sanitizeProvenance(input.provenance, audit, trustedProvenance);
   const requestedStatus = sanitizeStatus(input.status, audit);
-  const recordsOmitted = Math.max(suppliedCount(priorTruncation.recordsOmitted), rawRecords.length - records.length);
-  const receiptsOmitted = Math.max(suppliedCount(priorTruncation.receiptsOmitted), rawReceipts.length - receipts.length);
+  const recordsOmitted = boundedCount(Math.max(
+    suppliedCount(priorTruncation.recordsOmitted),
+    rawRecords.length - records.length,
+  ));
+  const receiptsOmitted = boundedCount(Math.max(
+    suppliedCount(priorTruncation.receiptsOmitted),
+    rawReceipts.length - receipts.length,
+  ));
   const base: SupportBundle = {
     schema: SUPPORT_BUNDLE_SCHEMA,
     version: SUPPORT_BUNDLE_VERSION,
     compatibility: SUPPORT_BUNDLE_COMPATIBILITY,
     generatedAt,
-    status: combineStatus(requestedStatus, errors, isCompleteProvenance(provenance)),
+    status: combineStatus(
+      requestedStatus,
+      errors,
+      isCompleteProvenance(provenance),
+      receipts.every((receipt) => receipt.verification === undefined),
+    ),
     provenance,
     ...(finiteNonNegativeInteger(input.ownerEpoch) !== undefined ? { ownerEpoch: finiteNonNegativeInteger(input.ownerEpoch) } : {}),
     ...(project ? { project } : {}),
@@ -1866,18 +2035,32 @@ function buildSupportBundleWithReceiptMode(
     truncation: {
       recordsOmitted,
       receiptsOmitted,
-      errorsOmitted,
+      errorsOmitted: boundedCount(errorsOmitted),
       stateFieldsOmitted: suppliedCount(priorTruncation.stateFieldsOmitted),
-      terminalLinesOmitted: Math.max(suppliedCount(priorTruncation.terminalLinesOmitted), audit.terminalLinesOmitted),
+      terminalLinesOmitted: boundedCount(Math.max(
+        suppliedCount(priorTruncation.terminalLinesOmitted), audit.terminalLinesOmitted,
+      )),
       bytesOmitted: suppliedCount(priorTruncation.bytesOmitted),
-      fieldsTruncated: Math.max(suppliedCount(priorTruncation.fieldsTruncated), audit.fieldsTruncated),
+      fieldsTruncated: boundedCount(Math.max(suppliedCount(priorTruncation.fieldsTruncated), audit.fieldsTruncated)),
       totalPayloadBounded: false,
     },
   };
-  const fitted = fitBundle(base, maxBundleBytes, deadlineAt).bundle;
-  REDACTION_AUDITS.set(fitted, auditManifest(audit));
-  TRUSTED_TRUNCATIONS.set(fitted, Object.freeze({ ...fitted.truncation }));
-  return fitted;
+  const codec = options.codec ?? (isRecord(input) ? SUPPORT_BUNDLE_CODECS.get(input) : undefined);
+  const fitInput = codec === undefined
+    ? base
+    : { ...base, accountingProof: ACCOUNTING_PROOF_PLACEHOLDER };
+  const fitted = fitBundle(fitInput, maxBundleBytes, deadlineAt).bundle;
+  const output = codec === undefined
+    ? fitted
+    : { ...fitted, accountingProof: signAccountingProof(fitted, codec, deadlineAt) };
+  REDACTION_AUDITS.set(output, auditManifest(audit));
+  TRUSTED_TRUNCATIONS.set(output, Object.freeze({ ...output.truncation }));
+  const trustedOutputFields = new Set<TrustedSupportField>();
+  if (trustedProvenance) trustedOutputFields.add('provenance');
+  if (trustedReceipts) trustedOutputFields.add('receipts');
+  TRUSTED_SUPPORT_FIELDS.set(output, Object.freeze(trustedOutputFields));
+  if (codec !== undefined) SUPPORT_BUNDLE_CODECS.set(output, codec);
+  return output;
 }
 
 export function buildSupportBundle(input: SupportBundleInput, options: SupportBundleOptions = {}): SupportBundle {
@@ -1890,7 +2073,7 @@ export function buildSupportBundle(input: SupportBundleInput, options: SupportBu
   }
 }
 
-export function serializeSupportBundle(bundle: SupportBundle): string {
+export function serializeSupportBundle(bundle: SupportBundle, codec?: SupportBundleCodec): string {
   const deadlineAt = Date.now() + SUPPORT_BUNDLE_LIMITS.maxElapsedMs;
   // Serialization is the repair boundary for a caller-mutated normalized
   // object. Validate the immutable envelope here, then re-normalize all
@@ -1900,12 +2083,30 @@ export function serializeSupportBundle(bundle: SupportBundle): string {
       code: 'support_bundle_schema_invalid',
     });
   }
+  const resolvedCodec = codec ?? SUPPORT_BUNDLE_CODECS.get(bundle);
+  if (resolvedCodec !== undefined) {
+    if (hasValidAccountingProof(bundle, resolvedCodec, deadlineAt)) {
+      REDACTION_AUDITS.set(bundle, bundle.redaction);
+      TRUSTED_TRUNCATIONS.set(bundle, Object.freeze({ ...bundle.truncation }));
+      TRUSTED_SUPPORT_FIELDS.set(bundle, verifiedSupportFields(bundle));
+      SUPPORT_BUNDLE_CODECS.set(bundle, resolvedCodec);
+    } else {
+      REDACTION_AUDITS.delete(bundle);
+      TRUSTED_TRUNCATIONS.delete(bundle);
+      TRUSTED_SUPPORT_FIELDS.delete(bundle);
+    }
+  }
   // Re-normalize at the export boundary. A caller may have parsed, cast, or
   // mutated a bundle after construction; serialization must remain an
   // independent redaction boundary rather than trusting the TypeScript type.
   let normalized: SupportBundle;
   try {
-    normalized = buildSupportBundleWithReceiptMode(bundle as unknown as SupportBundleInput, {}, 'projected', deadlineAt);
+    normalized = buildSupportBundleWithReceiptMode(
+      bundle as unknown as SupportBundleInput,
+      resolvedCodec === undefined ? {} : { codec: resolvedCodec },
+      'projected',
+      deadlineAt,
+    );
     assertNormalizationDeadline(deadlineAt);
   } catch (error) {
     if (isNormalizationDeadlineError(error)) {
@@ -1927,8 +2128,36 @@ export function serializeSupportBundle(bundle: SupportBundle): string {
   return serialized;
 }
 
-export function supportBundleDigest(bundle: SupportBundle): string {
-  return createHash('sha256').update(serializeSupportBundle(bundle), 'utf8').digest('hex');
+export function parseSupportBundle(serialized: string, codec: SupportBundleCodec): SupportBundle {
+  const deadlineAt = Date.now() + SUPPORT_BUNDLE_LIMITS.maxElapsedMs;
+  if (byteLength(serialized) > SUPPORT_BUNDLE_LIMITS.maxBundleBytes) {
+    throw Object.assign(new Error('support bundle exceeds the maximum payload size'), {
+      code: 'support_bundle_size_exceeded',
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    throw Object.assign(new Error('support bundle JSON is invalid'), {
+      code: 'support_bundle_json_invalid',
+    });
+  }
+  if (!hasValidAccountingProof(parsed, codec, deadlineAt)) {
+    throw Object.assign(new Error('support bundle accounting proof is invalid'), {
+      code: 'support_bundle_accounting_proof_invalid',
+    });
+  }
+  const bundle = parsed as SupportBundle;
+  REDACTION_AUDITS.set(bundle, bundle.redaction);
+  TRUSTED_TRUNCATIONS.set(bundle, Object.freeze({ ...bundle.truncation }));
+  TRUSTED_SUPPORT_FIELDS.set(bundle, verifiedSupportFields(bundle));
+  SUPPORT_BUNDLE_CODECS.set(bundle, codec);
+  return bundle;
+}
+
+export function supportBundleDigest(bundle: SupportBundle, codec?: SupportBundleCodec): string {
+  return createHash('sha256').update(serializeSupportBundle(bundle, codec), 'utf8').digest('hex');
 }
 
 export async function collectSupportBundle(
@@ -1942,6 +2171,7 @@ export async function collectSupportBundle(
   const maxElapsedMs = optionElapsedLimit(options.maxElapsedMs);
   const maxRecords = optionLimit(options.maxRecords, SUPPORT_BUNDLE_LIMITS.maxRecords);
   const maxReceipts = optionLimit(options.maxReceipts, SUPPORT_BUNDLE_LIMITS.maxReceipts);
+  const collectionAuthorized = options.authority === CONTROL_PLANE_AUTHORITY;
   const boundedCollectors = collectors.slice(0, MAX_SUPPORT_COLLECTORS);
   const controller = new AbortController();
   const forwardAbort = (): void => controller.abort(options.signal?.reason);
@@ -1961,6 +2191,7 @@ export async function collectSupportBundle(
   const rejectOnAbort = (): void => rejectDeadline?.(controller.signal.reason ?? new Error('support bundle collection cancelled'));
   controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
   const merged: SupportBundleInput = { generatedAt: collectionAt, records: [], errors: [] };
+  const trustedMergedFields = new Set<TrustedSupportField>();
   const recordCandidates: SupportRecord[] = [];
   let records: SupportRecord[] = [];
   let receipts: SupportReceipt[] = [];
@@ -2122,6 +2353,7 @@ export async function collectSupportBundle(
         errorsOmitted,
       },
     };
+    TRUSTED_SUPPORT_FIELDS.set(recoveryInput, Object.freeze(new Set(trustedMergedFields)));
     TRUSTED_TRUNCATIONS.set(recoveryInput, { errorsOmitted });
     try {
       return buildSupportBundleWithReceiptMode(recoveryInput, options, 'raw', deadlineAt);
@@ -2153,7 +2385,9 @@ export async function collectSupportBundle(
     recovery_required: 3,
   };
   const claimedCollectorFields = new Set<string>();
-  const ignoredCollectorFields = new Set(['generatedAt', 'schema', 'version', 'compatibility', 'redaction', 'truncation']);
+  const ignoredCollectorFields = new Set([
+    'generatedAt', 'schema', 'version', 'compatibility', 'redaction', 'truncation', 'accountingProof',
+  ]);
   for (const item of collected) {
     if (normalizationInterrupted()) return recoveryBundle(normalizationError());
     if (duplicateCollectorNames.has(item.name)) continue;
@@ -2186,6 +2420,9 @@ export async function collectSupportBundle(
       });
       continue;
     }
+    const resultTrustedFields = collectionAuthorized
+      ? new Set<TrustedSupportField>(['provenance', 'receipts'])
+      : TRUSTED_SUPPORT_FIELDS.get(item.result);
     const resultEntries = limitedEntries(item.result, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
     if (!resultEntries) {
       appendError({
@@ -2220,6 +2457,7 @@ export async function collectSupportBundle(
           continue;
         }
         claimedCollectorFields.add(key);
+        if (resultTrustedFields?.has('receipts')) trustedMergedFields.add('receipts');
         for (const receipt of value) {
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
           if (!isActionStatusReceipt(receipt)) {
@@ -2259,6 +2497,9 @@ export async function collectSupportBundle(
       } else {
         claimedCollectorFields.add(key);
         (merged as Record<string, unknown>)[key] = value;
+        if (key === 'provenance' && resultTrustedFields?.has('provenance')) {
+          trustedMergedFields.add('provenance');
+        }
       }
     }
   }
@@ -2315,6 +2556,7 @@ export async function collectSupportBundle(
     receiptsOmitted,
     errorsOmitted,
   });
+  TRUSTED_SUPPORT_FIELDS.set(merged, Object.freeze(new Set(trustedMergedFields)));
   if (normalizationInterrupted()) return recoveryBundle(normalizationError());
   let bundle: SupportBundle;
   try {
@@ -2354,5 +2596,8 @@ export function createSafeSupportBundleFixture(): SupportBundle {
       code: 'fixture_ok',
       durationMs: 10,
     }],
+  }, {
+    authority: CONTROL_PLANE_AUTHORITY,
+    codec: CONTROL_PLANE_FIXTURE_CODEC,
   });
 }

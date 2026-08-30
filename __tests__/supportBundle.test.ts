@@ -8,8 +8,10 @@ import {
   SUPPORT_ACTION_STATES,
   buildSupportBundle,
   collectSupportBundle,
+  createSupportBundleCodec,
   createSafeSupportBundleFixture,
   isSupportBundleV1,
+  parseSupportBundle,
   serializeSupportBundle,
   supportBundleDigest,
   type SupportBundle,
@@ -146,6 +148,68 @@ describe('support bundle v1', () => {
 
     expect(serializeSupportBundle(bundle)).toBe(first);
     expect(JSON.parse(first).redaction).toEqual(JSON.parse(serializeSupportBundle(bundle)).redaction);
+  });
+
+  it('marks structurally valid raw control values unverified until adapted from the control plane', () => {
+    const input = {
+      provenance: {
+        application: 'psyche-build',
+        releaseVersion: '1.0.0',
+        sourceSha: '0123456789abcdef0123456789abcdef01234567',
+        platform: 'linux',
+        architecture: 'x86_64',
+      },
+      receipts: [{
+        schema: 'psyche.control.receipt/v1' as const,
+        actionId: 'action',
+        state: 'succeeded' as const,
+        resource: { kind: 'project' as const, id: 'project' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }],
+    };
+    const raw = buildSupportBundle(input);
+    expect(raw.status).toBe('partial');
+    expect(raw.provenance.verification).toBe('unverified');
+    expect(raw.receipts[0]?.verification).toBe('unverified');
+
+    expect(createSafeSupportBundleFixture().status).toBe('complete');
+  });
+
+  it('does not treat forged normalized JSON as authoritative and rejects tampering', () => {
+    const codec = createSupportBundleCodec('support-bundle-proof-test-key-v1');
+    const fixture = createSafeSupportBundleFixture();
+    const forged = { ...fixture } as SupportBundle & { provenance: Record<string, unknown> };
+    delete (forged as { accountingProof?: string }).accountingProof;
+
+    const forgedSerialized = serializeSupportBundle(forged, codec);
+    const forgedOutput = JSON.parse(forgedSerialized) as SupportBundle;
+    expect(forgedOutput.status).toBe('partial');
+    expect(forgedOutput.provenance.verification).toBe('unverified');
+    expect(forgedOutput.receipts[0]?.verification).toBe('unverified');
+
+    const tampered = JSON.parse(serializeSupportBundle(fixture)) as Record<string, unknown>;
+    tampered.lifecycle = { state: 'stale' };
+    expect(() => parseSupportBundle(JSON.stringify(tampered), createSupportBundleCodec('psyche-build-support-fixture-v1')))
+      .toThrow(/accounting proof/i);
+  });
+
+  it('preserves bounded redaction and truncation metadata after a JSON round trip', () => {
+    const codec = createSupportBundleCodec('support-bundle-test-key-v1');
+    const bundle = buildSupportBundle({
+      lifecycle: { password: 'secret' },
+      records: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
+        sequence,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'test',
+        event: 'sample',
+      })),
+    }, { codec });
+    const serialized = serializeSupportBundle(bundle);
+    const roundTripped = parseSupportBundle(serialized, codec);
+
+    expect(serializeSupportBundle(roundTripped)).toBe(serialized);
+    expect(roundTripped.redaction).toEqual(bundle.redaction);
+    expect(roundTripped.truncation).toEqual(bundle.truncation);
   });
 
   it('preserves the complete action-state vocabulary without exposing receipt payloads', () => {
@@ -935,7 +999,10 @@ describe('support bundle v1', () => {
 
   it('keeps the checked-in safe fixture equal to the canonical fixture generator', async () => {
     const fixturePath = new URL('../protocol-fixtures/support-bundle/v1/safe-bundle.json', import.meta.url);
-    const fixture = JSON.parse(await readFile(fixturePath, 'utf8')) as SupportBundle;
+    const fixture = parseSupportBundle(
+      await readFile(fixturePath, 'utf8'),
+      createSupportBundleCodec('psyche-build-support-fixture-v1'),
+    );
     expect(serializeSupportBundle(fixture)).toBe(serializeSupportBundle(createSafeSupportBundleFixture()));
     expect(await readFile(fixturePath, 'utf8')).toBe(serializeProtocolFixture(createSafeSupportBundleFixture()));
   });
