@@ -346,6 +346,61 @@ describe('Tauri diagnostics stress harness', () => {
     },
   );
 
+  it('starts the late-resource grace window when cancellation occurs', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposed: string[] = [];
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(1_999);
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(1_999);
+      late.resolve(createResource('late-terminal', disposed));
+
+      const error = await observed;
+      expect(error).toMatchObject({ name: 'AbortError' });
+      expect(disposed).toContain('late-terminal');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns after a timed-out disposal and invokes the force path', async () => {
     vi.useFakeTimers();
     try {

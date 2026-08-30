@@ -307,6 +307,9 @@ async function invokeAbortable<T>(
     // the native invoke returns. The late-result callback still runs and owns
     // compensation for a resource that was created after cancellation.
     void lateSettlement.catch(() => undefined);
+  }
+  const armLateTimeout = (): void => {
+    if (!lateSettlement || lateTimeout !== undefined) return;
     lateTimeout = setTimeout(() => {
       const error = new Error('stress resource creation did not settle after cancellation');
       try {
@@ -322,7 +325,7 @@ async function invokeAbortable<T>(
         options.lateSettlements?.delete(lateSettlement);
       }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
-  }
+  };
   const settleLate = (value: T): void => {
     let work: Promise<void> | void;
     try {
@@ -347,6 +350,7 @@ async function invokeAbortable<T>(
     const onAbort = () => {
       if (settled) return;
       settled = true;
+      armLateTimeout();
       cleanup();
       reject(abortReason(signal));
     };
@@ -614,6 +618,13 @@ async function runStressScenario(
   const hiddenPaneIds = new Set<string>();
   const cleanupErrors: unknown[] = [];
   const pendingLateSettlements = new Set<Promise<void>>();
+  let lateCleanupClosed = false;
+  const recordCleanupError = (error: unknown): void => {
+    // A native creation can settle after the bounded late-result grace period.
+    // Its best-effort compensation must not mutate the result after this
+    // scenario has finished reporting its cleanup outcome.
+    if (!lateCleanupClosed) cleanupErrors.push(error);
+  };
   let primaryError: unknown;
   let result: StressScenarioResult | undefined;
   const startedAt = dependencies.now();
@@ -625,11 +636,11 @@ async function runStressScenario(
         try {
           await disposeStressResource(resource);
         } catch (error) {
-          cleanupErrors.push(error);
+          recordCleanupError(error);
           throw error;
         }
       },
-      onLateTimeout: (error) => cleanupErrors.push(error),
+      onLateTimeout: recordCleanupError,
     })
   );
 
@@ -761,28 +772,29 @@ async function runStressScenario(
     try {
       emitProgress(dependencies, scenarioIndex, scenarioValue, 'cleanup', 0, 0);
     } catch (error) {
-      cleanupErrors.push(error);
+      recordCleanupError(error);
     }
     try {
       await restoreHiddenPanes(dependencies, hiddenPaneIds);
     } catch (error) {
-      cleanupErrors.push(error);
+      recordCleanupError(error);
     }
     for (const resource of resources.reverse()) {
       try {
         await disposeStressResource(resource);
       } catch (error) {
-        cleanupErrors.push(error);
+        recordCleanupError(error);
       }
     }
     if (pendingLateSettlements.size > 0) {
       const lateResults = await Promise.allSettled([...pendingLateSettlements]);
       for (const lateResult of lateResults) {
         if (lateResult.status === 'rejected' && !cleanupErrors.includes(lateResult.reason)) {
-          cleanupErrors.push(lateResult.reason);
+          recordCleanupError(lateResult.reason);
         }
       }
     }
+    lateCleanupClosed = true;
   }
 
   const combinedError = combineErrors(primaryError, cleanupErrors);

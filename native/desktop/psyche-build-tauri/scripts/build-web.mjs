@@ -8,7 +8,7 @@ const argumentsList = process.argv.slice(2);
 const debug = argumentsList.includes('--debug');
 const outdirIndex = argumentsList.indexOf('--outdir');
 const outdir = resolve(
-  outdirIndex === -1 ? process.cwd() : argumentsList[outdirIndex + 1] ?? '',
+  outdirIndex === -1 ? (debug ? '.psyche-dev-web' : process.cwd()) : argumentsList[outdirIndex + 1] ?? '',
 );
 const unknownArgument = argumentsList.find((argument, index) => (
   argument !== '--debug' && argument !== '--outdir' && !(outdirIndex !== -1 && index === outdirIndex + 1)

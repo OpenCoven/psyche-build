@@ -10,7 +10,7 @@
     "check:runtime-bundle": "pnpm build:web && git diff --exit-code -- web/runtime.bundle.js",
     "check:release-contract": "node ../../../scripts/verify-tauri-release-contract.mjs --target-dir src-tauri/target",
     "dev": "pnpm build:web:debug && tauri dev",
-    "serve:web": "vite web --host 127.0.0.1 --port 1420 --strictPort"
+    "serve:web": "vite web --host 127.0.0.1 --port 1420 --strictPort --publicDir ../.psyche-dev-web/web"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",
