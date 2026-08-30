@@ -464,7 +464,9 @@ fn is_safe_harness_id(id: &str) -> bool {
 fn is_bounded_launch_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= MAX_LAUNCH_PATH_CHARS
-        && path.bytes().all(|byte| byte != 0 && !byte.is_ascii_control())
+        && path
+            .bytes()
+            .all(|byte| byte != 0 && !byte.is_ascii_control())
 }
 
 #[cfg(unix)]
@@ -505,13 +507,10 @@ fn validate_launch_request(request: &CovenLaunchRequest) -> Result<(), String> {
 /// sessions` titles, which Psyche Build surfaces in its session rail.
 #[cfg(unix)]
 fn launch_request_body(request: &CovenLaunchRequest) -> Result<Vec<u8>, String> {
-    let title = request
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or_else(|| format!("Coven {}", request.harness))
-        .to_string();
+    let title = match request.title.as_deref().map(str::trim) {
+        Some(title) if !title.is_empty() => title.to_string(),
+        _ => format!("Coven {}", request.harness),
+    };
     let mut body = serde_json::Map::new();
     body.insert(
         "projectRoot".to_string(),
@@ -678,7 +677,13 @@ fn parse_adapter_list(stdout: &[u8]) -> Result<Vec<CovenHarnessCapability>, ()> 
         let label = entry
             .get("label")
             .and_then(Value::as_str)
-            .map(|label| label.trim().chars().take(MAX_TITLE_CHARS).collect::<String>())
+            .map(|label| {
+                label
+                    .trim()
+                    .chars()
+                    .take(MAX_TITLE_CHARS)
+                    .collect::<String>()
+            })
             .filter(|label| !label.is_empty())
             .ok_or(())?;
         let available = entry.get("available").and_then(Value::as_bool).ok_or(())?;
@@ -721,7 +726,7 @@ fn run_coven_adapter_list(coven_binary: &str, timeout: Duration) -> Result<Vec<u
     };
     let (sender, receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let mut bounded = stdout.take(MAX_ADAPTER_LIST_BYTES + 1);
+        let mut bounded = stdout.take((MAX_ADAPTER_LIST_BYTES + 1) as u64);
         let mut buffer = Vec::new();
         let read_result = io::Read::read_to_end(&mut bounded, &mut buffer);
         let _ = sender.send(read_result.map(|_| buffer));
@@ -730,27 +735,24 @@ fn run_coven_adapter_list(coven_binary: &str, timeout: Duration) -> Result<Vec<u
     let mut status = None;
     while status.is_none() {
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(());
+            break;
         }
         match child.try_wait() {
             Ok(Some(exit)) => status = Some(exit),
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(());
-            }
+            Err(_) => break,
         }
     }
-    let Ok(Ok(buffer)) = reader.join() else {
-        let _ = child.wait();
+    let _ = child.kill();
+    let _ = child.wait();
+    // The reader finishes when the pipe reaches EOF. A daemonizing grandchild
+    // that inherited stdout could keep the pipe open, so the receive is
+    // bounded by the same deadline instead of an unbounded join.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let Ok(Ok(buffer)) = receiver.recv_timeout(remaining) else {
         return Err(());
     };
-    let _ = child.wait();
+    let _ = reader.join();
     if buffer.len() > MAX_ADAPTER_LIST_BYTES || !status.is_some_and(|exit| exit.success()) {
         return Err(());
     }
@@ -1246,9 +1248,7 @@ fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, HttpResponseError> {
     Ok(parsed.body)
 }
 
-fn parse_http_response_with_status(
-    response: &[u8],
-) -> Result<CovenApiResponse, HttpResponseError> {
+fn parse_http_response_with_status(response: &[u8]) -> Result<CovenApiResponse, HttpResponseError> {
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(HttpResponseError::TooLarge);
     }
@@ -1319,7 +1319,11 @@ fn parse_http_response_with_status(
         if transfer_encodings.as_slice() != ["chunked"] {
             return Err(HttpResponseError::Malformed);
         }
-        return decode_chunked_body(body);
+        let decoded = decode_chunked_body(body)?;
+        return Ok(CovenApiResponse {
+            status,
+            body: decoded,
+        });
     }
 
     if let Some(content_length) = content_length {
@@ -1334,7 +1338,10 @@ fn parse_http_response_with_status(
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(HttpResponseError::TooLarge);
     }
-    Ok(body.to_vec())
+    Ok(CovenApiResponse {
+        status,
+        body: body.to_vec(),
+    })
 }
 
 fn parse_header_line(line: &str) -> Result<(&str, &str), HttpResponseError> {

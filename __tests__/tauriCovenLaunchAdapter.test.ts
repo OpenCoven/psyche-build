@@ -69,7 +69,7 @@ describe('Coven launch adapter compatibility profile', () => {
     );
     // The daemon would otherwise default the session title to the prompt.
     expect(rustLaunch).toMatch(
-      /unwrap_or_else\(\|\| format!\("Coven \{\}", request\.harness\)\)/,
+      /_ => format!\("Coven \{\}", request\.harness\),/,
     );
   });
 
