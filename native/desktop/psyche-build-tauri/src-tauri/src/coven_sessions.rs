@@ -3493,6 +3493,7 @@ mod tests {
         ]);
 
         let response = try_launch_coven_session(&endpoint, &request);
+        assert_server_requests(&server, &["/api/v1/health"]);
         assert_eq!(
             server.recv_request(),
             expected_launch_request(&expected_body)
@@ -3521,6 +3522,7 @@ mod tests {
         ]);
 
         let response = try_launch_coven_session(&endpoint, &launch_fixture());
+        assert_server_requests(&server, &["/api/v1/health"]);
         assert!(server.recv_request().starts_with(b"POST /api/v1/sessions "));
         server.finish();
 
