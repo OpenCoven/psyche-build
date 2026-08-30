@@ -21,7 +21,16 @@ export async function runPairAction(ctx: PairActionContext): Promise<void> {
     return;
   }
   const qrPayload = ctx.bridgeDaemon.openMobileInvite();
-  const inviteToken = new URL(qrPayload).searchParams.get("psyche_invite");
-  if (!inviteToken) throw new Error("bridge returned an invalid mobile invite");
+  let inviteToken: string | null = null;
+  try {
+    inviteToken = new URL(qrPayload).searchParams.get("psyche_invite");
+  } catch {
+    ctx.setStatusMessage?.("bridge returned an invalid mobile invite");
+    return;
+  }
+  if (!inviteToken) {
+    ctx.setStatusMessage?.("bridge returned an invalid mobile invite");
+    return;
+  }
   ctx.showPairBanner?.({ qrPayload, inviteId: mobileInviteId(inviteToken) });
 }
