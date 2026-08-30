@@ -401,7 +401,7 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
-  it('does not compensate a resource that resolves after the late cutoff', async () => {
+  it('compensates a resource that resolves after the late cutoff', async () => {
     vi.useFakeTimers();
     try {
       const controller = new AbortController();
@@ -453,7 +453,7 @@ describe('Tauri diagnostics stress harness', () => {
         expect.objectContaining({ name: 'AbortError' }),
         expect.objectContaining({ message: 'stress resource creation did not settle after cancellation' }),
       ]));
-      expect(disposed).not.toContain('late-after-cutoff');
+      expect(disposed).toContain('late-after-cutoff');
     } finally {
       vi.useRealTimers();
     }
@@ -526,7 +526,7 @@ describe('Tauri diagnostics stress harness', () => {
 
       await vi.advanceTimersByTimeAsync(2_000);
       expect(disposed).toContain('force-late-in-flight');
-      expect(settled).toBe(true);
+      expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(settled).toBe(true);
       const error = await observed;
@@ -593,6 +593,7 @@ describe('Tauri diagnostics stress harness', () => {
       void observed.finally(() => { settled = true; });
       await disposeStarted.promise;
       await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(settled).toBe(true);
       expect(disposed).toContain('force-browser-1');
       disposal.resolve();

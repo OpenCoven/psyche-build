@@ -19,6 +19,7 @@ describe('Tauri development web server', () => {
     const server = spawn(packageManager, ['run', 'serve:web'], {
       cwd: desktop,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
     const output: string[] = [];
     server.stdout.on('data', (chunk: Buffer) => output.push(chunk.toString()));
@@ -70,25 +71,50 @@ describe('Tauri development web server', () => {
       expect(asset.status).toBe(200);
     } finally {
       if (server.exitCode === null) {
-        const stopped = new Promise<void>((resolve) => {
+        const waitForExit = (timeoutMs: number): Promise<boolean> => new Promise((resolve) => {
           let stopTimer: ReturnType<typeof setTimeout> | undefined;
-          const finish = (): void => {
+          const finish = (exited: boolean): void => {
             if (stopTimer !== undefined) clearTimeout(stopTimer);
-            resolve();
+            server.removeListener('exit', onExit);
+            server.removeListener('error', onError);
+            resolve(exited);
           };
-          // A spawn error can leave a ChildProcess without an exit event. The
-          // bounded fallback keeps this smoke test from hanging on a missing
-          // pnpm/Vite executable while still allowing normal process teardown.
-          server.once('exit', finish);
-          server.once('error', finish);
-          stopTimer = setTimeout(finish, 2_000);
-          try {
-            server.kill();
-          } catch {
-            finish();
+          const onExit = (): void => finish(true);
+          const onError = (): void => finish(true);
+          if (server.exitCode !== null) {
+            finish(true);
+            return;
           }
+          server.once('exit', onExit);
+          server.once('error', onError);
+          stopTimer = setTimeout(() => finish(false), timeoutMs);
         });
-        await stopped;
+        const terminateTree = (force: boolean): void => {
+          try {
+            if (server.pid === undefined) {
+              server.kill(force ? 'SIGKILL' : 'SIGTERM');
+            } else if (process.platform === 'win32') {
+              execFileSync('taskkill.exe', [
+                '/PID', String(server.pid), '/T', '/F',
+              ], { stdio: 'ignore' });
+            } else {
+              process.kill(-server.pid, force ? 'SIGKILL' : 'SIGTERM');
+            }
+          } catch {
+            try {
+              server.kill(force ? 'SIGKILL' : 'SIGTERM');
+            } catch {
+              // The process may have exited between the state check and kill.
+            }
+          }
+        };
+        terminateTree(false);
+        if (!(await waitForExit(2_000))) {
+          terminateTree(true);
+          if (!(await waitForExit(2_000))) {
+            throw new Error('serve:web process tree did not exit after termination');
+          }
+        }
       }
     }
   }, 30_000);

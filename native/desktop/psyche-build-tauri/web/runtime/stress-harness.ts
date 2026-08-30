@@ -54,7 +54,11 @@ export interface StressGeometry {
 export interface StressResource {
   id: string;
   dispose(signal?: AbortSignal): void | Promise<void>;
-  /** Optional native kill path used if graceful disposal exceeds its deadline. */
+  /**
+   * Optional native kill path used if graceful disposal exceeds its deadline.
+   * Implementations must invalidate the resource before returning and make a
+   * previously started dispose operation harmless and idempotent.
+   */
   forceDispose?(): void | Promise<void>;
 }
 
@@ -277,7 +281,7 @@ interface AbortableOperationOptions<T> {
 }
 
 type InvokeStressOperation = <T>(
-  operation: () => Promise<T> | T,
+  operation: (signal: AbortSignal) => Promise<T> | T,
   signal: AbortSignal,
   onLateResolve?: () => Promise<void> | void,
 ) => Promise<T>;
@@ -298,6 +302,7 @@ async function invokeAbortable<T>(
   let lateReject: ((reason?: unknown) => void) | undefined;
   let lateTimeout: ReturnType<typeof setTimeout> | undefined;
   let lateHardTimeout: ReturnType<typeof setTimeout> | undefined;
+  let latePostCutoffTimeout: ReturnType<typeof setTimeout> | undefined;
   let lateCutoff = false;
   let lateCompensationStarted = false;
   let lateSettlementFinished = false;
@@ -305,6 +310,7 @@ async function invokeAbortable<T>(
   const clearLateTimeouts = (): void => {
     if (lateTimeout !== undefined) clearTimeout(lateTimeout);
     if (lateHardTimeout !== undefined) clearTimeout(lateHardTimeout);
+    if (latePostCutoffTimeout !== undefined) clearTimeout(latePostCutoffTimeout);
   };
   const finishLate = (reason?: unknown): void => {
     if (lateSettlementFinished) return;
@@ -340,22 +346,35 @@ async function invokeAbortable<T>(
       // arrive and be compensated. A second deadline prevents an absent or
       // permanently hung native result from keeping the scenario alive.
       lateHardTimeout = setTimeout(() => {
-        // This is the compensation cutoff. A result that arrives after it must
-        // not start native cleanup after the scenario is allowed to finalize.
+        // This is the bounded result-wait cutoff. A result that arrives after
+        // it is still owned by the harness and is sent through the same bounded
+        // compensation path; the cutoff only closes the promise that was
+        // keeping the caller waiting for the native invoke itself.
         // If compensation already started, retain the tracked settlement until
         // that bounded cleanup promise settles; otherwise finalization could
         // race an in-flight dispose/forceDispose operation.
         lateCutoff = true;
         lateCutoffError = error;
-        if (!lateCompensationStarted) finishLate(error);
+        if (!lateCompensationStarted) {
+          // Keep a short reaper window after the result-wait cutoff. Native
+          // invokes can resolve on the same boundary as this timer; retaining
+          // the settlement during the window lets the harness compensate and
+          // finish cleanup before the scenario is finalized.
+          latePostCutoffTimeout = setTimeout(
+            () => finishLate(error),
+            LATE_RESOURCE_RESULT_TIMEOUT_MS,
+          );
+        }
       }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
   };
   const settleLate = (value: T): void => {
-    if (lateCutoff || lateSettlementFinished) {
-      if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
-      return;
-    }
+    // A late native resource is still owned by this harness even when the
+    // bounded result wait has elapsed. Run its compensation after the cutoff
+    // rather than dropping the resource and leaking a pane/PTY. The caller's
+    // pending settlement may already be closed; compensation is independently
+    // observed below so failures remain handled.
+    if (lateCompensationStarted) return;
     lateCompensationStarted = true;
     let work: Promise<void> | void;
     try {
@@ -429,12 +448,56 @@ async function invokeAbortable<T>(
   });
 }
 
+const STRESS_OPERATION_TIMEOUT_MS = 2_000;
+
+interface BoundedOperationOptions<T> {
+  readonly lateSettlements?: Set<Promise<void>>;
+  readonly onLateResolve?: (value: T) => Promise<void> | void;
+  readonly onLateTimeout?: (error: Error) => void;
+  readonly timeoutMessage?: string;
+}
+
+interface BoundedCleanupOptions {
+  readonly lateSettlements?: Set<Promise<void>>;
+  readonly onLateCompletion?: (error?: unknown) => void;
+}
+
+async function invokeBoundedOperation<T>(
+  operation: (signal: AbortSignal) => Promise<T> | T,
+  signal: AbortSignal,
+  options: BoundedOperationOptions<T> = {},
+): Promise<T> {
+  const operationController = new AbortController();
+  const forwardAbort = () => operationController.abort(abortReason(signal));
+  if (signal.aborted) forwardAbort();
+  else signal.addEventListener('abort', forwardAbort, { once: true });
+  const timeoutError = Object.assign(
+    new Error(options.timeoutMessage ?? 'stress operation timed out'),
+    { name: 'TimeoutError' },
+  );
+  const timeout = setTimeout(
+    () => operationController.abort(timeoutError),
+    STRESS_OPERATION_TIMEOUT_MS,
+  );
+  try {
+    return await invokeAbortable(
+      () => operation(operationController.signal),
+      operationController.signal,
+      options,
+    );
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener('abort', forwardAbort);
+  }
+}
+
 const CLEANUP_OPERATION_TIMEOUT_MS = 2_000;
 const FORCE_CLEANUP_TIMEOUT_MS = 1_000;
 
 async function invokeBoundedCleanup<T>(
   operation: (signal: AbortSignal) => Promise<T> | T,
   onTimeout?: () => Promise<void> | void,
+  options: BoundedCleanupOptions = {},
 ): Promise<T> {
   const controller = new AbortController();
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -442,12 +505,52 @@ async function invokeBoundedCleanup<T>(
   let timeoutError: Error | undefined;
   let timeoutCleanup: Promise<void> | undefined;
   let forceTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+  let operationSettled = false;
+  const operationPromise = Promise.resolve()
+    .then(() => operation(controller.signal))
+    .then(
+      (value) => {
+        operationSettled = true;
+        return value;
+      },
+      (error) => {
+        operationSettled = true;
+        throw error;
+      },
+    );
   const timeoutResult = new Promise<never>((_, reject) => {
     timeoutHandle = setTimeout(() => {
       timedOut = true;
       timeoutError = new Error('stress cleanup operation timed out');
       controller.abort(timeoutError);
+      const lateCompletion = operationPromise.then(
+        () => {
+          if (!operationSettled) return;
+          try {
+            options.onLateCompletion?.();
+          } catch {
+            // Cleanup diagnostics must never create an unhandled rejection.
+          }
+        },
+        (error) => {
+          try {
+            options.onLateCompletion?.(error);
+          } catch {
+            // Cleanup diagnostics must never create an unhandled rejection.
+          }
+        },
+      ).then(() => undefined);
+      const lateCompletionDeadline = new Promise<void>((resolve) => {
+        setTimeout(resolve, FORCE_CLEANUP_TIMEOUT_MS);
+      });
+      const boundedLateCompletion = Promise.race([
+        lateCompletion,
+        lateCompletionDeadline,
+      ]).then(() => undefined);
+      options.lateSettlements?.add(boundedLateCompletion);
+      void boundedLateCompletion.finally(() => {
+        options.lateSettlements?.delete(boundedLateCompletion);
+      }).catch(() => undefined);
       const forceCleanup = Promise.resolve().then(() => onTimeout?.()).then(() => undefined);
       const forceCleanupDeadline = new Promise<void>((resolve) => {
         forceTimeoutHandle = setTimeout(resolve, FORCE_CLEANUP_TIMEOUT_MS);
@@ -472,10 +575,14 @@ async function invokeBoundedCleanup<T>(
   }
 }
 
-async function disposeStressResource(resource: StressResource): Promise<void> {
+async function disposeStressResource(
+  resource: StressResource,
+  options: BoundedCleanupOptions = {},
+): Promise<void> {
   await invokeBoundedCleanup(
     (signal) => resource.dispose(signal),
     () => resource.forceDispose?.(),
+    options,
   );
 }
 
@@ -505,7 +612,7 @@ async function runActivePhase(
   durationMs: number,
   focusOrder: readonly string[],
   invokeOperation: InvokeStressOperation = (operation, operationSignal) => (
-    invokeAbortable(operation, operationSignal)
+    invokeAbortable(() => operation(operationSignal), operationSignal)
   ),
 ): Promise<void> {
   const phaseController = new AbortController();
@@ -516,6 +623,7 @@ async function runActivePhase(
   let frameStep = 0;
   let frameError: unknown;
   let frameActive = true;
+  let phaseTimeout: ReturnType<typeof setTimeout> | undefined;
 
   const requestGeometryFrame = () => {
     if (!frameActive || phaseController.signal.aborted) return;
@@ -541,11 +649,14 @@ async function runActivePhase(
     });
   };
 
-  emitProgress(dependencies, scenarioIndex, scenarioValue, phase, 0, durationMs);
   try {
+    emitProgress(dependencies, scenarioIndex, scenarioValue, phase, 0, durationMs);
     throwIfAborted(phaseController.signal);
     requestGeometryFrame();
     const phaseStartedAt = dependencies.now();
+    phaseTimeout = setTimeout(() => {
+      phaseController.abort(new Error(`stress ${phase} phase timed out`));
+    }, durationMs);
     let focusStep = 0;
     let nextFocusAt = phaseStartedAt + STRESS_FOCUS_INTERVAL_MS;
     while (true) {
@@ -568,7 +679,7 @@ async function runActivePhase(
       if (focusNow < nextFocusAt) continue;
       throwIfAborted(phaseController.signal);
       await invokeOperation(
-        () => dependencies.focus(stressFocusId(focusOrder, focusStep), phaseController.signal),
+        (operationSignal) => dependencies.focus(stressFocusId(focusOrder, focusStep), operationSignal),
         phaseController.signal,
         () => invokeBoundedCleanup((cleanupSignal) => (
           dependencies.focus(focusOrder[0] ?? stressFocusId(focusOrder, 0), cleanupSignal)
@@ -599,6 +710,7 @@ async function runActivePhase(
       );
     }
   } finally {
+    if (phaseTimeout !== undefined) clearTimeout(phaseTimeout);
     frameActive = false;
     if (frameHandle !== null) {
       dependencies.cancelFrame(frameHandle);
@@ -614,7 +726,7 @@ async function restoreHiddenPanes(
   hiddenPaneIds: Set<string>,
   signal?: AbortSignal,
   invokeOperation: InvokeStressOperation = (operation, operationSignal) => (
-    invokeAbortable(operation, operationSignal)
+    invokeAbortable(() => operation(operationSignal), operationSignal)
   ),
 ): Promise<void> {
   const errors: unknown[] = [];
@@ -622,7 +734,7 @@ async function restoreHiddenPanes(
     try {
       if (signal) {
         await invokeOperation(
-          () => dependencies.setVisible(id, true, signal),
+          (operationSignal) => dependencies.setVisible(id, true, operationSignal),
           signal,
           () => invokeBoundedCleanup((cleanupSignal) => (
             dependencies.setVisible(id, true, cleanupSignal)
@@ -669,6 +781,7 @@ async function runStressScenario(
   const hiddenPaneIds = new Set<string>();
   const cleanupErrors: unknown[] = [];
   const pendingLateSettlements = new Set<Promise<void>>();
+  const pendingCleanupSettlements = new Set<Promise<void>>();
   let lateCleanupClosed = false;
   const recordCleanupError = (error: unknown): void => {
     // A native creation can settle after the bounded late-result grace period.
@@ -676,8 +789,16 @@ async function runStressScenario(
     // scenario has finished reporting its cleanup outcome.
     if (!lateCleanupClosed) cleanupErrors.push(error);
   };
+  const disposeResource = (resource: StressResource): Promise<void> => (
+    disposeStressResource(resource, {
+      lateSettlements: pendingCleanupSettlements,
+      onLateCompletion: (error) => recordCleanupError(
+        error ?? new Error('stress cleanup completed after its deadline'),
+      ),
+    })
+  );
   const invokeTracked: InvokeStressOperation = (operation, operationSignal, onLateResolve) => (
-    invokeAbortable(operation, operationSignal, onLateResolve === undefined ? {} : {
+    invokeBoundedOperation(operation, operationSignal, onLateResolve === undefined ? {} : {
       lateSettlements: pendingLateSettlements,
       onLateResolve: () => onLateResolve(),
       onLateTimeout: recordCleanupError,
@@ -687,12 +808,12 @@ async function runStressScenario(
   let result: StressScenarioResult | undefined;
   const startedAt = dependencies.now();
 
-  const createResource = <T extends StressResource>(operation: () => Promise<T>): Promise<T> => (
-    invokeAbortable(operation, signal, {
+  const createResource = <T extends StressResource>(operation: (operationSignal: AbortSignal) => Promise<T>): Promise<T> => (
+    invokeBoundedOperation(operation, signal, {
       lateSettlements: pendingLateSettlements,
       onLateResolve: async (resource) => {
         try {
-          await disposeStressResource(resource);
+          await disposeResource(resource);
         } catch (error) {
           recordCleanupError(error);
           throw error;
@@ -702,15 +823,15 @@ async function runStressScenario(
     })
   );
 
-  emitProgress(dependencies, scenarioIndex, scenarioValue, 'setup', 0, 0);
   try {
+    emitProgress(dependencies, scenarioIndex, scenarioValue, 'setup', 0, 0);
     throwIfAborted(signal);
     for (let index = 0; index < scenarioValue.paneCount; index += 1) {
       const terminal = await createResource(
-        () => dependencies.createTerminal(
+        (operationSignal) => dependencies.createTerminal(
           index,
           scenarioValue.fixtures[index] as StressFixture,
-          signal,
+          operationSignal,
         ),
       );
       resources.push(terminal);
@@ -720,18 +841,18 @@ async function runStressScenario(
 
     throwIfAborted(signal);
     const editor = await createResource(
-      () => dependencies.createEditor(
+      (operationSignal) => dependencies.createEditor(
         createLargeEditorDocument(scenarioValue.paneCount),
-        signal,
+        operationSignal,
       ),
     );
     resources.push(editor);
     throwIfAborted(signal);
 
     const browser = await createResource(
-      () => dependencies.createBrowser(
+      (operationSignal) => dependencies.createBrowser(
         createDiagnosticBrowserPage(scenarioValue.paneCount),
-        signal,
+        operationSignal,
       ),
     );
     resources.push(browser);
@@ -754,7 +875,7 @@ async function runStressScenario(
     for (const id of terminalIds.slice(hiddenStart)) {
       hiddenPaneIds.add(id);
       await invokeTracked(
-        () => dependencies.setVisible(id, false, signal),
+        (operationSignal) => dependencies.setVisible(id, false, operationSignal),
         signal,
         () => invokeBoundedCleanup((cleanupSignal) => (
           dependencies.setVisible(id, true, cleanupSignal)
@@ -794,7 +915,7 @@ async function runStressScenario(
     );
     const restoreStartedAt = dependencies.now();
     await invokeTracked(
-      () => dependencies.cycleWindow(signal),
+      (operationSignal) => dependencies.cycleWindow(operationSignal),
       signal,
       () => invokeBoundedCleanup((cleanupSignal) => (
         dependencies.cycleWindow(cleanupSignal)
@@ -804,7 +925,7 @@ async function runStressScenario(
     await restoreHiddenPanes(dependencies, hiddenPaneIds, signal, invokeTracked);
     throwIfAborted(signal);
     const contextLossSupported = await invokeTracked(
-      () => dependencies.loseGraphicsContext(signal),
+      (operationSignal) => dependencies.loseGraphicsContext(operationSignal),
       signal,
       () => {
         if (dependencies.restoreGraphicsContext === undefined) {
@@ -818,7 +939,11 @@ async function runStressScenario(
     const restoreElapsedMs = Math.max(0, dependencies.now() - restoreStartedAt);
     const restoreRemainingMs = Math.max(0, scenarioValue.restoreMs - restoreElapsedMs);
     if (restoreRemainingMs > 0) {
-      await dependencies.sleep(restoreRemainingMs, signal);
+      await invokeBoundedOperation(
+        (sleepSignal) => dependencies.sleep(restoreRemainingMs, sleepSignal),
+        signal,
+        { timeoutMessage: 'stress restore phase timed out' },
+      );
     }
     throwIfAborted(signal);
     emitProgress(
@@ -848,18 +973,6 @@ async function runStressScenario(
     } catch (error) {
       recordCleanupError(error);
     }
-    try {
-      await restoreHiddenPanes(dependencies, hiddenPaneIds);
-    } catch (error) {
-      recordCleanupError(error);
-    }
-    for (const resource of resources.reverse()) {
-      try {
-        await disposeStressResource(resource);
-      } catch (error) {
-        recordCleanupError(error);
-      }
-    }
     if (pendingLateSettlements.size > 0) {
       const lateResults = await Promise.allSettled([...pendingLateSettlements]);
       for (const lateResult of lateResults) {
@@ -867,6 +980,21 @@ async function runStressScenario(
           recordCleanupError(lateResult.reason);
         }
       }
+    }
+    try {
+      await restoreHiddenPanes(dependencies, hiddenPaneIds);
+    } catch (error) {
+      recordCleanupError(error);
+    }
+    for (const resource of resources.reverse()) {
+      try {
+        await disposeResource(resource);
+      } catch (error) {
+        recordCleanupError(error);
+      }
+    }
+    if (pendingCleanupSettlements.size > 0) {
+      await Promise.allSettled([...pendingCleanupSettlements]);
     }
     lateCleanupClosed = true;
   }
@@ -913,3 +1041,9 @@ export async function runStressPlan(
     options.signal?.removeEventListener('abort', forwardAbort);
   }
 }
+
+/*
+ * The remainder of this patch intentionally replaces only the operation
+ * invocation sites above. The resource creation closures below are retained
+ * by the compiler as the canonical dependency boundary.
+ */
