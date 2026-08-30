@@ -39,6 +39,8 @@
     "allow-browser-snapshot",
     "allow-app-environment",
     "allow-coven-sessions",
+    "allow-coven-launch-session",
+    "allow-coven-launch-capabilities",
     "allow-coven-session-kill",
     "allow-workspace-load",
     "allow-workspace-save",

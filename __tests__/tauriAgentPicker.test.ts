@@ -85,24 +85,25 @@ describe('Tauri agent picker', () => {
     );
 
     expect(agentLaunchOptions()).toEqual([
-      { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code' },
-      { id: 'copilot', label: 'Copilot CLI', command: 'coven', args: ['run', 'copilot'], kind: 'agent-copilot' },
-      { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex' },
-      { id: 'anthropic', label: 'Anthropic CLI', command: 'coven', args: ['run', 'claude'], kind: 'agent-anthropic' },
-      { id: 'grok-build', label: 'Grok Build', command: 'coven', args: ['run', 'grok'], kind: 'agent-grok-build' },
+      { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code', harness: null },
+      { id: 'copilot', label: 'Copilot CLI', command: 'coven', args: ['run', 'copilot'], kind: 'agent-copilot', harness: 'copilot' },
+      { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+      { id: 'anthropic', label: 'Anthropic CLI', command: 'coven', args: ['run', 'claude'], kind: 'agent-anthropic', harness: 'claude' },
+      { id: 'grok-build', label: 'Grok Build', command: 'coven', args: ['run', 'grok'], kind: 'agent-grok-build', harness: 'grok' },
     ]);
   });
 
-  it('launches an agent through Coven with the user prompt', async () => {
+  it('launches an agent through the Coven daemon with the prompt in the request body', async () => {
+    const launchCalls: Array<[string, Record<string, unknown>]> = [];
     const createCalls: Array<Record<string, unknown>> = [];
-    const registryArgs = ['run', 'codex'];
     const project: PickerProject = { id: 'project', root: '/repo' };
     const entry = {
       id: 'codex',
       label: 'Codex CLI',
       command: 'coven',
-      args: registryArgs,
+      args: ['run', 'codex'],
       kind: 'agent-codex',
+      harness: 'codex',
     };
     const spawnAgentThread = compileFunction<(
       agentId: string,
@@ -117,6 +118,19 @@ describe('Tauri agent picker', () => {
         agentLaunchOptions: () => [entry],
         state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
         setStatus: () => undefined,
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          launchCalls.push([command, args]);
+          return {
+            status: 'accepted',
+            sessionId: '12345678-1234-4abc-8def-1234567890ab',
+            harness: 'codex',
+          };
+        },
+        covenLaunchOutcome: (result: Record<string, unknown>) =>
+          result && result.status === 'accepted' && result.sessionId ? 'accepted' : 'failed',
+        covenLaunchFailureStatus: () => 'Codex CLI launch failed',
+        covenPromptDigest: async () => 'sha256:0f1e2d3c4b5a6978',
         createThread: (options: Record<string, unknown>) => {
           createCalls.push(options);
           return options;
@@ -126,21 +140,165 @@ describe('Tauri agent picker', () => {
 
     const result = await spawnAgentThread('codex', project, 'Fix the failing tests');
 
+    expect(launchCalls).toEqual([
+      [
+        'coven_launch_session',
+        {
+          request: {
+            projectRoot: '/repo',
+            cwd: '/repo/worktree',
+            harness: 'codex',
+            prompt: 'Fix the failing tests',
+            title: 'Codex CLI',
+          },
+        },
+      ],
+    ]);
     expect(createCalls).toHaveLength(1);
     const created = createCalls[0]!;
     expect(result).toBe(created);
     expect(created).toMatchObject({
       name: 'Codex CLI',
-      kind: 'agent-codex',
+      kind: 'coven-attach',
       command: '/opt/homebrew/bin/coven',
-      args: ['run', 'codex', '--', 'Fix the failing tests'],
-      launchKind: null,
+      args: ['attach', '12345678-1234-4abc-8def-1234567890ab'],
+      launchKind: 'coven-attach',
+      covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+      metricsProvider: 'codex',
       projectRoot: '/repo',
       cwd: '/repo/worktree',
       worktreePath: '/repo/worktree',
       waitForPtyStart: true,
     });
-    expect(created.args).not.toBe(registryArgs);
+    expect(created.promptDigest).toMatch(/^sha256:[0-9a-f]{16}$/);
+    expect(JSON.stringify(created)).not.toContain('Fix the failing tests');
+    expect(JSON.stringify(launchCalls[0]![1])).toContain('Fix the failing tests');
+  });
+
+  it('keeps the composer prompt when the Coven daemon rejects the launch', async () => {
+    const createCalls: Array<Record<string, unknown>> = [];
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        invoke: async () => ({
+          status: 'rejected',
+          message: 'unknown harness `codex`',
+        }),
+        covenLaunchOutcome: (result: Record<string, unknown>) =>
+          result && result.status === 'accepted' && result.sessionId
+            ? 'accepted'
+            : (result && (result.status === 'unavailable' || result.status === 'incompatible')
+              ? 'recovery_required'
+              : 'failed'),
+        covenLaunchFailureStatus: (entry: { label: string }, result: Record<string, unknown>) =>
+          result && result.status === 'rejected'
+            ? entry.label + ' launch failed: ' + String(result.message)
+            : 'Codex CLI launch failed',
+        covenPromptDigest: async () => null,
+        createThread: (options: Record<string, unknown>) => {
+          createCalls.push(options);
+          return options;
+        },
+      },
+    );
+
+    await expect(spawnAgentThread('codex', project, 'Fix the failing tests')).resolves.toBeNull();
+    expect(createCalls).toEqual([]);
+    expect(status).toEqual(['Codex CLI launch failed: unknown harness `codex`', 'error']);
+  });
+
+  it('maps an unavailable daemon to recovery-required guidance', async () => {
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        invoke: async () => ({
+          status: 'unavailable',
+          message: 'Coven daemon is not running; run `coven daemon start`',
+        }),
+        covenLaunchOutcome: (result: Record<string, unknown>) =>
+          result && (result.status === 'unavailable' || result.status === 'incompatible')
+            ? 'recovery_required'
+            : 'failed',
+        covenLaunchFailureStatus: (_entry: unknown, result: Record<string, unknown>) =>
+          String(result.message),
+        covenPromptDigest: async () => null,
+        createThread: () => { throw new Error('createThread must not be called'); },
+      },
+    );
+
+    await expect(spawnAgentThread('codex', project, 'Fix the failing tests')).resolves.toBeNull();
+    expect(status).toEqual([
+      'Coven daemon is not running; run `coven daemon start`',
+      'error',
+    ]);
+  });
+
+  it('rejects over-long prompts before any Coven exchange', async () => {
+    const invokeCalls: unknown[] = [];
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        invoke: async (...args: unknown[]) => {
+          invokeCalls.push(args);
+          return { status: 'accepted', sessionId: 'x' };
+        },
+        covenLaunchOutcome: () => 'accepted',
+        covenLaunchFailureStatus: () => 'unreachable',
+        covenPromptDigest: async () => null,
+        createThread: () => ({}),
+      },
+    );
+
+    await expect(
+      spawnAgentThread('codex', project, 'x'.repeat(8193)),
+    ).resolves.toBeNull();
+    expect(invokeCalls).toEqual([]);
+    expect(status![0]).toContain('8192-character Coven launch limit');
   });
 
   it('requires a prompt before launching a Coven harness', async () => {
@@ -316,6 +474,7 @@ describe('Tauri agent picker', () => {
         closeNewPaneMenu: () => undefined,
         closeScopeMenu: () => undefined,
         closeSessionContextMenu: () => { closeSessionContextMenuCalls += 1; },
+        refreshCovenLaunchCapabilities: async () => undefined,
       },
       {
         agentPickerOverlayEl: overlay,
@@ -1217,6 +1376,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<string | null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'coven-code' },
           { id: 'codex' },
@@ -1256,6 +1416,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'coven-code' },
         ],
@@ -1284,6 +1445,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'codex', label: 'Codex CLI' },
         ],
@@ -1326,6 +1488,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<string | null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'codex', label: 'Codex CLI' },
         ],

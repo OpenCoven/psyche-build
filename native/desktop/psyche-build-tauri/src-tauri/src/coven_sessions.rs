@@ -21,12 +21,33 @@ use tauri::Url;
 
 #[cfg(unix)]
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const ADAPTER_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+#[cfg(unix)]
+const MAX_PROMPT_CHARS: usize = 8_192;
+#[cfg(unix)]
+const MAX_TITLE_CHARS: usize = 128;
+#[cfg(unix)]
+const MAX_LAUNCH_PATH_CHARS: usize = 4_096;
+#[cfg(unix)]
+const MAX_HARNESS_ID_CHARS: usize = 64;
+#[cfg(unix)]
+const MAX_ADAPTER_LIST_BYTES: usize = 256 * 1024;
+#[cfg(unix)]
+const MAX_DAEMON_ERROR_MESSAGE_CHARS: usize = 512;
 const STABLE_API_VERSION: &str = "coven.daemon.v1";
 const MAX_JAVASCRIPT_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
 const UNAVAILABLE_MESSAGE: &str = "Coven daemon is not running; run `coven daemon start`";
 const INCOMPATIBLE_MESSAGE: &str = "Coven daemon API update required";
 const ERROR_MESSAGE: &str = "Coven sessions could not be loaded";
+#[cfg(unix)]
+const LAUNCH_REJECTED_MESSAGE: &str = "Coven rejected the launch request";
+const LAUNCH_FAILED_MESSAGE: &str = "Coven launch could not be completed";
+#[cfg(unix)]
+const ADAPTER_LIST_FAILED_MESSAGE: &str = "Coven adapters could not be listed";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CovenEndpoint {
@@ -52,6 +73,7 @@ impl HttpMethod {
 #[derive(Debug, PartialEq, Eq)]
 enum HttpResponseError {
     Malformed,
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     Status(u16),
     TooLarge,
 }
@@ -376,6 +398,467 @@ pub(crate) async fn coven_session_kill(_session_id: String) -> Result<(), String
     Err("Local Coven session control is unsupported on Windows".to_string())
 }
 
+/// A prompt-backed launch request routed through the Coven daemon. The raw
+/// prompt travels only inside this request body over the local daemon
+/// transport — never as process argv and never into the persisted launch
+/// model.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CovenLaunchRequest {
+    project_root: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    harness: String,
+    prompt: String,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CovenLaunchResponse {
+    /// `accepted` (daemon created the canonical session), `rejected` (the
+    /// daemon refused the launch with an actionable message),
+    /// `unavailable`/`incompatible` (recovery required at the runtime
+    /// authority), or `error`.
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CovenHarnessCapability {
+    id: String,
+    label: String,
+    available: bool,
+    source: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CovenLaunchCapabilities {
+    /// `ready` (daemon health confirmed at the pinned API version),
+    /// `unavailable`/`incompatible` (recovery required), or `error`.
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_version: Option<String>,
+    adapters: Vec<CovenHarnessCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[cfg(unix)]
+fn is_safe_harness_id(id: &str) -> bool {
+    (1..=MAX_HARNESS_ID_CHARS).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+#[cfg(unix)]
+fn is_bounded_launch_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= MAX_LAUNCH_PATH_CHARS
+        && path.bytes().all(|byte| byte != 0 && !byte.is_ascii_control())
+}
+
+#[cfg(unix)]
+fn validate_launch_request(request: &CovenLaunchRequest) -> Result<(), String> {
+    if !is_bounded_launch_path(&request.project_root) {
+        return Err("Coven launch requires a bounded project root".to_string());
+    }
+    if let Some(cwd) = request.cwd.as_deref() {
+        if !is_bounded_launch_path(cwd) {
+            return Err("Coven launch requires a bounded working directory".to_string());
+        }
+    }
+    if !is_safe_harness_id(&request.harness) {
+        return Err("Coven launch requires a safe harness id".to_string());
+    }
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() {
+        return Err("Coven launch requires a non-empty prompt".to_string());
+    }
+    if request.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(format!(
+            "Coven launch prompt exceeds the {MAX_PROMPT_CHARS}-character limit"
+        ));
+    }
+    if request.prompt.contains('\0') {
+        return Err("Coven launch prompt must not contain NUL".to_string());
+    }
+    if let Some(title) = request.title.as_deref() {
+        if title.chars().count() > MAX_TITLE_CHARS || title.contains('\0') {
+            return Err("Coven launch title must be bounded and NUL-free".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Build the daemon launch body. The title deliberately never defaults to the
+/// prompt: the daemon would otherwise echo the raw prompt into `coven
+/// sessions` titles, which Psyche Build surfaces in its session rail.
+#[cfg(unix)]
+fn launch_request_body(request: &CovenLaunchRequest) -> Result<Vec<u8>, String> {
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| format!("Coven {}", request.harness))
+        .to_string();
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "projectRoot".to_string(),
+        Value::String(request.project_root.clone()),
+    );
+    if let Some(cwd) = request.cwd.as_deref() {
+        body.insert("cwd".to_string(), Value::String(cwd.to_string()));
+    }
+    body.insert(
+        "harness".to_string(),
+        Value::String(request.harness.clone()),
+    );
+    body.insert("prompt".to_string(), Value::String(request.prompt.clone()));
+    body.insert("title".to_string(), Value::String(title));
+    serde_json::to_vec(&Value::Object(body)).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn bounded_daemon_error_message(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let message = value
+        .get("error")?
+        .get("message")?
+        .as_str()?
+        .trim()
+        .chars()
+        .take(MAX_DAEMON_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    (!message.is_empty()).then_some(message)
+}
+
+#[cfg(unix)]
+fn rejected_launch_response(body: &[u8]) -> CovenLaunchResponse {
+    CovenLaunchResponse {
+        status: "rejected".to_string(),
+        session_id: None,
+        harness: None,
+        message: Some(
+            bounded_daemon_error_message(body)
+                .unwrap_or_else(|| LAUNCH_REJECTED_MESSAGE.to_string()),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn parse_launch_record(body: &[u8]) -> Result<(String, Option<String>), CovenAdapterError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| CovenAdapterError::Failed)?;
+    let session_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| is_safe_session_id(id))
+        .ok_or(CovenAdapterError::Failed)?
+        .to_string();
+    let harness = value
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|harness| is_safe_harness_id(harness))
+        .map(str::to_string);
+    Ok((session_id, harness))
+}
+
+#[cfg(unix)]
+fn try_launch_coven_session(
+    endpoint: &CovenEndpoint,
+    request: &CovenLaunchRequest,
+) -> Result<CovenLaunchResponse, CovenAdapterError> {
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+    let health_body = request_endpoint(endpoint, HttpMethod::Get, "/api/v1/health", deadline)?;
+    let health: CovenHealthResponse =
+        serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
+    if health.api_version != STABLE_API_VERSION {
+        return Err(CovenAdapterError::Incompatible);
+    }
+
+    let body = launch_request_body(request).map_err(|_| CovenAdapterError::Failed)?;
+    let response = request_endpoint_with_body(
+        endpoint,
+        HttpMethod::Post,
+        "/api/v1/sessions",
+        Some(&body),
+        deadline,
+    )?;
+    if response.status == 400 || response.status == 403 || response.status == 404 {
+        return Ok(rejected_launch_response(&response.body));
+    }
+    if !(200..=299).contains(&response.status) {
+        return Err(CovenAdapterError::Failed);
+    }
+    let (session_id, harness) = parse_launch_record(&response.body)?;
+    Ok(CovenLaunchResponse {
+        status: "accepted".to_string(),
+        session_id: Some(session_id),
+        harness,
+        message: None,
+    })
+}
+
+#[cfg(unix)]
+fn try_load_launch_capabilities(
+    endpoint: &CovenEndpoint,
+    coven_binary: &str,
+) -> CovenLaunchCapabilities {
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+    let failure = |error: CovenAdapterError| CovenLaunchCapabilities {
+        status: match error {
+            CovenAdapterError::Unavailable => "unavailable",
+            CovenAdapterError::Incompatible => "incompatible",
+            CovenAdapterError::Failed => "error",
+        }
+        .to_string(),
+        api_version: None,
+        adapters: Vec::new(),
+        message: Some(adapter_launch_message(error).to_string()),
+    };
+    let health_body = match request_endpoint(endpoint, HttpMethod::Get, "/api/v1/health", deadline)
+    {
+        Ok(body) => body,
+        Err(error) => return failure(error),
+    };
+    let health: CovenHealthResponse = match serde_json::from_slice(&health_body) {
+        Ok(health) => health,
+        Err(_) => return failure(CovenAdapterError::Failed),
+    };
+    if health.api_version != STABLE_API_VERSION {
+        return failure(CovenAdapterError::Incompatible);
+    }
+    let adapters = load_adapter_capabilities(coven_binary);
+    CovenLaunchCapabilities {
+        status: "ready".to_string(),
+        api_version: Some(health.api_version),
+        adapters: adapters.0,
+        message: adapters.1,
+    }
+}
+
+/// Query the selected Coven executable for its configured harness adapters.
+/// The daemon owns launch acceptance; the executable owns the adapter
+/// registry, so capability confirmation must come from `coven adapter list`.
+#[cfg(unix)]
+fn load_adapter_capabilities(coven_binary: &str) -> (Vec<CovenHarnessCapability>, Option<String>) {
+    match run_coven_adapter_list(coven_binary, ADAPTER_LIST_TIMEOUT) {
+        Ok(stdout) => match parse_adapter_list(&stdout) {
+            Ok(adapters) => (adapters, None),
+            Err(_) => (Vec::new(), Some(ADAPTER_LIST_FAILED_MESSAGE.to_string())),
+        },
+        Err(_) => (Vec::new(), Some(ADAPTER_LIST_FAILED_MESSAGE.to_string())),
+    }
+}
+
+/// Parse `coven adapter list --json`: an array of harness summaries with at
+/// least `id`, `label`, `available`, and `source`. Unknown fields are
+/// ignored so additive CLI changes stay compatible.
+#[cfg(unix)]
+fn parse_adapter_list(stdout: &[u8]) -> Result<Vec<CovenHarnessCapability>, ()> {
+    let value: Value = serde_json::from_slice(stdout).map_err(|_| ())?;
+    let entries = value.as_array().ok_or(())?;
+    let mut adapters = Vec::new();
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| is_safe_harness_id(id))
+            .ok_or(())?;
+        let label = entry
+            .get("label")
+            .and_then(Value::as_str)
+            .map(|label| label.trim().chars().take(MAX_TITLE_CHARS).collect::<String>())
+            .filter(|label| !label.is_empty())
+            .ok_or(())?;
+        let available = entry.get("available").and_then(Value::as_bool).ok_or(())?;
+        let source = entry
+            .get("source")
+            .and_then(Value::as_str)
+            .map(|source| source.trim().chars().take(64).collect::<String>())
+            .unwrap_or_else(|| "unknown".to_string());
+        adapters.push(CovenHarnessCapability {
+            id: id.to_string(),
+            label,
+            available,
+            source,
+        });
+    }
+    Ok(adapters)
+}
+
+#[cfg(unix)]
+fn run_coven_adapter_list(coven_binary: &str, timeout: Duration) -> Result<Vec<u8>, ()> {
+    use std::process::Stdio;
+    use std::sync::mpsc;
+
+    let mut command = std::process::Command::new(coven_binary);
+    command
+        .args(["adapter", "list", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|_| ())?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(());
+    };
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bounded = stdout.take(MAX_ADAPTER_LIST_BYTES + 1);
+        let mut buffer = Vec::new();
+        let read_result = io::Read::read_to_end(&mut bounded, &mut buffer);
+        let _ = sender.send(read_result.map(|_| buffer));
+    });
+    let deadline = Instant::now() + timeout;
+    let mut status = None;
+    while status.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(());
+        }
+        match child.try_wait() {
+            Ok(Some(exit)) => status = Some(exit),
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(());
+            }
+        }
+    }
+    let Ok(Ok(buffer)) = reader.join() else {
+        let _ = child.wait();
+        return Err(());
+    };
+    let _ = child.wait();
+    if buffer.len() > MAX_ADAPTER_LIST_BYTES || !status.is_some_and(|exit| exit.success()) {
+        return Err(());
+    }
+    Ok(buffer)
+}
+
+fn adapter_launch_message(error: CovenAdapterError) -> &'static str {
+    match error {
+        CovenAdapterError::Unavailable => UNAVAILABLE_MESSAGE,
+        CovenAdapterError::Incompatible => INCOMPATIBLE_MESSAGE,
+        CovenAdapterError::Failed => LAUNCH_FAILED_MESSAGE,
+    }
+}
+
+fn launch_failure_response(error: CovenAdapterError) -> CovenLaunchResponse {
+    CovenLaunchResponse {
+        status: match error {
+            CovenAdapterError::Unavailable => "unavailable".to_string(),
+            CovenAdapterError::Incompatible => "incompatible".to_string(),
+            CovenAdapterError::Failed => "error".to_string(),
+        },
+        session_id: None,
+        harness: None,
+        message: Some(adapter_launch_message(error).to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn coven_launch_environment() -> Result<CovenEndpoint, String> {
+    let env = coven_environment([
+        ("COVEN_SOCKET", std::env::var_os("COVEN_SOCKET")),
+        ("COVEN_HOME", std::env::var_os("COVEN_HOME")),
+        ("COVEN_URL", std::env::var_os("COVEN_URL")),
+        ("COVEN_PORT", std::env::var_os("COVEN_PORT")),
+    ])
+    .map_err(|()| LAUNCH_FAILED_MESSAGE.to_string())?;
+    let home = home_path(std::env::var_os("HOME"));
+    resolve_endpoint(&env, &home).map_err(|_| LAUNCH_FAILED_MESSAGE.to_string())
+}
+
+#[cfg(unix)]
+fn launch_validation_rejection(message: String) -> CovenLaunchResponse {
+    CovenLaunchResponse {
+        status: "rejected".to_string(),
+        session_id: None,
+        harness: None,
+        message: Some(message),
+    }
+}
+
+#[cfg(unix)]
+#[tauri::command]
+pub(crate) async fn coven_launch_session(request: CovenLaunchRequest) -> CovenLaunchResponse {
+    match tauri::async_runtime::spawn_blocking(
+        move || -> Result<CovenLaunchResponse, CovenAdapterError> {
+            if let Err(message) = validate_launch_request(&request) {
+                return Ok(launch_validation_rejection(message));
+            }
+            let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
+            try_launch_coven_session(&endpoint, &request)
+        },
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => launch_failure_response(error),
+        Err(_) => launch_failure_response(CovenAdapterError::Failed),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub(crate) async fn coven_launch_session(_request: CovenLaunchRequest) -> CovenLaunchResponse {
+    launch_failure_response(CovenAdapterError::Unavailable)
+}
+
+#[cfg(unix)]
+#[tauri::command]
+pub(crate) async fn coven_launch_capabilities(coven_path: String) -> CovenLaunchCapabilities {
+    match tauri::async_runtime::spawn_blocking(
+        move || -> Result<CovenLaunchCapabilities, CovenAdapterError> {
+            let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
+            Ok(try_load_launch_capabilities(&endpoint, &coven_path))
+        },
+    )
+    .await
+    {
+        Ok(Ok(capabilities)) => capabilities,
+        Ok(Err(_)) | Err(_) => CovenLaunchCapabilities {
+            status: "error".to_string(),
+            api_version: None,
+            adapters: Vec::new(),
+            message: Some(LAUNCH_FAILED_MESSAGE.to_string()),
+        },
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub(crate) async fn coven_launch_capabilities(_coven_path: String) -> CovenLaunchCapabilities {
+    CovenLaunchCapabilities {
+        status: "unavailable".to_string(),
+        api_version: None,
+        adapters: Vec::new(),
+        message: Some("local Coven Unix socket transport is unsupported on Windows".to_string()),
+    }
+}
+
 #[cfg(unix)]
 fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
@@ -428,6 +911,11 @@ fn adapter_error_message(error: CovenAdapterError) -> &'static str {
     }
 }
 
+struct CovenApiResponse {
+    status: u16,
+    body: Vec<u8>,
+}
+
 #[cfg(unix)]
 fn request_endpoint(
     endpoint: &CovenEndpoint,
@@ -435,14 +923,35 @@ fn request_endpoint(
     path: &str,
     deadline: Instant,
 ) -> Result<Vec<u8>, CovenAdapterError> {
+    let response = request_endpoint_with_body(endpoint, method, path, None, deadline)?;
+    if !(200..=299).contains(&response.status) {
+        return Err(CovenAdapterError::Failed);
+    }
+    Ok(response.body)
+}
+
+#[cfg(unix)]
+fn request_endpoint_with_body(
+    endpoint: &CovenEndpoint,
+    method: HttpMethod,
+    path: &str,
+    body: Option<&[u8]>,
+    deadline: Instant,
+) -> Result<CovenApiResponse, CovenAdapterError> {
     let allowed = match method {
         HttpMethod::Get => matches!(path, "/api/v1/health" | "/api/v1/sessions"),
-        HttpMethod::Post => path
-            .strip_prefix("/api/v1/sessions/")
-            .and_then(|value| value.strip_suffix("/kill"))
-            .is_some_and(is_safe_session_id),
+        HttpMethod::Post => {
+            path == "/api/v1/sessions"
+                || path
+                    .strip_prefix("/api/v1/sessions/")
+                    .and_then(|value| value.strip_suffix("/kill"))
+                    .is_some_and(is_safe_session_id)
+        }
     };
     if !allowed {
+        return Err(CovenAdapterError::Failed);
+    }
+    if body.is_some_and(|bytes| bytes.len() > MAX_REQUEST_BYTES) {
         return Err(CovenAdapterError::Failed);
     }
 
@@ -451,7 +960,7 @@ fn request_endpoint(
         CovenEndpoint::Unix(socket) => {
             let mut stream = connect_unix_before(socket, deadline)
                 .map_err(|error| categorize_io_error(&error, true))?;
-            exchange_http(&mut stream, method, path, deadline)
+            exchange_http(&mut stream, method, path, body, deadline)
         }
         CovenEndpoint::Http(address) => {
             if !address.ip().is_loopback() {
@@ -464,7 +973,7 @@ fn request_endpoint(
             stream
                 .set_nonblocking(true)
                 .map_err(|error| categorize_io_error(&error, false))?;
-            exchange_http(&mut stream, method, path, deadline)
+            exchange_http(&mut stream, method, path, body, deadline)
         }
     }
 }
@@ -493,14 +1002,24 @@ fn exchange_http<S: LocalHttpStream>(
     stream: &mut S,
     method: HttpMethod,
     path: &str,
+    body: Option<&[u8]>,
     deadline: Instant,
-) -> Result<Vec<u8>, CovenAdapterError> {
-    let request = format!(
-        "{} {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+) -> Result<CovenApiResponse, CovenAdapterError> {
+    let mut request = format!(
+        "{} {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\n",
         method.as_str()
     );
+    if let Some(bytes) = body {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", bytes.len()));
+    }
+    request.push_str("Connection: close\r\n\r\n");
     write_all_before(stream, request.as_bytes(), deadline)
         .map_err(|error| categorize_io_error(&error, false))?;
+    if let Some(bytes) = body {
+        write_all_before(stream, bytes, deadline)
+            .map_err(|error| categorize_io_error(&error, false))?;
+    }
     flush_before(stream, deadline).map_err(|error| categorize_io_error(&error, false))?;
     remaining_before(deadline).map_err(|error| categorize_io_error(&error, false))?;
     stream
@@ -509,7 +1028,7 @@ fn exchange_http<S: LocalHttpStream>(
 
     let response =
         read_to_end_before(stream, deadline).map_err(|error| categorize_io_error(&error, false))?;
-    parse_http_response(&response).map_err(|_| CovenAdapterError::Failed)
+    parse_http_response_with_status(&response).map_err(|_| CovenAdapterError::Failed)
 }
 
 #[cfg(unix)]
@@ -718,7 +1237,18 @@ fn categorize_io_error(error: &io::Error, missing_is_unavailable: bool) -> Coven
     }
 }
 
+#[cfg(all(test, unix))]
 fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, HttpResponseError> {
+    let parsed = parse_http_response_with_status(response)?;
+    if !(200..=299).contains(&parsed.status) {
+        return Err(HttpResponseError::Status(parsed.status));
+    }
+    Ok(parsed.body)
+}
+
+fn parse_http_response_with_status(
+    response: &[u8],
+) -> Result<CovenApiResponse, HttpResponseError> {
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(HttpResponseError::TooLarge);
     }
@@ -747,9 +1277,6 @@ fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, HttpResponseError> {
     let status = status_text
         .parse::<u16>()
         .map_err(|_| HttpResponseError::Malformed)?;
-    if !(200..=299).contains(&status) {
-        return Err(HttpResponseError::Status(status));
-    }
 
     let mut content_lengths = Vec::new();
     let mut transfer_encodings = Vec::new();
@@ -2867,5 +3394,262 @@ mod tests {
         assert_eq!(recovered.status, "ready");
         assert!(recovered.sessions.is_empty());
         assert_eq!(recovered.message, None);
+    }
+
+    fn http_status_json(status: u16, reason: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn launch_fixture() -> CovenLaunchRequest {
+        CovenLaunchRequest {
+            project_root: "/repo/project".to_string(),
+            cwd: Some("/repo/project/worktree".to_string()),
+            harness: "codex".to_string(),
+            prompt: "Fix the failing tests".to_string(),
+            title: Some("Codex CLI".to_string()),
+        }
+    }
+
+    fn expected_launch_request(body: &[u8]) -> Vec<u8> {
+        let mut request = format!(
+            "POST /api/v1/sessions HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        request
+    }
+
+    #[test]
+    fn launch_request_bodies_carry_the_prompt_without_a_prompt_title() {
+        let body = launch_request_body(&launch_fixture()).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["projectRoot"], "/repo/project");
+        assert_eq!(value["cwd"], "/repo/project/worktree");
+        assert_eq!(value["harness"], "codex");
+        assert_eq!(value["prompt"], "Fix the failing tests");
+        assert_eq!(value["title"], "Codex CLI");
+
+        let mut untitled = launch_fixture();
+        untitled.title = Some("   ".to_string());
+        let body = launch_request_body(&untitled).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["title"], "Coven codex");
+    }
+
+    #[test]
+    fn launch_request_validation_rejects_unbounded_input() {
+        assert!(validate_launch_request(&launch_fixture()).is_ok());
+
+        let mut request = launch_fixture();
+        request.prompt = "   ".to_string();
+        assert!(validate_launch_request(&request).is_err());
+
+        let mut request = launch_fixture();
+        request.prompt = "x".repeat(MAX_PROMPT_CHARS + 1);
+        assert!(validate_launch_request(&request).is_err());
+
+        let mut request = launch_fixture();
+        request.prompt = "bad\0prompt".to_string();
+        assert!(validate_launch_request(&request).is_err());
+
+        let mut request = launch_fixture();
+        request.harness = "Codex".to_string();
+        assert!(validate_launch_request(&request).is_err());
+
+        let mut request = launch_fixture();
+        request.project_root = String::new();
+        assert!(validate_launch_request(&request).is_err());
+
+        let mut request = launch_fixture();
+        request.title = Some("x".repeat(MAX_TITLE_CHARS + 1).to_string());
+        assert!(validate_launch_request(&request).is_err());
+    }
+
+    #[test]
+    fn launch_session_posts_the_prompt_body_and_accepts_the_canonical_session() {
+        let request = launch_fixture();
+        let expected_body = launch_request_body(&request).unwrap();
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            http_status_json(
+                201,
+                "Created",
+                br#"{"id":"12345678-1234-4abc-8def-1234567890ab","project_root":"/repo/project","harness":"codex","title":"Codex CLI","status":"running","created_at":"c","updated_at":"u"}"#,
+            ),
+        ]);
+
+        let response = try_launch_coven_session(&endpoint, &request);
+        assert_eq!(
+            server.recv_request(),
+            expected_launch_request(&expected_body)
+        );
+        server.finish();
+
+        let response = response.unwrap();
+        assert_eq!(response.status, "accepted");
+        assert_eq!(
+            response.session_id.as_deref(),
+            Some("12345678-1234-4abc-8def-1234567890ab")
+        );
+        assert_eq!(response.harness.as_deref(), Some("codex"));
+        assert_eq!(response.message, None);
+    }
+
+    #[test]
+    fn launch_session_surfaces_daemon_rejections_with_actionable_messages() {
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            http_status_json(
+                400,
+                "Bad Request",
+                br#"{"error":{"code":"unknown_harness","message":"unknown harness `grok`"}}"#,
+            ),
+        ]);
+
+        let response = try_launch_coven_session(&endpoint, &launch_fixture());
+        assert!(server.recv_request().starts_with(b"POST /api/v1/sessions "));
+        server.finish();
+
+        let response = response.unwrap();
+        assert_eq!(response.status, "rejected");
+        assert_eq!(response.session_id, None);
+        assert_eq!(response.message.as_deref(), Some("unknown harness `grok`"));
+    }
+
+    #[test]
+    fn launch_session_rejects_incompatible_daemon_versions() {
+        let (endpoint, server) =
+            spawn_tcp_server(vec![http_json(br#"{"apiVersion":"coven.daemon.v2"}"#)]);
+
+        let response = try_launch_coven_session(&endpoint, &launch_fixture());
+        assert_server_requests(&server, &["/api/v1/health"]);
+        server.finish();
+
+        assert_eq!(response.unwrap_err(), CovenAdapterError::Incompatible);
+    }
+
+    #[test]
+    fn launch_failures_map_to_recovery_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+        drop(listener);
+
+        assert_eq!(
+            launch_failure_response(
+                try_launch_coven_session(&endpoint, &launch_fixture()).unwrap_err()
+            ),
+            CovenLaunchResponse {
+                status: "unavailable".to_string(),
+                session_id: None,
+                harness: None,
+                message: Some(UNAVAILABLE_MESSAGE.to_string()),
+            }
+        );
+        assert_eq!(
+            launch_failure_response(CovenAdapterError::Incompatible),
+            CovenLaunchResponse {
+                status: "incompatible".to_string(),
+                session_id: None,
+                harness: None,
+                message: Some(INCOMPATIBLE_MESSAGE.to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn launch_transport_allowlist_blocks_unknown_paths() {
+        let (endpoint, server) = spawn_tcp_server(vec![]);
+        let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+        assert_eq!(
+            request_endpoint_with_body(
+                &endpoint,
+                HttpMethod::Post,
+                "/api/v1/other",
+                Some(b"{}".as_slice()),
+                deadline,
+            ),
+            Err(CovenAdapterError::Failed)
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn parse_adapter_list_confirms_configured_harnesses() {
+        let adapters = parse_adapter_list(
+            br#"[
+                {"id":"codex","label":"Codex","executable":"codex","available":true,
+                 "install_hint":"install codex","capabilities":{},"source":"bundled"},
+                {"id":"grok","label":"  Grok Build  ","executable":"grok","available":false,
+                 "install_hint":"install grok","capabilities":{},"source":"recipe",
+                 "manifest_path":"/adapters/grok.json"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            adapters,
+            vec![
+                CovenHarnessCapability {
+                    id: "codex".to_string(),
+                    label: "Codex".to_string(),
+                    available: true,
+                    source: "bundled".to_string(),
+                },
+                CovenHarnessCapability {
+                    id: "grok".to_string(),
+                    label: "Grok Build".to_string(),
+                    available: false,
+                    source: "recipe".to_string(),
+                },
+            ]
+        );
+
+        assert!(parse_adapter_list(b"[]").unwrap().is_empty());
+        assert!(parse_adapter_list(b"{}").is_err());
+        assert!(parse_adapter_list(br#"[{"id":"Codex","label":"x","available":true}]"#).is_err());
+        assert!(parse_adapter_list(br#"[{"id":"codex","label":"x"}]"#).is_err());
+    }
+
+    #[test]
+    fn load_adapter_capabilities_runs_the_selected_executable() {
+        let tree = TempTree::new("adapter-list");
+        let coven = tree.root.join("coven");
+        fs::write(
+            &coven,
+            "#!/bin/sh\ncat <<'JSON'\n[{\"id\":\"codex\",\"label\":\"Codex\",\"available\":true,\"source\":\"bundled\"}]\nJSON\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&coven, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let (adapters, message) = load_adapter_capabilities(coven.to_str().unwrap());
+        assert_eq!(message, None);
+        assert_eq!(
+            adapters,
+            vec![CovenHarnessCapability {
+                id: "codex".to_string(),
+                label: "Codex".to_string(),
+                available: true,
+                source: "bundled".to_string(),
+            }]
+        );
+
+        let missing = tree.root.join("missing-coven");
+        let (adapters, message) = load_adapter_capabilities(missing.to_str().unwrap());
+        assert!(adapters.is_empty());
+        assert_eq!(message.as_deref(), Some(ADAPTER_LIST_FAILED_MESSAGE));
+
+        let broken = tree.root.join("broken-coven");
+        fs::write(&broken, "#!/bin/sh\nexit 3\n").unwrap();
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o700)).unwrap();
+        let (adapters, message) = load_adapter_capabilities(broken.to_str().unwrap());
+        assert!(adapters.is_empty());
+        assert_eq!(message.as_deref(), Some(ADAPTER_LIST_FAILED_MESSAGE));
     }
 }

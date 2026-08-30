@@ -177,6 +177,23 @@
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
+  // The pinned Coven launch profile: prompt-backed provider launches are
+  // accepted only by this daemon API version, with the composer prompt
+  // transported in the launch request body — never as process argv and
+  // never into the persisted launch model.
+  var COVEN_LAUNCH_API_VERSION = "coven.daemon.v1";
+  var COVEN_LAUNCH_PROMPT_MAX_CHARS = 8192;
+  var COVEN_LAUNCH_CAPABILITIES_TTL_MS = 15000;
+  var COVEN_LAUNCH_STATES = [
+    "accepted",
+    "spawned",
+    "running",
+    "failed",
+    "recovery_required",
+  ];
+  var covenLaunchCapabilitiesSnapshot = null;
+  var covenLaunchCapabilitiesFetchedAt = 0;
+  var covenLaunchCapabilitiesFlight = null;
   var paneCounter = 0n;
   var MAX_PENDING_PTY_INPUT_BYTES = 1024 * 1024;
   var MAX_PENDING_PTY_INPUT_WRITES = 256;
@@ -2299,6 +2316,7 @@
       cwd: opts.cwd || opts.worktreePath || opts.projectRoot,
       launchKind: opts.launchKind || null,
       covenSessionId: opts.covenSessionId || null,
+      promptDigest: opts.promptDigest || null,
       metricsProvider: opts.metricsProvider || null,
     };
     var sourceLaunchKind = sourceLaunch.launchKind || null;
@@ -2313,6 +2331,11 @@
         (project && activeWorkspaceRoot(project)) || null,
       launchKind: sourceLaunchKind,
       covenSessionId: isCovenAttachLaunch ? sourceLaunch.covenSessionId || null : null,
+      // A bounded prompt reference (short digest) for the accepted daemon
+      // launch; the raw prompt never enters this model. In-memory only — the
+      // persisted workspace descriptor keeps launchKind and the canonical
+      // Coven session id.
+      promptDigest: isCovenAttachLaunch ? sourceLaunch.promptDigest || null : null,
       metricsProvider: isCovenCodeLaunch
         ? null
         : sourceLaunch.metricsProvider || opts.metricsProvider || null,
@@ -13873,12 +13896,226 @@
 
   function agentLaunchOptions() {
     return [
-      { id: "coven-code", label: "Coven CLI", command: "coven", args: [], kind: "coven-code" },
-      { id: "copilot", label: "Copilot CLI", command: "coven", args: ["run", "copilot"], kind: "agent-copilot" },
-      { id: "codex", label: "Codex CLI", command: "coven", args: ["run", "codex"], kind: "agent-codex" },
-      { id: "anthropic", label: "Anthropic CLI", command: "coven", args: ["run", "claude"], kind: "agent-anthropic" },
-      { id: "grok-build", label: "Grok Build", command: "coven", args: ["run", "grok"], kind: "agent-grok-build" },
+      {
+        id: "coven-code",
+        label: "Coven CLI",
+        command: "coven",
+        args: [],
+        kind: "coven-code",
+        harness: null,
+      },
+      {
+        id: "copilot",
+        label: "Copilot CLI",
+        command: "coven",
+        args: ["run", "copilot"],
+        kind: "agent-copilot",
+        harness: "copilot",
+      },
+      {
+        id: "codex",
+        label: "Codex CLI",
+        command: "coven",
+        args: ["run", "codex"],
+        kind: "agent-codex",
+        harness: "codex",
+      },
+      {
+        id: "anthropic",
+        label: "Anthropic CLI",
+        command: "coven",
+        args: ["run", "claude"],
+        kind: "agent-anthropic",
+        harness: "claude",
+      },
+      {
+        id: "grok-build",
+        label: "Grok Build",
+        command: "coven",
+        args: ["run", "grok"],
+        kind: "agent-grok-build",
+        harness: "grok",
+      },
     ];
+  }
+
+  function normalizeCovenLaunchCapabilities(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    var status = typeof payload.status === "string" ? payload.status : null;
+    if (!status) return null;
+    var adapters = [];
+    if (Array.isArray(payload.adapters)) {
+      payload.adapters.forEach(function (adapter) {
+        if (!adapter || typeof adapter.id !== "string" || !adapter.id) return;
+        adapters.push({
+          id: adapter.id,
+          label:
+            typeof adapter.label === "string" && adapter.label
+              ? adapter.label
+              : adapter.id,
+          available: adapter.available === true,
+        });
+      });
+    }
+    return {
+      status: status,
+      apiVersion: typeof payload.apiVersion === "string" ? payload.apiVersion : null,
+      adapters: adapters,
+      message: typeof payload.message === "string" ? payload.message : null,
+    };
+  }
+
+  function covenLaunchCapabilitiesCache() {
+    return covenLaunchCapabilitiesSnapshot;
+  }
+
+  async function refreshCovenLaunchCapabilities(force) {
+    var now = Date.now();
+    if (
+      !force &&
+      covenLaunchCapabilitiesSnapshot &&
+      now - covenLaunchCapabilitiesFetchedAt < COVEN_LAUNCH_CAPABILITIES_TTL_MS
+    ) {
+      return covenLaunchCapabilitiesSnapshot;
+    }
+    if (covenLaunchCapabilitiesFlight) return covenLaunchCapabilitiesFlight;
+    var covenPath = state.env && state.env.coven_path;
+    if (!covenPath) {
+      covenLaunchCapabilitiesSnapshot = {
+        status: "unavailable",
+        apiVersion: null,
+        adapters: [],
+        message: "Coven CLI not found — install @opencoven/cli and restart Psyche",
+      };
+      covenLaunchCapabilitiesFetchedAt = now;
+      return covenLaunchCapabilitiesSnapshot;
+    }
+    var flight = invoke("coven_launch_capabilities", { covenPath: covenPath })
+      .then(function (payload) {
+        var normalized =
+          normalizeCovenLaunchCapabilities(payload) || {
+            status: "error",
+            apiVersion: null,
+            adapters: [],
+            message: "Coven capabilities could not be loaded",
+          };
+        if (normalized.apiVersion && normalized.apiVersion !== COVEN_LAUNCH_API_VERSION) {
+          normalized = {
+            status: "incompatible",
+            apiVersion: normalized.apiVersion,
+            adapters: [],
+            message: "Coven daemon API update required",
+          };
+        }
+        covenLaunchCapabilitiesSnapshot = normalized;
+        covenLaunchCapabilitiesFetchedAt = Date.now();
+        return covenLaunchCapabilitiesSnapshot;
+      })
+      .catch(function (error) {
+        covenLaunchCapabilitiesSnapshot = {
+          status: "error",
+          apiVersion: null,
+          adapters: [],
+          message: "Coven capabilities could not be loaded: " + String(error),
+        };
+        covenLaunchCapabilitiesFetchedAt = Date.now();
+        return covenLaunchCapabilitiesSnapshot;
+      })
+      .finally(function () {
+        if (covenLaunchCapabilitiesFlight === flight) covenLaunchCapabilitiesFlight = null;
+      });
+    covenLaunchCapabilitiesFlight = flight;
+    return flight;
+  }
+
+  function covenCapabilityFor(harnessId, snapshot) {
+    if (!harnessId) return null;
+    var resolved = snapshot || covenLaunchCapabilitiesSnapshot;
+    if (!resolved || !Array.isArray(resolved.adapters)) return null;
+    var capability = resolved.adapters.find(function (adapter) {
+      return adapter.id === harnessId;
+    });
+    return capability || null;
+  }
+
+  // Returns null when the entry may launch, or an actionable reason string.
+  // The gate reads only capabilities confirmed by the selected Coven
+  // executable/profile, so unconfirmed harnesses stay explicitly unavailable
+  // before prompt submission.
+  function covenLaunchGate(entry, snapshot) {
+    if (!entry) return "Unknown agent";
+    if (entry.id === "coven-code") {
+      return state.env && state.env.coven_path
+        ? null
+        : "Coven CLI not found — install @opencoven/cli and restart Psyche";
+    }
+    if (!entry.harness) return "Unknown Coven harness";
+    var resolved = snapshot || covenLaunchCapabilitiesSnapshot;
+    if (!resolved) return "Checking Coven capabilities — retry in a moment";
+    if (resolved.status === "unavailable" || resolved.status === "incompatible") {
+      return resolved.message || "Coven daemon is not available";
+    }
+    if (resolved.status !== "ready") {
+      return resolved.message || "Coven capabilities could not be loaded";
+    }
+    var capability = covenCapabilityFor(entry.harness, resolved);
+    if (!capability) {
+      return entry.label + " is not offered by this Coven executable";
+    }
+    if (!capability.available) {
+      return (
+        entry.label +
+        " is unavailable in Coven — run `coven adapter doctor " +
+        entry.harness +
+        "`"
+      );
+    }
+    return null;
+  }
+
+  function covenLaunchOutcome(launchResult) {
+    if (launchResult && launchResult.status === "accepted" && launchResult.sessionId) {
+      return "accepted";
+    }
+    if (
+      launchResult &&
+      (launchResult.status === "unavailable" || launchResult.status === "incompatible")
+    ) {
+      return "recovery_required";
+    }
+    return "failed";
+  }
+
+  function covenLaunchFailureStatus(entry, launchResult) {
+    var message =
+      launchResult && typeof launchResult.message === "string"
+        ? launchResult.message
+        : null;
+    if (covenLaunchOutcome(launchResult) === "recovery_required") {
+      return message || "Coven daemon is not available — run `coven daemon start`";
+    }
+    return entry.label + " launch failed" + (message ? ": " + message : "");
+  }
+
+  // Persist only a bounded prompt reference (a short digest) next to the
+  // canonical Coven session identity; the raw prompt never enters the launch
+  // model.
+  async function covenPromptDigest(prompt) {
+    if (!prompt) return null;
+    try {
+      var subtle = globalThis.crypto && globalThis.crypto.subtle;
+      if (!subtle) return null;
+      var bytes = new TextEncoder().encode(prompt);
+      var digest = await subtle.digest("SHA-256", bytes);
+      var hex = Array.prototype.map
+        .call(new Uint8Array(digest), function (byte) {
+          return byte.toString(16).padStart(2, "0");
+        })
+        .join("");
+      return "sha256:" + hex.slice(0, 16);
+    } catch (_) {
+      return null;
+    }
   }
 
   function nextAgentPickerIndex(current, delta, count) {
@@ -13897,24 +14134,36 @@
     agentPickerListEl.innerHTML = "";
     entries.forEach(function (entry, index) {
       var selected = index === agentPickerIndex;
+      var gate = covenLaunchGate(entry);
       var option = document.createElement("button");
       option.type = "button";
       option.id = "agent-picker-option-" + entry.id;
-      option.className = "agent-picker-option" + (selected ? " is-selected" : "");
+      option.className =
+        "agent-picker-option" +
+        (selected ? " is-selected" : "") +
+        (gate ? " is-unavailable" : "");
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", selected ? "true" : "false");
+      if (gate) option.setAttribute("aria-disabled", "true");
       option.tabIndex = -1;
       option.innerHTML =
         '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
-        '<span class="agent-picker-option-command">' +
-          escapeHtml([entry.command].concat(entry.args || []).join(" ")) +
-        "</span>";
+        (gate
+          ? '<span class="agent-picker-option-unavailable">' + escapeHtml(gate) + "</span>"
+          : '<span class="agent-picker-option-command">' +
+            escapeHtml([entry.command].concat(entry.args || []).join(" ")) +
+            "</span>");
       option.addEventListener("pointermove", function () {
         if (agentPickerIndex === index) return;
         agentPickerIndex = index;
         renderAgentPicker();
       });
       option.addEventListener("click", function () {
+        var reason = covenLaunchGate(entry);
+        if (reason) {
+          setStatus(reason, "warn");
+          return;
+        }
         agentPickerIndex = index;
         launchSelectedAgent();
       });
@@ -13941,6 +14190,9 @@
     renderAgentPicker();
     agentPickerOverlayEl.hidden = false;
     focusAgentPickerList();
+    refreshCovenLaunchCapabilities().then(function () {
+      if (agentPickerOpen()) renderAgentPicker();
+    });
     return true;
   }
 
@@ -13961,6 +14213,12 @@
     var entry = agentLaunchOptions()[agentPickerIndex];
     if (!entry) return null;
     var project = activeProject();
+    var gate = covenLaunchGate(entry);
+    if (gate) {
+      closeAgentPicker();
+      setStatus(gate, "warn");
+      return null;
+    }
     var promptBacked = entry.id !== "coven-code";
     var prompt = promptBacked
       ? String(commandInput && commandInput.value || "").trim()
@@ -14039,17 +14297,47 @@
       setStatus("Enter a prompt before starting an agent", "warn");
       return null;
     }
+    if (userPrompt.length > COVEN_LAUNCH_PROMPT_MAX_CHARS) {
+      setStatus(
+        "Prompt exceeds the " + COVEN_LAUNCH_PROMPT_MAX_CHARS +
+          "-character Coven launch limit — shorten it and retry",
+        "warn"
+      );
+      return null;
+    }
     if (!(await showTerminalView())) return null;
-    var args = entry.args.slice();
-    args.push("--", userPrompt);
+    // The composer prompt rides the daemon launch request body only. It is
+    // never placed in process argv and never stored on the launch model; the
+    // pane attaches to the canonical Coven session returned by the daemon.
+    var launchResult = await invoke("coven_launch_session", {
+      request: {
+        projectRoot: project.root,
+        cwd: worktree.path,
+        harness: entry.harness,
+        prompt: userPrompt,
+        title: entry.label,
+      },
+    }).catch(function (error) {
+      setStatus(entry.label + " failed to start: " + String(error), "error");
+      return null;
+    });
+    if (!launchResult) return null;
+    if (covenLaunchOutcome(launchResult) !== "accepted") {
+      setStatus(covenLaunchFailureStatus(entry, launchResult), "error");
+      return null;
+    }
+    var promptDigest = await covenPromptDigest(userPrompt);
     return createThread({
       project: project,
       worktreePath: worktree.path,
       name: entry.label,
-      kind: entry.kind,
+      kind: "coven-attach",
       command: state.env.coven_path,
-      args: args,
-      launchKind: null,
+      args: ["attach", launchResult.sessionId],
+      launchKind: "coven-attach",
+      covenSessionId: launchResult.sessionId,
+      promptDigest: promptDigest,
+      metricsProvider: launchResult.harness || entry.harness || "coven",
       projectRoot: project.root,
       cwd: worktree.path,
       waitForPtyStart: true,

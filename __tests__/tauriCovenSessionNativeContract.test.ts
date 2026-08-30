@@ -104,7 +104,7 @@ describe('Tauri Coven session native contract', () => {
     );
 
     expect(libSource).toMatch(
-      /use\s+coven_sessions::\{\s*coven_session_kill\s*,\s*coven_sessions\s*\}\s*;/,
+      /use\s+coven_sessions::\{\s*coven_launch_capabilities\s*,\s*coven_launch_session\s*,\s*coven_session_kill\s*,\s*coven_sessions\s*,?\s*\}\s*;/,
     );
     expect(libSource).toMatch(
       /tauri::generate_handler!\s*\[[\s\S]*?app_environment\s*,\s*coven_sessions\s*,/,
@@ -134,10 +134,10 @@ describe('Tauri Coven session native contract', () => {
     );
 
     expect(libSource).toMatch(
-      /use\s+coven_sessions::\{\s*coven_session_kill\s*,\s*coven_sessions\s*\}\s*;/,
+      /use\s+coven_sessions::\{\s*coven_launch_capabilities\s*,\s*coven_launch_session\s*,\s*coven_session_kill\s*,\s*coven_sessions\s*,?\s*\}\s*;/,
     );
     expect(libSource).toMatch(
-      /tauri::generate_handler!\s*\[[\s\S]*?coven_sessions\s*,\s*coven_session_kill\s*,/,
+      /tauri::generate_handler!\s*\[[\s\S]*?coven_sessions\s*,\s*coven_launch_session\s*,\s*coven_launch_capabilities\s*,\s*coven_session_kill\s*,/,
     );
   });
 

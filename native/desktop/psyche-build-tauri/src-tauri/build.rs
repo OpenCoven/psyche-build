@@ -28,6 +28,8 @@ fn main() {
             "browser_snapshot",
             "app_environment",
             "coven_sessions",
+            "coven_launch_session",
+            "coven_launch_capabilities",
             "coven_session_kill",
             "workspace_load",
             "workspace_save",

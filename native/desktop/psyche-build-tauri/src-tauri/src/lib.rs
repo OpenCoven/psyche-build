@@ -78,7 +78,9 @@ use control_provider::{
 };
 
 use coven_sessions::is_safe_session_id;
-use coven_sessions::{coven_session_kill, coven_sessions};
+use coven_sessions::{
+    coven_launch_capabilities, coven_launch_session, coven_session_kill, coven_sessions,
+};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use native_sessions::{
     native_session_capture, native_session_create, native_session_list, native_session_stop,
@@ -8666,6 +8668,8 @@ pub fn run() {
             browser_snapshot,
             app_environment,
             coven_sessions,
+            coven_launch_session,
+            coven_launch_capabilities,
             coven_session_kill,
             workspace_load,
             workspace_save,

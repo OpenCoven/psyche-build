@@ -544,7 +544,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(libRs).toContain('if !matches!(launch_kind, "coven-code" | "coven-attach")');
 
     const spawnAgentThread = functionSource('spawnAgentThread');
-    expect(spawnAgentThread).toContain('launchKind: null');
+    expect(spawnAgentThread).toContain('launchKind: "coven-attach"');
 
     const covenCliLaunch = functionSource('covenCliLaunch');
     expect(covenCliLaunch).toContain('launchKind: "coven-code"');
@@ -928,7 +928,8 @@ describe('native Coven launch routing', () => {
     expect(thread.launch).toEqual({
       command: '/bin/coven', args: [],
       env: {}, projectRoot: '/repo', cwd: '/repo/wt',
-      launchKind: 'coven-code', covenSessionId: null, metricsProvider: null,
+      launchKind: 'coven-code', covenSessionId: null, promptDigest: null,
+      metricsProvider: null,
     });
     expect(thread).toMatchObject({
       metricsGeneration: 0,
@@ -2210,7 +2211,7 @@ describe('native Coven launch routing', () => {
     expect(functionSource('runNewShellCommand')).toMatch(/return createTerminalPane\(\);/);
     expect(functionSource('runNewPsycheCommand')).toMatch(/spawnPsycheThread/);
     expect(functionSource('spawnAgentThread')).toMatch(
-      /if \(entry\.id === "coven-code"\) \{[\s\S]*return ensureProjectCoven\(project\);[\s\S]*\}\s*if \(!\(await showTerminalView\(\)\)\) return null;/,
+      /if \(entry\.id === "coven-code"\) \{[\s\S]*return ensureProjectCoven\(project\);[\s\S]*\}\s*var userPrompt[\s\S]*if \(!\(await showTerminalView\(\)\)\) return null;/,
     );
     expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
     expect(functionSource('setActiveProject')).not.toContain('ensureCoven');
