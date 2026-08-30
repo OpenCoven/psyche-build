@@ -93,7 +93,7 @@ proof PR remain open governance evidence.
 |---:|---|---:|---|
 | 1 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) + [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One immutable-source manifest proves ordinary lifecycle and representative failure/recovery paths |
 | 1a | [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Parallel live-policy correction: administrator-enforced checks/review and direct-push rejection |
-| 2 | [#199 — operations/recovery](https://github.com/OpenCoven/psyche-build/issues/199) + [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Bounded fail-closed diagnostics plus reusable operator-observed recovery harnesses |
+| 2 | [#199 — operations/recovery](https://github.com/OpenCoven/psyche-build/issues/199) + [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Bounded fail-closed diagnostics plus reusable operator-observed recovery harnesses; PRs #278 and #281 have requested changes |
 | 2a | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Clean external checkout completes canonical bootstrap/full gate; live policy/community evidence retained |
 | 3 | [#241 — atomic iOS readiness](https://github.com/OpenCoven/psyche-build/issues/241) under [#200 — iOS internal beta](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | No failed new host can expose a workspace as authoritative |
 | 4 | [#280 — secure invite authentication](https://github.com/OpenCoven/psyche-build/issues/280) | P1 | Focused protocol, desktop, iOS, UX, and physical slices after #241 |
@@ -148,6 +148,23 @@ CI but unresolved requested changes. Before it may merge, v1 must:
 - bound collector input/traversal truthfully rather than applying the elapsed
   claim only to asynchronous collection while synchronous normalization remains
   unbounded.
+
+[PR #281](https://github.com/OpenCoven/psyche-build/pull/281) is a bounded
+#199 diagnostics-harness slice for generated Beads task #230, but its current
+exact head has requested changes. Before it may merge, it must:
+
+- compile/register the process-spawning fixture commands and diagnostic
+  permissions only behind the stated debug-build boundary, or replace that
+  contract through an explicit reviewed design decision and release-build test;
+- validate the actual invoking webview for `diagnostics_cycle_window` rather
+  than trusting only the owning window label;
+- handle child-process spawn errors in the launcher deterministically, avoid
+  double settlement, and retain signal/exit propagation.
+
+Keep #281's enum-only fixtures, startup-captured authorization, deterministic
+scenario timing/focus/geometry, hidden-pane restoration, context-loss handling,
+and aggregate cleanup. The generated #230 issue body remains a one-way mirror;
+update its canonical Beads state only after accepted merge/evidence.
 
 #198/#244 retains its P1 dependency gate: #244, #272, and #273 deliver the
 repository-addressable policy floor, but #198 remains open for terminal
@@ -236,6 +253,7 @@ contracts unless a bounded slice is explicitly promoted.
 | Pull request | Disposition | Replacement / closure contract |
 |---|---|---|
 | [#274](https://github.com/OpenCoven/psyche-build/pull/274) | **Merged** as `f12b7534` | Preserve as product-local iOS action-state composition; no support claim |
+| [#281](https://github.com/OpenCoven/psyche-build/pull/281) | **Changes requested** | Resolve #199/#230 debug-build authority, invoking-webview identity, and launcher spawn-error findings on a new exact head |
 | [#278](https://github.com/OpenCoven/psyche-build/pull/278) | **Changes requested** | Resolve #243 privacy, collector truth, vocabulary, and bounded-input findings on a new exact head |
 | [#277](https://github.com/OpenCoven/psyche-build/pull/277) | **Design correction required; not merge-ready** | Replace through #279 with negotiated capability and private prompt transport; split unrelated Git tests |
 | [#264](https://github.com/OpenCoven/psyche-build/pull/264) | **Draft source material only** | Extract focused #280 slices after #241; do not merge the full branch |
@@ -248,9 +266,11 @@ contracts unless a bounded slice is explicitly promoted.
 
 The listed source-material PRs are not merge-ready because they can be rebased
 or had historical green tests. No listed open implementation PR is merge-ready
-at this snapshot. Every replacement starts from current `main`, has one owning
-outcome and acceptance gate, resolves current review findings, and passes
-required checks on its exact final head.
+at this snapshot: #281 and #278 have unresolved requested changes, #277 needs
+the #279 design correction, and #264 remains an oversized draft/source branch.
+Every replacement starts from current `main`, has one owning outcome and
+acceptance gate, resolves current review findings, and passes required checks on
+its exact final head.
 
 ## Concurrency rules
 
@@ -258,6 +278,8 @@ required checks on its exact final head.
   publication.
 - #243 correction may proceed during #239; recovery scenarios wait for observed
   #239 cases.
+- #281 may proceed as a bounded #199 diagnostics-harness slice after resolving
+  its current authority/build/launcher findings; it does not change support.
 - #198 evidence work may proceed independently without weakening #31.
 - #241 precedes #280, later iOS authority/capability slices, and support changes.
 - #242 publication precedes execution; execution precedes mobile controls.
