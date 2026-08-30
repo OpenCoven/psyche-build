@@ -15,7 +15,8 @@ const releaseDocs = [
 ] as const;
 
 const historicalDocDirectories = new Set([
-  path.join('docs', 'superpowers'),
+  path.join('docs', 'superpowers', 'plans'),
+  path.join('docs', 'superpowers', 'specs'),
 ]);
 
 const generatedAgentsDoc = path.join('src', 'utils', 'generated-agents-doc.ts');
@@ -90,22 +91,28 @@ function releaseEnvironmentSecretNames(runbook: string): string[] {
   return rows.sort();
 }
 
-describe('v0.0.1 release documentation contract', () => {
-  it('tracks post-release changes without claiming TestFlight availability', async () => {
+describe('release documentation contract', () => {
+  it('tracks the v0.0.2 patch without claiming TestFlight availability', async () => {
     const changelog = await readFile('CHANGELOG.md', 'utf8');
-    const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/);
-    const release = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
+    const unreleased = changelog.match(/## Unreleased\s*([\s\S]*?)(?=\n## \[0\.0\.2\])/);
+    const release = changelog.match(
+      /## \[0\.0\.2\] - 2026-08-28\s*([\s\S]*?)(?=\n## \[0\.0\.1\])/,
+    );
 
     expect(unreleased).not.toBeNull();
-    expect(unreleased?.[1]).toContain('bare Coven CLI (`coven`)');
-    expect(unreleased?.[1]).toContain('graphite surfaces');
-    expect(unreleased?.[1]).toContain('Files-pane toolbar controls');
     expect(release).not.toBeNull();
-    expect(release?.[1]).toContain('### Performance');
-    expect(release?.[1]).toContain('### Security');
-    expect(release?.[1]).toContain('### Reliability');
-    expect(release?.[1]).toContain('### Documentation');
-    expect(release?.[1]).toMatch(/internal distribution remains pending #200\./i);
+    expect(release?.[1]).toContain('bare Coven CLI (`coven`)');
+    expect(release?.[1]).toContain('graphite surfaces');
+    expect(release?.[1]).toContain('Files-pane toolbar controls');
+    expect(release?.[1]).toContain('Native Git history inspection');
+    expect(release?.[1]).toContain('### TestFlight: What to Test');
+    const initialRelease = changelog.match(/## \[0\.0\.1\] - 2026-08-23\s*([\s\S]*)$/);
+    expect(initialRelease).not.toBeNull();
+    expect(initialRelease?.[1]).toContain('### Performance');
+    expect(initialRelease?.[1]).toContain('### Security');
+    expect(initialRelease?.[1]).toContain('### Reliability');
+    expect(initialRelease?.[1]).toContain('### Documentation');
+    expect(initialRelease?.[1]).toMatch(/internal distribution remains pending #200\./i);
     expect(changelog).not.toMatch(/release-candidate record/i);
     expect(changelog).not.toMatch(/Public macOS\/Homebrew availability remains pending/i);
   });
@@ -143,7 +150,7 @@ describe('v0.0.1 release documentation contract', () => {
   it('pins the tracked generated agent documentation to the release version', async () => {
     const generated = await readFile(generatedAgentsDoc, 'utf8');
 
-    expect(generated).toContain('*Version: 0.0.1*');
+    expect(generated).toContain('*Version: 0.0.2*');
     expect(generated).not.toContain('*Version: 0.1.0*');
   });
 
@@ -613,13 +620,18 @@ describe('v0.0.1 release documentation contract', () => {
         path.join('native', 'ios', 'README.md'),
         path.join('protocol-fixtures', 'README.md'),
         generatedAgentsDoc,
+        path.join('docs', 'superpowers', 'README.md'),
         path.join('docs', 'src', 'hero.js'),
         path.join('docs', 'src', 'index.html'),
         path.join('docs', 'public', 'og.svg'),
       ]),
     );
     expect(
-      activeFiles.some((filePath) => filePath.startsWith(path.join('docs', 'superpowers'))),
+      activeFiles.some((filePath) =>
+        [...historicalDocDirectories].some((directory) =>
+          filePath.startsWith(`${directory}${path.sep}`),
+        ),
+      ),
     ).toBe(false);
 
     for (const filePath of activeFiles) {

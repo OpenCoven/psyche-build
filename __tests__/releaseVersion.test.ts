@@ -29,8 +29,10 @@ async function writeFixture(): Promise<string> {
   const tauriRoot = path.join(nativeRoot, 'src-tauri');
   const iosRoot = path.join(root, 'native/ios');
   const xcodeProjectRoot = path.join(iosRoot, 'Psyche.xcodeproj');
+  const mcpRoot = path.join(root, 'src/mcp');
   await mkdir(tauriRoot, { recursive: true });
   await mkdir(xcodeProjectRoot, { recursive: true });
+  await mkdir(mcpRoot, { recursive: true });
 
   await Promise.all([
     writeFile(
@@ -60,6 +62,10 @@ async function writeFixture(): Promise<string> {
     writeFile(
       path.join(xcodeProjectRoot, 'project.pbxproj'),
       `// !$*UTF8*$!\n{\n\tobjects = {\n\t\tDEBUG /* Debug */ = {\n\t\t\tbuildSettings = {\n${xcodeMarketingVersionDecoy}\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = build.psyche.fixture;\n\t\t\t};\n\t\t};\n\t\tRELEASE /* Release */ = {\n\t\t\tbuildSettings = {\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-O";\n\t\t\t};\n\t\t};\n\t};\n}\n`,
+    ),
+    writeFile(
+      path.join(mcpRoot, 'server.ts'),
+      "const SERVER_VERSION = '0.0.9';\n",
     ),
   ]);
 
@@ -100,7 +106,7 @@ describe('release version contract', () => {
     const root = await writeFixture();
 
     expect(() => assertReleaseVersion(root, 'v0.0.1')).toThrow(
-      /package\.json \(0\.0\.11\)[\s\S]*native\/desktop\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*native\/ios\/Psyche\.xcodeproj\/project\.pbxproj \(0\.0\.3\)/,
+      /package\.json \(0\.0\.11\)[\s\S]*native\/desktop\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*native\/ios\/Psyche\.xcodeproj\/project\.pbxproj \(0\.0\.3\)[\s\S]*src\/mcp\/server\.ts \(0\.0\.9\)/,
     );
   });
 
@@ -127,6 +133,7 @@ describe('release version contract', () => {
       tauriConfig: '0.0.1',
       iosProjectYml: '0.0.1',
       iosXcodeProject: '0.0.1',
+      mcpServer: '0.0.1',
     });
     expect(() => assertReleaseVersion(root, 'v0.0.1')).not.toThrow();
 
@@ -192,8 +199,9 @@ describe('release version contract', () => {
       'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
       'native/ios/project.yml',
       'native/ios/Psyche.xcodeproj/project.pbxproj',
+      'src/mcp/server.ts',
     ].map((relativePath) => path.join(root, relativePath));
-    const xcodeProjectPath = releaseFiles.at(-1)!;
+    const xcodeProjectPath = path.join(root, 'native/ios/Psyche.xcodeproj/project.pbxproj');
     const xcodeProject = await readFile(xcodeProjectPath, 'utf8');
     await writeFile(
       xcodeProjectPath,

@@ -112,11 +112,13 @@ describe('built cockpit smoke test', () => {
         HOME: home,
         // Without this the cockpit may take a dev-only path.
         PSYCHE_DEV: undefined,
+        OPENROUTER_API_KEY: undefined,
         // Keep Ink from deciding it is non-interactive and bailing early.
         TERM: 'xterm-256color',
         CI: undefined,
       };
       delete env.PSYCHE_DEV;
+      delete env.OPENROUTER_API_KEY;
       delete env.CI;
       delete env.TMUX;
 

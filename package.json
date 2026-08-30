@@ -1,6 +1,6 @@
 {
   "name": "psyche-build",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "OpenCoven's local-first coding cockpit for visible, isolated agent lanes in tmux and git worktrees.",
   "type": "module",
   "author": "Valentina Alexander",
