@@ -20,6 +20,7 @@ struct PsycheApp: App {
             CockpitView()
                 .environmentObject(model)
                 .environmentObject(model.workspaceStore)
+                .environmentObject(model.remoteActionStore)
                 .environmentObject(model.terminalRegistry)
                 .preferredColorScheme(.dark)
                 .task {
