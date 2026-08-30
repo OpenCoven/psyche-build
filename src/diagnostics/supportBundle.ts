@@ -199,15 +199,6 @@ const ROOT_FIELDS = new Set([
   'truncation',
 ]);
 
-const COLLECTOR_STATE_FIELDS = [
-  'provenance',
-  'project',
-  'lifecycle',
-  'providers',
-  'persistence',
-  'updater',
-  'graphics',
-] as const;
 const COLLECTOR_ARRAY_FIELDS = ['terminalTail', 'records', 'receipts', 'errors'] as const;
 
 const SENSITIVE_KEY = /(?:^|[_-]|(?<=[a-z]))(?:token|secret|password|passwd|passphrase|credential|authorization|auth|cookie|private(?:[_-]?key)?|api(?:[_-]?key)?|access(?:[_-]?token)?)(?=$|[_-]|[A-Z])/i;
@@ -218,7 +209,7 @@ const ABSOLUTE_PATH_FRAGMENT = /(?<![A-Za-z0-9])(?:\/[^\s"'`<>|]+(?:[ \t]+[^\s"'
 const ANSI = /(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001bP[\s\S]*?\u001b\\|\u001b\[[0-?]*[ -/]*[@-~]|\u001b[()][0-2A-Za-z]|\u001b[=>])/g;
 const BEARER = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const PEM = /-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/gi;
-const API_TOKEN = /\b(?:github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/g;
+const API_TOKEN = /\b(?:github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{12,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{16})\b/g;
 const SENSITIVE_ASSIGNMENT = /\b(?:[A-Z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|API_KEY|PRIVATE_KEY))\s*=\s*[^\s]+/gi;
 const CLOUD_CREDENTIAL_ASSIGNMENT = /\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*[^\s]+/gi;
 const AUTHORIZATION_LABELED_VALUE = /["']?authorization(?:[_-]?header)?["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\r\n,;}]+)/gi;
@@ -287,12 +278,12 @@ function isBoundedInputValue(
   seen = new Set<object>(),
   budget: { remaining: number } = { remaining: MAX_ATTRIBUTE_NODES },
 ): boolean {
-  if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth) return false;
+  if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth || budget.remaining <= 0) return false;
+  budget.remaining -= 1;
   if (value === null || typeof value === 'boolean') return true;
   if (typeof value === 'number') return Number.isFinite(value);
   if (typeof value === 'string') return value.length <= MAX_TEXT_SCAN_CHARS;
-  if (typeof value !== 'object' || budget.remaining <= 0) return false;
-  budget.remaining -= 1;
+  if (typeof value !== 'object') return false;
   if (seen.has(value)) return false;
   seen.add(value);
   let valid = true;
@@ -315,7 +306,7 @@ function isBoundedInputValue(
   return valid;
 }
 
-function isCollectorRecordShape(value: unknown, budget: { remaining: number }): boolean {
+function isCollectorRecordShape(value: unknown): boolean {
   if (!isRecord(value)
     || !hasOnlyKeys(value, NORMALIZED_RECORD_KEYS)
     || finiteNonNegativeInteger(value.sequence) === undefined
@@ -329,16 +320,14 @@ function isCollectorRecordShape(value: unknown, budget: { remaining: number }): 
     || (value.outcome !== undefined && (typeof value.outcome !== 'string' || value.outcome.length > MAX_TEXT_SCAN_CHARS))
     || (value.durationMs !== undefined
       && (typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0))
-    || (value.attributes !== undefined && (!isRecord(value.attributes)
-      || !isBoundedInputValue(value.attributes, 0, new Set<object>(), budget)))
+    || (value.attributes !== undefined && !isRecord(value.attributes))
     || (value.truncated !== undefined && typeof value.truncated !== 'boolean')) return false;
   return true;
 }
 
-function isCollectorReceiptShape(value: unknown, budget: { remaining: number }): boolean {
+function isCollectorReceiptShape(value: unknown): boolean {
   return isRecord(value)
     && hasOnlyKeys(value, CONTROL_RECEIPT_KEYS)
-    && isBoundedInputValue(value, 0, new Set<object>(), budget)
     && isActionStatusReceipt(value);
 }
 
@@ -362,12 +351,13 @@ function collectorResultViolation(
   value: unknown,
   maxRecords: number = SUPPORT_BUNDLE_LIMITS.maxRecords,
   maxReceipts: number = SUPPORT_BUNDLE_LIMITS.maxReceipts,
+  budget: { remaining: number } = { remaining: MAX_COLLECTOR_RESULT_NODES },
 ): 'invalid' | 'overflow' | undefined {
   if (!isRecord(value)) return 'invalid';
   const entries = limitedEntries(value);
   if (!entries || entries.length === 0 || entries.length > ROOT_FIELDS.size
     || entries.some(([key]) => key.length > MAX_TEXT_SCAN_CHARS || !ROOT_FIELDS.has(key))) return 'invalid';
-  const budget = { remaining: MAX_COLLECTOR_RESULT_NODES };
+  if (!isBoundedInputValue(value, 0, new Set<object>(), budget)) return 'invalid';
   if (value.status !== undefined
     && value.status !== 'complete'
     && value.status !== 'partial'
@@ -375,12 +365,6 @@ function collectorResultViolation(
     && value.status !== 'recovery_required') return 'invalid';
   if (value.generatedAt !== undefined && safeCanonicalTimestamp(value.generatedAt) === undefined) return 'invalid';
   if (value.ownerEpoch !== undefined && finiteNonNegativeInteger(value.ownerEpoch) === undefined) return 'invalid';
-  for (const key of COLLECTOR_STATE_FIELDS) {
-    if (value[key] !== undefined && (!isRecord(value[key])
-      || !isBoundedInputValue(value[key], 0, new Set<object>(), budget))) return 'invalid';
-  }
-  if (value.project !== undefined && (!isRecord(value.project)
-    || !isBoundedInputValue(value.project, 0, new Set<object>(), budget))) return 'invalid';
   for (const key of COLLECTOR_ARRAY_FIELDS) {
     if (value[key] !== undefined && !Array.isArray(value[key])) return 'invalid';
   }
@@ -388,8 +372,8 @@ function collectorResultViolation(
   if (Array.isArray(value.receipts) && value.receipts.length > maxReceipts) return 'overflow';
   if (Array.isArray(value.errors) && value.errors.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) return 'overflow';
   if (Array.isArray(value.terminalTail) && value.terminalTail.length > SUPPORT_BUNDLE_LIMITS.maxTerminalLines) return 'overflow';
-  if (Array.isArray(value.records) && !value.records.every((item) => isCollectorRecordShape(item, budget))) return 'invalid';
-  if (Array.isArray(value.receipts) && !value.receipts.every((item) => isCollectorReceiptShape(item, budget))) return 'invalid';
+  if (Array.isArray(value.records) && !value.records.every((item) => isCollectorRecordShape(item))) return 'invalid';
+  if (Array.isArray(value.receipts) && !value.receipts.every((item) => isCollectorReceiptShape(item))) return 'invalid';
   if (Array.isArray(value.errors) && !value.errors.every((item) => isCollectorErrorShape(item))) return 'invalid';
   if (Array.isArray(value.terminalTail)
     && !value.terminalTail.every((item) => typeof item === 'string' && item.length <= MAX_TEXT_SCAN_CHARS)) return 'invalid';
@@ -669,10 +653,13 @@ function safeMap(value: unknown, audit: MutableAudit, homeDirectory?: string): R
 function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvenance {
   const input = isRecord(value) ? value : {};
   const get = (key: string, fallback: string): string => safeCategory(input[key], audit, key) ?? fallback;
+  const sourceSha = typeof input.sourceSha === 'string' && input.sourceSha.length <= MAX_TEXT_SCAN_CHARS
+    ? input.sourceSha
+    : undefined;
   return {
     application: get('application', 'psyche-build'),
     releaseVersion: get('releaseVersion', 'unknown'),
-    sourceSha: /^[0-9a-f]{7,64}$/i.test(String(input.sourceSha ?? '')) ? String(input.sourceSha) : 'unknown',
+    sourceSha: sourceSha && /^[0-9a-f]{7,64}$/i.test(sourceSha) ? sourceSha : 'unknown',
     platform: get('platform', 'unknown'),
     architecture: get('architecture', 'unknown'),
   };
@@ -680,11 +667,17 @@ function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvena
 
 function sanitizeProject(value: unknown, audit: MutableAudit, homeDirectory?: string): SupportProjectIdentity | undefined {
   if (!isRecord(value)) return undefined;
-  const identity = value.id ?? value.identity ?? value.name ?? value.relativePath;
-  if (identity === undefined) return undefined;
-  const idDigest = typeof value.idDigest === 'string' && /^[0-9a-f]{64}$/i.test(value.idDigest)
+  const suppliedDigest = typeof value.idDigest === 'string' && /^[0-9a-f]{64}$/i.test(value.idDigest)
     ? value.idDigest.toLowerCase()
-    : createHash('sha256').update(String(identity), 'utf8').digest('hex');
+    : undefined;
+  const identity = value.id ?? value.identity ?? value.name ?? value.relativePath;
+  const identityText = typeof identity === 'string' && identity.length <= MAX_TEXT_SCAN_CHARS ? identity : undefined;
+  if (!suppliedDigest && identity !== undefined && identityText === undefined) {
+    omit(audit, 'project-identity-too-large');
+    return undefined;
+  }
+  if (!suppliedDigest && identityText === undefined) return undefined;
+  const idDigest = suppliedDigest ?? createHash('sha256').update(identityText!, 'utf8').digest('hex');
   const name = safeCategory(value.name, audit, 'name');
   const relativePath = safeRelativePath(value.relativePath, audit);
   return {
@@ -774,6 +767,12 @@ function receiptResource(value: ActionStatusReceipt): SupportReceipt['resource']
   };
 }
 
+function hasBoundedReceiptIdentity(value: ActionStatusReceipt): boolean {
+  const resource = value.resource;
+  return !('id' in resource)
+    || (typeof resource.id === 'string' && resource.id.length <= MAX_TEXT_SCAN_CHARS);
+}
+
 function isSupportReceiptProjection(value: unknown): value is SupportReceipt {
   if (!isRecord(value) || !hasOnlyKeys(value, SUPPORT_RECEIPT_KEYS)
     || value.sourceSchema !== 'psyche.control.receipt/v1'
@@ -854,6 +853,10 @@ function sanitizeReceipt(
   }
   if (!isActionStatusReceipt(value)) {
     if (value !== undefined) note(audit, 'non-authoritative-receipt');
+    return undefined;
+  }
+  if (!hasBoundedReceiptIdentity(value)) {
+    note(audit, 'receipt-identity-too-large');
     return undefined;
   }
   const actionId = safeCategory(value.actionId, audit, 'actionId');
@@ -1420,6 +1423,7 @@ export async function collectSupportBundle(
   const receiptIds = new Set<string>();
   let aggregateOverflow = false;
   let duplicateReceiptActionId = false;
+  const preflightBudget = { remaining: MAX_COLLECTOR_RESULT_NODES };
   const appendError = (error: SupportCollectionError): void => {
     if (errors.length < SUPPORT_BUNDLE_LIMITS.maxErrorChain) {
       errors.push(error);
@@ -1455,7 +1459,7 @@ export async function collectSupportBundle(
       try {
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
         const result = await Promise.race([collector.collect(controller.signal), deadline]);
-        const violation = collectorResultViolation(result, maxRecords, maxReceipts);
+        const violation = collectorResultViolation(result, maxRecords, maxReceipts, preflightBudget);
         if (violation !== undefined) {
           collected.push({
             index,
@@ -1541,6 +1545,16 @@ export async function collectSupportBundle(
           records.push(record as SupportRecord);
         }
       } else if (key === 'receipts' && Array.isArray(value)) {
+        if (claimedCollectorFields.has(key)) {
+          appendError({
+            collector: item.name,
+            code: 'collection_conflict',
+            at: new Date(options.now?.() ?? Date.now()).toISOString(),
+            recoveryRequired: true,
+          });
+          continue;
+        }
+        claimedCollectorFields.add(key);
         for (const receipt of value) {
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
           if (!isActionStatusReceipt(receipt)) {

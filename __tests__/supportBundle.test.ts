@@ -73,6 +73,7 @@ describe('support bundle v1', () => {
         upstreamUrl: 'https://internal.example.test/repo.git?token=secret',
         cwd: '/home/alice/private-project',
         safeState: 'ready',
+        diagnosticNote: 'sk_live_01234567890123456789',
       },
       terminalTail: [
         '\u001b[31mBearer very-secret-value\u001b[0m',
@@ -127,6 +128,7 @@ describe('support bundle v1', () => {
     expect(serialized).not.toContain('do not include this prompt');
     expect(serialized).not.toContain('source should never be here');
     expect(serialized).not.toContain('internal.example.test');
+    expect(serialized).not.toContain('sk_live_01234567890123456789');
     expect(serialized).not.toContain('/home/alice/private-project');
     expect(bundle.lifecycle).toMatchObject({ safeState: 'ready' });
     expect(bundle.records[0]?.attributes).toMatchObject({ relativePath: 'src/index.ts', safe: true });
@@ -265,7 +267,7 @@ describe('support bundle v1', () => {
     ]));
   });
 
-  it('merges authoritative receipts from every collector deterministically', async () => {
+  it('requires unique authoritative receipt ownership across collectors', async () => {
     const receipt = (actionId: string) => ({
       schema: 'psyche.control.receipt/v1' as const,
       actionId,
@@ -278,7 +280,46 @@ describe('support bundle v1', () => {
       { name: 'alpha', collect: async () => ({ receipts: [receipt('alpha')] }) },
     ]);
 
-    expect(bundle.receipts.map((item) => item.actionId)).toEqual(['alpha', 'zeta']);
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.receipts.map((item) => item.actionId)).toEqual(['alpha']);
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collector: 'zeta', code: 'collection_conflict', recoveryRequired: true }),
+    ]));
+  });
+
+  it('bounds scalar array members during collector preflight', async () => {
+    const result = {
+      lifecycle: { values: Array.from({ length: 1_024 }, () => 'ready') },
+      providers: { values: Array.from({ length: 1_024 }, () => 'available') },
+      persistence: { values: Array.from({ length: 1_024 }, () => 'healthy') },
+      updater: { values: Array.from({ length: 1_024 }, () => 'current') },
+      graphics: { values: Array.from({ length: 1_024 }, () => 'accelerated') },
+    };
+    const bundle = await collectSupportBundle([
+      { name: 'scalar-array-graph', collect: async () => result },
+      { name: 'second-scalar-array-graph', collect: async () => result },
+      { name: 'third-scalar-array-graph', collect: async () => result },
+      { name: 'fourth-scalar-array-graph', collect: async () => result },
+    ]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
+  it('does not hash unbounded project identities or receipt resource IDs', () => {
+    const project = buildSupportBundle({ project: { id: 'x'.repeat(16_385) } });
+    expect(project.project).toBeUndefined();
+
+    const receipt = buildSupportBundle({ receipts: [{
+      schema: 'psyche.control.receipt/v1',
+      actionId: 'large-resource-id',
+      state: 'queued',
+      resource: { kind: 'project', id: 'x'.repeat(16_385) },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }] as never });
+    expect(receipt.receipts).toHaveLength(0);
   });
 
   it('rejects malformed, projected, and overflowing collector output', async () => {
@@ -353,8 +394,10 @@ describe('support bundle v1', () => {
     ]));
 
     const collected = await collectSupportBundle([
-      { name: 'alpha', collect: async () => ({ receipts: [receipt] }) },
-      { name: 'beta', collect: async () => ({ receipts: [{ ...receipt, state: 'failed' as const }] }) },
+      {
+        name: 'alpha',
+        collect: async () => ({ receipts: [receipt, { ...receipt, state: 'failed' as const }] }),
+      },
     ]);
     expect(collected.status).toBe('recovery_required');
     expect(collected.errors).toEqual(expect.arrayContaining([

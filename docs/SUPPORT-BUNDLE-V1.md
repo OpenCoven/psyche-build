@@ -41,7 +41,8 @@ The v1 implementation enforces the following defaults before serialization:
 
 | Surface | Bound |
 | --- | ---: |
-| Collection elapsed time | 30 seconds |
+| Async collection and normalization deadline | 30 seconds |
+| Collector preflight graph | 16,384 values across the collection |
 | Diagnostic records | 256 |
 | One record | 4 KiB |
 | Complete payload | 64 KiB |
@@ -64,7 +65,7 @@ collector is represented as complete success.
 
 There are two safety boundaries: input normalization and final deterministic
 serialization. Secret-shaped keys, authorization values, bearer/basic tokens,
-API-token formats, PEM material, sensitive assignments, infrastructure URLs,
+known API-token formats, PEM material, sensitive assignments, infrastructure URLs,
 and absolute paths are redacted or omitted. Prompts, unrestricted terminal or
 repository content, diffs, environment maps, and source contents are omitted.
 Only explicitly bounded terminal tails, project-relative paths, enum-like
@@ -83,9 +84,10 @@ repositories, terminals, and secrets.
 ## Collection and later surfaces
 
 `collectSupportBundle` accepts named collectors and an `AbortSignal`. It runs
-collectors with a shared elapsed-time budget and converts failures into bounded
-collection errors. A future CLI or UI may request a fresh snapshot, display the
-redacted preview, and offer copy/clear actions, but it must not silently upload
+collectors with a shared elapsed-time budget, preflights their complete bounded
+input graph, and converts failures into bounded collection errors. A future CLI
+or UI may request a fresh snapshot, display the redacted preview, and offer
+copy/clear actions, but it must not silently upload
 or execute anything. The later surface must preserve cancellation, timeout,
 partial-failure, and `recovery_required` semantics and must show the exact
 payload before copying. Empty or malformed collector results, conflicting
