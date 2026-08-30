@@ -866,7 +866,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(committed?.serverID, "new-host", "the commit succeeded, so authority moved")
         XCTAssertEqual(
             recorder.calls,
-            ["commit:new-host", "validate:7", "apply:7"],
+            ["commit:old-host", "validate:5", "apply:5", "commit:new-host", "validate:7", "apply:7"],
             "the apply ran but its failure must not leave a success-shaped workspace"
         )
     }
@@ -1158,7 +1158,9 @@ final class HostReadinessMachineTests: XCTestCase {
         let degradedState = await machine.state
         XCTAssertEqual(degradedState, .degraded)
 
-        // Recovery runs the same spine against the committed authority.
+        // Recovery runs the same spine against the committed authority, with
+        // the workspace boundary healthy again.
+        recorder.setApplyFailure(nil)
         let retry = try await machine.beginReconnection()
         _ = try await machine.markAuthenticated(for: retry)
         try await machine.commitHostIdentity(
