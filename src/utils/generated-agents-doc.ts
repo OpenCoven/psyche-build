@@ -426,5 +426,5 @@ When creating a new hook:
 ---
 
 *This documentation was auto-generated from psyche source code.*
-*Version: 0.0.1*
+*Version: 0.0.2*
 `;

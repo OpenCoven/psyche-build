@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.0.2] - 2026-08-28
+
 ### Changed
 
 - The Coven launcher now opens the bare Coven CLI (`coven`) across the TUI,
@@ -10,11 +12,29 @@
 - The native Coven theme now uses graphite surfaces with restrained violet
   focus accents, and performance diagnostics consistently show a dropped-frame
   value when frame timing is available.
+- Repository planning now publishes from the canonical Beads store through a
+  bounded managed-Project synchronizer with repeatable offline drift checks.
+- Contributor, security, support, agent-operation, and Psyche compatibility
+  contracts are now explicit and covered by repository checks.
 
 ### Fixed
 
 - Files-pane toolbar controls no longer transfer focus to the pane canvas
   before their button action runs.
+- Native Git history inspection now isolates repository, global, and system Git
+  configuration so a project cannot redirect the read-only log operation.
+- Restored Coven panes discard legacy code-mode session IDs and names before
+  relaunching the bare CLI.
+
+### TestFlight: What to Test
+
+- Open a project and launch Coven CLI from the agent picker. Confirm it starts
+  with the bare `coven` command and does not attempt to resume a generated
+  session ID.
+- Use the Files pane toolbar and confirm each control runs without moving focus
+  into the pane canvas first.
+- Inspect Git history in ordinary and bare repositories and confirm the log
+  remains bounded to the selected repository.
 
 ## [0.0.1] - 2026-08-23
 

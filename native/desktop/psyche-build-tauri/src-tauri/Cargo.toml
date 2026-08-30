@@ -1,6 +1,6 @@
 [package]
 name = "psyche-build-tauri"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 # tauri-plugin-macos-fps, which removes WKWebView's 60 Hz cap for direct
 # macOS distribution, requires Rust 1.85. CI and release builds remain pinned
