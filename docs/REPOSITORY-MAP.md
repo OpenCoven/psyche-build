@@ -45,6 +45,7 @@ The TypeScript tree is intentionally split by responsibility rather than by one 
 - `hooks/` — hook behavior and generated hook documentation inputs;
 - `mcp/` — MCP-facing integration code;
 - `orchestration/` — current product-local orchestration/composition; do not promote its local identifiers to canonical Psyche identity;
+- `protocol/` — inert design-stage contract types for the future Psyche convergence (issue #201); design record under `docs/superpowers/specs/`; product code must not import them (boundary-tested);
 - `services/` — service/integration implementation, including security-sensitive bridge surfaces;
 - `utils/` and other support modules — shared product utilities and generated outputs where documented.
 
