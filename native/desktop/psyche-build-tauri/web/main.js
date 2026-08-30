@@ -13865,10 +13865,10 @@
   function agentLaunchOptions() {
     return [
       { id: "coven-code", label: "Coven CLI", command: "coven", args: [], kind: "coven-code" },
-      { id: "copilot", label: "Copilot CLI", command: "copilot", args: [], kind: "agent-copilot" },
-      { id: "codex", label: "Codex CLI", command: "codex", args: [], kind: "agent-codex" },
-      { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
-      { id: "grok-build", label: "Grok Build", command: "grok", args: [], kind: "agent-grok-build" },
+      { id: "copilot", label: "Copilot CLI", command: "coven", args: ["run", "copilot"], kind: "agent-copilot" },
+      { id: "codex", label: "Codex CLI", command: "coven", args: ["run", "codex"], kind: "agent-codex" },
+      { id: "anthropic", label: "Anthropic CLI", command: "coven", args: ["run", "claude"], kind: "agent-anthropic" },
+      { id: "grok-build", label: "Grok Build", command: "coven", args: ["run", "grok"], kind: "agent-grok-build" },
     ];
   }
 
@@ -13898,7 +13898,7 @@
       option.innerHTML =
         '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
         '<span class="agent-picker-option-command">' +
-          escapeHtml(entry.command || "") +
+          escapeHtml([entry.command].concat(entry.args || []).join(" ")) +
         "</span>";
       option.addEventListener("pointermove", function () {
         if (agentPickerIndex === index) return;
@@ -13948,14 +13948,38 @@
     }
   }
 
-  function launchSelectedAgent() {
+  async function launchSelectedAgent() {
     var entry = agentLaunchOptions()[agentPickerIndex];
     if (!entry) return null;
+    var project = activeProject();
+    var prompt = entry.id === "coven-code"
+      ? ""
+      : String(commandInput && commandInput.value || "").trim();
     closeAgentPicker();
-    return spawnAgentThread(entry.id);
+    var thread = await spawnAgentThread(entry.id, project, prompt);
+    if (!thread) {
+      if (
+        entry.id !== "coven-code" &&
+        commandInput &&
+        typeof commandInput.focus === "function"
+      ) {
+        commandInput.focus();
+      }
+      return null;
+    }
+    if (
+      entry.id !== "coven-code" &&
+      commandInput &&
+      commandInput.value.trim() === prompt
+    ) {
+      commandInput.value = "";
+      hidePalette();
+      syncComposerChrome();
+    }
+    return thread;
   }
 
-  async function spawnAgentThread(agentId, project) {
+  async function spawnAgentThread(agentId, project, prompt) {
     project = project || activeProject();
     if (!project || !project.root) {
       setStatus("Open a project before starting an agent", "warn");
@@ -13973,22 +13997,28 @@
       setStatus("Unknown agent: " + agentId, "error");
       return null;
     }
-    var command = entry.command;
+    if (!state.env || !state.env.coven_path) {
+      setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+      return null;
+    }
     if (entry.id === "coven-code") {
-      if (!state.env || !state.env.coven_path) {
-        setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
-        return null;
-      }
       return ensureProjectCoven(project);
     }
+    var userPrompt = String(prompt || "").trim();
+    if (!userPrompt) {
+      setStatus("Enter a prompt before starting an agent", "warn");
+      return null;
+    }
     if (!(await showTerminalView())) return null;
+    var args = entry.args.slice();
+    args.push("--", userPrompt);
     return createThread({
       project: project,
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: command,
-      args: entry.args.slice(),
+      command: state.env.coven_path,
+      args: args,
       launchKind: null,
       projectRoot: project.root,
       cwd: worktree.path,

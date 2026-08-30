@@ -86,31 +86,28 @@ describe('Tauri agent picker', () => {
 
     expect(agentLaunchOptions()).toEqual([
       { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code' },
-      { id: 'copilot', label: 'Copilot CLI', command: 'copilot', args: [], kind: 'agent-copilot' },
-      { id: 'codex', label: 'Codex CLI', command: 'codex', args: [], kind: 'agent-codex' },
-      { id: 'anthropic', label: 'Anthropic CLI', command: 'claude', args: [], kind: 'agent-anthropic' },
-      { id: 'grok-build', label: 'Grok Build', command: 'grok', args: [], kind: 'agent-grok-build' },
+      { id: 'copilot', label: 'Copilot CLI', command: 'coven', args: ['run', 'copilot'], kind: 'agent-copilot' },
+      { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex' },
+      { id: 'anthropic', label: 'Anthropic CLI', command: 'coven', args: ['run', 'claude'], kind: 'agent-anthropic' },
+      { id: 'grok-build', label: 'Grok Build', command: 'coven', args: ['run', 'grok'], kind: 'agent-grok-build' },
     ]);
   });
 
-  it('launches an agent in the selected worktree', async () => {
+  it('launches an agent through Coven with the user prompt', async () => {
     const createCalls: Array<Record<string, unknown>> = [];
-    const registryArgs = ['--fixture-arg'];
+    const registryArgs = ['run', 'codex'];
     const project: PickerProject = { id: 'project', root: '/repo' };
-    let commandReads = 0;
     const entry = {
       id: 'codex',
       label: 'Codex CLI',
-      get command() {
-        commandReads += 1;
-        return commandReads === 1 ? 'codex-normalized' : 'codex-diverged';
-      },
+      command: 'coven',
       args: registryArgs,
       kind: 'agent-codex',
     };
     const spawnAgentThread = compileFunction<(
       agentId: string,
       project?: PickerProject,
+      prompt?: string,
     ) => Promise<Record<string, unknown> | null>>(
       functionSource('spawnAgentThread'),
       {
@@ -127,7 +124,7 @@ describe('Tauri agent picker', () => {
       },
     );
 
-    const result = await spawnAgentThread('codex');
+    const result = await spawnAgentThread('codex', project, 'Fix the failing tests');
 
     expect(createCalls).toHaveLength(1);
     const created = createCalls[0]!;
@@ -135,16 +132,48 @@ describe('Tauri agent picker', () => {
     expect(created).toMatchObject({
       name: 'Codex CLI',
       kind: 'agent-codex',
-      command: 'codex-normalized',
-      args: ['--fixture-arg'],
+      command: '/opt/homebrew/bin/coven',
+      args: ['run', 'codex', '--', 'Fix the failing tests'],
       launchKind: null,
       projectRoot: '/repo',
       cwd: '/repo/worktree',
       worktreePath: '/repo/worktree',
     });
-    expect(created.args).toEqual(registryArgs);
     expect(created.args).not.toBe(registryArgs);
-    expect(commandReads).toBe(1);
+  });
+
+  it('requires a prompt before launching a Coven harness', async () => {
+    const createCalls: Array<Record<string, unknown>> = [];
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        createThread: (options: Record<string, unknown>) => {
+          createCalls.push(options);
+          return options;
+        },
+      },
+    );
+
+    await expect(spawnAgentThread('codex', project, '   ')).resolves.toBeNull();
+    expect(createCalls).toEqual([]);
+    expect(status).toEqual([
+      'Enter a prompt before starting an agent',
+      'warn',
+    ]);
   });
 
   it('delegates Coven CLI launches to ensureProjectCoven(project)', async () => {
@@ -209,6 +238,9 @@ describe('Tauri agent picker', () => {
 
   it('renders an accessible picker shell', () => {
     expect(indexHtml).toMatch(/id="agent-picker-overlay" hidden/);
+    expect(indexHtml).toContain(
+      '<span class="agent-picker-hint">composer prompt required · enter to launch · esc to close</span>',
+    );
     expect(indexHtml).toMatch(
       /id="agent-picker"[\s\S]*role="dialog"[\s\S]*aria-modal="true"[\s\S]*aria-labelledby="agent-picker-title"/,
     );
@@ -222,7 +254,7 @@ describe('Tauri agent picker', () => {
   it('uses the planned picker command class and visual contract', () => {
     expect(mainJs).toContain('<span class="agent-picker-option-command">');
     expect(mainJs).toContain(
-      'escapeHtml(entry.command || "")',
+      'escapeHtml([entry.command].concat(entry.args || []).join(" "))',
     );
     expect(mainJs).not.toContain('agent-picker-command');
     expect(stylesCss).not.toContain('.agent-picker-command');
@@ -1171,10 +1203,17 @@ describe('Tauri agent picker', () => {
     });
   });
 
-  it('launches the selected agent from the picker', () => {
-    let spawnedAgentId: string | null = null;
+  it('launches the selected agent with the composer prompt', async () => {
+    let spawned: [string, unknown, string] | null = null;
     let closed = false;
-    const controller = compileFunctionWithState<() => string | null>(
+    let synced = 0;
+    let hidden = 0;
+    let focused = 0;
+    const commandInput = {
+      value: 'Fix the failing tests',
+      focus: () => { focused += 1; },
+    };
+    const controller = compileFunctionWithState<() => Promise<string | null>>(
       functionSource('launchSelectedAgent'),
       {
         agentLaunchOptions: () => [
@@ -1182,17 +1221,56 @@ describe('Tauri agent picker', () => {
           { id: 'codex' },
         ],
         closeAgentPicker: () => { closed = true; },
-        spawnAgentThread: (agentId: string) => {
-          spawnedAgentId = agentId;
+        spawnAgentThread: async (agentId: string, project: unknown, prompt: string) => {
+          spawned = [agentId, project, prompt];
           return agentId;
         },
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        commandInput,
+        hidePalette: () => { hidden += 1; },
+        syncComposerChrome: () => { synced += 1; },
       },
       { agentPickerIndex: 1 },
     );
 
-    expect(controller.fn()).toBe('codex');
+    await expect(controller.fn()).resolves.toBe('codex');
     expect(closed).toBe(true);
-    expect(spawnedAgentId).toBe('codex');
+    expect(spawned).toEqual([
+      'codex',
+      { id: 'project', root: '/repo' },
+      'Fix the failing tests',
+    ]);
+    expect(commandInput.value).toBe('');
+    expect(hidden).toBe(1);
+    expect(synced).toBe(1);
+    expect(focused).toBe(0);
+  });
+
+  it('keeps composer focus unchanged when a standalone Coven launch returns no thread', async () => {
+    let focused = 0;
+    const commandInput = {
+      value: 'Keep this draft',
+      focus: () => { focused += 1; },
+    };
+    const controller = compileFunctionWithState<() => Promise<null>>(
+      functionSource('launchSelectedAgent'),
+      {
+        agentLaunchOptions: () => [
+          { id: 'coven-code' },
+        ],
+        closeAgentPicker: () => undefined,
+        spawnAgentThread: async () => null,
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        commandInput,
+        hidePalette: () => undefined,
+        syncComposerChrome: () => undefined,
+      },
+      { agentPickerIndex: 0 },
+    );
+
+    await expect(controller.fn()).resolves.toBeNull();
+    expect(commandInput.value).toBe('Keep this draft');
+    expect(focused).toBe(0);
   });
 
   it('does not persist an agent preference and always reselects Coven CLI', () => {
