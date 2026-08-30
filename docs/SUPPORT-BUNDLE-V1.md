@@ -25,6 +25,11 @@ states `queued` and `approval_required` map to `pending`, `running` maps to
 The projection keeps only bounded authority metadata and a resource digest; it
 never copies receipt messages or values.
 
+`requested`, `accepted`, and `recovery_required` remain part of the broader
+diagnostic action vocabulary for journal/collection state; they are not
+invented as receipt projections when the authoritative control receipt has no
+such source state.
+
 Serialization re-normalizes the input at the export boundary, sorts object keys
 and deterministic record/receipt collections, and re-applies the payload cap.
 `supportBundleDigest` hashes that stable UTF-8 representation, so two bundles
@@ -79,7 +84,9 @@ collection errors. A future CLI or UI may request a fresh snapshot, display the
 redacted preview, and offer copy/clear actions, but it must not silently upload
 or execute anything. The later surface must preserve cancellation, timeout,
 partial-failure, and `recovery_required` semantics and must show the exact
-payload before copying.
+payload before copying. Empty or malformed collector results, conflicting
+singleton sections, collector-count overflow, and normalization overruns are
+reported as `recovery_required` rather than being treated as complete data.
 
 The reusable recovery harness in #239 is intentionally separate. Once #239 has
 operator-observed cases, those cases may be mapped to fixture-only collector

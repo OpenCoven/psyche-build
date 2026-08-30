@@ -176,6 +176,7 @@ interface MutableAudit {
   omittedFields: number;
   fieldsTruncated: number;
   terminalLinesOmitted: number;
+  attributeNodesVisited: number;
   categories: Map<string, number>;
 }
 
@@ -212,25 +213,47 @@ const COLLECTOR_STATE_FIELDS = [
 ] as const;
 const COLLECTOR_ARRAY_FIELDS = ['terminalTail', 'records', 'receipts', 'errors'] as const;
 
-const SENSITIVE_KEY = /(?:^|[_-])(token|secret|password|credential|authorization|cookie|private(?:[_-]?key)?|api(?:[_-]?key)?|access(?:[_-]?token)?)(?:$|[_-])/i;
+const SENSITIVE_KEY = /(?:^|[_-]|(?<=[a-z]))(?:token|secret|password|credential|authorization|cookie|private(?:[_-]?key)?|api(?:[_-]?key)?|access(?:[_-]?token)?)(?=$|[_-]|[A-Z])/i;
 const CONTENT_KEY = /(?:prompt|transcript|terminal(?:[_-]?output)?|repository(?:[_-]?contents?)?|diff|environment|env(?:ironment)?|source(?:[_-]?contents?)?)/i;
 const URL_KEY = /(?:url|uri|endpoint|remote|host)/i;
 const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
-const ABSOLUTE_PATH_FRAGMENT = /(?:\/(?:[A-Za-z0-9._~-]+\/)+[^\s"'`]+|[A-Za-z]:[\\/][^\s"'`]+|\\\\[^\s"'`]+)/g;
+const ABSOLUTE_PATH_FRAGMENT = /(?<![A-Za-z0-9])(?:\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*|[A-Za-z]:[\\/][^\s"'`]+|\\\\[^\s"'`]+)/g;
 const ANSI = /(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001bP[\s\S]*?\u001b\\|\u001b\[[0-?]*[ -/]*[@-~]|\u001b[()][0-2A-Za-z]|\u001b[=>])/g;
 const BEARER = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const PEM = /-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/gi;
 const API_TOKEN = /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/g;
 const SENSITIVE_ASSIGNMENT = /\b(?:[A-Z_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|PRIVATE_KEY))\s*=\s*[^\s]+/gi;
-const SENSITIVE_LABELED_VALUE = /["']?(?:token|secret|password|credential|api[_-]?key|private[_-]?key|access[_-]?token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi;
+const CLOUD_CREDENTIAL_ASSIGNMENT = /\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*[^\s]+/gi;
+const AUTHORIZATION_LABELED_VALUE = /["']?authorization(?:[_-]?header)?["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+(?:\s+[^\s,;}]+)?)/gi;
+const SENSITIVE_LABELED_VALUE = /["']?(?:token|secret|password|credential|authorization(?:[_-]?header)?|cookie|api[_-]?key|private[_-]?key|access[_-]?token)(?:[A-Z][A-Za-z0-9_-]*)?["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi;
+const SENSITIVE_PHRASE = /\b(?:token|secret|password|credential|cookie|authorization(?:header)?)\b\s+(?:is\s+|value\s+|)\S+/gi;
 const SAFE_ATTRIBUTE_KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const SAFE_CATEGORY_VALUE = /^[a-z0-9][a-z0-9._-]{0,95}$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const INFRASTRUCTURE_URL = /\b(?:https?|ssh|git|ftp):\/\/[^\s"'`]+/gi;
 const MAX_ATTRIBUTE_SCAN_KEYS = 1_024;
+const MAX_SUPPORT_COLLECTORS = 64;
+const MAX_ATTRIBUTE_NODES = 4_096;
+const MAX_TEXT_SCAN_CHARS = 16_384;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCollectorRecordShape(value: unknown): boolean {
+  if (!isRecord(value)
+    || finiteNonNegativeInteger(value.sequence) === undefined
+    || safeCanonicalTimestamp(value.at) === undefined
+    || typeof value.component !== 'string'
+    || value.component.length === 0
+    || typeof value.event !== 'string'
+    || value.event.length === 0
+    || (value.outcome !== undefined && typeof value.outcome !== 'string')
+    || (value.durationMs !== undefined
+      && (typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0))
+    || (value.attributes !== undefined && !isRecord(value.attributes))
+    || (value.truncated !== undefined && typeof value.truncated !== 'boolean')) return false;
+  return true;
 }
 
 function isCollectorResultShape(value: unknown): value is SupportBundleInput {
@@ -241,6 +264,7 @@ function isCollectorResultShape(value: unknown): value is SupportBundleInput {
     if (rootFieldCount >= MAX_ATTRIBUTE_SCAN_KEYS || !ROOT_FIELDS.has(key)) return false;
     rootFieldCount += 1;
   }
+  if (rootFieldCount === 0) return false;
   if (value.status !== undefined
     && value.status !== 'complete'
     && value.status !== 'partial'
@@ -254,7 +278,8 @@ function isCollectorResultShape(value: unknown): value is SupportBundleInput {
   for (const key of COLLECTOR_ARRAY_FIELDS) {
     if (value[key] !== undefined && !Array.isArray(value[key])) return false;
   }
-  if (Array.isArray(value.records) && value.records.slice(0, SUPPORT_BUNDLE_LIMITS.maxRecords).some((item) => !isRecord(item))) return false;
+  if (Array.isArray(value.records)
+    && value.records.slice(0, SUPPORT_BUNDLE_LIMITS.maxRecords).some((item) => !isCollectorRecordShape(item))) return false;
   if (Array.isArray(value.receipts) && value.receipts.slice(0, SUPPORT_BUNDLE_LIMITS.maxReceipts).some((item) => !isRecord(item))) return false;
   if (Array.isArray(value.errors) && value.errors.slice(0, SUPPORT_BUNDLE_LIMITS.maxErrorChain).some((item) => !isRecord(item))) return false;
   if (Array.isArray(value.terminalTail) && value.terminalTail.slice(0, SUPPORT_BUNDLE_LIMITS.maxTerminalLines).some((item) => typeof item !== 'string')) return false;
@@ -263,6 +288,36 @@ function isCollectorResultShape(value: unknown): value is SupportBundleInput {
 
 function finiteNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function seededAudit(input: SupportBundleInput): MutableAudit {
+  const audit: MutableAudit = {
+    redactedFields: 0,
+    omittedFields: 0,
+    fieldsTruncated: 0,
+    terminalLinesOmitted: 0,
+    attributeNodesVisited: 0,
+    categories: new Map(),
+  };
+  const manifest = isRecord(input.redaction) ? input.redaction : undefined;
+  if (manifest?.version !== 1) return audit;
+  const redactedFields = finiteNonNegativeInteger(manifest.redactedFields);
+  const omittedFields = finiteNonNegativeInteger(manifest.omittedFields);
+  if (redactedFields !== undefined) audit.redactedFields = redactedFields;
+  if (omittedFields !== undefined) audit.omittedFields = omittedFields;
+  if (!isRecord(manifest.categories)) return audit;
+  for (const [category, count] of Object.entries(manifest.categories).slice(0, SUPPORT_BUNDLE_LIMITS.maxAttributeKeys)) {
+    if (!SAFE_CATEGORY_VALUE.test(category)) continue;
+    const safeCount = finiteNonNegativeInteger(count);
+    if (safeCount !== undefined) audit.categories.set(category, safeCount);
+  }
+  return audit;
+}
+
+function safeLeaseRevision(value: unknown, audit: MutableAudit): number | undefined {
+  if (value === undefined) return undefined;
+  const revision = finiteNonNegativeInteger(value);
+  return revision === undefined ? omit(audit, 'invalid-lease-revision') : revision;
 }
 
 function optionLimit(value: number | undefined, ceiling: number): number {
@@ -283,7 +338,8 @@ function suppliedCount(value: unknown): number {
 
 function boundedText(value: unknown, audit: MutableAudit, key = ''): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const scrubbed = scrubText(value, audit, key);
+  const scanInput = value.length > MAX_TEXT_SCAN_CHARS ? value.slice(0, MAX_TEXT_SCAN_CHARS) : value;
+  const scrubbed = scrubText(scanInput, audit, key);
   const bytes = Buffer.byteLength(scrubbed, 'utf8');
   if (bytes <= SUPPORT_BUNDLE_LIMITS.maxStringBytes) return scrubbed;
   audit.fieldsTruncated += 1;
@@ -326,7 +382,10 @@ function scrubText(value: string, audit: MutableAudit, key: string): string {
     [BEARER, 'authorization'],
     [API_TOKEN, 'token'],
     [SENSITIVE_ASSIGNMENT, 'secret-assignment'],
+    [CLOUD_CREDENTIAL_ASSIGNMENT, 'secret-assignment'],
+    [AUTHORIZATION_LABELED_VALUE, 'authorization'],
     [SENSITIVE_LABELED_VALUE, 'secret-labeled-value'],
+    [SENSITIVE_PHRASE, 'secret-phrase'],
     [INFRASTRUCTURE_URL, 'infrastructure-url'],
   ] as const) {
     const next = result.replace(pattern, '[redacted]');
@@ -404,6 +463,8 @@ function safeUnknown(
   homeDirectory: string | undefined,
 ): unknown {
   if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth) return omit(audit, 'attribute-depth');
+  if (audit.attributeNodesVisited >= MAX_ATTRIBUTE_NODES) return omit(audit, 'attribute-node-limit');
+  audit.attributeNodesVisited += 1;
   if (SENSITIVE_KEY.test(key)) return redact(value, audit, 'secret-field');
   if (CONTENT_KEY.test(key)) return omit(audit, 'content-field');
   if (value === null || typeof value === 'boolean') return value;
@@ -595,9 +656,18 @@ function receiptResource(value: ActionStatusReceipt): SupportReceipt['resource']
 
 function isSupportReceiptProjection(value: unknown): value is SupportReceipt {
   if (!isRecord(value) || value.sourceSchema !== 'psyche.control.receipt/v1'
-    || typeof value.actionId !== 'string' || !isActionReceiptState(value.sourceState)
+    || typeof value.actionId !== 'string' || byteLength(value.actionId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes
+    || !isActionReceiptState(value.sourceState)
     || !(SUPPORT_ACTION_STATES as readonly unknown[]).includes(value.state)
-    || typeof value.createdAt !== 'string' || !isRecord(value.resource)) return false;
+    || safeCanonicalTimestamp(value.createdAt) === undefined || !isRecord(value.resource)
+    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.leaseRevision !== undefined && finiteNonNegativeInteger(value.leaseRevision) === undefined)
+    || (value.completedAt !== undefined && safeCanonicalTimestamp(value.completedAt) === undefined)
+    || (value.code !== undefined && (typeof value.code !== 'string' || byteLength(value.code) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.durationMs !== undefined
+      && (typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0))) return false;
   const resource = value.resource;
   return (resource.kind === 'project' || resource.kind === 'pane' || resource.kind === 'browser_tab')
     && typeof resource.idDigest === 'string'
@@ -617,6 +687,7 @@ function sanitizeProjectedReceipt(value: SupportReceipt, audit: MutableAudit): S
   const taskId = value.taskId === undefined ? undefined : safeCategory(value.taskId, audit, 'taskId');
   const actorId = value.actorId === undefined ? undefined : safeCategory(value.actorId, audit, 'actorId');
   const leaseId = value.leaseId === undefined ? undefined : safeCategory(value.leaseId, audit, 'leaseId');
+  const leaseRevision = safeLeaseRevision(value.leaseRevision, audit);
   const completedAt = value.completedAt === undefined ? undefined : safeTimestamp(value.completedAt, audit, 'completedAt');
   const code = value.code === undefined ? undefined : safeCategory(value.code, audit, 'code');
   const durationMs = typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) && value.durationMs >= 0
@@ -636,7 +707,7 @@ function sanitizeProjectedReceipt(value: SupportReceipt, audit: MutableAudit): S
     ...(taskId ? { taskId } : {}),
     ...(actorId ? { actorId } : {}),
     ...(leaseId ? { leaseId } : {}),
-    ...(value.leaseRevision !== undefined ? { leaseRevision: value.leaseRevision } : {}),
+    ...(leaseRevision !== undefined ? { leaseRevision } : {}),
     ...(completedAt ? { completedAt } : {}),
     ...(code ? { code } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -652,8 +723,12 @@ function sanitizeReceipt(value: unknown, audit: MutableAudit): SupportReceipt | 
   const actionId = safeCategory(value.actionId, audit, 'actionId');
   const createdAt = safeTimestamp(value.createdAt, audit, 'createdAt');
   if (!actionId || !createdAt) return undefined;
+  const taskId = value.taskId === undefined ? undefined : safeCategory(value.taskId, audit, 'taskId');
+  const actorId = value.actorId === undefined ? undefined : safeCategory(value.actorId, audit, 'actorId');
+  const leaseId = value.leaseId === undefined ? undefined : safeCategory(value.leaseId, audit, 'leaseId');
   const completedAt = safeTimestamp(value.completedAt, audit, 'completedAt');
   const code = safeCategory(value.code, audit, 'code');
+  const leaseRevision = safeLeaseRevision(value.leaseRevision, audit);
   const durationMs = typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) && value.durationMs >= 0
     ? Math.min(Math.floor(value.durationMs), 86_400_000)
     : undefined;
@@ -664,10 +739,10 @@ function sanitizeReceipt(value: unknown, audit: MutableAudit): SupportReceipt | 
     sourceState: value.state,
     resource: receiptResource(value),
     createdAt,
-    ...(value.taskId ? { taskId: safeCategory(value.taskId, audit, 'taskId') } : {}),
-    ...(value.actorId ? { actorId: safeCategory(value.actorId, audit, 'actorId') } : {}),
-    ...(value.leaseId ? { leaseId: safeCategory(value.leaseId, audit, 'leaseId') } : {}),
-    ...(value.leaseRevision !== undefined ? { leaseRevision: value.leaseRevision } : {}),
+    ...(taskId ? { taskId } : {}),
+    ...(actorId ? { actorId } : {}),
+    ...(leaseId ? { leaseId } : {}),
+    ...(leaseRevision !== undefined ? { leaseRevision } : {}),
     ...(completedAt ? { completedAt } : {}),
     ...(code ? { code } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -746,6 +821,70 @@ function serializeForSize(bundle: SupportBundle): string {
   return JSON.stringify(stableValue(bundle));
 }
 
+function isBoundedNormalizedValue(
+  value: unknown,
+  depth = 0,
+  seen = new Set<object>(),
+  budget = { remaining: MAX_ATTRIBUTE_NODES },
+): boolean {
+  if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth) return false;
+  if (value === null || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') return byteLength(value) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes;
+  if (typeof value !== 'object') return false;
+  if (budget.remaining <= 0) return false;
+  budget.remaining -= 1;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  let valid = true;
+  if (Array.isArray(value)) {
+    valid = value.length <= SUPPORT_BUNDLE_LIMITS.maxAttributeItems
+      && value.every((item) => isBoundedNormalizedValue(item, depth + 1, seen, budget));
+  } else {
+    const entries = Object.entries(value);
+    valid = entries.length <= SUPPORT_BUNDLE_LIMITS.maxAttributeKeys
+      && entries.every(([key, child]) => SAFE_ATTRIBUTE_KEY.test(key)
+        && isBoundedNormalizedValue(child, depth + 1, seen, budget));
+  }
+  seen.delete(value);
+  return valid;
+}
+
+function isNormalizedRecord(value: unknown): value is SupportRecord {
+  if (!isRecord(value)
+    || finiteNonNegativeInteger(value.sequence) === undefined
+    || safeCanonicalTimestamp(value.at) === undefined
+    || typeof value.component !== 'string'
+    || !SAFE_CATEGORY_VALUE.test(value.component)
+    || typeof value.event !== 'string'
+    || !SAFE_CATEGORY_VALUE.test(value.event)
+    || (value.outcome !== undefined
+      && (typeof value.outcome !== 'string' || !SAFE_CATEGORY_VALUE.test(value.outcome)))
+    || (value.durationMs !== undefined
+      && (typeof value.durationMs !== 'number' || !Number.isSafeInteger(value.durationMs) || value.durationMs < 0))
+    || (value.truncated !== undefined && typeof value.truncated !== 'boolean')
+    || (value.attributes !== undefined && !isBoundedNormalizedValue(value.attributes))) return false;
+  return Object.keys(value).every((key) => new Set([
+    'sequence', 'at', 'component', 'event', 'outcome', 'durationMs', 'attributes', 'truncated',
+  ]).has(key));
+}
+
+function isNormalizedError(value: unknown): value is SupportCollectionError {
+  if (!isRecord(value)
+    || (typeof value.collector !== 'string' || !SAFE_CATEGORY_VALUE.test(value.collector))
+    || (typeof value.code !== 'string' || !SAFE_CATEGORY_VALUE.test(value.code))
+    || (value.at !== 'unknown' && safeCanonicalTimestamp(value.at) === undefined)
+    || (value.recoveryRequired !== undefined && value.recoveryRequired !== true)) return false;
+  return Object.keys(value).every((key) => ['collector', 'code', 'at', 'recoveryRequired'].includes(key));
+}
+
+function isNormalizedCounterMap(value: unknown): boolean {
+  return isRecord(value)
+    && Object.entries(value).length <= SUPPORT_BUNDLE_LIMITS.maxAttributeKeys
+    && Object.entries(value).every(([key, count]) => SAFE_CATEGORY_VALUE.test(key)
+      && finiteNonNegativeInteger(count) !== undefined);
+}
+
 export function isSupportBundleV1(value: unknown): value is SupportBundle {
   if (!isRecord(value)
     || value.schema !== SUPPORT_BUNDLE_SCHEMA
@@ -764,6 +903,16 @@ export function isSupportBundleV1(value: unknown): value is SupportBundle {
     || !Array.isArray(value.errors)
     || !isRecord(value.redaction)
     || !isRecord(value.truncation)) return false;
+  if (value.terminalTail.length > SUPPORT_BUNDLE_LIMITS.maxTerminalLines
+    || value.terminalTail.some((line) => typeof line !== 'string'
+      || byteLength(line) > SUPPORT_BUNDLE_LIMITS.maxStringBytes)
+    || byteLength(JSON.stringify(value.terminalTail)) > SUPPORT_BUNDLE_LIMITS.maxTerminalBytes
+    || value.records.length > SUPPORT_BUNDLE_LIMITS.maxRecords
+    || value.receipts.length > SUPPORT_BUNDLE_LIMITS.maxReceipts
+    || value.errors.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain
+    || !value.records.every((record) => isNormalizedRecord(record))
+    || !value.receipts.every((receipt) => isSupportReceiptProjection(receipt))
+    || !value.errors.every((error) => isNormalizedError(error))) return false;
   const redaction = value.redaction;
   const truncation = value.truncation;
   const provenance = value.provenance;
@@ -771,16 +920,25 @@ export function isSupportBundleV1(value: unknown): value is SupportBundle {
   const project = value.project;
   return value.compatibility.policy === SUPPORT_BUNDLE_COMPATIBILITY.policy
     && value.compatibility.minimumReaderVersion === SUPPORT_BUNDLE_COMPATIBILITY.minimumReaderVersion
-    && provenanceKeys.every((key) => typeof provenance[key] === 'string')
+    && provenanceKeys.every((key) => typeof provenance[key] === 'string'
+      && byteLength(provenance[key]) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes)
+    && typeof provenance.sourceSha === 'string'
+    && (provenance.sourceSha === 'unknown' || /^[0-9a-f]{7,64}$/i.test(provenance.sourceSha))
     && (value.ownerEpoch === undefined || finiteNonNegativeInteger(value.ownerEpoch) !== undefined)
     && (project === undefined || (isRecord(project)
       && typeof project.idDigest === 'string'
-      && /^[a-f0-9]{64}$/i.test(project.idDigest)))
-    && (value.graphics === undefined || isRecord(value.graphics))
+      && /^[a-f0-9]{64}$/i.test(project.idDigest)
+      && (project.name === undefined || (typeof project.name === 'string' && SAFE_CATEGORY_VALUE.test(project.name)))
+      && (project.relativePath === undefined || (typeof project.relativePath === 'string' && isSafeRelativePath(project.relativePath)))))
+    && isBoundedNormalizedValue(value.lifecycle)
+    && isBoundedNormalizedValue(value.providers)
+    && isBoundedNormalizedValue(value.persistence)
+    && isBoundedNormalizedValue(value.updater)
+    && (value.graphics === undefined || isBoundedNormalizedValue(value.graphics))
     && redaction.version === 1
     && finiteNonNegativeInteger(redaction.redactedFields) !== undefined
     && finiteNonNegativeInteger(redaction.omittedFields) !== undefined
-    && isRecord(redaction.categories)
+    && isNormalizedCounterMap(redaction.categories)
     && finiteNonNegativeInteger(truncation.recordsOmitted) !== undefined
     && finiteNonNegativeInteger(truncation.receiptsOmitted) !== undefined
     && finiteNonNegativeInteger(truncation.stateFieldsOmitted) !== undefined
@@ -890,13 +1048,7 @@ function fitBundle(
 }
 
 export function buildSupportBundle(input: SupportBundleInput, options: SupportBundleOptions = {}): SupportBundle {
-  const audit: MutableAudit = {
-    redactedFields: 0,
-    omittedFields: 0,
-    fieldsTruncated: 0,
-    terminalLinesOmitted: 0,
-    categories: new Map(),
-  };
+  const audit = seededAudit(input);
   const homeDirectory = options.homeDirectory;
   const maxRecords = optionLimit(options.maxRecords, SUPPORT_BUNDLE_LIMITS.maxRecords);
   const maxRecordBytes = optionLimit(options.maxRecordBytes, SUPPORT_BUNDLE_LIMITS.maxRecordBytes);
@@ -1041,6 +1193,8 @@ export async function collectSupportBundle(
   const wallStartedAt = Date.now();
   const maxElapsedMs = optionElapsedLimit(options.maxElapsedMs);
   const maxRecords = optionLimit(options.maxRecords, SUPPORT_BUNDLE_LIMITS.maxRecords);
+  const maxReceipts = optionLimit(options.maxReceipts, SUPPORT_BUNDLE_LIMITS.maxReceipts);
+  const boundedCollectors = collectors.slice(0, MAX_SUPPORT_COLLECTORS);
   const controller = new AbortController();
   const forwardAbort = (): void => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) forwardAbort();
@@ -1062,6 +1216,13 @@ export async function collectSupportBundle(
   const records: SupportRecord[] = [];
   const receipts: SupportReceipt[] = [];
   const errors: SupportCollectionError[] = [];
+  const appendError = (error: SupportCollectionError): void => {
+    if (errors.length < SUPPORT_BUNDLE_LIMITS.maxErrorChain) {
+      errors.push(error);
+      return;
+    }
+    if (error.recoveryRequired && !errors.some((item) => item.recoveryRequired)) errors[errors.length - 1] = error;
+  };
   let requestedStatus: SupportBundleStatus | undefined;
   const collected: Array<{
     index: number;
@@ -1069,8 +1230,16 @@ export async function collectSupportBundle(
     result?: SupportBundleInput;
     error?: SupportCollectionError;
   }> = [];
+  if (collectors.length > boundedCollectors.length) {
+    appendError({
+      collector: 'support-bundle',
+      code: 'collector_limit',
+      at: new Date(options.now?.() ?? Date.now()).toISOString(),
+      recoveryRequired: true,
+    });
+  }
   if (controller.signal.aborted) {
-    errors.push({
+    appendError({
       collector: 'support-bundle',
       code: 'collection_cancelled',
       at: new Date(options.now?.() ?? Date.now()).toISOString(),
@@ -1078,7 +1247,7 @@ export async function collectSupportBundle(
     });
   }
   try {
-    await Promise.all(collectors.map(async (collector, index) => {
+    await Promise.all(boundedCollectors.map(async (collector, index) => {
       try {
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
         const result = await Promise.race([collector.collect(controller.signal), deadline]);
@@ -1116,6 +1285,25 @@ export async function collectSupportBundle(
     controller.signal.removeEventListener('abort', rejectOnAbort);
     options.signal?.removeEventListener('abort', forwardAbort);
   }
+  const normalizationTimedOut = (): boolean => Date.now() - wallStartedAt >= maxElapsedMs;
+  const normalizationError = (): SupportCollectionError => ({
+    collector: 'support-bundle',
+    code: 'normalization_timeout',
+    at: new Date(options.now?.() ?? Date.now()).toISOString(),
+    recoveryRequired: true,
+  });
+  const recoveryBundle = (error: SupportCollectionError): SupportBundle => {
+    const collectedErrors = collected
+      .filter((item): item is typeof item & { error: SupportCollectionError } => item.error !== undefined)
+      .map((item) => item.error)
+      .slice(0, SUPPORT_BUNDLE_LIMITS.maxErrorChain);
+    return buildSupportBundle({
+      ...merged,
+      status: 'recovery_required',
+      errors: [...errors, ...collectedErrors, error],
+    }, options);
+  };
+  if (normalizationTimedOut()) return recoveryBundle(normalizationError());
   collected.sort((a, b) => a.name.localeCompare(b.name) || a.index - b.index);
   const statusRank: Record<SupportBundleStatus, number> = {
     complete: 0,
@@ -1123,13 +1311,17 @@ export async function collectSupportBundle(
     unknown: 2,
     recovery_required: 3,
   };
+  const claimedCollectorFields = new Set<string>();
+  const ignoredCollectorFields = new Set(['generatedAt', 'schema', 'version', 'compatibility', 'redaction', 'truncation']);
   for (const item of collected) {
+    if (normalizationTimedOut()) return recoveryBundle(normalizationError());
     if (item.error) {
-      errors.push(item.error);
+      appendError(item.error);
       continue;
     }
     if (!item.result) continue;
     for (const [key, value] of Object.entries(item.result).sort(([a], [b]) => a.localeCompare(b))) {
+      if (normalizationTimedOut()) return recoveryBundle(normalizationError());
       if (key === 'status') {
         const next: SupportBundleStatus = value === 'complete' || value === 'partial' || value === 'unknown' || value === 'recovery_required'
           ? value
@@ -1142,12 +1334,22 @@ export async function collectSupportBundle(
         }
       } else if (key === 'receipts' && Array.isArray(value)) {
         for (const receipt of value) {
-          if (receipts.length >= optionLimit(options.maxReceipts, SUPPORT_BUNDLE_LIMITS.maxReceipts)) break;
+          if (receipts.length >= maxReceipts) break;
           receipts.push(receipt as SupportReceipt);
         }
       } else if (key === 'errors' && Array.isArray(value)) {
-        for (const error of value.slice(0, SUPPORT_BUNDLE_LIMITS.maxErrorChain)) errors.push(error as SupportCollectionError);
-      } else if (!(key in merged)) {
+        for (const error of value.slice(0, SUPPORT_BUNDLE_LIMITS.maxErrorChain)) appendError(error as SupportCollectionError);
+      } else if (ignoredCollectorFields.has(key)) {
+        continue;
+      } else if (claimedCollectorFields.has(key)) {
+        appendError({
+          collector: item.name,
+          code: 'collection_conflict',
+          at: new Date(options.now?.() ?? Date.now()).toISOString(),
+          recoveryRequired: true,
+        });
+      } else {
+        claimedCollectorFields.add(key);
         (merged as Record<string, unknown>)[key] = value;
       }
     }
@@ -1157,21 +1359,11 @@ export async function collectSupportBundle(
   (merged as Record<string, unknown>).receipts = receipts;
   (merged as Record<string, unknown>).errors = errors;
   (merged as Record<string, unknown>).status = status;
-  let bundle = buildSupportBundle(merged, options);
-  if (Date.now() - wallStartedAt > maxElapsedMs && bundle.status !== 'recovery_required') {
-    const elapsedError: SupportCollectionError = {
-      collector: 'support-bundle',
-      code: 'normalization_timeout',
-      at: new Date(options.now?.() ?? Date.now()).toISOString(),
-      recoveryRequired: true,
-    };
-    bundle = buildSupportBundle({
-      ...merged,
-      status: 'recovery_required',
-      errors: [...errors, elapsedError],
-    }, options);
-  }
-  return bundle;
+  if (normalizationTimedOut()) return recoveryBundle(normalizationError());
+  const bundle = buildSupportBundle(merged, options);
+  return Date.now() - wallStartedAt >= maxElapsedMs && bundle.status !== 'recovery_required'
+    ? recoveryBundle(normalizationError())
+    : bundle;
 }
 
 export function createSafeSupportBundleFixture(): SupportBundle {

@@ -79,6 +79,13 @@ describe('support bundle v1', () => {
         '{"apiKey":"json-secret"}',
         '/tmp/workspace/private.txt',
         '\\\\server\\share\\private.txt',
+        'Authorization: hidden',
+        'Authorization: Token very-secret-value',
+        'authorizationHeader=header-secret',
+        'passwordHash: hash-secret',
+        'password is spaced-secret',
+        'cwd /tmp/private.txt',
+        'AWS_SECRET_ACCESS_KEY=aws-secret',
       ],
       records: [{
         sequence: 1,
@@ -101,6 +108,11 @@ describe('support bundle v1', () => {
     expect(serialized).not.toContain('json-secret');
     expect(serialized).not.toContain('/tmp/workspace/private.txt');
     expect(serialized).not.toContain('server\\share');
+    expect(serialized).not.toContain('very-secret-value');
+    expect(serialized).not.toContain('header-secret');
+    expect(serialized).not.toContain('hash-secret');
+    expect(serialized).not.toContain('spaced-secret');
+    expect(serialized).not.toContain('aws-secret');
     expect(serialized).not.toContain('do not include this prompt');
     expect(serialized).not.toContain('source should never be here');
     expect(serialized).not.toContain('internal.example.test');
@@ -110,6 +122,7 @@ describe('support bundle v1', () => {
     expect(bundle.redaction.redactedFields).toBeGreaterThan(0);
     expect(bundle.redaction.omittedFields).toBeGreaterThan(0);
     expect(bundle.redaction.categories).toHaveProperty('secret-field');
+    expect((JSON.parse(serialized) as typeof bundle).redaction.categories).toHaveProperty('secret-field');
   });
 
   it('preserves the complete action-state vocabulary without exposing receipt payloads', () => {
@@ -194,6 +207,32 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('fails closed for empty and malformed collector results', async () => {
+    for (const result of [{}, { records: [{}] }]) {
+      const bundle = await collectSupportBundle([{
+        name: 'malformed',
+        collect: async () => result as never,
+      }]);
+
+      expect(bundle.status).toBe('recovery_required');
+      expect(bundle.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ collector: 'malformed', code: 'collection_invalid_output', recoveryRequired: true }),
+      ]));
+    }
+  });
+
+  it('degrades conflicting singleton collector sections to recovery_required', async () => {
+    const bundle = await collectSupportBundle([
+      { name: 'alpha', collect: async () => ({ lifecycle: { state: 'ready' } }) },
+      { name: 'beta', collect: async () => ({ lifecycle: { state: 'stale' } }) },
+    ]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collector: 'beta', code: 'collection_conflict', recoveryRequired: true }),
+    ]));
+  });
+
   it('merges authoritative receipts from every collector deterministically', async () => {
     const receipt = (actionId: string) => ({
       schema: 'psyche.control.receipt/v1' as const,
@@ -230,6 +269,32 @@ describe('support bundle v1', () => {
     })).toBe(false);
     expect(() => serializeSupportBundle({ ...bundle, generatedAt: 'not-a-timestamp' } as unknown as SupportBundle))
       .toThrow(/schema|compatibility/i);
+  });
+
+  it('drops malformed receipt revisions without serializing their payload', () => {
+    const bundle = buildSupportBundle({
+      receipts: [{
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'unsafe-revision',
+        state: 'queued',
+        resource: { kind: 'project', id: 'project' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+        leaseRevision: { secret: 'must-not-serialize' },
+      } as never],
+    });
+
+    expect(bundle.receipts).toHaveLength(0);
+    expect(serializeSupportBundle(bundle)).not.toContain('must-not-serialize');
+  });
+
+  it('validates normalized collection entries and bounds at the type guard boundary', () => {
+    const fixture = createSafeSupportBundleFixture();
+    expect(isSupportBundleV1({ ...fixture, records: [{}] } as unknown)).toBe(false);
+    expect(isSupportBundleV1({ ...fixture, terminalTail: [123] } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      records: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, () => fixture.records[0]),
+    } as unknown)).toBe(false);
   });
 
   it('fails closed for invalid or recovery-sensitive collection status', () => {
