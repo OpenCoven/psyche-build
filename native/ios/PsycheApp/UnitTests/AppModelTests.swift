@@ -42,6 +42,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.isFixture)
         XCTAssertNil(model.fixtureName)
         XCTAssertTrue(model.workspaceStore === composition?.workspaceStore)
+        XCTAssertTrue(model.remoteActionStore === composition?.remoteActionStore)
     }
 
     func testProductionRootStartsWithNothingConfirmed() {

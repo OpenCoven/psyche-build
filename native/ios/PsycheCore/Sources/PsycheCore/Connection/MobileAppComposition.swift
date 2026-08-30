@@ -6,6 +6,10 @@ public final class MobileAppComposition: ObservableObject {
     public let transport: any PsycheTransport
     public let requestClient: ControlRequestClient
     public let workspaceStore: WorkspaceStore
+    /// The single host-action state machine shared by every native action
+    /// surface. It uses the same request client as the workspace store so an
+    /// action cannot silently switch transports or lose its session state.
+    public let remoteActionStore: RemoteActionStore
     public let pairedHostStore: PairedHostStore
     public let connectionManager: ConnectionManager
     public let terminalRegistry: TerminalSessionRegistry
@@ -25,6 +29,7 @@ public final class MobileAppComposition: ObservableObject {
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
         self.requestClient = requestClient
         self.workspaceStore = workspaceStore
+        remoteActionStore = RemoteActionStore(controlRequests: requestClient)
         connectionManager = ConnectionManager(
             transport: transport,
             workspaceStore: workspaceStore,
