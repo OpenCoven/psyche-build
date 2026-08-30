@@ -17,7 +17,16 @@ manifests. The action vocabulary is explicit: `pending`, `requested`,
 retry, or execute an action. The existing control-plane owner, lease,
 approval, idempotency, and receipt contracts remain authoritative.
 
-Serialization sorts object keys and deterministic record/receipt collections.
+The compatibility policy rejects an unknown major schema/version and permits a
+reader to ignore unknown fields within a supported major version. Receipt
+entries are projections of validated `psyche.control.receipt/v1` records: source
+states `queued` and `approval_required` map to `pending`, `running` maps to
+`executing`, `denied` maps to `failed`, and `expired` maps to `invalidated`.
+The projection keeps only bounded authority metadata and a resource digest; it
+never copies receipt messages or values.
+
+Serialization re-normalizes the input at the export boundary, sorts object keys
+and deterministic record/receipt collections, and re-applies the payload cap.
 `supportBundleDigest` hashes that stable UTF-8 representation, so two bundles
 with the same safe facts can be compared without depending on insertion order.
 
@@ -39,7 +48,8 @@ The v1 implementation enforces the following defaults before serialization:
 | Terminal tail | 64 lines / 4 KiB |
 
 When the payload approaches its cap, oldest records are removed before terminal
-tail lines. The truncation manifest records what was removed. A collector
+tail lines, then the largest state fields and finally receipts. The truncation
+manifest records what was removed. A collector
 timeout, cancellation, or recovery-sensitive failure produces
 `recovery_required`; ordinary collector failures produce `partial`. No failed
 collector is represented as complete success.

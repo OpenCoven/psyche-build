@@ -105,16 +105,30 @@ describe('support bundle v1', () => {
 
   it('preserves the complete action-state vocabulary without exposing receipt payloads', () => {
     const receipts = SUPPORT_ACTION_STATES.map((state, index) => ({
+      schema: 'psyche.control.receipt/v1' as const,
       actionId: `action-${index}`,
-      state,
-      resource: { kind: 'project', idDigest: '0123456789abcdef0123456789abcdef' },
+      state: state === 'pending' ? 'queued' as const
+        : state === 'executing' ? 'running' as const
+          : state === 'invalidated' ? 'expired' as const
+            : state === 'recovery_required' ? 'unknown' as const
+              : state === 'failed' ? 'failed' as const
+                : state === 'unknown' ? 'unknown' as const
+                  : state === 'requested' ? 'queued' as const
+                    : state === 'accepted' ? 'running' as const
+                      : 'succeeded' as const,
+      resource: { kind: 'project' as const, id: `project-${index}` },
       createdAt: `2026-01-01T00:00:0${index}.000Z`,
       message: 'private outcome detail',
       value: { secret: 'private' },
     }));
     const bundle = buildSupportBundle({ receipts });
 
-    expect(bundle.receipts.map((receipt) => receipt.state).sort()).toEqual([...SUPPORT_ACTION_STATES].sort());
+    expect(bundle.receipts.map((receipt) => receipt.sourceState)).toEqual([
+      'queued', 'queued', 'running', 'running', 'succeeded', 'failed', 'unknown', 'expired', 'unknown',
+    ]);
+    expect(bundle.receipts.map((receipt) => receipt.state)).toEqual([
+      'pending', 'pending', 'executing', 'executing', 'succeeded', 'failed', 'unknown', 'invalidated', 'unknown',
+    ]);
     expect(serializeSupportBundle(bundle)).not.toContain('private outcome detail');
     expect(serializeSupportBundle(bundle)).not.toContain('private');
   });
@@ -130,7 +144,7 @@ describe('support bundle v1', () => {
     const bundle = buildSupportBundle({
       records,
       terminalTail: Array.from({ length: 100 }, () => 'y'.repeat(2_000)),
-    }, { maxRecordBytes: 100 });
+    }, { maxRecordBytes: 20 });
     const serialized = serializeSupportBundle(bundle);
 
     expect(bundle.records.length).toBeLessThanOrEqual(SUPPORT_BUNDLE_LIMITS.maxRecords);
@@ -138,6 +152,9 @@ describe('support bundle v1', () => {
     expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(SUPPORT_BUNDLE_LIMITS.maxBundleBytes);
     expect(bundle.redaction.categories).toHaveProperty('record-size');
     expect(bundle.truncation.fieldsTruncated).toBeGreaterThan(0);
+    const serializedBundle = JSON.parse(serialized) as typeof bundle;
+    expect(serializedBundle.truncation.recordsOmitted).toBeGreaterThan(0);
+    expect(serializedBundle.truncation.terminalLinesOmitted).toBeGreaterThan(0);
   });
 
   it('returns recovery_required when a bounded collector times out', async () => {
@@ -159,6 +176,43 @@ describe('support bundle v1', () => {
     expect(fixture.schema).toBe(SUPPORT_BUNDLE_SCHEMA);
     expect(fixture.status).toBe('complete');
     expect(serializeSupportBundle(fixture)).not.toMatch(/prompt|password|token|transcript|repositoryContents/i);
+  });
+
+  it('re-sanitizes a mutated bundle at the serialization boundary and rejects unknown versions', () => {
+    const bundle = createSafeSupportBundleFixture() as SupportBundle & { lifecycle: Record<string, unknown> };
+    bundle.lifecycle = { safe: 'ready', BYPASS_SECRET: 'must not serialize' };
+    const serialized = serializeSupportBundle(bundle);
+    expect(serialized).not.toContain('must not serialize');
+    expect(() => serializeSupportBundle({ ...bundle, version: 2 } as unknown as SupportBundle)).toThrow(/schema|compatibility/i);
+  });
+
+  it('fails closed for invalid or recovery-sensitive collection status', () => {
+    expect(buildSupportBundle({ status: 'not-a-status' }).status).toBe('unknown');
+    expect(buildSupportBundle({ errors: [{ collector: 'disk', code: 'write_failed', at: 'now', recoveryRequired: true }] }).status)
+      .toBe('recovery_required');
+  });
+
+  it('selects bounded map keys deterministically and omits unsafe names', () => {
+    const left: Record<string, unknown> = Object.fromEntries(Array.from({ length: 40 }, (_, index) => [`key-${index}`, index]));
+    const right = Object.fromEntries(Object.entries(left).reverse());
+    left['/home/alice/private'] = 'secret-path';
+    right['/home/alice/private'] = 'secret-path';
+    const first = buildSupportBundle({ generatedAt: '2026-01-01T00:00:00.000Z', lifecycle: left });
+    const second = buildSupportBundle({ generatedAt: '2026-01-01T00:00:00.000Z', lifecycle: right });
+    expect(serializeSupportBundle(first)).toBe(serializeSupportBundle(second));
+    expect(serializeSupportBundle(first)).not.toContain('private-path');
+    expect(first.redaction.categories).toHaveProperty('attribute-keys');
+    expect(first.redaction.categories).toHaveProperty('unsafe-field-name');
+  });
+
+  it('keeps the newest terminal lines and strips OSC/DCS control sequences', () => {
+    const lines = Array.from({ length: 64 }, (_, index) => `line-${index}-${'x'.repeat(480)}`);
+    lines[63] = '\u001b]0;OSC_SECRET\u0007newest';
+    const bundle = buildSupportBundle({ terminalTail: lines });
+    const serialized = serializeSupportBundle(bundle);
+    expect(serialized).not.toContain('OSC_SECRET');
+    expect(bundle.terminalTail.at(-1)).toBe('newest');
+    expect(bundle.truncation.terminalLinesOmitted).toBeGreaterThan(0);
   });
 
   it('keeps the checked-in safe fixture equal to the canonical fixture generator', async () => {
