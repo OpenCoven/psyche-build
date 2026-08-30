@@ -102,7 +102,10 @@ mod composition_tests {
     const BUILD_RS: &str = include_str!("../build.rs");
 
     fn expected_inventory() -> Vec<String> {
-        REGISTERED_COMMANDS.iter().map(|command| command.to_string()).collect()
+        REGISTERED_COMMANDS
+            .iter()
+            .map(|command| command.to_string())
+            .collect()
     }
 
     /// Extracts the ordered registration list from the single
