@@ -7,6 +7,7 @@ const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
 const debugBundle = join(desktop, '.psyche-dev-web', 'web', 'runtime-debug.bundle.js');
 const packageManager = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+const ansiEscape = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 
 describe('Tauri development web server', () => {
   it('serves the generated debug bundle and committed web shell', async () => {
@@ -46,7 +47,7 @@ describe('Tauri development web server', () => {
         reject(new Error(`serve:web did not become ready\n${output.join('')}`));
       }, 10_000);
       readinessTimer = setInterval(() => {
-        if (output.join('').includes('Local:')) {
+        if (output.join('').replace(ansiEscape, '').includes('Local:')) {
           clearReadiness();
           resolve();
         }
