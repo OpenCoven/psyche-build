@@ -101,11 +101,10 @@ No baseline failures were encountered; nothing was stashed or skipped.
 
 ## Head SHA
 
-- The exact deliverables commit SHA is recorded in the PR body and the status
-  comment on the PR thread immediately after the final commit and push (a
-  commit cannot contain its own SHA).
-- Any later commits on this branch are record-keeping only; the reviewed
-  content is the deliverables commit.
+- Deliverables commit (implementation + tests + docs + this record):
+  `51dfb8a3f8d5d5caa652cce76ef1790450c5a5b9`. Any later commits on this branch
+  are record-keeping only; the reviewed content is this commit. The PR head
+  SHA is recorded in the PR body and status comment.
 
 ## Rollback
 
