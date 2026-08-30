@@ -256,10 +256,9 @@ public actor ConnectionManager {
         )
     }
 
-    /// Redeems a one-time invite only against an existing pinned host record.
-    /// The link supplies routing, never certificate identity, so it cannot
-    /// authorize a connection to an endpoint the device has not already
-    /// verified.
+    /// Redeems a one-time invite and exchanges it for a durable credential.
+    /// If the device already knows a host at the same host+port, the invite's
+    /// fingerprint must match that pinned identity; otherwise it fails closed.
     @discardableResult
     public func connect(using invite: PsycheInvite) async -> Bool {
         await startInviteConnection(invite, outcomeID: nil)
