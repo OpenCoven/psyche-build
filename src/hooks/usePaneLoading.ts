@@ -43,6 +43,7 @@ import {
 } from '../utils/paneTeardown.js';
 import { retainPaneRecovery } from '../utils/paneLifecycleRecovery.js';
 import { indexUniquePaneTitles } from '../utils/paneTitleIndex.js';
+import { StateManager } from '../shared/StateManager.js';
 
 // Separate config structure to match new format
 export interface PsycheConfig {
@@ -97,10 +98,18 @@ export function migrateBackgroundPaneResources(pane: PsychePane): PsychePane {
   };
 }
 
+export interface PaneRecoveryNotice {
+  code: 'stale_shell_pane_removed' | 'stale_shell_pane_recovery_required';
+  severity: 'warning' | 'error';
+  paneRecordIds: string[];
+  message: string;
+}
+
 interface PaneLoadResult {
   panes: PsychePane[];
   allPaneIds: string[];
   titleToId: Map<string, string>;
+  recoveryNotices: PaneRecoveryNotice[];
 }
 
 async function restoreAgentSessionForPane(
@@ -630,8 +639,8 @@ export async function recreateKilledWorktreePanes(
 export async function removeStaleShellPaneRecords(
   projectRoot: string,
   stalePanes: readonly PsychePane[],
-): Promise<void> {
-  await removeProjectPaneConfigPaneIdentities(
+): Promise<PsychePane[]> {
+  const mutation = await removeProjectPaneConfigPaneIdentities(
     projectRoot,
     stalePanes.map((pane) => ({
       id: pane.id,
@@ -641,6 +650,7 @@ export async function removeStaleShellPaneRecords(
         : {}),
     })),
   );
+  return mutation.result as PsychePane[];
 }
 
 /**
@@ -656,6 +666,7 @@ export async function loadAndProcessPanes(
   isInitialLoad: boolean
 ): Promise<PaneLoadResult> {
   const loadedPanes = await loadPanesFromFile(panesFile);
+  const recoveryNotices: PaneRecoveryNotice[] = [];
   let { allPaneIds, titleToId, currentWindowPaneIds } = await fetchTmuxPaneIds();
 
   // Attempt to rebind panes whose IDs changed by matching on their stable tmux title.
@@ -683,35 +694,64 @@ export async function loadAndProcessPanes(
         p => !(p.type === 'shell' && !paneTmuxIdentityIsCurrent(p, allPaneIds))
       );
 
-      // Save the cleaned config immediately to prevent these panes from reappearing
+      // Save the cleaned config immediately to prevent these panes from reappearing.
+      // Sidebar normalization is a follow-up repair and must not change the
+      // outcome reported for the already-durable identity removal.
       try {
         const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-        await removeStaleShellPaneRecords(sessionProjectRoot, staleShellPanes);
-        const mutation = await mutateProjectPaneConfig(
+        reboundPanes = await removeStaleShellPaneRecords(
           sessionProjectRoot,
-          (configRecord) => {
-            const config = configRecord as unknown as PsycheConfig;
-            const persistedPanes = Array.isArray(config.panes) ? config.panes : [];
-            const projectRoot = config.projectRoot || sessionProjectRoot;
-            const projectName = config.projectName || path.basename(projectRoot);
-            config.panes = persistedPanes;
-            config.sidebarProjects = normalizeSidebarProjects(
-              config.sidebarProjects,
-              persistedPanes,
-              projectRoot,
-              projectName
-            );
-            config.lastUpdated = new Date().toISOString();
-            return persistedPanes;
-          }
+          staleShellPanes,
         );
-        reboundPanes = mutation.result;
+        recoveryNotices.push({
+          code: 'stale_shell_pane_removed',
+          severity: 'warning',
+          paneRecordIds: staleShellPanes.map((pane) => pane.id),
+          message: `Recovered from a stale tmux identity by removing unavailable shell pane ${
+            staleShellPanes.map((pane) => pane.slug).join(', ')
+          }. Reopen the shell pane if it is still needed.`,
+        });
+
+        try {
+          const mutation = await mutateProjectPaneConfig(
+            sessionProjectRoot,
+            (configRecord) => {
+              const config = configRecord as unknown as PsycheConfig;
+              const persistedPanes = Array.isArray(config.panes) ? config.panes : [];
+              const projectRoot = config.projectRoot || sessionProjectRoot;
+              const projectName = config.projectName || path.basename(projectRoot);
+              config.panes = persistedPanes;
+              config.sidebarProjects = normalizeSidebarProjects(
+                config.sidebarProjects,
+                persistedPanes,
+                projectRoot,
+                projectName
+              );
+              config.lastUpdated = new Date().toISOString();
+              return persistedPanes;
+            }
+          );
+          reboundPanes = mutation.result;
+        } catch (normalizationError) {
+          LogService.getInstance().warn(
+            `Removed stale shell pane records, but failed to normalize sidebar state: ${normalizationError}`,
+            'usePaneLoading',
+          );
+        }
         LogService.getInstance().debug('Saved cleaned config after removing stale shell panes', 'usePaneLoading');
       } catch (saveError) {
-        LogService.getInstance().debug(
+        LogService.getInstance().error(
           `Failed to save cleaned config: ${saveError}`,
-          'usePaneLoading'
+          'usePaneLoading',
         );
+        recoveryNotices.push({
+          code: 'stale_shell_pane_recovery_required',
+          severity: 'error',
+          paneRecordIds: staleShellPanes.map((pane) => pane.id),
+          message: `A stale tmux identity was found for shell pane ${
+            staleShellPanes.map((pane) => pane.slug).join(', ')
+          }, but the recovery could not be saved. Recovery is required before restart.`,
+        });
       }
     }
   }
@@ -740,5 +780,9 @@ export async function loadAndProcessPanes(
     );
   }
 
-  return { panes: reboundPanes, allPaneIds, titleToId };
+  for (const notice of recoveryNotices) {
+    StateManager.getInstance().showToast(notice.message, notice.severity);
+  }
+
+  return { panes: reboundPanes, allPaneIds, titleToId, recoveryNotices };
 }
