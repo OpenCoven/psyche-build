@@ -619,13 +619,18 @@ describe('release documentation contract', () => {
         path.join('native', 'ios', 'README.md'),
         path.join('protocol-fixtures', 'README.md'),
         generatedAgentsDoc,
+        path.join('docs', 'superpowers', 'README.md'),
         path.join('docs', 'src', 'hero.js'),
         path.join('docs', 'src', 'index.html'),
         path.join('docs', 'public', 'og.svg'),
       ]),
     );
     expect(
-      activeFiles.some((filePath) => filePath.startsWith(path.join('docs', 'superpowers'))),
+      activeFiles.some((filePath) =>
+        [...historicalDocDirectories].some((directory) =>
+          filePath.startsWith(`${directory}${path.sep}`),
+        ),
+      ),
     ).toBe(false);
 
     for (const filePath of activeFiles) {
