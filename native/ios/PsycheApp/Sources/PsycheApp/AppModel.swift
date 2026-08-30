@@ -17,6 +17,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var hostName: String?
 
     let workspaceStore: WorkspaceStore
+    /// Shared host-owned action state. Fixture roots receive a disconnected
+    /// store so UI previews can exercise the state surface without a socket.
+    let remoteActionStore: RemoteActionStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
     /// root incapable of talking to a host.
     let composition: MobileAppComposition?
@@ -40,6 +43,7 @@ final class AppModel: ObservableObject {
             let composition = MobileAppComposition.production()
             self.composition = composition
             workspaceStore = composition.workspaceStore
+            remoteActionStore = composition.remoteActionStore
             terminalRegistry = composition.terminalRegistry
             return
         }
@@ -49,6 +53,7 @@ final class AppModel: ObservableObject {
             fixture: fixture,
             inspectionFails: fixtureInspectionFails
         )
+        remoteActionStore = RemoteActionStore()
         // A fixture terminal client, so the fixture shell renders real output
         // through the real registry without opening a socket.
         terminalRegistry = TerminalSessionRegistry(
