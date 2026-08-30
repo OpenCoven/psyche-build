@@ -316,6 +316,28 @@ describe('support bundle v1', () => {
     }
   });
 
+  it('bounds the total collector normalization graph before merging sections', async () => {
+    const state = () => Object.fromEntries(Array.from({ length: 32 }, (_, key) => [
+      `key-${key}`,
+      Array.from({ length: 110 }, (_, index) => ({ value: index })),
+    ]));
+    const bundle = await collectSupportBundle([{
+      name: 'oversized-graph',
+      collect: async () => ({
+        lifecycle: state(),
+        providers: state(),
+        persistence: state(),
+        updater: state(),
+        graphics: state(),
+      }),
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collector: 'oversized-graph', code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
   it('detects duplicate and conflicting action IDs as recovery-required', async () => {
     const receipt = {
       schema: 'psyche.control.receipt/v1' as const,

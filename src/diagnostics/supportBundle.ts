@@ -565,6 +565,9 @@ function safeRelativePath(value: unknown, audit: MutableAudit): string | undefin
   if (typeof value !== 'string') {
     return value === undefined ? undefined : omit(audit, 'unsafe-relative-path');
   }
+  if (value.length > MAX_TEXT_SCAN_CHARS) {
+    return omit(audit, 'relative-path-too-long');
+  }
   const normalized = value.replaceAll('\\', '/');
   if (!isSafeRelativePath(normalized)) {
     return omit(audit, 'unsafe-relative-path');
@@ -1533,11 +1536,13 @@ export async function collectSupportBundle(
       } else if (key === 'records' && Array.isArray(value)) {
         if (records.length + value.length > maxRecords) aggregateOverflow = true;
         for (const record of value) {
+          if (normalizationInterrupted()) return recoveryBundle(normalizationError());
           if (records.length >= maxRecords) break;
           records.push(record as SupportRecord);
         }
       } else if (key === 'receipts' && Array.isArray(value)) {
         for (const receipt of value) {
+          if (normalizationInterrupted()) return recoveryBundle(normalizationError());
           if (!isActionStatusReceipt(receipt)) {
             aggregateOverflow = true;
             continue;
@@ -1555,7 +1560,10 @@ export async function collectSupportBundle(
         }
       } else if (key === 'errors' && Array.isArray(value)) {
         if (errors.length + value.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) aggregateOverflow = true;
-        for (const error of value) appendError(error as SupportCollectionError);
+        for (const error of value) {
+          if (normalizationInterrupted()) return recoveryBundle(normalizationError());
+          appendError(error as SupportCollectionError);
+        }
       } else if (ignoredCollectorFields.has(key)) {
         continue;
       } else if (claimedCollectorFields.has(key)) {
