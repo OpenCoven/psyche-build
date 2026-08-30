@@ -454,6 +454,11 @@ final class HostReadinessTransitionsTests: XCTestCase {
             .pairing
         )
         XCTAssertEqual(
+            HostReadinessTransitions.destination(for: .pairingStarted, from: .ready),
+            .pairing,
+            "pairing a new host while one is ready is the retarget flow whose authority must be atomic"
+        )
+        XCTAssertEqual(
             HostReadinessTransitions.destination(for: .authenticationStarted, from: .pairing),
             .authenticating
         )
@@ -526,7 +531,12 @@ final class HostReadinessTransitionsTests: XCTestCase {
             HostReadinessTransitions.destination(for: .discoveryStarted, from: .ready)
         )
         XCTAssertNil(
-            HostReadinessTransitions.destination(for: .pairingStarted, from: .ready)
+            HostReadinessTransitions.destination(for: .pairingStarted, from: .authenticating),
+            "pairing may not start inside an in-flight flow"
+        )
+        XCTAssertNil(
+            HostReadinessTransitions.destination(for: .pairingStarted, from: .degraded),
+            "a degraded machine recovers by reconnection, not by silently re-pairing"
         )
         XCTAssertNil(
             HostReadinessTransitions.destination(for: .reconnectionStarted, from: .revoked),
@@ -947,7 +957,11 @@ final class HostReadinessMachineTests: XCTestCase {
             await machine.presentation,
             .stale(hostID: "old-host", confirmedAt: fixedDate)
         )
-        XCTAssertEqual(recorder.calls, [], "a wrong-host commit must never reach the secure store")
+        XCTAssertEqual(recorder.calls, ["commit:old-host", "validate:5", "apply:5"])
+        XCTAssertFalse(
+            recorder.calls.contains("commit:impostor"),
+            "a wrong-host commit must never reach the secure store"
+        )
         XCTAssertEqual(failure?.boundary, .revocation)
     }
 
@@ -988,7 +1002,7 @@ final class HostReadinessMachineTests: XCTestCase {
         let state = await machine.state
         let committed = await machine.committedHost
         XCTAssertEqual(state, .reconnecting)
-        XCTAssertEqual(committed, makeHost(serverID: "new-host", clientID: "client-1"))
+        XCTAssertEqual(committed, makeHost(serverID: "new-host", clientID: "client-new"))
         XCTAssertEqual(
             recorder.calls,
             ["commit:old-host", "validate:5", "apply:5", "commit:new-host"],

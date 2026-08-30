@@ -162,10 +162,13 @@ public enum HostReadinessTransitions {
                 return nil
             }
         case .pairingStarted:
-            // Discovery is the normal path to a selected host, but a manual
-            // endpoint legitimately skips it, so pairing may also start from
-            // `unknown`.
-            guard state == .discovering || state == .unknown else { return nil }
+            // Discovery is the normal path to a selected host, a manual
+            // endpoint skips it, and pairing a new host while one is ready is
+            // exactly the retarget flow whose authority must be atomic — so
+            // pairing may start from any of those.
+            guard state == .discovering || state == .unknown || state == .ready else {
+                return nil
+            }
             return .pairing
         case .authenticationStarted:
             guard state == .pairing || state == .reconnecting else { return nil }
@@ -218,7 +221,9 @@ public enum HostReadinessTransitions {
             switch state {
             case .pairing, .authenticating, .hostCommitted, .synchronizing, .reconnecting, .ready:
                 return hasCommittedHost ? .degraded : .unknown
-            case .unknown, .discovering, .revoked:
+            case .unknown, .discovering, .degraded, .revoked:
+                // Resting states own no flow, so failure events are inert
+                // there; recovery starts a new flow.
                 return nil
             }
         }
@@ -431,7 +436,7 @@ public actor HostReadinessMachine {
         do {
             try await adapters.commitHostIdentity(host)
         } catch {
-            try rollback(.secureStore, reason: error.localizedDescription, for: flow)
+            _ = try rollback(.secureStore, reason: error.localizedDescription, for: flow)
             throw error
         }
         // The commit crossed the secure-store boundary. From here the
@@ -464,7 +469,7 @@ public actor HostReadinessMachine {
         do {
             try await adapters.validateSnapshot(candidate)
         } catch {
-            try rollback(.decodeRevision, reason: error.localizedDescription, for: flow)
+            _ = try rollback(.decodeRevision, reason: error.localizedDescription, for: flow)
             throw error
         }
         guard activeFlow == flow, state == .synchronizing else {
@@ -474,7 +479,7 @@ public actor HostReadinessMachine {
         do {
             try await adapters.applyWorkspace(candidate)
         } catch {
-            try rollback(.workspaceApply, reason: error.localizedDescription, for: flow)
+            _ = try rollback(.workspaceApply, reason: error.localizedDescription, for: flow)
             throw error
         }
 
