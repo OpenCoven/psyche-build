@@ -80,6 +80,102 @@ bash ./scripts/agent-check full
 
 The full gate covers the unit/contract suite, docs checks/build, typecheck, source smoke, packaged-artifact smoke, deterministic desktop web generation, Rust formatting/tests/checks, and exact worktree cleanliness. iOS remains an explicit opt-in platform gate; physical-device, signing, TestFlight, and distribution evidence are governed separately by release acceptance.
 
+## Beads planning and public Project
+
+Beads is the authoritative planning store. The public GitHub Project is a
+one-way sanitized mirror, so update work with `bd` rather than editing mirrored
+GitHub issues or Project fields. Unmanaged GitHub issues are not touched.
+
+Common local mirror commands are:
+
+```bash
+pnpm beads:project:check
+export BEADS_PROJECT_TOKEN="<load from your password manager>"
+pnpm beads:project:e2e
+pnpm beads:project:sync
+```
+
+The check and GraphQL E2E verifier are read-only. The E2E command runs the real
+dry-run path against GitHub, rejects mutations and duplicate payloads, and
+enforces the current two-query request ceiling. Applying requires the
+maintainer-only `BEADS_PROJECT_TOKEN`; load it from a password manager rather
+than storing it in the repository. Create two protected environments restricted
+to the main branch (`main`): the `beads-project-sync-automation` environment
+must have no required reviewers so scheduled runs remain unattended, while the
+`beads-project-sync` environment must have required reviewers so manual runs
+remain reviewer-gated. Install the fine-grained token as the environment secret
+`BEADS_PROJECT_TOKEN` in both environments, or use a secure equivalent that
+preserves those properties. Its complete fine-grained permission contract is
+repository **Contents: read and write** (for the atomic commit/branch-ref apply
+lock), **Issues: read and write**, and **Metadata: read**, plus organization
+**Projects: read and write**.
+
+Local dry-run is read-only and never bootstraps or mutates Beads; a missing
+database produces explicit `bd bootstrap --yes` guidance. Actions dry-run
+bootstraps an ephemeral runner database from the authoritative Beads remote
+without a GitHub token before invoking the same read-only CLI mode.
+
+The synchronizer is bound to the immutable GitHub Project node ID
+`PVT_kwDOECXnmc4BhMIA` for
+[OpenCoven Project 11](https://github.com/orgs/OpenCoven/projects/11). Existing
+Project adoption and repair require that exact identity plus the
+repository-bound managed marker or canonical repository link; a duplicate
+marker elsewhere is ignored and never authorizes publication. The pinned
+public Project's title, README, repository link, fields, and views remain
+repairable.
+
+An absent pinned Project fails closed instead of provisioning a replacement.
+If the pinned Project is private, dry-run and apply also fail before mutations.
+Automatic visibility changes are disabled: a maintainer must manually review
+the Project identity and contents, change visibility to public in GitHub, and
+rerun a dry-run. Never repoint `projectNodeId` merely because another Project
+has the managed marker.
+
+`.github/beads-project-sync.json` also pins the non-empty `trustedIssueAuthors`
+allowlist. Managed issue markers are owned only when GitHub's issue `user.login`
+matches a configured login case-insensitively; `author_association` does not
+grant ownership. Keep `BunsDev` pinned unless a reviewed ownership migration
+changes the issue-creation actor. Created issues are re-read and fail closed on
+an actor mismatch.
+
+After that gate is satisfied, `.github/workflows/beads-project-sync.yml`
+applies automatically at 03:17 UTC with a redundant 09:43 UTC run because
+GitHub may delay or drop scheduled events. The sync is idempotent and
+lease-serialized, so the backup normally applies zero operations. Use workflow
+dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an exception
+guard override and should be enabled only after reviewing a dry-run artifact,
+including its operation-kind counts and body-free closure candidates.
+
+The synchronizer minimizes GitHub GraphQL pressure within each run. Project
+discovery and Project item inventory are read once and reused, while all field
+changes for one Project item are sent as one aliased mutation instead of one
+request per field. Ambiguous writes deliberately bypass the snapshot and
+re-read GitHub before deciding whether a retry is safe.
+
+Every local or Actions apply also acquires the same GitHub-backed apply lock.
+The lock is an atomic, expiring repository branch-ref lease, so a local
+`pnpm beads:project:sync` fails closed while an Actions apply owns the lease (and
+vice versa); dry-runs never acquire it. The persistent
+`psyche-beads-project-sync-lock` coordination branch remains on the remote as a
+linear audit trail. Release appends a `released` tombstone, and the next apply
+acquires immediately by appending a child active lease. Do not delete or
+rewrite this coordination ref manually. Unlike the former moving tag, it does
+not interfere with `git fetch origin main --tags`. Renewal, release,
+reacquisition, and stale takeover commits are children of the exact current
+lock commit and update the branch with a non-forced fast-forward. The 30-minute
+lease is renewed by a bounded heartbeat. After acquisition, apply discards all
+cached Project discovery, item, and field state and revalidates the pinned
+Project's identity, ownership, repository link, visibility, title, and README
+before repair. Lease ownership is then awaited immediately before every
+individual REST, GraphQL, or `gh project` mutation, including each sub-request
+in compound repairs. Renewal or ownership proof failure stops the next write.
+Only the current lease owner may release it.
+
+During a Beads version or schema migration, designate one sole migrator and
+stop other bootstrap/migration-capable processes until the migrated Dolt state
+has been pushed. See [`.beads/README.md`](.beads/README.md) for export commands,
+token setup, guard thresholds, workflow operation, and Project view notes.
+
 ## Pull-request scope
 
 Use one branch/worktree for one reviewable outcome. A PR should have one primary behavior or contract change and a rollback story that remains understandable without reading unrelated work.
@@ -152,18 +248,32 @@ Do not publish tokens, passwords, private keys, signing material, raw private pr
 - Product status and active priorities: use [docs/ROADMAP.md](docs/ROADMAP.md).
 - Historical design context: use [`docs/superpowers/README.md`](docs/superpowers/README.md); dated records are not an executable backlog.
 
-## Local application channels
+## Local macOS app channels
 
-For a protected daily-use macOS build from an explicit tested Git ref:
+Build a protected daily-use app from an explicit tested Git ref:
 
 ```bash
 pnpm app:stable -- <git-ref>
 ```
 
-For an experimental local build from the current checkout:
+The stable command builds the resolved commit in a temporary detached worktree,
+runs the full desktop verification gate, smoke-launches the candidate with
+temporary local data, and transactionally replaces
+`~/Applications/Psyche Build.app` only after every check passes.
+
+Build the current checkout as a separate experimental app:
 
 ```bash
 pnpm app:dev
 ```
 
-Neither command creates a signed/notarized public release. Publication is governed by [docs/RELEASE.md](docs/RELEASE.md) and requires the corresponding protected release evidence.
+This fast path accepts a dirty checkout, skips the stable-only full gate and
+startup smoke, and replaces only `~/Applications/Psyche Build Dev.app`.
+The stable app uses bundle identifier `dev.opencoven.psyche`; the dev app uses
+`dev.opencoven.psyche.dev`, keeping preferences, WebView data, caches, and
+restored state isolated between channels. Neither command automatically opens
+the installed app.
+
+Local commands do not create a signed or notarized public release. These
+commands produce local application bundles only; use `docs/RELEASE.md` for the
+publication workflow.
