@@ -288,11 +288,13 @@ function boundedText(value: unknown, audit: MutableAudit, key = ''): string | un
   if (bytes <= SUPPORT_BUNDLE_LIMITS.maxStringBytes) return scrubbed;
   audit.fieldsTruncated += 1;
   note(audit, 'bounded-text');
-  let result = scrubbed;
-  while (Buffer.byteLength(`${result}…`, 'utf8') > SUPPORT_BUNDLE_LIMITS.maxStringBytes) {
-    result = result.slice(0, Math.max(0, result.length - 1));
-  }
-  return `${result}…`;
+  const suffix = '…';
+  const prefixBytes = SUPPORT_BUNDLE_LIMITS.maxStringBytes - Buffer.byteLength(suffix, 'utf8');
+  // Slice UTF-8 bytes once and let decoding discard a partial trailing code
+  // point. This keeps hostile oversized strings linear instead of trimming
+  // one JavaScript code unit at a time.
+  const prefix = Buffer.from(scrubbed, 'utf8').subarray(0, prefixBytes).toString('utf8');
+  return `${prefix}${suffix}`;
 }
 
 function safeCategory(value: unknown, audit: MutableAudit, key: string): string | undefined {
