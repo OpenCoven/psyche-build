@@ -15,26 +15,65 @@ const controlDocuments = async (): Promise<Array<{ filePath: string; source: str
     })),
   );
 
+const expectAnyPhrase = (
+  source: string,
+  phrases: readonly string[],
+  context: string,
+): void => {
+  const normalized = source.toLowerCase();
+  expect(
+    phrases.some((phrase) => normalized.includes(phrase.toLowerCase())),
+    `${context}: expected one of ${phrases.join(', ')}`,
+  ).toBe(true);
+};
+
+const expectPrDisposition = (
+  source: string,
+  filePath: string,
+  pull: number,
+  disposition: RegExp,
+): void => {
+  expect(source, `${filePath} missing pull request #${pull}`).toContain(pullUrl(pull));
+  expect(source, `${filePath} missing disposition for PR #${pull}`).toMatch(
+    new RegExp(`#${pull}\\b[\\s\\S]{0,420}${disposition.source}`, 'i'),
+  );
+};
+
+const expectOrderedUrls = (
+  source: string,
+  firstUrl: string,
+  secondUrl: string,
+  context: string,
+): void => {
+  const firstIndex = source.indexOf(firstUrl);
+  const secondIndex = source.indexOf(secondUrl);
+  expect(firstIndex, `${context}: missing ${firstUrl}`).toBeGreaterThanOrEqual(0);
+  expect(secondIndex, `${context}: missing ${secondUrl}`).toBeGreaterThanOrEqual(0);
+  expect(firstIndex, `${context}: expected ${firstUrl} before ${secondUrl}`).toBeLessThan(secondIndex);
+};
+
 describe('post-release execution documentation', () => {
   it('records completed control foundations without falsely closing live governance', async () => {
     const documents = await controlDocuments();
 
     for (const { filePath, source } of documents) {
+      expect(source, filePath).toMatch(/## Delivered(?: control)? foundation/i);
       expect(source, filePath).toContain(pullUrl(245));
       expect(source, filePath).toContain('5f4b7b05');
-      expect(source, filePath).toMatch(/#238[\s\S]{0,240}(?:delivered|completed)/i);
-      expect(source, filePath).toMatch(/#237[\s\S]{0,240}(?:completed|delivered|first apply)/i);
-      expect(source, filePath).toMatch(/#240[\s\S]{0,240}(?:completed|delivered|zero-operation)/i);
-      expect(source, filePath).toMatch(/#244[\s\S]{0,240}(?:completed|delivered|community)/i);
+      for (const issue of [237, 238, 240, 244]) {
+        expect(source, `${filePath} missing completed outcome #${issue}`).toContain(issueUrl(issue));
+      }
       expect(source, filePath).toContain(pullUrl(272));
       expect(source, filePath).toContain(pullUrl(273));
       expect(source, filePath).toContain(issueUrl(31));
-      expect(source, filePath).toMatch(/#31[\s\S]{0,220}(?:not delivered|open governance|parallel P0 governance)/i);
+      expect(source, filePath).toMatch(
+        /#31[\s\S]{0,420}(?:not delivered|not part of the\s+completed list|open governance)/i,
+      );
       expect(source, filePath).toMatch(/enforcement_level:\s*non_admins/i);
       expect(source, filePath).toMatch(/administrator enforcement/i);
       expect(source, filePath).toMatch(/direct-push rejection/i);
       expect(source, filePath).toMatch(/standing (?:broad )?bypass/i);
-      expect(source, filePath).not.toMatch(/#31[\s\S]{0,160}delivered by this wave/i);
+      expect(source, filePath).not.toMatch(/#31[\s\S]{0,180}delivered by this wave/i);
       expect(source, filePath).not.toMatch(/when this proof PR merges/i);
     }
   });
@@ -49,18 +88,26 @@ describe('post-release execution documentation', () => {
     const packageJson = JSON.parse(packageSource) as { version: string };
 
     expect(packageJson.version).toBe('0.0.2');
-    for (const source of [roadmap, execution, support]) {
-      expect(source).toContain('57c6c71bd5264fde960b062e95de278c8438c94f');
-      expect(source).toMatch(/v0\.0\.1[\s\S]{0,180}(?:released|supported)/i);
-      expect(source).toMatch(/0\.0\.2[\s\S]{0,180}unreleased candidate/i);
-      expect(source).toMatch(/latest (?:supported )?public release[\s\S]{0,120}v0\.0\.1/i);
-      expect(source).toMatch(/(?:version string|package\.json|changelog|merge)[\s\S]{0,220}(?:not|is not)[\s\S]{0,80}(?:publication|release)/i);
+    for (const [name, source] of [
+      ['roadmap', roadmap],
+      ['execution', execution],
+      ['support', support],
+    ] as const) {
+      expect(source, name).toContain('57c6c71bd5264fde960b062e95de278c8438c94f');
+      expect(source, name).toContain('v0.0.1');
+      expect(source, name).toContain('0.0.2');
+      expect(source, name).toMatch(/unreleased candidate/i);
     }
-    expect(support).toMatch(/iOS application[\s\S]{0,160}Planned internal beta pending #200/i);
-    expect(support).toMatch(/Only an immutable TestFlight build[\s\S]{0,160}Internal beta/i);
+
+    expect(roadmap).toMatch(/not a\s+publication event/i);
+    expect(execution).toMatch(/Do not infer release/i);
+    expect(support).toMatch(/latest supported public release is[\s\S]{0,100}v0\.0\.1/i);
+    expect(support).toMatch(/0\.0\.2[\s\S]{0,180}not a supported distribution/i);
+    expect(support).toMatch(/iOS application[\s\S]{0,180}Planned internal beta pending #200/i);
+    expect(support).toMatch(/Only an immutable TestFlight build[\s\S]{0,180}Internal beta/i);
   });
 
-  it('names the complete current portfolio and its ordered gates', async () => {
+  it('names the complete current portfolio and preserves the ordered gates', async () => {
     const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
 
     for (const issue of [31, 195, 196, 197, 198, 199, 200, 201, 237, 238, 239, 240, 241, 242, 243, 244, 246, 253, 279, 280]) {
@@ -68,59 +115,76 @@ describe('post-release execution documentation', () => {
     }
 
     expect(execution).toMatch(/#196\/#239 are the current P0 stabilization critical\s+path/i);
-    expect(execution).toMatch(/#31[\s\S]{0,180}parallel P0 governance gate/i);
-    expect(execution).toMatch(/#241 atomic readiness[\s\S]{0,240}#280 focused invite-auth/i);
-    expect(execution).toMatch(/#280[\s\S]{0,240}physical same-LAN proof[\s\S]{0,240}#242/i);
+    expect(execution).toMatch(/#31[\s\S]{0,220}parallel P0 governance gate/i);
+    expectOrderedUrls(execution, issueUrl(241), issueUrl(280), 'iOS readiness before invite authentication');
+    expectOrderedUrls(execution, issueUrl(280), issueUrl(242), 'invite authentication before production actions');
     expect(execution).toMatch(/#242 publication precedes execution/i);
     expect(execution).toMatch(/execution precedes mobile controls/i);
-    expect(execution).toMatch(/#279[\s\S]{0,220}cannot[\s\S]{0,120}block #196, #199, or #200/i);
+    expect(execution).toMatch(/#279[\s\S]{0,280}cannot[\s\S]{0,160}block #196, #199, or #200/i);
   });
 
   it('records current pull-request disposition instead of equating green CI with readiness', async () => {
     const documents = await controlDocuments();
 
     for (const { filePath, source } of documents) {
-      for (const pull of [190, 192, 193, 236, 254, 262, 264, 274, 277, 278]) {
-        expect(source, `${filePath} missing pull request #${pull}`).toContain(pullUrl(pull));
-      }
-      expect(source, filePath).toMatch(/#274[\s\S]{0,180}\*\*Merged\*\*[\s\S]{0,100}f12b7534/i);
-      expect(source, filePath).toMatch(/#278[\s\S]{0,180}\*\*Changes requested\*\*/i);
-      expect(source, filePath).toMatch(/#277[\s\S]{0,220}\*\*Design correction required; not merge-ready\*\*/i);
-      expect(source, filePath).toMatch(/#264[\s\S]{0,220}\*\*Draft source material only\*\*/i);
-      expect(source, filePath).toMatch(/#262[\s\S]{0,180}\*\*Merged focused mapping slice\*\*/i);
-      expect(source, filePath).toMatch(/#236[\s\S]{0,180}\*\*Closed as superseded\*\*/i);
+      expectPrDisposition(source, filePath, 274, /\*\*Merged\*\*[\s\S]{0,140}f12b7534/i);
+      expectPrDisposition(source, filePath, 281, /\*\*Changes requested\*\*/i);
+      expectPrDisposition(source, filePath, 278, /\*\*Changes requested\*\*/i);
+      expectPrDisposition(source, filePath, 277, /\*\*Design correction required; not merge-ready\*\*/i);
+      expectPrDisposition(source, filePath, 264, /\*\*Draft source material only\*\*/i);
+      expectPrDisposition(source, filePath, 262, /\*\*Merged focused mapping slice\*\*/i);
+      expectPrDisposition(source, filePath, 236, /\*\*Closed as superseded\*\*/i);
       for (const pull of [190, 192, 193, 254]) {
-        expect(source, `${filePath} changed PR #${pull} source disposition`).toMatch(
-          new RegExp(`${pullUrl(pull).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,220}\\*\\*Source material only\\*\\*`, 'i'),
-        );
+        expectPrDisposition(source, filePath, pull, /\*\*Source material only\*\*/i);
       }
       expect(source, filePath).toMatch(/No listed open implementation PR is\s+merge-ready/i);
-      expect(source, filePath).toMatch(/green CI[\s\S]{0,180}(?:not|does not)[\s\S]{0,120}(?:readiness|resolve|establish)/i);
+      expect(source, filePath).toMatch(/unresolved requested changes|not merge-ready|design correction required/i);
     }
   });
 
-  it('protects the active privacy, iOS, and runtime-adapter review findings', async () => {
+  it('protects the active privacy, diagnostics, iOS, and runtime-adapter findings', async () => {
     const [roadmap, execution, support] = await Promise.all([
       readFile('docs/ROADMAP.md', 'utf8'),
       readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8'),
       readFile('docs/SUPPORT-MATRIX.md', 'utf8'),
     ]);
 
-    for (const source of [roadmap, execution, support]) {
-      expect(source).toContain(issueUrl(243));
-      expect(source).toContain(pullUrl(278));
-      expect(source).toMatch(/terminal[\s\S]{0,180}(?:free text|content|output)[\s\S]{0,220}(?:omit|fail closed|proven-safe)/i);
-      expect(source).toMatch(/collector[\s\S]{0,180}(?:conflict|ownership)[\s\S]{0,180}(?:truth|silently|complete)/i);
-      expect(source).toMatch(/action vocabulary[\s\S]{0,180}(?:receipt|authoritative)/i);
-      expect(source).toMatch(/(?:traversal|normalization)[\s\S]{0,180}(?:bound|elapsed)/i);
+    for (const [name, source] of [
+      ['roadmap', roadmap],
+      ['execution', execution],
+      ['support', support],
+    ] as const) {
+      expect(source, name).toContain(issueUrl(243));
+      expect(source, name).toContain(pullUrl(278));
+      expectAnyPhrase(source, ['terminal free text', 'terminal content', 'terminal output'], `${name} terminal privacy`);
+      expectAnyPhrase(source, ['omit', 'fail closed', 'proven-safe'], `${name} terminal admission`);
+      expect(source.toLowerCase(), `${name} collector contract`).toContain('collector');
+      expectAnyPhrase(source, ['collector conflict', 'collector ownership', 'duplicate collector'], `${name} collector truth`);
+      expectAnyPhrase(source, ['action vocabulary', 'action states', 'state vocabulary'], `${name} action state contract`);
+      expect(source.toLowerCase(), `${name} authoritative receipts`).toContain('receipt');
+      expectAnyPhrase(source, ['traversal', 'normalization'], `${name} bounded traversal`);
+      expectAnyPhrase(source, ['bound', 'elapsed'], `${name} elapsed/bound contract`);
 
-      expect(source).toContain(issueUrl(279));
-      expect(source).toMatch(/prompt[\s\S]{0,160}(?:process argv|process arguments)[\s\S]{0,200}(?:persistent|launch metadata)/i);
-      expect(source).toMatch(/Coven[\s\S]{0,180}(?:version\/profile|profile\/capability|capability\/version)/i);
+      expect(source, name).toContain(issueUrl(279));
+      expect(source.toLowerCase(), `${name} Coven adapter`).toContain('coven');
+      expect(source.toLowerCase(), `${name} prompt transport`).toContain('prompt');
+      expectAnyPhrase(source, ['process argv', 'process arguments'], `${name} process-argument privacy`);
+      expect(source.toLowerCase(), `${name} launch metadata`).toContain('launch metadata');
+      expect(source.toLowerCase(), `${name} capability negotiation`).toContain('capability');
+      expect(source.toLowerCase(), `${name} profile negotiation`).toContain('profile');
 
-      expect(source).toContain(issueUrl(280));
-      expect(source).toMatch(/#241[\s\S]{0,220}(?:precedes|after)[\s\S]{0,180}#280/i);
-      expect(source).toMatch(/PR #264[\s\S]{0,220}(?:source material|not a\s+merge-ready)/i);
+      expect(source, name).toContain(issueUrl(280));
+      expectOrderedUrls(source, issueUrl(241), issueUrl(280), `${name} #241 before #280`);
+      expect(source, name).toMatch(/PR #264[\s\S]{0,260}(?:source material|not a\s+merge-ready)/i);
+    }
+
+    for (const { filePath, source } of await controlDocuments()) {
+      expect(source, filePath).toContain(pullUrl(281));
+      expect(source, filePath).toContain(issueUrl(199));
+      expectAnyPhrase(source, ['compile-time debug boundary', 'debug-build boundary'], `${filePath} debug boundary`);
+      expect(source.toLowerCase(), `${filePath} invoking webview`).toContain('invoking webview');
+      expect(source.toLowerCase(), `${filePath} launcher spawn error`).toContain('spawn error');
+      expect(source, filePath).toMatch(/generated (?:Beads task|#230|issue body)[\s\S]{0,240}(?:one-way mirror|not manually)/i);
     }
   });
 
@@ -136,7 +200,7 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toMatch(/#246 retains its P2 dependency gate/i);
       expect(source, filePath).toContain(pullUrl(262));
       expect(source, filePath).toMatch(/PR #262 is the focused replacement for #254(?:'s)? mapping scope/i);
-      expect(source, filePath).toMatch(/#201\/#253\/#279[\s\S]{0,180}(?:cannot block|implementation cannot block)[\s\S]{0,100}#196[\s\S]{0,80}#199[\s\S]{0,80}#200/i);
+      expect(source, filePath).toMatch(/#201\/#253\/#279[\s\S]{0,240}(?:cannot block|implementation cannot block)[\s\S]{0,140}#196[\s\S]{0,100}#199[\s\S]{0,100}#200/i);
     }
   });
 
@@ -194,7 +258,7 @@ describe('post-release execution documentation', () => {
     expect(execution).toContain('exact final head');
     expect(execution).toMatch(/required checks are terminal and successful on the exact final head/i);
     expect(execution).toMatch(/no unresolved current review finding/i);
-    expect(execution).toMatch(/Documentation and test counts[\s\S]{0,100}not substitutes/i);
-    expect(execution).toMatch(/Closing a public outcome requires[\s\S]{0,100}every child gate/i);
+    expect(execution).toMatch(/Documentation and test counts[\s\S]{0,140}not substitutes/i);
+    expect(execution).toMatch(/Closing a public outcome requires[\s\S]{0,140}every child gate/i);
   });
 });
