@@ -160,6 +160,25 @@ describe('built cockpit smoke test', () => {
       }
       tmux(['send-keys', '-t', session, 'n']);
 
+      // The tmux onboarding is followed by the independent OpenRouter setup
+      // prompt on a clean HOME. Decline that prompt too so startup can reach
+      // the project config without writing credentials or shell state.
+      try {
+        await waitFor(
+          () => capturePane(session).includes('OPENROUTER_API_KEY is not set.'),
+          {
+            timeoutMs: 20_000,
+            label: 'the OpenRouter onboarding prompt',
+          },
+        );
+      } catch (error) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}\n`
+            + `--- cockpit pane ---\n${capturePane(session)}`,
+        );
+      }
+      tmux(['send-keys', '-t', session, 'n', 'Enter']);
+
       const configPath = path.join(realRepo, '.psyche', 'psyche.config.json');
       try {
         await waitFor(() => fs.existsSync(configPath), {
