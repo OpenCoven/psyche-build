@@ -532,19 +532,26 @@ interface CollectorArraySnapshot {
 // Collector results are untrusted objects. Read payload arrays through a
 // bounded snapshot so a throwing field/element getter cannot escape the
 // recovery path, and avoid copying an array whose length is already too large.
-function safeCollectorArraySnapshot(value: unknown, field: CollectorPayloadField): CollectorArraySnapshot | undefined {
+function safeCollectorArrayValueSnapshot(value: unknown): CollectorArraySnapshot | undefined {
   try {
-    if (!isRecord(value)) return undefined;
-    const candidate = value[field];
-    if (!Array.isArray(candidate)) return undefined;
-    const length = candidate.length;
+    if (!Array.isArray(value)) return undefined;
+    const length = value.length;
     if (!Number.isSafeInteger(length) || length < 0) return undefined;
     if (length > MAX_ATTRIBUTE_SCAN_KEYS) return { length };
     try {
-      return { length, values: candidate.slice() };
+      return { length, values: value.slice() };
     } catch {
       return { length };
     }
+  } catch {
+    return undefined;
+  }
+}
+
+function safeCollectorArraySnapshot(value: unknown, field: CollectorPayloadField): CollectorArraySnapshot | undefined {
+  try {
+    if (!isRecord(value)) return undefined;
+    return safeCollectorArrayValueSnapshot(value[field]);
   } catch {
     return undefined;
   }
@@ -2847,16 +2854,16 @@ export async function collectSupportBundle(
       }
       if (item.result === undefined || item.result === null) continue;
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const snapshot = safeCollectorArraySnapshot(item.result, field);
-        if (snapshot === undefined) continue;
         const fieldKey = `${item.index}:${field}`;
         if (processedCollectorFields.has(fieldKey)) continue;
         const active = activePayload?.item.index === item.index && activePayload.field === field
           ? activePayload
           : undefined;
-        const values = active?.values ?? snapshot.values;
+        const snapshot = active === undefined ? safeCollectorArraySnapshot(item.result, field) : undefined;
+        if (active === undefined && snapshot === undefined) continue;
+        const values = active?.values ?? snapshot?.values;
         if (values === undefined) {
-          accountCollectorArrayLoss(field, snapshot.length);
+          accountCollectorArrayLoss(field, snapshot?.length ?? 0);
           continue;
         }
         const pendingValue = active === undefined
@@ -3011,24 +3018,46 @@ export async function collectSupportBundle(
       continue;
     }
     if (normalizationInterrupted()) return recoveryBundle(normalizationError());
+    const normalizedResultEntries: Array<[string, unknown]> = [];
     for (const [key, value] of resultEntries.sort(([a], [b]) => compareCodeUnits(a, b))) {
+      if ((COLLECTOR_ARRAY_FIELDS as readonly string[]).includes(key)) {
+        const snapshot = safeCollectorArrayValueSnapshot(value);
+        if (snapshot?.values === undefined) {
+          appendError({
+            collector: item.name,
+            code: 'collection_invalid_output',
+            at: collectionAt,
+            recoveryRequired: true,
+          });
+          if (snapshot !== undefined) accountCollectorArrayLoss(key as CollectorPayloadField, snapshot.length);
+          processedCollectorFields.add(`${item.index}:${key}`);
+          continue;
+        }
+        normalizedResultEntries.push([key, snapshot.values]);
+      } else {
+        normalizedResultEntries.push([key, value]);
+      }
+    }
+    for (const [key, value] of normalizedResultEntries) {
       if (normalizationInterrupted()) return recoveryBundle(normalizationError());
       if (key === 'status') {
         const next: SupportBundleStatus = value === 'complete' || value === 'partial' || value === 'unknown' || value === 'recovery_required'
           ? value
           : 'unknown';
         if (requestedStatus === undefined || statusRank[next] > statusRank[requestedStatus]) requestedStatus = next;
-      } else if (key === 'records' && Array.isArray(value)) {
-        activePayload = { item, field: 'records', values: value, nextIndex: 0 };
-        for (let index = 0; index < value.length; index += 1) {
+      } else if (key === 'records') {
+        const values = value as readonly unknown[];
+        activePayload = { item, field: 'records', values, nextIndex: 0 };
+        for (let index = 0; index < values.length; index += 1) {
           activePayload.nextIndex = index;
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
-          recordCandidates.push(value[index] as SupportRecord);
+          recordCandidates.push(values[index] as SupportRecord);
           activePayload.nextIndex = index + 1;
         }
         activePayload = undefined;
         processedCollectorFields.add(`${item.index}:records`);
-      } else if (key === 'receipts' && Array.isArray(value)) {
+      } else if (key === 'receipts') {
+        const values = value as readonly unknown[];
         if (claimedCollectorFields.has(key)) {
           appendError({
             collector: item.name,
@@ -3036,17 +3065,17 @@ export async function collectSupportBundle(
             at: collectionAt,
             recoveryRequired: true,
           });
-          accountCollectorArrayLoss('receipts', value.length);
+          accountCollectorArrayLoss('receipts', values.length);
           processedCollectorFields.add(`${item.index}:receipts`);
           continue;
         }
         claimedCollectorFields.add(key);
         if (resultTrustedFields?.has('receipts')) trustedMergedFields.add('receipts');
-        activePayload = { item, field: 'receipts', values: value, nextIndex: 0 };
-        for (let index = 0; index < value.length; index += 1) {
+        activePayload = { item, field: 'receipts', values, nextIndex: 0 };
+        for (let index = 0; index < values.length; index += 1) {
           activePayload.nextIndex = index;
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
-          const receipt = value[index];
+          const receipt = values[index];
           if (!isActionStatusReceipt(receipt)) {
             aggregateOverflow = true;
             receiptsOmitted += 1;
@@ -3068,16 +3097,17 @@ export async function collectSupportBundle(
         }
         activePayload = undefined;
         processedCollectorFields.add(`${item.index}:receipts`);
-      } else if (key === 'errors' && Array.isArray(value)) {
-        if (errorCandidates.length + value.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) aggregateOverflow = true;
-        activePayload = { item, field: 'errors', values: value, nextIndex: 0 };
-        for (let index = 0; index < value.length; index += 1) {
+      } else if (key === 'errors') {
+        const values = value as readonly unknown[];
+        if (errorCandidates.length + values.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) aggregateOverflow = true;
+        activePayload = { item, field: 'errors', values, nextIndex: 0 };
+        for (let index = 0; index < values.length; index += 1) {
           activePayload.nextIndex = index;
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
-          appendError(value[index] as SupportCollectionError);
+          appendError(values[index] as SupportCollectionError);
           activePayload.nextIndex = index + 1;
         }
-        activePayload.nextIndex = value.length;
+        activePayload.nextIndex = values.length;
         activePayload = undefined;
         processedCollectorFields.add(`${item.index}:errors`);
       } else if (ignoredCollectorFields.has(key)) {
@@ -3088,9 +3118,11 @@ export async function collectSupportBundle(
           code: 'collection_conflict',
           at: collectionAt,
           recoveryRequired: true,
-        });
-        if (key === 'terminalTail' && Array.isArray(value)) terminalLinesOmitted += value.length;
-        if (Array.isArray(value)) processedCollectorFields.add(`${item.index}:${key}`);
+          });
+        if (key === 'terminalTail') terminalLinesOmitted += (value as readonly unknown[]).length;
+        if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField)) {
+          processedCollectorFields.add(`${item.index}:${key}`);
+        }
       } else {
         claimedCollectorFields.add(key);
         (merged as Record<string, unknown>)[key] = value;

@@ -627,6 +627,34 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('returns bounded recovery when a collector array element becomes unreadable', async () => {
+    let reads = 0;
+    const records: unknown[] = [];
+    Object.defineProperty(records, 0, {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        if (reads >= 3) throw new Error('record getter boom');
+        return {
+          sequence: 1,
+          at: '2026-01-01T00:00:00.000Z',
+          component: 'collector',
+          event: 'ready',
+        };
+      },
+    });
+    records.length = 1;
+    const bundle = await collectSupportBundle([{
+      name: 'stateful-payload',
+      collect: async () => ({ records } as never),
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
   it('degrades conflicting singleton collector sections to recovery_required', async () => {
     const bundle = await collectSupportBundle([
       { name: 'alpha', collect: async () => ({ lifecycle: { state: 'ready' } }) },
