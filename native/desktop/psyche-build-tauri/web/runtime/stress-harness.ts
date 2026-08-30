@@ -290,6 +290,11 @@ async function invokeAbortable<T>(
   let lateResolve: (() => void) | undefined;
   let lateReject: ((reason?: unknown) => void) | undefined;
   let lateTimeout: ReturnType<typeof setTimeout> | undefined;
+  let lateHardTimeout: ReturnType<typeof setTimeout> | undefined;
+  const clearLateTimeouts = (): void => {
+    if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+    if (lateHardTimeout !== undefined) clearTimeout(lateHardTimeout);
+  };
   const lateSettlement = options.onLateResolve === undefined
     ? undefined
     : new Promise<void>((resolve, reject) => {
@@ -309,8 +314,13 @@ async function invokeAbortable<T>(
       } catch {
         // The tracked late settlement remains the authoritative cleanup error.
       }
-      lateReject?.(error);
-      options.lateSettlements?.delete(lateSettlement);
+      // Keep the tracked settlement pending while a late resource can still
+      // arrive and be compensated. A second deadline prevents an absent or
+      // permanently hung native result from keeping the scenario alive.
+      lateHardTimeout = setTimeout(() => {
+        lateReject?.(error);
+        options.lateSettlements?.delete(lateSettlement);
+      }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
   }
   const settleLate = (value: T): void => {
@@ -319,7 +329,7 @@ async function invokeAbortable<T>(
       work = options.onLateResolve?.(value);
     } catch (error) {
       lateReject?.(error);
-      if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+      clearLateTimeouts();
       if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
       return;
     }
@@ -327,7 +337,7 @@ async function invokeAbortable<T>(
       () => lateResolve?.(),
       (error) => lateReject?.(error),
     ).finally(() => {
-      if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+      clearLateTimeouts();
       if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
     }).catch(() => undefined);
   };
@@ -353,7 +363,7 @@ async function invokeAbortable<T>(
         }
         settled = true;
         cleanup();
-        if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+        clearLateTimeouts();
         if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
         resolve(value);
       },
@@ -362,13 +372,13 @@ async function invokeAbortable<T>(
           // A late rejection is still observed by this handler. There is no
           // resource to compensate, so release the tracked settlement.
           lateResolve?.();
-          if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+          clearLateTimeouts();
           if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
           return;
         }
         settled = true;
         cleanup();
-        if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+        clearLateTimeouts();
         if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
         reject(error);
       },
@@ -377,6 +387,7 @@ async function invokeAbortable<T>(
 }
 
 const CLEANUP_OPERATION_TIMEOUT_MS = 2_000;
+const FORCE_CLEANUP_TIMEOUT_MS = 1_000;
 
 async function invokeBoundedCleanup<T>(
   operation: (signal: AbortSignal) => Promise<T> | T,
@@ -387,16 +398,24 @@ async function invokeBoundedCleanup<T>(
   let timedOut = false;
   let timeoutError: Error | undefined;
   let timeoutCleanup: Promise<void> | undefined;
+  let forceTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const operationPromise = Promise.resolve().then(() => operation(controller.signal));
-  timeoutHandle = setTimeout(() => {
-    timedOut = true;
-    timeoutError = new Error('stress cleanup operation timed out');
-    controller.abort(timeoutError);
-    timeoutCleanup = Promise.resolve().then(() => onTimeout?.()).then(() => undefined);
-    void timeoutCleanup.catch(() => undefined);
-  }, CLEANUP_OPERATION_TIMEOUT_MS);
+  const timeoutResult = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      timeoutError = new Error('stress cleanup operation timed out');
+      controller.abort(timeoutError);
+      const forceCleanup = Promise.resolve().then(() => onTimeout?.()).then(() => undefined);
+      const forceCleanupDeadline = new Promise<void>((resolve) => {
+        forceTimeoutHandle = setTimeout(resolve, FORCE_CLEANUP_TIMEOUT_MS);
+      });
+      timeoutCleanup = Promise.race([forceCleanup, forceCleanupDeadline]).then(() => undefined);
+      void timeoutCleanup.catch(() => undefined);
+      reject(timeoutError);
+    }, CLEANUP_OPERATION_TIMEOUT_MS);
+  });
   try {
-    const result = await operationPromise;
+    const result = await Promise.race([operationPromise, timeoutResult]);
     if (timeoutCleanup) await timeoutCleanup;
     if (timedOut) throw timeoutError;
     return result;
@@ -406,6 +425,7 @@ async function invokeBoundedCleanup<T>(
     throw error;
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (forceTimeoutHandle !== undefined) clearTimeout(forceTimeoutHandle);
   }
 }
 

@@ -346,7 +346,7 @@ describe('Tauri diagnostics stress harness', () => {
     },
   );
 
-  it('waits for a timed-out disposal to settle and invokes the force path', async () => {
+  it('returns after a timed-out disposal and invokes the force path', async () => {
     vi.useFakeTimers();
     try {
       const disposed: string[] = [];
@@ -403,7 +403,7 @@ describe('Tauri diagnostics stress harness', () => {
       void observed.finally(() => { settled = true; });
       await disposeStarted.promise;
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(settled).toBe(false);
+      expect(settled).toBe(true);
       expect(disposed).toContain('force-browser-1');
       disposal.resolve();
 
