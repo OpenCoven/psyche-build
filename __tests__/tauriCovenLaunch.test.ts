@@ -974,6 +974,55 @@ describe('native Coven launch routing', () => {
     expect((invoked[0].options as Record<string, unknown>)).not.toHaveProperty('metricsProvider');
   });
 
+  it('can wait for the first PTY start before reporting thread creation success', async () => {
+    const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
+    const start = deferred<boolean>();
+    let frame: (() => void) | null = null;
+    let settled = false;
+    const createThread = compileFunction<(
+      opts: Record<string, any>,
+    ) => Promise<Record<string, any> | null>>(
+      functionSource('createThread'),
+      {
+        makeThreadId: () => 'thread-1',
+        activeProject: () => null,
+        activeWorkspaceRoot: () => '/repo',
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        commitPanePlacement: () => undefined,
+        state,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        mountTerminal: () => undefined,
+        focusThread: () => undefined,
+        requestAnimationFrame: (callback: () => void) => { frame = callback; },
+        isLiveThread: (thread: Record<string, any>) => state.threads.includes(thread),
+        isPersistentThread: () => false,
+        attachThreadClient: () => Promise.resolve(false),
+        spawnPty: () => start.promise,
+      },
+    );
+
+    const creation = createThread({
+      worktreePath: '/repo',
+      command: '/bin/coven',
+      waitForPtyStart: true,
+    }).then((thread) => {
+      settled = true;
+      return thread;
+    });
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(frame).not.toBeNull();
+    (frame as unknown as () => void)();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    start.resolve(false);
+    await expect(creation).resolves.toBeNull();
+  });
+
   it('suppresses initial terminal focus only when thread creation requests it', async () => {
     const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
     const focusCalls: Array<{
