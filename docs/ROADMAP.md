@@ -144,8 +144,10 @@ Delivered release and control foundation
 Current P0 stabilization path
   #196/#239 operator acceptance ─────────────► #199 operational hardening
                     │                              │
-                    │                              └─► #243 support bundle v1
-                    │                                   (PR #278 review-blocked)
+                    │                              ├─► #243 support bundle v1
+                    │                              │    (PR #278 review-blocked)
+                    │                              └─► debug rendering stress harness
+                    │                                   (PR #281 review-blocked; Beads #230)
                     │
                     ├─► #198 final clean-room/live-settings evidence
                     │
@@ -178,7 +180,7 @@ Non-blocking P2 convergence
 | [#240 — tracker drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | **Completed** | Preserve bounded validation and zero-operation evidence |
 | [#196 — `v0.0.1` stabilization](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Active critical path | Operator-observed ordinary and representative failure/recovery paths |
 | [#239 — operator acceptance manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | Active critical path | One sanitized immutable-source manifest covering lifecycle, persistence, Git/cleanup, provider isolation, authority, and recovery |
-| [#199 — operations, diagnostics, recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Active after/alongside #239 | Bounded diagnostics and reusable observed recovery harnesses |
+| [#199 — operations, diagnostics, recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Active after/alongside #239; PR #281 changes requested | Bounded diagnostics and reusable observed recovery harnesses |
 | [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Active; PR #278 changes requested | Fail-closed redaction, truthful collector ownership/status, bounded traversal, deterministic schema/fixture |
 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Repository policy delivered; evidence remains | Terminal clean-checkout contributor acceptance and live policy/community evidence |
 | [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | **Completed** | Preserve validated security, ownership, support, intake, conduct, and protected-data contracts |
@@ -197,6 +199,7 @@ Non-blocking P2 convergence
 | Pull request | Disposition | Owning gate |
 |---|---|---|
 | [#274](https://github.com/OpenCoven/psyche-build/pull/274) | **Merged** as `f12b7534` | Product-local iOS action-state composition; no support claim |
+| [#281](https://github.com/OpenCoven/psyche-build/pull/281) | **Changes requested** | #199 / generated Beads #230: compile-time debug boundary, invoking-webview authority, deterministic launcher spawn errors |
 | [#278](https://github.com/OpenCoven/psyche-build/pull/278) | **Changes requested** | #243: fail-closed terminal privacy, collector conflict truth, state vocabulary, bounded normalization |
 | [#277](https://github.com/OpenCoven/psyche-build/pull/277) | **Design correction required; not merge-ready** | #279: remove prompt from argv/persistence, negotiate Coven capability/version, split unrelated Git tests |
 | [#264](https://github.com/OpenCoven/psyche-build/pull/264) | **Draft source material only** | #280 after #241; extract focused R3 slices rather than merging 32 commits / 37 files |
@@ -209,11 +212,11 @@ Non-blocking P2 convergence
 
 The listed source-material PRs are not merge-ready merely because they can be
 rebased or their historical checks passed. No listed open implementation PR is
-merge-ready at this snapshot: #278 has unresolved requested changes, #277 needs
-the #279 design correction, and #264 remains an oversized draft/source branch.
-Every replacement starts from current `main`, has one owning outcome and one
-acceptance gate, resolves current findings, and passes required checks on its
-exact final head.
+merge-ready at this snapshot: #281 and #278 have unresolved requested changes,
+#277 needs the #279 design correction, and #264 remains an oversized
+draft/source branch. Every replacement starts from current `main`, has one
+owning outcome and one acceptance gate, resolves current findings, and passes
+required checks on its exact final head.
 
 ## Stage 1 — P0 governance and supported-release stabilization
 
@@ -242,6 +245,14 @@ cases. PR #278 remains blocked until unrestricted terminal text fails closed,
 duplicate collector ownership cannot disappear silently, the advertised action
 vocabulary matches authoritative receipt projections, and traversal/elapsed
 bounds are truthful.
+
+PR #281 remains blocked under #199 and generated Beads task #230 until the
+process-spawning diagnostics commands and permissions honor the stated
+compile-time debug boundary (or an explicit reviewed design change replaces
+that contract), `diagnostics_cycle_window` validates the invoking webview rather
+than only a window label, and the diagnostics launcher handles child-process
+spawn errors deterministically without double settlement. The generated #230
+body remains a one-way mirror and is not manually repaired.
 
 #198/#244 retains its P1 dependency gate: #244 and repository policy work are
 delivered, but #198 remains open until a clean external checkout completes the
@@ -304,6 +315,8 @@ contracts unless a bounded slice is explicitly reprioritized.
   publication.
 - #243 schema/redaction correction may proceed during #239; recovery scenarios
   wait for observed #239 cases.
+- #281 may proceed as a bounded #199 diagnostics-harness slice once its current
+  authority/build/launcher findings are resolved; it does not change support.
 - #198 evidence work may proceed independently without weakening #31.
 - #241 precedes #280, later iOS capability work, and support-state changes.
 - #242 publication precedes execution; execution precedes mobile controls.
