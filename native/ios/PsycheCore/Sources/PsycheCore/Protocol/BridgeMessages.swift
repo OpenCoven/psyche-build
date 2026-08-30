@@ -118,6 +118,30 @@ public struct WorkspaceProjectSnapshot: Codable, Sendable, Equatable, Identifiab
     public let projectPanes: [WorkspacePaneSnapshot]
     public let runningCount: Int
     public let attentionCount: Int
+    /// Bounded, sanitized ritual metadata the host publishes for this exact
+    /// project. Legacy hosts omit it; absence means the host did not publish
+    /// a listing, never that the project has no rituals.
+    public let rituals: RitualPublicationSnapshot?
+
+    public init(
+        id: String,
+        root: String,
+        title: String,
+        worktrees: [WorkspaceWorktreeSnapshot],
+        projectPanes: [WorkspacePaneSnapshot],
+        runningCount: Int,
+        attentionCount: Int,
+        rituals: RitualPublicationSnapshot? = nil
+    ) {
+        self.id = id
+        self.root = root
+        self.title = title
+        self.worktrees = worktrees
+        self.projectPanes = projectPanes
+        self.runningCount = runningCount
+        self.attentionCount = attentionCount
+        self.rituals = rituals
+    }
 }
 
 public struct WorkspaceWorktreeSnapshot: Codable, Sendable, Equatable, Identifiable {
@@ -191,6 +215,61 @@ public struct Ritual: Codable, Sendable, Equatable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, displayName, description, scope, projectID = "projectId"
+    }
+}
+
+/// The state of a project's published ritual listing, mirroring the host's
+/// `RitualPublicationState`. Every observable condition is spelled out so a
+/// failed or stale listing can never render as a healthy empty one.
+public enum RitualPublicationState: String, Codable, Sendable, Equatable {
+    case available
+    case empty
+    case unavailable
+    case stale
+    case incompatible
+    case permissionDenied = "permission-denied"
+}
+
+/// One published ritual: identifiers and description only. Commands, prompts,
+/// pane lists, and project-root paths stay host-side; the authoritative
+/// launcher resolves them at execution time.
+public struct PublishedRitual: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let displayName: String
+    public let description: String?
+    public let scope: RitualScope
+
+    public init(id: String, displayName: String, description: String?, scope: RitualScope) {
+        self.id = id
+        self.displayName = displayName
+        self.description = description
+        self.scope = scope
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, displayName, description, scope
+    }
+}
+
+public struct RitualPublicationSnapshot: Codable, Sendable, Equatable {
+    public let state: RitualPublicationState
+    public let rituals: [PublishedRitual]
+
+    public init(state: RitualPublicationState, rituals: [PublishedRitual]) {
+        self.state = state
+        self.rituals = rituals
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // A partial or absent publication object decodes as unavailable —
+        // an unread listing must not masquerade as an empty project.
+        state = try container.decodeIfPresent(RitualPublicationState.self, forKey: .state) ?? .unavailable
+        rituals = try container.decodeIfPresent([PublishedRitual].self, forKey: .rituals) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state, rituals
     }
 }
 

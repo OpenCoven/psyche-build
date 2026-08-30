@@ -5,9 +5,94 @@ import {
   parseGitWorktreePorcelain,
   readProjectWorktrees,
   readProjectWorktreesAsync,
+  unpublishedRituals,
 } from '../src/workspace/snapshot.js';
+import { readDaemonWorkspaceSnapshot } from '../src/daemon/workspace.js';
+import type { RitualPublicationSnapshot } from '../src/workspace/snapshot.js';
 
 describe('workspace snapshot', () => {
+  it('publishes an explicit unavailable listing when a project input omits rituals', () => {
+    const snapshot = buildWorkspaceSnapshot({
+      revision: 1,
+      projects: [{
+        id: '/repo',
+        root: '/repo',
+        title: 'repo',
+        worktrees: [],
+        panes: [],
+      }],
+    });
+
+    expect(snapshot.projects[0]!.rituals).toEqual({ state: 'unavailable', rituals: [] });
+  });
+
+  it('carries a composed ritual publication through to the project snapshot', () => {
+    const rituals: RitualPublicationSnapshot = {
+      state: 'available',
+      rituals: [{
+        id: 'release-checklist',
+        displayName: 'Release checklist',
+        description: 'Prepare a release safely.',
+        scope: 'project',
+      }],
+    };
+    const snapshot = buildWorkspaceSnapshot({
+      revision: 1,
+      projects: [{
+        id: '/repo',
+        root: '/repo',
+        title: 'repo',
+        rituals,
+        worktrees: [],
+        panes: [],
+      }],
+    });
+
+    expect(snapshot.projects[0]!.rituals).toEqual(rituals);
+  });
+
+  it('publishes bounded sanitized ritual metadata for the canonical daemon project', async () => {
+    const snapshot = await readDaemonWorkspaceSnapshot('/repo', {
+      revision: () => 10,
+      readWorktrees: () => [],
+      listPanes: async () => [],
+      listCovenSessions: async () => [],
+      ritualPublication: () => ({
+        state: 'available',
+        rituals: [{
+          id: 'release-checklist',
+          displayName: 'Release checklist',
+          description: 'Prepare a release safely.',
+          scope: 'project',
+        }],
+      }),
+    });
+
+    expect(snapshot.projects[0]!.rituals).toEqual({
+      state: 'available',
+      rituals: [{
+        id: 'release-checklist',
+        displayName: 'Release checklist',
+        description: 'Prepare a release safely.',
+        scope: 'project',
+      }],
+    });
+    // No launch mechanics ever reach the published snapshot.
+    expect(JSON.stringify(snapshot)).not.toContain('"command"');
+  });
+
+  it('publishes the canonical daemon project as unavailable when no listing was composed', async () => {
+    const snapshot = await readDaemonWorkspaceSnapshot('/repo', {
+      revision: () => 10,
+      readWorktrees: () => [],
+      listPanes: async () => [],
+      listCovenSessions: async () => [],
+      ritualPublication: () => unpublishedRituals(),
+    });
+
+    expect(snapshot.projects[0]!.rituals).toEqual({ state: 'unavailable', rituals: [] });
+  });
+
   it('parses main, detached, locked, and prunable worktrees', () => {
     expect(parseGitWorktreePorcelain([
       'worktree /repo',

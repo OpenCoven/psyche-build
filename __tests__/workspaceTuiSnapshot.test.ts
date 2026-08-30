@@ -6,6 +6,7 @@ import type {
   GitWorktreeSnapshotInput,
   PaneSnapshot,
   ReadonlyWorkspaceSnapshot,
+  RitualPublicationSnapshot,
   WorkspaceSnapshot,
 } from '../src/workspace/snapshot.js';
 import type { TuiWorkspaceSnapshotInput } from '../src/workspace/tuiSnapshot.js';
@@ -539,6 +540,121 @@ describe('TUI workspace snapshot adapter', () => {
 
       expect(changed.revision).toBe(2);
       expect(project(changed, '/repo/sidebar').attentionCount).toBe(1);
+    });
+
+    it('publishes composed ritual metadata scoped to the projects the host publishes', async () => {
+      const loadedRoots: string[] = [];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => [{ projectRoot: '/repo/sidebar', projectName: 'Sidebar' }],
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/sidebar', [worktree('/repo/sidebar', { isMain: true, branch: 'main' })]],
+        ]),
+        loadRituals: (projectRoot) => {
+          loadedRoots.push(projectRoot);
+          return {
+            state: 'available',
+            rituals: [{
+              id: 'release-checklist',
+              displayName: 'Release checklist',
+              description: 'Prepare a release safely.',
+              scope: 'project',
+            }],
+          };
+        },
+      });
+
+      const snapshot = await provider();
+
+      // Reads are steered only by canonical published roots, never by a client.
+      expect(loadedRoots.sort()).toEqual(['/repo/primary', '/repo/sidebar']);
+      for (const published of snapshot.projects) {
+        expect(published.rituals).toEqual({
+          state: 'available',
+          rituals: [{
+            id: 'release-checklist',
+            displayName: 'Release checklist',
+            description: 'Prepare a release safely.',
+            scope: 'project',
+          }],
+        });
+      }
+      expect(JSON.stringify(snapshot)).not.toContain('"command"');
+    });
+
+    it('degrades a failing ritual read to an explicit unavailable listing', async () => {
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+        ]),
+        loadRituals: (projectRoot) => {
+          if (projectRoot === '/repo/primary') {
+            throw new Error('ritual store exploded');
+          }
+          return { state: 'empty', rituals: [] };
+        },
+      });
+
+      const snapshot = await provider();
+
+      expect(snapshot.projects).toHaveLength(1);
+      expect(snapshot.projects[0]!.rituals).toEqual({ state: 'unavailable', rituals: [] });
+    });
+
+    it('publishes every project as unavailable when no ritual loader is wired', async () => {
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+        ]),
+      });
+
+      const snapshot = await provider();
+
+      expect(snapshot.projects[0]!.rituals).toEqual({ state: 'unavailable', rituals: [] });
+    });
+
+    it('bumps the workspace revision when a published ritual listing changes', async () => {
+      const listings: RitualPublicationSnapshot[] = [{
+        state: 'empty',
+        rituals: [],
+      }, {
+        state: 'available',
+        rituals: [{
+          id: 'release-checklist',
+          displayName: 'Release checklist',
+          scope: 'project',
+        }],
+      }];
+      let read = 0;
+      // Reads 1 and 2 see the same listing; read 3 sees it change.
+      const readSequence = [0, 0, 1];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+        ]),
+        loadRituals: () => listings[readSequence[Math.min(read++, readSequence.length - 1)]]!,
+      });
+
+      const first = await provider();
+      const unchanged = await provider();
+      const changed = await provider();
+
+      expect(first.revision).toBe(1);
+      expect(unchanged).toBe(first);
+      expect(changed.revision).toBe(2);
+      expect(project(changed, '/repo/primary').rituals).toEqual(listings[1]);
     });
 
     it('serializes concurrent provider reads so revisions follow request order', async () => {

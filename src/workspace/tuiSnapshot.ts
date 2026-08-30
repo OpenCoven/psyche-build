@@ -12,12 +12,15 @@ import {
   normalizeWorkspaceWorktrees,
   readProjectWorktrees,
   readProjectWorktreesAsync,
+  unpublishedRituals,
   type GitWorktreeSnapshotInput,
   type ReadonlyWorkspaceSnapshot,
+  type RitualPublicationSnapshot,
   type WorkspacePaneInput,
   type WorkspaceProjectInput,
   type WorkspaceSnapshot,
 } from './snapshot.js';
+import { readProjectRitualPublication } from './ritualPublication.js';
 
 export interface BuildTuiWorkspaceSnapshotInput {
   revision: number;
@@ -27,6 +30,12 @@ export interface BuildTuiWorkspaceSnapshotInput {
   panes: readonly PsychePane[];
   covenSessionsByProject?: ReadonlyMap<string, readonly CovenSessionSummary[]>;
   worktreesByProjectRoot?: ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>;
+  /**
+   * Bounded ritual publications composed by the host for published project
+   * roots. Projects without an entry publish as `unavailable` — the host did
+   * not compose a listing, which must never read as "no rituals exist".
+   */
+  ritualsByProjectRoot?: ReadonlyMap<string, RitualPublicationSnapshot>;
   readWorktrees?: (projectRoot: string) => GitWorktreeSnapshotInput[];
 }
 
@@ -48,6 +57,15 @@ export interface TuiWorkspaceProviderOptions {
   loadWorktrees?: (
     projectRoot: string,
   ) => MaybePromise<readonly GitWorktreeSnapshotInput[]>;
+  /**
+   * Composes the bounded ritual publication for one published project root.
+   * Called only for roots the workspace actually publishes, so a client can
+   * never steer reads at arbitrary paths. When omitted, every project
+   * publishes as `unavailable`.
+   */
+  loadRituals?: (
+    projectRoot: string,
+  ) => MaybePromise<RitualPublicationSnapshot>;
   worktreeCacheTtlMs?: number;
   onWorktreeReadError?: (projectRoot: string, error: unknown) => void;
   state?: TuiWorkspaceState;
@@ -123,6 +141,8 @@ export function createTuiWorkspaceProvider(
   const loadWorktrees = options.loadWorktrees ?? readProjectWorktreesAsync;
   let providerQueue: Promise<void> = Promise.resolve();
 
+  const loadRituals = options.loadRituals;
+
   const readSnapshot = async (): Promise<ReadonlyWorkspaceSnapshot> => {
     const [
       panes,
@@ -195,10 +215,21 @@ export function createTuiWorkspaceProvider(
       ),
     );
 
+    const ritualsByProjectRoot = loadRituals
+      ? await loadRitualPublications(
+        uniqueSortedStrings([
+          ...publishedProjects.map((project) => project.root),
+          ...associatedCovenSessions.keys(),
+        ]),
+        loadRituals,
+      )
+      : undefined;
+
     return state.snapshot({
       ...workspaceInput,
       covenSessionsByProject: associatedCovenSessions,
       worktreesByProjectRoot: canonicalCovenOwnership.worktreesByProjectRoot,
+      ritualsByProjectRoot,
     });
   };
 
@@ -210,6 +241,25 @@ export function createTuiWorkspaceProvider(
     );
     return result;
   };
+}
+
+/**
+ * Compose one publication per published root. A failing loader degrades that
+ * project to `unavailable` — a read failure is a state the client can see,
+ * never a reason the whole snapshot should fail to publish.
+ */
+async function loadRitualPublications(
+  projectRoots: readonly string[],
+  loadRituals: (projectRoot: string) => MaybePromise<RitualPublicationSnapshot>,
+): Promise<Map<string, RitualPublicationSnapshot>> {
+  const publications = await Promise.all(projectRoots.map(async (projectRoot) => {
+    try {
+      return [projectRoot, await loadRituals(projectRoot)] as const;
+    } catch {
+      return [projectRoot, unpublishedRituals()] as const;
+    }
+  }));
+  return new Map(publications);
 }
 
 export function normalizeCovenSessionsForPublication(
@@ -371,6 +421,8 @@ export function buildTuiWorkspaceSnapshot(
       id: project.root,
       root: project.root,
       title: project.title,
+      rituals: getResolvedMapValue(input.ritualsByProjectRoot ?? new Map(), project.root)
+        ?? unpublishedRituals(),
       worktrees: [
         ...(getResolvedMapValue(
           canonicalCovenOwnership.worktreesByProjectRoot,

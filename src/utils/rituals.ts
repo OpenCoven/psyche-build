@@ -393,6 +393,86 @@ export function listProjectRituals(projectRoot: string): RitualDefinition[] {
     .filter((ritual): ritual is RitualDefinition => !!ritual);
 }
 
+/**
+ * What the project's on-disk ritual store actually contains, with the failure
+ * classified instead of swallowed. Ritual publication needs the difference
+ * between "the project defines nothing" and "the host may not read the store"
+ * so a remote client can render the true state; listProjectRituals keeps its
+ * long-standing lenient contract for existing callers.
+ */
+export interface RitualStoreListing {
+  /** Every project ritual that parsed and normalized. */
+  rituals: RitualDefinition[];
+  /** Entries that exist but do not satisfy the supported ritual shape. */
+  incompatibleCount: number;
+  /** The host may not read the store (EACCES/EPERM somewhere in the read). */
+  denied: boolean;
+  /** The read failed for any other reason (unexpected fs or parse failure). */
+  failed: boolean;
+}
+
+export function readProjectRitualStore(projectRoot: string): RitualStoreListing {
+  const listing: RitualStoreListing = {
+    rituals: [],
+    incompatibleCount: 0,
+    denied: false,
+    failed: false,
+  };
+  const dir = getProjectRitualsDir(projectRoot);
+  if (!fs.existsSync(dir)) {
+    return listing;
+  }
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir)
+      .filter((entry) => entry.endsWith('.json'))
+      .sort();
+  } catch (error) {
+    listing.denied = isPermissionError(error);
+    listing.failed = !listing.denied;
+    return listing;
+  }
+
+  for (const entry of entries) {
+    let content: string;
+    try {
+      content = fs.readFileSync(path.join(dir, entry), 'utf-8');
+    } catch (error) {
+      if (isPermissionError(error)) {
+        listing.denied = true;
+      } else {
+        // A single unreadable entry must not mask the rest of the store, but
+        // it does mean the listing is not a faithful read.
+        listing.failed = true;
+      }
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      // Malformed content is an unsupported entry, not a broken store read.
+      listing.incompatibleCount += 1;
+      continue;
+    }
+
+    const ritual = normalizeRitual(parsed, 'project');
+    if (ritual) {
+      listing.rituals.push(ritual);
+    } else {
+      listing.incompatibleCount += 1;
+    }
+  }
+  return listing;
+}
+
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+}
+
 export function listAvailableRituals(projectRoot: string): RitualDefinition[] {
   const ritualsById = new Map<string, RitualDefinition>();
   for (const ritual of getBuiltInRituals()) {

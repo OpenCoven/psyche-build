@@ -17,6 +17,7 @@ import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRoute
 import { ControlRuntime } from '../../src/control/runtime.js';
 import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
 import type { BridgeSpawnRequest } from '../../src/daemon/bridge.js';
+import type { WorkspaceSnapshot } from '../../src/workspace/snapshot.js';
 
 /**
  * The loopback daemon is scoped to exactly one project root, and every pane
@@ -584,12 +585,13 @@ describe('daemon connection project scoping', () => {
 describe('daemon workspace projection', () => {
   it('returns the shared project-worktree-pane snapshot', async () => {
     const root = await projectWithPanes([]);
-    const workspace = {
+    const workspace: WorkspaceSnapshot = {
       revision: 12,
       projects: [{
         id: root,
         root,
         title: 'project',
+        rituals: { state: 'unavailable', rituals: [] },
         worktrees: [],
         projectPanes: [],
         runningCount: 0,
@@ -611,12 +613,13 @@ describe('daemon workspace projection', () => {
 
   it('emits an ordered workspace change after a successful pane mutation', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3', title: 'old' }]);
-    const workspace = {
+    const workspace: WorkspaceSnapshot = {
       revision: 13,
       projects: [{
         id: root,
         root,
         title: 'project',
+        rituals: { state: 'unavailable', rituals: [] },
         worktrees: [],
         projectPanes: [],
         runningCount: 0,
