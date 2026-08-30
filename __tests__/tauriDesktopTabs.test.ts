@@ -299,9 +299,14 @@ describe('Tauri desktop tab shortcuts', () => {
       description: 'Allows only the main app webview to access runtime diagnostics',
       local: true,
       webviews: ['main'],
-      permissions: ['allow-runtime-diagnostics', 'allow-runtime-process-metrics'],
+      permissions: [
+        'allow-runtime-diagnostics',
+        'allow-runtime-process-metrics',
+        'allow-diagnostics-spawn-fixture',
+        'allow-diagnostics-cycle-window',
+      ],
     });
-    expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(2);
+    expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(4);
     expect(mainRuntimeDiagnosticsCapability.windows).toBeUndefined();
     expect(JSON.stringify(mainRuntimeDiagnosticsCapability)).not.toContain('psyche-browser-*');
 
@@ -339,6 +344,12 @@ describe('Tauri desktop tab shortcuts', () => {
       permissions: ['allow-browser-report-title'],
     });
     expect(JSON.stringify(browserTitleCapability)).not.toContain('core:event:allow-emit');
+  });
+
+  it('validates and authorizes the fixed native minimize/restore cycle', () => {
+    expect(tauriLib).toMatch(
+      /async fn diagnostics_cycle_window\([\s\S]*ensure_trusted_pty_caller\(window\.label\(\)\)\?;[\s\S]*state\.ensure_stress_authorized\(\)\?;[\s\S]*window\s*\.minimize\(\)[\s\S]*window\s*\.unminimize\(\)[\s\S]*window\s*\.set_focus\(\)/,
+    );
   });
 
   it('manages per-webview shortcut authorization across navigation and destruction', () => {

@@ -94,7 +94,10 @@ use pty_transport::{
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
-use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
+use runtime_diagnostics::{
+    fixture_start_options, runtime_diagnostics, runtime_process_metrics, DiagnosticsFixture,
+    RuntimeDiagnosticsState,
+};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
@@ -2839,6 +2842,43 @@ async fn pty_start(
         Ok(result) => result,
         Err(error) => Err(format!("failed to join PTY start task: {error}")),
     }
+}
+
+#[tauri::command]
+async fn diagnostics_spawn_fixture(
+    webview: tauri::Webview,
+    app: AppHandle,
+    state: State<'_, RuntimeDiagnosticsState>,
+    thread_id: String,
+    fixture: DiagnosticsFixture,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    state.ensure_stress_authorized()?;
+    let options = fixture_start_options(&thread_id, fixture)?;
+
+    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+#[tauri::command]
+async fn diagnostics_cycle_window(
+    window: tauri::Window,
+    state: State<'_, RuntimeDiagnosticsState>,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(window.label())?;
+    state.ensure_stress_authorized()?;
+    window
+        .minimize()
+        .map_err(|error| format!("failed to minimize diagnostics window: {error}"))?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    window
+        .unminimize()
+        .map_err(|error| format!("failed to restore diagnostics window: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus restored diagnostics window: {error}"))
 }
 
 fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
@@ -8692,6 +8732,8 @@ pub fn run() {
             control_state,
             runtime_diagnostics,
             runtime_process_metrics,
+            diagnostics_spawn_fixture,
+            diagnostics_cycle_window,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {

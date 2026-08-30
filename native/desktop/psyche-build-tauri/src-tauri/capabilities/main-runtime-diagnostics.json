@@ -6,6 +6,8 @@
   "webviews": ["main"],
   "permissions": [
     "allow-runtime-diagnostics",
-    "allow-runtime-process-metrics"
+    "allow-runtime-process-metrics",
+    "allow-diagnostics-spawn-fixture",
+    "allow-diagnostics-cycle-window"
   ]
 }
