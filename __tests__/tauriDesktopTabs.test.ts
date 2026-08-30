@@ -568,7 +568,7 @@ describe('Tauri desktop tab shortcuts', () => {
 
     const shutdownHooksStart = tauriLib.indexOf('impl ExitShutdownHooks for PtyExitShutdown');
     const timeoutStart = tauriLib.indexOf('fn terminate_process(&mut self)', shutdownHooksStart);
-    const timeoutEnd = tauriLib.indexOf('fn finish_terminated_cleanup', timeoutStart);
+    const timeoutEnd = tauriLib.indexOf('fn abandon_terminated_threads', timeoutStart);
     const timeoutSource = tauriLib.slice(timeoutStart, timeoutEnd);
     expect(timeoutSource.indexOf('self.terminator.terminate()')).toBeGreaterThanOrEqual(0);
     expect(timeoutSource.indexOf('self.begin_matching_exit()')).toBeGreaterThan(

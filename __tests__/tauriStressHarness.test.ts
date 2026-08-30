@@ -444,17 +444,75 @@ describe('Tauri diagnostics stress harness', () => {
       const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
       await started.promise;
       controller.abort(abortError());
-      await vi.advanceTimersByTimeAsync(6_001);
+      // The bounded result cutoff is at four seconds; the quarantine remains
+      // open long enough to compensate a resource that arrives after that
+      // cutoff but before scenario finalization.
+      await vi.advanceTimersByTimeAsync(4_001);
+      late.resolve(createResource('late-after-cutoff', disposed));
+      await vi.runAllTimersAsync();
       const error = await observed;
       expect(error).toBeInstanceOf(AggregateError);
       expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'AbortError' }),
         expect.objectContaining({ message: 'stress resource creation did not settle after cancellation' }),
       ]));
-      late.resolve(createResource('late-after-cutoff', disposed));
-      await vi.runAllTimersAsync();
 
       expect(disposed).toContain('late-after-cutoff');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not compensate a resource after the late-result quarantine closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposed: string[] = [];
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(9_001);
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+
+      late.resolve(createResource('late-after-quarantine', disposed));
+      await vi.runAllTimersAsync();
+      expect(disposed).not.toContain('late-after-quarantine');
     } finally {
       vi.useRealTimers();
     }

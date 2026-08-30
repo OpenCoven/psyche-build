@@ -325,6 +325,7 @@ async function invokeAbortable<T>(
   let lateCompensationStarted = false;
   let lateCompensationFinished = false;
   let lateSettlementFinished = false;
+  let lateQuarantineClosed = false;
   let lateCutoffError: Error | undefined;
   let completeLateCompensation: (() => void) | undefined;
   const lateCompensation = options.onLateResolve === undefined
@@ -344,10 +345,22 @@ async function invokeAbortable<T>(
   const finishLate = (reason?: unknown): void => {
     if (lateSettlementFinished) return;
     lateSettlementFinished = true;
+    lateQuarantineClosed = true;
     clearLateTimeouts();
     if (reason === undefined) lateResolve?.();
     else lateReject?.(reason);
     if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+  };
+  const armLatePostCutoff = (error: Error): void => {
+    if (latePostCutoffTimeout !== undefined) clearTimeout(latePostCutoffTimeout);
+    // Keep the scenario in a bounded quarantine while a late native result
+    // can still arrive. Starting compensation resets that window so cleanup
+    // gets a full bounded interval, and finalization closes the gate before
+    // any result that arrives after quarantine can mutate state.
+    latePostCutoffTimeout = setTimeout(
+      () => finishLate(error),
+      DETACHED_REAPER_RETENTION_MS,
+    );
   };
   const lateSettlement = options.onLateResolve === undefined
     ? undefined
@@ -379,31 +392,21 @@ async function invokeAbortable<T>(
         // it is still owned by the harness and is sent through the same bounded
         // compensation path; the cutoff only closes the promise that was
         // keeping the caller waiting for the native invoke itself.
-        // If compensation already started, retain the tracked settlement until
-        // that bounded cleanup promise settles; otherwise finalization could
-        // race an in-flight dispose/forceDispose operation.
         lateCutoffError = error;
-        if (!lateCompensationStarted) {
-          // Keep a short reaper window after the result-wait cutoff. Native
-          // invokes can resolve on the same boundary as this timer; retaining
-          // the settlement during the window lets the harness compensate and
-          // finish cleanup before the scenario is finalized.
-          latePostCutoffTimeout = setTimeout(
-            () => finishLate(error),
-            LATE_RESOURCE_RESULT_TIMEOUT_MS,
-          );
-        }
+        armLatePostCutoff(error);
       }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
   };
   const settleLate = (value: T): void => {
     // A late native resource is still owned by this harness even when the
-    // bounded result wait has elapsed. Run its compensation after the cutoff
-    // rather than dropping the resource and leaking a pane/PTY. The caller's
-    // pending settlement may already be closed; compensation is independently
-    // observed below so failures remain handled.
-    if (lateCompensationStarted) return;
+    // bounded result wait has elapsed. Run its compensation during the
+    // quarantine rather than dropping a resource and leaking a pane/PTY. A
+    // result that arrives after the quarantine is deliberately ignored: the
+    // native cancellation contract owns that terminal state, and invoking
+    // cleanup after the scenario has finalized would mutate state out of band.
+    if (lateSettlementFinished || lateQuarantineClosed || lateCompensationStarted) return;
     lateCompensationStarted = true;
+    if (lateCutoffError !== undefined) armLatePostCutoff(lateCutoffError);
     let work: Promise<void> | void;
     try {
       work = options.onLateResolve?.(value);

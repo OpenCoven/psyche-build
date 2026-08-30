@@ -192,8 +192,11 @@ describe('Tauri PTY command threading contract', () => {
     const start = commandSource(source, 'pty_start');
     const exitEmission = start.indexOf('"pty:exit"');
     const timeoutCleanup = start.indexOf('shutdown.finish_terminated_threads');
-    const cleanupCompletion = start.indexOf('shutdown.finish_terminated_threads_to_completion');
-    const generationFinalization = start.indexOf('PTY_LIFECYCLES.lock().finish_exit');
+    const cleanupCompletion = start.indexOf(
+      'shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT)',
+      timeoutCleanup + 1,
+    );
+    const generationFinalization = start.indexOf('finish_pty_lifecycle(&shutdown)');
 
     expect(exitEmission).toBeGreaterThan(-1);
     expect(timeoutCleanup).toBeGreaterThan(exitEmission);

@@ -2640,21 +2640,18 @@ impl PtyExitShutdown {
         self.reader_completion_known && worker_completed
     }
 
-    fn finish_terminated_threads_to_completion(&mut self) {
-        if !self.reader_completion_known {
-            match self.reader_done_rx.recv() {
-                Ok(result) => {
-                    self.reader_result = Some(result);
-                    self.reader_completion_known = true;
-                }
-                Err(_) => {
-                    self.reader_completion_known = true;
-                }
-            }
-        }
-        self.join_reader_after_completion();
-        if self.pump.cancel_and_join().is_err() {
-            log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+    fn abandon_terminated_threads(&mut self) {
+        // The reader and output pump were already cancelled by the bounded
+        // shutdown path. Dropping their join handles deliberately detaches
+        // any OS thread that ignored cancellation; the cancelled pump rejects
+        // late output, so the lifecycle entry can leave Exiting without an
+        // unbounded reaper or a permanently reserved thread id.
+        self.pump.cancel();
+        if self.reader_thread.take().is_some() {
+            log::warn!(
+                "detaching PTY reader after bounded cleanup for '{}'",
+                self.token.thread_id
+            );
         }
     }
 }
@@ -3121,15 +3118,17 @@ fn register_pty_client(
         }
         // Timeout cleanup has its own bounded budget, so it must happen only after
         // observers receive the exit. If reader or worker cleanup is still
-        // incomplete, hand the shutdown object to a reaper and retain the
-        // lifecycle entry in Exiting until both handles have quiesced. This
-        // prevents a late old-generation emission from colliding with a new
-        // session that reuses the same thread id.
+        // incomplete, give it one final bounded retry. If cancellation still
+        // cannot quiesce a thread, detach its handle after the cancelled pump
+        // has been sealed and release the lifecycle entry; the pump rejects
+        // late old-generation output before a new session can reuse the id.
         if outcome == ExitShutdownOutcome::TimedOut {
             if !shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT) {
                 std::thread::spawn(move || {
                     let mut shutdown = shutdown;
-                    shutdown.finish_terminated_threads_to_completion();
+                    if !shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT) {
+                        shutdown.abandon_terminated_threads();
+                    }
                     finish_pty_lifecycle(&shutdown);
                 });
                 return;
@@ -3199,12 +3198,27 @@ async fn diagnostics_cycle_window(
         .minimize()
         .map_err(|error| format!("failed to minimize diagnostics window: {error}"))?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    window
+    let cycle_result = window
         .unminimize()
-        .map_err(|error| format!("failed to restore diagnostics window: {error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("failed to focus restored diagnostics window: {error}"))
+        .map_err(|error| format!("failed to restore diagnostics window: {error}"))
+        .and_then(|()| {
+            window
+                .set_focus()
+                .map_err(|error| format!("failed to focus restored diagnostics window: {error}"))
+        });
+    if let Err(error) = cycle_result {
+        let rollback_result = window
+            .unminimize()
+            .and_then(|()| window.set_focus())
+            .map_err(|rollback_error| {
+                format!("failed to rollback diagnostics window state: {rollback_error}")
+            });
+        return match rollback_result {
+            Ok(()) => Err(format!("{error}; diagnostics window rollback succeeded")),
+            Err(rollback_error) => Err(format!("{error}; {rollback_error}")),
+        };
+    }
+    Ok(())
 }
 
 #[tauri::command]

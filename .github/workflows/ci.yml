@@ -232,8 +232,8 @@ jobs:
           MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
           cargo check --manifest-path "$MANIFEST" --locked
 
-      - name: Run Windows PTY runtime tests
-        if: runner.os == 'Windows' && needs.changes.outputs.desktop == 'true'
+      - name: Run desktop PTY runtime tests
+        if: needs.changes.outputs.desktop == 'true'
         shell: bash
         run: |
           set -euo pipefail
