@@ -538,8 +538,10 @@ function safeCollectorArrayValueSnapshot(value: unknown): CollectorArraySnapshot
     const length = value.length;
     if (!Number.isSafeInteger(length) || length < 0) return undefined;
     if (length > MAX_ATTRIBUTE_SCAN_KEYS) return { length };
+    const values: unknown[] = [];
     try {
-      return { length, values: value.slice() };
+      for (let index = 0; index < length; index += 1) values.push(value[index]);
+      return { length, values };
     } catch {
       return { length };
     }
@@ -1076,13 +1078,19 @@ function safeUnknown(
   }
   if (Array.isArray(value)) {
     const output: unknown[] = [];
-    for (const item of value.slice(0, SUPPORT_BUNDLE_LIMITS.maxAttributeItems)) {
-      const safe = safeUnknown(item, audit, key, depth + 1, homeDirectory, stateKeyPolicy, keyPolicy);
-      if (safe !== undefined) output.push(safe);
-    }
-    if (value.length > output.length) {
-      audit.fieldsTruncated += value.length - output.length;
-      note(audit, 'attribute-items');
+    try {
+      const itemCount = Math.min(value.length, SUPPORT_BUNDLE_LIMITS.maxAttributeItems);
+      for (let index = 0; index < itemCount; index += 1) {
+        const safe = safeUnknown(value[index], audit, key, depth + 1, homeDirectory, stateKeyPolicy, keyPolicy);
+        if (safe !== undefined) output.push(safe);
+      }
+      if (value.length > output.length) {
+        audit.fieldsTruncated += value.length - output.length;
+        note(audit, 'attribute-items');
+      }
+    } catch (error) {
+      if (isNormalizationDeadlineError(error)) throw error;
+      return omit(audit, 'unsupported-value');
     }
     return output;
   }

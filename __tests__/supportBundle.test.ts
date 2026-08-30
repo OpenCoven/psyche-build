@@ -684,6 +684,26 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('does not call an overridable collector array slice method', async () => {
+    const records = [{
+      sequence: 1,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'ready',
+    }] as unknown[];
+    Object.defineProperty(records, 'slice', {
+      value: () => ({ length: 1_000_000_000 }),
+      enumerable: true,
+    });
+    const bundle = await collectSupportBundle([{
+      name: 'slice-poison',
+      collect: async () => ({ records } as never),
+    }]);
+
+    expect(bundle.records).toEqual([expect.objectContaining({ sequence: 1 })]);
+    expect(bundle.status).toBe('partial');
+  });
+
   it('degrades conflicting singleton collector sections to recovery_required', async () => {
     const bundle = await collectSupportBundle([
       { name: 'alpha', collect: async () => ({ lifecycle: { state: 'ready' } }) },
