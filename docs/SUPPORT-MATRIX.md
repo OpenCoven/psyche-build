@@ -1,24 +1,45 @@
 # Psyche Build support matrix
 
-**Status:** Active release contract
+**Status:** Active release contract  
+**Last reconciled:** 2026-08-30
 
 **Applies to:** released `v0.0.1` and current post-release `main` unless a later
-release document supersedes it
+accepted release document supersedes it
 
-**Roadmap:** [ROADMAP.md](./ROADMAP.md)
+**Roadmap:** [ROADMAP.md](./ROADMAP.md)  
+**Execution contract:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
 
-This document defines what Psyche Build may claim as supported. A feature is
-not supported merely because source exists, a simulator passes, or a platform
-compiles. Support requires an intentional distribution path, documented user
-contract, executable validation, and an owned recovery path.
+This document defines what Psyche Build may claim as supported. A feature is not
+supported merely because source exists, a simulator passes, a version string is
+updated, a changelog entry exists, or a platform compiles. Support requires an
+intentional distribution path, immutable artifact/source identity, executable
+acceptance evidence, and an owned recovery path.
+
+## Release truth
+
+The latest supported public release is **`v0.0.1`**, published on 2026-08-23
+from immutable source `57c6c71bd5264fde960b062e95de278c8438c94f`.
+Publication evidence includes the public
+[GitHub Release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1),
+the protected
+[release workflow](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508),
+two architecture-specific signed/notarized DMGs, `SHA256SUMS`, and the public
+OpenCoven Homebrew Cask. [#194](https://github.com/OpenCoven/psyche-build/issues/194)
+and [#203](https://github.com/OpenCoven/psyche-build/issues/203) are closed.
+
+Current `main` identifies package/changelog version `0.0.2`, but no accepted
+`v0.0.2` public release, immutable asset set, publication run, clean install and
+upgrade evidence, or support-state transition is recorded. `0.0.2` is therefore
+an **unreleased candidate**, not a supported distribution. Its eventual release
+must be proved independently against the exact final source and artifacts.
 
 ## Status vocabulary
 
 | Status | Meaning |
 |---|---|
 | **Supported** | Intended for real use in the named distribution, covered by acceptance evidence, and owned for recovery |
-| **Source-supported** | Supported from a repository checkout for contributors or operators; not separately distributed |
-| **Internal beta** | Available only to authorized internal testers, with distributed-build evidence; behavior and distribution may change |
+| **Source-supported** | Supported from a repository checkout for contributors/operators; not separately distributed |
+| **Internal beta** | Available only to authorized internal testers, with immutable distributed-build evidence; behavior/distribution may change |
 | **Compile-only** | CI checks compilation compatibility; no application artifact, install path, or support commitment is published |
 | **Optional integration** | Extends a complete standalone product through a typed, bounded interface and fails in isolation when unavailable |
 | **Planned** | Roadmapped but not a current product or availability claim |
@@ -26,32 +47,25 @@ contract, executable validation, and an owned recovery path.
 
 ## Distribution surfaces
 
-| Surface | `v0.0.1` status | Contract |
+| Surface | Current status | Contract |
 |---|---|---|
-| macOS native application | **Supported** | Signed and notarized Apple Silicon and Intel DMGs, checksums, stable [GitHub Release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.1), and native [Homebrew Cask](https://github.com/OpenCoven/homebrew-tap/blob/main/Casks/psyche-build.rb) |
-| TUI / Node CLI from source checkout | **Source-supported** | Contributor/operator interface invoked from the repository checkout; its package archive is validated |
-| npm package | **Unavailable** | `psyche-build` is not published as an npm release for `v0.0.1` |
-| iOS application | **Planned internal beta pending #200** | No live TestFlight availability is claimed until an immutable distributed build and physical-device acceptance are linked from #200 |
-| External TestFlight | **Unavailable** | Not part of the first delivery contract |
-| Public App Store | **Unavailable** | Not part of the first delivery contract |
-| Windows application | **Compile-only** | Cross-platform compilation compatibility is retained as evidence; no public installer or supported application is shipped |
-| Linux application | **Compile-only** | Cross-platform compilation compatibility is retained as evidence; no public package or supported application is shipped |
+| macOS native application | **Supported — released `v0.0.1` only** | Signed/notarized Apple Silicon and Intel DMGs, checksums, stable GitHub Release, and native Homebrew Cask |
+| Current `main` / `0.0.2` candidate | **Unreleased** | Development and candidate evidence only; no public support transition before immutable publication and release acceptance |
+| TUI / Node CLI from source checkout | **Source-supported** | Contributor/operator interface invoked from a repository checkout; package archive and canonical agent gates are validated |
+| npm package | **Unavailable** | `psyche-build` is not a published npm product release |
+| iOS application | **Planned internal beta pending #200** | No TestFlight claim until one immutable distributed build and physical-device acceptance are linked from #200 |
+| External TestFlight | **Unavailable** | Not part of the current delivery contract |
+| Public App Store | **Unavailable** | Not part of the current delivery contract |
+| Windows application | **Compile-only** | Compilation compatibility only; no public installer or supported application |
+| Linux application | **Compile-only** | Compilation compatibility only; no public package or supported application |
 | Android application | **Unavailable** | No release artifact or supported runtime |
 | Browser-hosted application | **Unavailable** | Psyche Build is not currently a hosted web product |
-| Cloud execution / hosted terminals | **Planned** | Future work only; not required for local use or the first release |
+| Cloud execution / hosted terminals | **Planned** | Future work; not required for local use or current macOS support |
 
-The `v0.0.1` macOS release was published on 2026-08-23 from commit
-`57c6c71bd5264fde960b062e95de278c8438c94f`. Publication evidence includes the
-successful
-[release workflow](https://github.com/OpenCoven/psyche-build/actions/runs/32629730508),
-the immutable release assets, and the public tap Cask. [#194](https://github.com/OpenCoven/psyche-build/issues/194)
-and [#203](https://github.com/OpenCoven/psyche-build/issues/203) are closed.
-
-The product contract keeps iOS-only failures off an explicitly selected
-desktop-only macOS release while retaining shared validation and every iOS gate
-for coordinated releases. The verified desktop-only publication skipped iOS
-distribution while preserving shared validation. iOS remains a separate
-planned surface rather than a macOS prerequisite.
+Desktop-only publication keeps iOS-only distribution failures off an explicitly
+selected macOS release while preserving shared validation and coordinated iOS
+gates. iOS remains an independent planned surface rather than a macOS
+prerequisite.
 
 ## Core capability contract
 
@@ -59,113 +73,145 @@ planned surface rather than a macOS prerequisite.
 |---|---|---|---|
 | Open and manage explicit projects | Supported / source-supported | Planned observation pending #200 | Project identity and canonical scope must be proven |
 | Plain terminal panes | Supported / source-supported | Planned control where wired | Does not require an agent CLI |
-| Agent-backed panes | Supported / source-supported | Planned observation/control where wired | Requires an installed supported launcher; absence must not disable plain terminals |
-| Git worktree isolation | Supported / source-supported | Planned observation | Cleanup remains explicit; a pane close must not silently delete the only copy of work |
+| Agent-backed panes | Supported / source-supported | Planned observation/control where wired | Requires an installed compatible launcher; absence must not disable plain terminals |
+| Git worktree isolation | Supported / source-supported | Planned observation | Cleanup remains explicit; pane close must not silently delete the only copy of work |
 | Multi-project cockpit | Supported / source-supported | Planned workspace view | Project ownership and active scope remain explicit |
-| File browsing and bounded diff inspection | Supported / source-supported | Not a first mobile-beta claim unless separately accepted | Large content must remain bounded |
-| Ritual discovery and launch | Supported from source where current paths are accepted | Blocked pending #192 live-path repair | Fixtures or simulator menus do not establish production support |
+| File browsing and bounded diff inspection | Supported / source-supported | Not a first mobile-beta claim unless separately accepted | Large content remains bounded |
+| Ritual discovery and launch | Supported from source where current desktop paths are accepted | Planned under #242 | Fixtures/simulator menus do not establish production mobile support |
 | Merge, pull request, and cleanup workflows | Supported / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
 | Pane/browser control over MCP | Source-supported bounded interface | Not a direct mobile claim | Requires project scope, exact generations, leases, approvals where necessary, receipts, and revocation |
-| Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
-| Bonjour host discovery | Not a desktop product claim | Planned pending #193 | Local discovery only; not the remote-connectivity architecture |
+| Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Optional providers fail closed without disabling core local workflows |
+| Native iOS shared action state | Merged product-local composition in PR #274 | Development evidence only | One shared store/client narrows local state duplication; it does not prove pairing, production execution, or TestFlight support |
+| Invite authentication | Not a macOS support claim | Planned under #280 after #241 | Draft PR #264 is source material; focused R3 slices and physical evidence are required |
+| Bonjour host discovery | Not a desktop product claim | Planned after #241 | Discovery adapter only; not durable identity or remote-connectivity architecture |
+| QR/deep-link pairing UX | Not a desktop support claim | Planned under #280 | A code/link/address is not host identity or authority |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
-| Diagnostics/support bundle | Current visible diagnostics only; versioned support bundle planned under #199 | Planned | The first release does not claim the bounded support bundle before #199 delivers it |
-| Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
-| Team collaboration | Planned | Planned | Not a first-release claim |
-| Marketplace/plugin ecosystem | Planned | Planned | Must wait for stable capability, identity, and compatibility contracts |
+| Diagnostics/support bundle v1 | Existing visible diagnostics only | Planned | PR #278 has changes requested; no bounded support-bundle support claim before #243 acceptance |
+| Automatic update | Supported only where release acceptance proves the configured released path | Planned distribution-specific behavior | Update claims identify source, version, integrity, rollback, and failure behavior |
+| Team collaboration | Planned | Planned | Not a current-release claim |
+| Marketplace/plugin ecosystem | Planned | Planned | Waits for stable capability, identity, and compatibility contracts |
 
 ## Optional integration contract
 
 Psyche Build remains usable for ordinary projects, terminals, worktrees, file
-browsing, rituals, merge/PR workflows, settings, and cleanup when optional
-providers are absent.
+browsing, merge/PR workflows, settings, and cleanup when optional providers are
+absent.
 
 An optional provider must:
 
 - register a typed, bounded capability or session interface;
 - prove canonical project scope and resource ownership;
 - expose exact lifecycle and compatibility state;
-- fail closed when unavailable or incompatible;
+- fail closed when unavailable, incompatible, or revoked;
 - avoid whole-desktop, coordinate, raw-shell, or unscoped tmux fallback;
-- route consequential effects through the authoritative policy, approval,
-  receipt, idempotency, revocation, and recovery path;
-- avoid owning durable Psyche Build identity.
+- route consequential effects through authoritative policy, approval, receipt,
+  idempotency, revocation, and recovery paths;
+- avoid owning durable Psyche Build or protocol identity.
+
+Direct executable discovery does not prove compatibility. The planned
+Coven-mediated product adapter is tracked in
+[#279](https://github.com/OpenCoven/psyche-build/issues/279). It must negotiate
+an exact supported profile/capability set, show only available adapters, keep raw
+prompts out of process arguments and persistent launch metadata, preserve
+canonical Coven session/receipt identity, and fail closed without weakening
+plain-terminal operation. [PR #277](https://github.com/OpenCoven/psyche-build/pull/277)
+is design-correction work, not a current support claim.
 
 ## iOS companion contract
 
 The planned first internal iOS delivery is a companion, not an independent
-authority. After #200's distribution and physical-device gates pass, it may
-discover or select a host, authenticate, restore an authoritative workspace,
-observe bounded state, and invoke explicitly supported mobile commands.
+authority. [#241](https://github.com/OpenCoven/psyche-build/issues/241) must first
+commit host authority atomically before a new workspace can become visible as
+live. [#280](https://github.com/OpenCoven/psyche-build/issues/280) then owns
+focused invite-authentication slices. [#242](https://github.com/OpenCoven/psyche-build/issues/242)
+owns production action publication/execution. [#200](https://github.com/OpenCoven/psyche-build/issues/200)
+owns physical acceptance and distribution.
 
-Until then, source, simulator, and UI-test behavior are development evidence,
-not a live TestFlight availability claim.
+Until those gates pass, source, simulator, fixture, merged composition, and UI
+test behavior are development evidence, not live TestFlight availability.
 
 The companion must not:
 
-- present a newly loaded workspace as live when readiness failed;
-- infer success from a local UI transition without an authoritative host
-  result;
-- expose a control whose production executor or publication path is not wired;
-- turn a caller-supplied task, project, pane, or session identifier into proof
-  of authority;
-- treat Bonjour as sufficient for durable remote connectivity;
-- silently re-pair or create a replacement identity after revocation.
+- present a newly loaded workspace as live when readiness/authentication failed;
+- infer success from local UI transition, socket connection, QR/deep-link parse,
+  or PTY creation without an authoritative host result;
+- expose a control whose production publisher/executor is not wired;
+- turn caller-supplied task/project/pane/session identifiers into proof of
+  authority;
+- treat Bonjour address, endpoint, QR code, or invite as durable identity;
+- persist/log invite material or silently re-pair after revocation;
+- change support status without immutable physical-device distribution evidence.
 
-The complete iOS delivery and continuity gate is
-[#200](https://github.com/OpenCoven/psyche-build/issues/200).
+Only an immutable TestFlight build installed by an authorized tester may move
+iOS from **Planned** to **Internal beta**.
+
+## Diagnostics and protected-data contract
+
+A future support bundle must be versioned, deterministic, strictly bounded,
+cancellable, and fail closed. It must not include raw prompts, unrestricted
+terminal output, repository contents, environment maps, credentials, private
+keys/certificates, infrastructure URLs, or full user paths merely because a
+finite regex did not recognize them.
+
+[#243](https://github.com/OpenCoven/psyche-build/issues/243) owns the first
+contract. [PR #278](https://github.com/OpenCoven/psyche-build/pull/278) remains
+unaccepted until unrestricted terminal content is omitted or admitted through a
+proven-safe typed source, collector ownership conflicts are truthful, the action
+vocabulary matches authoritative receipt projections, and traversal/elapsed
+bounds are enforceable.
 
 ## Identity and persistence invariants
 
-Current implementation identifiers may be used as adapters, but durable user
-work must not be defined solely by:
+Current implementation identifiers may be adapters, but durable user work must
+not be defined solely by:
 
 - a Bead ID;
-- a tmux pane or session ID;
-- a process ID;
-- a filesystem path;
-- a branch or worktree name;
+- a tmux pane/session or process ID;
+- a filesystem path or branch/worktree name;
 - a provider-specific session ID;
-- a device address or transport endpoint;
-- a UI component or navigation selection.
+- a device address, transport endpoint, QR/deep-link, or invite;
+- executable discovery or UI selection.
 
 The future protocol-owned identity and Threads execution contract is tracked in
-[#201](https://github.com/OpenCoven/psyche-build/issues/201). That outcome is
-not a claim that the complete model has already shipped.
+[#201](https://github.com/OpenCoven/psyche-build/issues/201). The immutable
+Psyche profile/canary remains tracked in
+[#253](https://github.com/OpenCoven/psyche-build/issues/253). The merged mapping
+in PR #262 is not a conformance claim.
 
 ## Release-claim rules
 
-A public claim may move from planned to supported only when:
+A claim may move from planned/candidate to supported only when:
 
-1. the exact artifact or source commit is immutable and identified;
-2. the intended distribution path succeeds from a clean environment;
-3. the primary user path and representative failure paths are observed;
-4. security and scope boundaries remain intact;
-5. recovery ownership and known limitations are documented;
-6. retained evidence is linked from the owning GitHub issue.
+1. exact source and artifact identities are immutable;
+2. the intended distribution succeeds from a clean environment;
+3. primary user paths and representative failures are observed;
+4. security, authority, scope, and protected-data boundaries remain intact;
+5. recovery ownership, rollback, and known limitations are documented;
+6. retained evidence is linked from the owning GitHub outcome;
+7. roadmap, support matrix, release acceptance, changelog, and public release
+   metadata agree.
 
-Documentation, source presence, compile success, simulator success, test count,
-or a generated artifact alone is insufficient.
+Documentation, source presence, version strings, compile/simulator success, test
+counts, generated artifacts, or a merge to `main` alone are insufficient.
 
 ## Current known deferrals
 
-The following were not prerequisites for `v0.0.1` and remain post-release work
-unless they expose a shared defect in the supported macOS path:
+The following are not prerequisites for released `v0.0.1` unless they expose a
+shared defect in its supported macOS path:
 
-- internal, public, or external iOS distribution and mobile feature completion;
+- internal/public/external iOS distribution and mobile completion;
+- invite authentication and physical reconnect evidence;
 - remote/off-LAN companion transport;
-- graphics diagnostics in #190 unless release acceptance proves them required;
+- support-bundle v1 and broader diagnostics;
 - desktop architecture decomposition;
-- complete community-health work beyond the minimum security and ownership
-  floor;
-- cloud terminals or hosted orchestration;
-- team collaboration;
-- marketplace/plugin behavior;
-- complete Threads and AgentFS convergence.
+- final live governance/community evidence beyond repository files;
+- capability-negotiated Coven convergence;
+- cloud terminals/hosted orchestration, team collaboration, and marketplace;
+- complete Psyche, Threads, and AgentFS convergence.
 
 ## Changing this contract
 
-Any pull request that changes a support status must update this file, the
-canonical [roadmap](./ROADMAP.md), and the owning issue. The pull request must
-identify the executable evidence that justifies the change or explicitly mark
-the new state as planned/internal/compile-only rather than supported.
+Any PR changing a support status updates this file, the canonical
+[roadmap](./ROADMAP.md), the execution contract, and the owning issue. It names
+the executable evidence justifying the transition or explicitly keeps the state
+planned, candidate, internal, compile-only, or unavailable.
