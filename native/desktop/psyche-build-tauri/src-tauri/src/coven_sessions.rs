@@ -3581,7 +3581,8 @@ mod tests {
                 "/api/v1/other",
                 Some(b"{}".as_slice()),
                 deadline,
-            ),
+            )
+            .map(|response| response.status),
             Err(CovenAdapterError::Failed)
         );
         server.finish();
