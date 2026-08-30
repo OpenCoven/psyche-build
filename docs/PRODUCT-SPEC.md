@@ -157,6 +157,23 @@ The bridge must stay conservative:
 - avoid push, merge, publish, delete, or external actions without explicit approval;
 - keep secrets and infrastructure URLs out of UI copy and logs.
 
+## Mobile companion (Now-first)
+
+A planned iOS companion opens into a cross-project **Now inbox** — Needs You,
+Running, Recent — ranked from one canonical workspace snapshot published by
+the host, with an adaptive one/two-pane terminal workspace (at most two
+attached terminal streams), bounded file inspection, and guarded pane
+commands and actions. Mobile control travels as protocol-v3 typed control
+envelopes over the paired TLS/Bonjour bridge with the host certificate pinned
+at pairing; every operation is scoped to published workspace resources, and
+offline state is visibly stale rather than live. The iOS application is a
+planned internal beta pending
+[#200](https://github.com/OpenCoven/psyche-build/issues/200): source,
+simulator, and UI-test behavior are development evidence, not an availability
+claim. The architecture, exact limits and security guarantees, and the
+implemented-versus-planned boundary are documented in
+[Mobile cockpit architecture](MOBILE-ARCHITECTURE.md).
+
 ## Optional integration boundary
 
 Psyche Build accepts optional agent and session integrations only through
