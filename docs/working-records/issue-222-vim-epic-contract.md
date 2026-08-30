@@ -94,10 +94,12 @@ final state is the 37/37 run above.
 
 ## Exact head SHA
 
-- Implementation head (code, tests, charter): see `git log` — the implementation
-  commit is recorded in the PR body and status comment; this record was finalized in
-  the commit immediately after it, and the exact pushed head SHA is stated in the PR
-  body, the PR status comment, and the orchestrator report.
+- Implementation head (code, tests, charter, this record's initial version):
+  `c64c8b7` — `feat(vim): epic charter and versioned semantic contract v1 (#222)`
+  on `psyche/issue-222-vim-epic-contract`, parented on `origin/main` `f12b753`.
+- This record was finalized in the commit immediately after `c64c8b7`; the exact
+  pushed head SHA is stated in the PR body, the PR status comment, and the
+  orchestrator report.
 
 ## Rollback
 
