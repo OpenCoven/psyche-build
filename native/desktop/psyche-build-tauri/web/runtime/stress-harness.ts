@@ -288,17 +288,23 @@ type InvokeStressOperation = <T>(
 ) => Promise<T>;
 
 const LATE_RESOURCE_RESULT_TIMEOUT_MS = 2_000;
+const DETACHED_REAPER_RETENTION_MS = 5_000;
 const DETACHED_STRESS_REAPERS = new Set<Promise<void>>();
 
 function retainStressReaper(
   reaper: Promise<void>,
   destination: Set<Promise<void>> = DETACHED_STRESS_REAPERS,
 ): void {
-  destination.add(reaper);
-  void reaper.then(
-    () => destination.delete(reaper),
-    () => destination.delete(reaper),
-  );
+  let retentionTimeout: ReturnType<typeof setTimeout> | undefined;
+  const retentionDeadline = new Promise<void>((resolve) => {
+    retentionTimeout = setTimeout(resolve, DETACHED_REAPER_RETENTION_MS);
+  });
+  const retained = Promise.race([reaper, retentionDeadline]).then(() => undefined, () => undefined);
+  destination.add(retained);
+  void retained.finally(() => {
+    if (retentionTimeout !== undefined) clearTimeout(retentionTimeout);
+    destination.delete(retained);
+  }).catch(() => undefined);
 }
 
 async function invokeAbortable<T>(
@@ -377,9 +383,6 @@ async function invokeAbortable<T>(
         // that bounded cleanup promise settles; otherwise finalization could
         // race an in-flight dispose/forceDispose operation.
         lateCutoffError = error;
-        if (lateCompensation && !lateCompensationFinished) {
-          retainStressReaper(lateCompensation, options.lateReapers);
-        }
         if (!lateCompensationStarted) {
           // Keep a short reaper window after the result-wait cutoff. Native
           // invokes can resolve on the same boundary as this timer; retaining
@@ -408,6 +411,9 @@ async function invokeAbortable<T>(
       completeLateCompensation?.();
       finishLate(error);
       return;
+    }
+    if (lateCompensation && !lateCompensationFinished) {
+      retainStressReaper(lateCompensation, options.lateReapers);
     }
     void Promise.resolve(work).then(
       () => {
@@ -967,53 +973,79 @@ async function runStressScenario(
       scenarioValue.restoreMs,
     );
     const restoreStartedAt = dependencies.now();
-    await invokeTracked(
-      (operationSignal) => dependencies.cycleWindow(operationSignal),
-      signal,
-      (cleanupSignal) => dependencies.cycleWindow(cleanupSignal),
+    const restoreController = new AbortController();
+    const restoreTimeoutError = Object.assign(new Error('stress restore phase timed out'), {
+      name: 'TimeoutError',
+    });
+    const abortRestore = () => restoreController.abort(abortReason(signal));
+    const restoreTimeout = setTimeout(
+      () => restoreController.abort(restoreTimeoutError),
+      scenarioValue.restoreMs,
     );
-    throwIfAborted(signal);
-    await restoreHiddenPanes(dependencies, hiddenPaneIds, signal, invokeTracked, invokeCleanup);
-    throwIfAborted(signal);
-    const contextLossSupported = await invokeTracked(
-      (operationSignal) => dependencies.loseGraphicsContext(operationSignal),
-      signal,
-      (cleanupSignal) => {
-        if (dependencies.restoreGraphicsContext === undefined) {
-          throw new Error('late graphics-context loss has no compensation');
-        }
-        return dependencies.restoreGraphicsContext(cleanupSignal);
-      },
-    );
-    const restoreElapsedMs = Math.max(0, dependencies.now() - restoreStartedAt);
-    const restoreRemainingMs = Math.max(0, scenarioValue.restoreMs - restoreElapsedMs);
-    if (restoreRemainingMs > 0) {
-      await invokeBoundedOperation(
-        (sleepSignal) => dependencies.sleep(restoreRemainingMs, sleepSignal),
-        signal,
-        { timeoutMessage: 'stress restore phase timed out' },
+    if (signal.aborted) abortRestore();
+    else signal.addEventListener('abort', abortRestore, { once: true });
+    try {
+      await invokeTracked(
+        (operationSignal) => dependencies.cycleWindow(operationSignal),
+        restoreController.signal,
+        (cleanupSignal) => dependencies.cycleWindow(cleanupSignal),
       );
-    }
-    throwIfAborted(signal);
-    emitProgress(
-      dependencies,
-      scenarioIndex,
-      scenarioValue,
-      'restore',
-      scenarioValue.restoreMs,
-      scenarioValue.restoreMs,
-    );
+      throwIfAborted(restoreController.signal);
+      await restoreHiddenPanes(
+        dependencies,
+        hiddenPaneIds,
+        restoreController.signal,
+        invokeTracked,
+        invokeCleanup,
+      );
+      throwIfAborted(restoreController.signal);
+      const contextLossSupported = await invokeTracked(
+        (operationSignal) => dependencies.loseGraphicsContext(operationSignal),
+        restoreController.signal,
+        (cleanupSignal) => {
+          if (dependencies.restoreGraphicsContext === undefined) {
+            throw new Error('late graphics-context loss has no compensation');
+          }
+          return dependencies.restoreGraphicsContext(cleanupSignal);
+        },
+      );
+      const restoreElapsedMs = Math.max(0, dependencies.now() - restoreStartedAt);
+      const restoreRemainingMs = Math.max(0, scenarioValue.restoreMs - restoreElapsedMs);
+      if (restoreRemainingMs > 0) {
+        await invokeBoundedOperation(
+          (sleepSignal) => dependencies.sleep(restoreRemainingMs, sleepSignal),
+          restoreController.signal,
+          {
+            timeoutMs: restoreRemainingMs + 1,
+            timeoutMessage: 'stress restore phase timed out',
+          },
+        );
+      }
+      throwIfAborted(restoreController.signal);
+      emitProgress(
+        dependencies,
+        scenarioIndex,
+        scenarioValue,
+        'restore',
+        scenarioValue.restoreMs,
+        scenarioValue.restoreMs,
+      );
 
-    result = {
-      paneCount: scenarioValue.paneCount,
-      startedAt,
-      finishedAt: dependencies.now(),
-      contextLossSupported,
-      metrics: {
-        beforeMeasurement,
-        afterMeasurement,
-      },
-    };
+      result = {
+        paneCount: scenarioValue.paneCount,
+        startedAt,
+        finishedAt: dependencies.now(),
+        contextLossSupported,
+        metrics: {
+          beforeMeasurement,
+          afterMeasurement,
+        },
+      };
+    } finally {
+      clearTimeout(restoreTimeout);
+      signal.removeEventListener('abort', abortRestore);
+      if (!restoreController.signal.aborted) restoreController.abort();
+    }
   } catch (error) {
     primaryError = error;
   } finally {

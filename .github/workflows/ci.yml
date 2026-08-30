@@ -232,6 +232,14 @@ jobs:
           MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
           cargo check --manifest-path "$MANIFEST" --locked
 
+      - name: Run Windows PTY runtime tests
+        if: runner.os == 'Windows' && needs.changes.outputs.desktop == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
+          cargo test --manifest-path "$MANIFEST" --locked pty_runtime_tests
+
   typescript-rust:
     name: TypeScript and Rust
     needs: [changes, quality, desktop-web, rust-test, desktop-check]

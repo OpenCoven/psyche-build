@@ -2411,7 +2411,7 @@ impl PtyReaderCancellation {
                 Err(error)
                     if error.code()
                         == windows::core::HRESULT::from_win32(
-                            windows::Win32::Foundation::ERROR_NOT_FOUND,
+                            windows::Win32::Foundation::ERROR_NOT_FOUND.0,
                         ) =>
                 {
                     Ok(())
@@ -3065,9 +3065,13 @@ fn register_pty_client(
     let reader_cancellation_for_thread = reader_cancellation.clone();
     let data_thread = std::thread::spawn(move || {
         #[cfg(windows)]
-        if let Err(error) = reader_cancellation_for_thread.install_current_thread() {
-            log::warn!("failed to retain Windows PTY reader thread handle: {error}");
-        }
+        let reader_result = match reader_cancellation_for_thread.install_current_thread() {
+            Ok(()) => pump_pty_reader(&mut reader, reader_pump),
+            Err(error) => Err(format!(
+                "failed to retain Windows PTY reader thread handle: {error}"
+            )),
+        };
+        #[cfg(not(windows))]
         let reader_result = pump_pty_reader(&mut reader, reader_pump);
         let _ = reader_done_tx.send(reader_result);
     });
