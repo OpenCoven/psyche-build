@@ -86,4 +86,49 @@ describe('Tauri diagnostics launcher', () => {
     expect(processApi.kill).toHaveBeenCalledWith(44, 'SIGTERM');
     expect(processApi.exitCode).toBeUndefined();
   });
+
+  it('converts spawn errors into a controlled nonzero exit and settles only once', () => {
+    const child = new FakeChild();
+    const spawnImpl = vi.fn(() => child);
+    const write = vi.fn();
+    const processApi = {
+      env: {},
+      platform: 'linux',
+      pid: 45,
+      exitCode: undefined as number | undefined,
+      stderr: { write },
+      kill: vi.fn(),
+    };
+
+    launchDiagnostics({ spawnImpl, processApi });
+    child.emit('error', new Error('pnpm missing'));
+    child.emit('exit', 17, null);
+
+    expect(processApi.exitCode).toBe(1);
+    expect(write).toHaveBeenCalledWith(
+      'failed to start Tauri diagnostics: pnpm missing\n',
+    );
+    expect(processApi.kill).not.toHaveBeenCalled();
+  });
+
+  it('bounds an unexpectedly large spawn error before writing it', () => {
+    const child = new FakeChild();
+    const write = vi.fn();
+    const processApi = {
+      env: {},
+      platform: 'linux',
+      pid: 46,
+      exitCode: undefined as number | undefined,
+      stderr: { write },
+      kill: vi.fn(),
+    };
+
+    launchDiagnostics({ spawnImpl: vi.fn(() => child), processApi });
+    child.emit('error', new Error('x'.repeat(2_000)));
+
+    const message = write.mock.calls[0]?.[0] as string;
+    expect(message).toHaveLength('failed to start Tauri diagnostics: '.length + 512 + 1);
+    expect(message.endsWith('…\n')).toBe(true);
+    expect(processApi.exitCode).toBe(1);
+  });
 });

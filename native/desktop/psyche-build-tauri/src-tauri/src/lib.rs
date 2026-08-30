@@ -94,10 +94,9 @@ use pty_transport::{
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
-use runtime_diagnostics::{
-    fixture_start_options, runtime_diagnostics, runtime_process_metrics, DiagnosticsFixture,
-    RuntimeDiagnosticsState,
-};
+#[cfg(debug_assertions)]
+use runtime_diagnostics::{fixture_start_request, DiagnosticsFixture};
+use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
@@ -2845,6 +2844,23 @@ async fn pty_start(
 }
 
 fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
+    pty_start_blocking_with_launch(app, options, None)
+}
+
+#[cfg(debug_assertions)]
+fn pty_start_blocking_with_trusted_fixture(
+    app: AppHandle,
+    options: StartOptions,
+    fixture_launch: platform::TrustedFixtureLaunch,
+) -> Result<(), String> {
+    pty_start_blocking_with_launch(app, options, Some(fixture_launch.into_descriptor()))
+}
+
+fn pty_start_blocking_with_launch(
+    app: AppHandle,
+    options: StartOptions,
+    trusted_fixture_launch: Option<platform::LaunchDescriptor>,
+) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2863,7 +2879,10 @@ fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), Strin
         command,
         args,
         env: launch_env,
-    } = platform::pty_launch_descriptor(options.command, options.args)?;
+    } = match trusted_fixture_launch {
+        Some(fixture_launch) => fixture_launch,
+        None => platform::pty_launch_descriptor(options.command, options.args)?,
+    };
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
     cmd.env("PATH", platform::augmented_path());
@@ -3013,6 +3032,7 @@ fn register_pty_client(
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 async fn diagnostics_spawn_fixture(
     webview: tauri::Webview,
@@ -3023,21 +3043,27 @@ async fn diagnostics_spawn_fixture(
 ) -> Result<(), String> {
     ensure_trusted_pty_caller(webview.label())?;
     state.ensure_stress_authorized()?;
-    let options = fixture_start_options(&thread_id, fixture)?;
+    let (options, fixture_launch) = fixture_start_request(&thread_id, fixture)?;
 
-    match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_start_blocking_with_trusted_fixture(app, options, fixture_launch)
+    })
+    .await
+    {
         Ok(result) => result,
         Err(error) => Err(format!("failed to join PTY start task: {error}")),
     }
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 async fn diagnostics_cycle_window(
-    window: tauri::Window,
+    webview: tauri::Webview,
     state: State<'_, RuntimeDiagnosticsState>,
 ) -> Result<(), String> {
-    ensure_trusted_pty_caller(window.label())?;
+    ensure_trusted_pty_caller(webview.label())?;
     state.ensure_stress_authorized()?;
+    let window = webview.window();
     window
         .minimize()
         .map_err(|error| format!("failed to minimize diagnostics window: {error}"))?;
@@ -8732,7 +8758,9 @@ pub fn run() {
             control_state,
             runtime_diagnostics,
             runtime_process_metrics,
+            #[cfg(debug_assertions)]
             diagnostics_spawn_fixture,
+            #[cfg(debug_assertions)]
             diagnostics_cycle_window,
         ])
         .setup(|app| {

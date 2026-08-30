@@ -53,7 +53,7 @@ export interface StressGeometry {
 
 export interface StressResource {
   id: string;
-  dispose(): void | Promise<void>;
+  dispose(signal?: AbortSignal): void | Promise<void>;
 }
 
 export interface StressScenarioResult {
@@ -75,14 +75,18 @@ export interface StressRunResult {
 
 export interface StressHarnessDependencies {
   authorized: boolean;
-  createTerminal(index: number, fixture: StressFixture): Promise<StressResource>;
-  createEditor(document: StressEditorDocument): Promise<StressResource>;
-  createBrowser(page: StressBrowserPage): Promise<StressResource>;
-  focus(id: string): Promise<void>;
+  createTerminal(
+    index: number,
+    fixture: StressFixture,
+    signal: AbortSignal,
+  ): Promise<StressResource>;
+  createEditor(document: StressEditorDocument, signal: AbortSignal): Promise<StressResource>;
+  createBrowser(page: StressBrowserPage, signal: AbortSignal): Promise<StressResource>;
+  focus(id: string, signal: AbortSignal): Promise<void>;
   resize(step: number, geometry: StressGeometry): void;
-  setVisible(id: string, visible: boolean): Promise<void>;
-  cycleWindow(): Promise<void>;
-  loseGraphicsContext(): Promise<boolean>;
+  setVisible(id: string, visible: boolean, signal: AbortSignal): Promise<void>;
+  cycleWindow(signal: AbortSignal): Promise<void>;
+  loseGraphicsContext(signal: AbortSignal): Promise<boolean>;
   resetMetrics(): void;
   snapshotMetrics(): unknown;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -202,25 +206,41 @@ function draw() {
 requestAnimationFrame(draw);
 function reportContextStatus(status) {
   document.title = status;
-  try {
-    const core = window.__TAURI__ && window.__TAURI__.core;
-    const invoke = core && core.invoke;
-    if (typeof invoke === 'function') {
-      Promise.resolve(
-        invoke('browser_report_title', { title: status })
-      ).catch(function () {});
-    }
-  } catch (_) {}
 }
 window.losePsycheDiagnosticsContext = function () {
   const extension = gl && gl.getExtension('WEBGL_lose_context');
   if (!extension) {
     reportContextStatus(${JSON.stringify(`${title} · context-unavailable`)});
-    return false;
+    return Promise.resolve(false);
   }
-  reportContextStatus(${JSON.stringify(`${title} · context-lost`)});
-  extension.loseContext();
-  return true;
+  return new Promise(function (resolve) {
+    let settled = false;
+    const timeout = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      reportContextStatus(${JSON.stringify(`${title} · context-loss-unconfirmed`)});
+      resolve(false);
+    }, 1000);
+    const onContextLost = function (event) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      reportContextStatus(${JSON.stringify(`${title} · context-lost`)});
+      resolve(true);
+    };
+    canvas.addEventListener('webglcontextlost', onContextLost, { once: true });
+    try {
+      extension.loseContext();
+    } catch (_) {
+      clearTimeout(timeout);
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      settled = true;
+      reportContextStatus(${JSON.stringify(`${title} · context-loss-failed`)});
+      resolve(false);
+    }
+  });
 };
 </script>
 </body>
@@ -245,6 +265,70 @@ function abortReason(signal: AbortSignal): unknown {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
+}
+
+async function invokeAbortable<T>(
+  operation: () => Promise<T> | T,
+  signal: AbortSignal,
+): Promise<T> {
+  throwIfAborted(signal);
+  const operationPromise = Promise.resolve().then(() => {
+    throwIfAborted(signal);
+    return operation();
+  });
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    operationPromise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+const CLEANUP_OPERATION_TIMEOUT_MS = 2_000;
+
+async function invokeBoundedCleanup<T>(
+  operation: (signal: AbortSignal) => Promise<T> | T,
+): Promise<T> {
+  const controller = new AbortController();
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      const error = new Error('stress cleanup operation timed out');
+      controller.abort(error);
+      reject(error);
+    }, CLEANUP_OPERATION_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      timeout,
+    ]);
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  }
 }
 
 function emitProgress(
@@ -274,6 +358,7 @@ async function runActivePhase(
   focusOrder: readonly string[],
 ): Promise<void> {
   const phaseController = new AbortController();
+  throwIfAborted(signal);
   const abortPhase = () => phaseController.abort(abortReason(signal));
   signal.addEventListener('abort', abortPhase, { once: true });
   let frameHandle: number | null = null;
@@ -307,6 +392,7 @@ async function runActivePhase(
 
   emitProgress(dependencies, scenarioIndex, scenarioValue, phase, 0, durationMs);
   try {
+    throwIfAborted(phaseController.signal);
     requestGeometryFrame();
     const phaseStartedAt = dependencies.now();
     let focusStep = 0;
@@ -329,7 +415,12 @@ async function runActivePhase(
       const elapsedBeforeFocus = Math.max(0, focusNow - phaseStartedAt);
       if (elapsedBeforeFocus >= durationMs) break;
       if (focusNow < nextFocusAt) continue;
-      await dependencies.focus(stressFocusId(focusOrder, focusStep));
+      throwIfAborted(phaseController.signal);
+      await invokeAbortable(
+        () => dependencies.focus(stressFocusId(focusOrder, focusStep), phaseController.signal),
+        phaseController.signal,
+      );
+      throwIfAborted(phaseController.signal);
       focusStep += 1;
       nextFocusAt += STRESS_FOCUS_INTERVAL_MS;
       const focusCompletedAt = dependencies.now();
@@ -367,11 +458,21 @@ async function runActivePhase(
 async function restoreHiddenPanes(
   dependencies: StressHarnessDependencies,
   hiddenPaneIds: Set<string>,
+  signal?: AbortSignal,
 ): Promise<void> {
   const errors: unknown[] = [];
   for (const id of [...hiddenPaneIds]) {
     try {
-      await dependencies.setVisible(id, true);
+      if (signal) {
+        await invokeAbortable(
+          () => dependencies.setVisible(id, true, signal),
+          signal,
+        );
+      } else {
+        await invokeBoundedCleanup((cleanupSignal) => (
+          dependencies.setVisible(id, true, cleanupSignal)
+        ));
+      }
       hiddenPaneIds.delete(id);
     } catch (error) {
       errors.push(error);
@@ -415,23 +516,36 @@ async function runStressScenario(
   try {
     throwIfAborted(signal);
     for (let index = 0; index < scenarioValue.paneCount; index += 1) {
-      const terminal = await dependencies.createTerminal(
-        index,
-        scenarioValue.fixtures[index] as StressFixture,
+      const terminal = await invokeAbortable(
+        () => dependencies.createTerminal(
+          index,
+          scenarioValue.fixtures[index] as StressFixture,
+          signal,
+        ),
+        signal,
       );
       resources.push(terminal);
       terminalIds.push(terminal.id);
       throwIfAborted(signal);
     }
 
-    const editor = await dependencies.createEditor(
-      createLargeEditorDocument(scenarioValue.paneCount),
+    throwIfAborted(signal);
+    const editor = await invokeAbortable(
+      () => dependencies.createEditor(
+        createLargeEditorDocument(scenarioValue.paneCount),
+        signal,
+      ),
+      signal,
     );
     resources.push(editor);
     throwIfAborted(signal);
 
-    const browser = await dependencies.createBrowser(
-      createDiagnosticBrowserPage(scenarioValue.paneCount),
+    const browser = await invokeAbortable(
+      () => dependencies.createBrowser(
+        createDiagnosticBrowserPage(scenarioValue.paneCount),
+        signal,
+      ),
+      signal,
     );
     resources.push(browser);
     throwIfAborted(signal);
@@ -447,10 +561,15 @@ async function runStressScenario(
       focusOrder,
     );
 
+    throwIfAborted(signal);
     const hiddenStart = Math.ceil(terminalIds.length / 2);
     for (const id of terminalIds.slice(hiddenStart)) {
       hiddenPaneIds.add(id);
-      await dependencies.setVisible(id, false);
+      await invokeAbortable(
+        () => dependencies.setVisible(id, false, signal),
+        signal,
+      );
+      throwIfAborted(signal);
     }
     const measurementFocusOrder = buildStressFocusOrder(
       terminalIds.slice(0, hiddenStart),
@@ -459,6 +578,7 @@ async function runStressScenario(
     );
 
     dependencies.resetMetrics();
+    throwIfAborted(signal);
     const beforeMeasurement = dependencies.snapshotMetrics();
     await runActivePhase(
       dependencies,
@@ -469,6 +589,7 @@ async function runStressScenario(
       scenarioValue.measureMs,
       measurementFocusOrder,
     );
+    throwIfAborted(signal);
     const afterMeasurement = dependencies.snapshotMetrics();
 
     emitProgress(
@@ -480,9 +601,17 @@ async function runStressScenario(
       scenarioValue.restoreMs,
     );
     const restoreStartedAt = dependencies.now();
-    await dependencies.cycleWindow();
-    await restoreHiddenPanes(dependencies, hiddenPaneIds);
-    const contextLossSupported = await dependencies.loseGraphicsContext();
+    await invokeAbortable(
+      () => dependencies.cycleWindow(signal),
+      signal,
+    );
+    throwIfAborted(signal);
+    await restoreHiddenPanes(dependencies, hiddenPaneIds, signal);
+    throwIfAborted(signal);
+    const contextLossSupported = await invokeAbortable(
+      () => dependencies.loseGraphicsContext(signal),
+      signal,
+    );
     const restoreElapsedMs = Math.max(0, dependencies.now() - restoreStartedAt);
     const restoreRemainingMs = Math.max(0, scenarioValue.restoreMs - restoreElapsedMs);
     if (restoreRemainingMs > 0) {
@@ -523,7 +652,7 @@ async function runStressScenario(
     }
     for (const resource of resources.reverse()) {
       try {
-        await resource.dispose();
+        await invokeBoundedCleanup((cleanupSignal) => resource.dispose(cleanupSignal));
       } catch (error) {
         cleanupErrors.push(error);
       }

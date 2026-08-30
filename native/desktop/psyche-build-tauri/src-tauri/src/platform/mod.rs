@@ -32,6 +32,26 @@ pub(crate) struct LaunchDescriptor {
     pub(crate) env: Vec<(String, String)>,
 }
 
+/// A fixture launch selected by the debug-only diagnostics boundary.
+///
+/// Normal PTY launches must continue to use [`pty_launch_descriptor`], which
+/// preserves the user's shell behavior. Diagnostics fixtures are different:
+/// their executable is selected by platform code and must be launched
+/// directly, without passing through that shell resolution path.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedFixtureLaunch {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+}
+
+#[cfg(debug_assertions)]
+impl TrustedFixtureLaunch {
+    pub(crate) fn into_descriptor(self) -> LaunchDescriptor {
+        direct_launch(self.program, self.args)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct RuntimePlatformInfo {
@@ -74,6 +94,38 @@ fn direct_launch(command: String, args: Vec<String>) -> LaunchDescriptor {
         args,
         env: Vec::new(),
     }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn diagnostics_fixture_launch(
+    args: Vec<String>,
+) -> Result<TrustedFixtureLaunch, String> {
+    Ok(TrustedFixtureLaunch {
+        program: target::diagnostics_shell()?,
+        args,
+    })
+}
+
+#[cfg(all(debug_assertions, unix))]
+fn verified_fixed_executable(path: &str) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let canonical = Path::new(path)
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve trusted executable '{path}': {error}"))?;
+    let metadata = canonical.metadata().map_err(|error| {
+        format!(
+            "failed to inspect trusted executable '{}': {error}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "trusted executable '{}' is not an executable file",
+            canonical.display()
+        ));
+    }
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 fn is_windows_batch_script(command: &str) -> bool {
@@ -283,6 +335,24 @@ mod tests {
                 std::path::PathBuf::from("two")
             ]
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn diagnostics_fixture_launch_is_absolute_and_bypasses_the_normal_shell_wrapper() {
+        let launch =
+            diagnostics_fixture_launch(vec!["-c".to_string(), "printf fixture".to_string()])
+                .unwrap();
+        assert!(Path::new(&launch.program).is_absolute());
+
+        let descriptor = launch.clone().into_descriptor();
+        assert_eq!(descriptor.command, launch.program);
+        assert_eq!(descriptor.args, launch.args);
+        assert!(descriptor.env.is_empty());
+        assert!(!descriptor
+            .args
+            .iter()
+            .any(|arg| arg == "exec \"$0\" \"$@\""));
     }
 
     #[test]

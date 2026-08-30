@@ -3,6 +3,14 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
+const MAX_LAUNCH_ERROR_CHARS = 512;
+
+function boundedLaunchErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.length <= MAX_LAUNCH_ERROR_CHARS) return message;
+  return `${message.slice(0, MAX_LAUNCH_ERROR_CHARS - 1)}…`;
+}
+
 export function launchDiagnostics(options = {}) {
   const spawnImpl = options.spawnImpl || spawn;
   const processApi = options.processApi || process;
@@ -14,7 +22,19 @@ export function launchDiagnostics(options = {}) {
     stdio: 'inherit',
   });
 
+  let settled = false;
+  child.on('error', (error) => {
+    if (settled) return;
+    settled = true;
+    processApi.stderr?.write(
+      `failed to start Tauri diagnostics: ${boundedLaunchErrorMessage(error)}\n`,
+    );
+    processApi.exitCode = 1;
+  });
+
   child.on('exit', (code, signal) => {
+    if (settled) return;
+    settled = true;
     if (signal) {
       processApi.kill(processApi.pid, signal);
     } else {

@@ -131,46 +131,39 @@ describe('Tauri diagnostics stress harness', () => {
     });
   });
 
-  it('generates a large deterministic editor document and a local diagnostic browser page', () => {
+  it('generates a large deterministic editor document and verifies context loss asynchronously', async () => {
     const document = createLargeEditorDocument(12);
     const page = createDiagnosticBrowserPage(12);
-    const reports: Array<[string, { title: string }]> = [];
     let contextLost = false;
-    const browserWindow: {
-      __TAURI__: {
-        core: {
-          invoke(command: string, payload: { title: string }): Promise<void>;
-        };
-      };
-      losePsycheDiagnosticsContext?: () => boolean;
-    } = {
-      __TAURI__: {
-        core: {
-          async invoke(command, payload) {
-            reports.push([command, payload]);
-          },
-        },
+    let contextLostListener: ((event: { preventDefault(): void }) => void) | undefined;
+    const canvas = {
+      addEventListener(_name: string, listener: (event: { preventDefault(): void }) => void) {
+        contextLostListener = listener;
       },
-    };
-    const browserDocument = {
-      title: page.title,
-      getElementById() {
+      removeEventListener() {
+        contextLostListener = undefined;
+      },
+      getContext() {
         return {
-          getContext() {
+          clearColor() {},
+          clear() {},
+          COLOR_BUFFER_BIT: 0x4000,
+          getExtension() {
             return {
-              clearColor() {},
-              clear() {},
-              COLOR_BUFFER_BIT: 0x4000,
-              getExtension() {
-                return {
-                  loseContext() {
-                    contextLost = true;
-                  },
-                };
+              loseContext() {
+                contextLost = true;
+                queueMicrotask(() => contextLostListener?.({ preventDefault() {} }));
               },
             };
           },
         };
+      },
+    };
+    const browserWindow: { losePsycheDiagnosticsContext?: () => Promise<boolean> } = {};
+    const browserDocument = {
+      title: page.title,
+      getElementById() {
+        return canvas;
       },
     };
     const script = page.html.match(/<script>([\s\S]+)<\/script>/)?.[1];
@@ -192,17 +185,13 @@ describe('Tauri diagnostics stress harness', () => {
     expect(page.html).toContain('WEBGL_lose_context');
     expect(page.html).toContain('context-unavailable');
     expect(page.html).toContain('context-lost');
-    expect(browserWindow.losePsycheDiagnosticsContext?.()).toBe(true);
+    expect(page.html).toContain('webglcontextlost');
+    expect(page.html).not.toContain('browser_report_title');
+    await expect(browserWindow.losePsycheDiagnosticsContext?.()).resolves.toBe(true);
     expect(contextLost).toBe(true);
     expect(browserDocument.title).toBe(
       'Psyche render diagnostics · 12 panes · context-lost',
     );
-    expect(reports).toEqual([
-      [
-        'browser_report_title',
-        { title: 'Psyche render diagnostics · 12 panes · context-lost' },
-      ],
-    ]);
   });
 
   it('runs fixed scenarios with per-frame geometry, hidden panes, window cycling, and context loss', async () => {
