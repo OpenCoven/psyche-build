@@ -57,7 +57,7 @@ No baseline failures were encountered; nothing was stashed or skipped.
 
 ## Head SHA
 
-- Deliverables commit (module + tests + contract doc + this record): recorded in the commit message of `docs(vim): record deliverables commit SHA in working record (#225)`, which follows the deliverables commit on this branch; the reviewed content is the deliverables commit. The PR head SHA is recorded in the PR body and status comment.
+- Deliverables commit (module + tests + contract doc + this record): `4e58f7a69e100fe537429afe5a69b7527d351c87`. The record-keeping commit that follows it only fills in this SHA; the reviewed content is the deliverables commit. The PR head SHA is recorded in the PR body and status comment.
 
 ## Rollback
 
