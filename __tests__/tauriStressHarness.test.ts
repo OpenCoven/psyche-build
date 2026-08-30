@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildStressFocusOrder,
   buildStressGeometry,
@@ -66,6 +66,16 @@ function createResource(id: string, disposed: string[]): StressResource {
       disposed.push(id);
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('Tauri diagnostics stress harness', () => {
@@ -274,6 +284,138 @@ describe('Tauri diagnostics stress harness', () => {
     expect(disposed).toHaveLength(51);
     expect(frames.pending()).toBe(0);
     expect(frames.cancelled.length).toBeGreaterThan(0);
+  });
+
+  it.each(['terminal', 'editor', 'browser'] as const)(
+    'compensates a resource that resolves after cancellation during %s creation',
+    async (creationStage) => {
+      const controller = new AbortController();
+      const disposed: string[] = [];
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const targetStarted = deferred<void>();
+      const createLateResource = () => {
+        targetStarted.resolve();
+        controller.abort(abortError());
+        return late.promise;
+      };
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return creationStage === 'terminal'
+            ? createLateResource()
+            : createResource(`terminal-${index}`, disposed);
+        },
+        async createEditor(document) {
+          return creationStage === 'editor'
+            ? createLateResource()
+            : createResource(`editor-${document.paneCount}`, disposed);
+        },
+        async createBrowser(page) {
+          return creationStage === 'browser'
+            ? createLateResource()
+            : createResource(`browser-${page.paneCount}`, disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const run = runStressPlan(dependencies, { signal: controller.signal });
+      await targetStarted.promise;
+      late.resolve(createResource(`late-${creationStage}`, disposed));
+
+      await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+      expect(disposed).toContain(`late-${creationStage}`);
+      expect(frames.pending()).toBe(0);
+    },
+  );
+
+  it('waits for a timed-out disposal to settle and invokes the force path', async () => {
+    vi.useFakeTimers();
+    try {
+      const disposed: string[] = [];
+      const frames = createFrameDriver();
+      const disposal = deferred<void>();
+      const disposeStarted = deferred<void>();
+      let now = 0;
+      const resource = (id: string): StressResource => ({
+        id,
+        async dispose() {
+          if (id === 'browser-1') {
+            disposeStarted.resolve();
+            await disposal.promise;
+          }
+          disposed.push(id);
+        },
+        forceDispose() {
+          disposed.push(`force-${id}`);
+        },
+      });
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return resource(`terminal-${index}`);
+        },
+        async createEditor() {
+          return resource('editor');
+        },
+        async createBrowser() {
+          return resource('browser-1');
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms) {
+          now += ms;
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      let settled = false;
+      const observed = runStressPlan(dependencies).catch((error: unknown) => error);
+      void observed.finally(() => { settled = true; });
+      await disposeStarted.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled).toBe(false);
+      expect(disposed).toContain('force-browser-1');
+      disposal.resolve();
+
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ message: 'stress cleanup operation timed out' }),
+      ]));
+      expect(disposed).toContain('browser-1');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps warmup, measurement, and restore phases on fixed wall-clock budgets', async () => {

@@ -31,20 +31,41 @@ const steps: BundleStep[] = [
   { outfile: 'web/status.bundle.js' },
   { outfile: 'web/workspace.bundle.js' },
 ];
-const scratch = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
-rmSync(scratch, { recursive: true, force: true });
-mkdirSync(scratch, { recursive: true });
+const artifactRoot = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
+const releaseScratch = join(artifactRoot, 'release');
+const debugScratch = join(artifactRoot, 'debug');
+const debugRepeatScratch = join(artifactRoot, 'debug-repeat');
+rmSync(artifactRoot, { recursive: true, force: true });
+mkdirSync(artifactRoot, { recursive: true });
 beforeAll(() => {
   execFileSync(process.execPath, [
     join(packageRoot, 'scripts/build-web.mjs'),
     '--outdir',
-    scratch,
+    releaseScratch,
+  ], {
+    cwd: packageRoot,
+    stdio: 'pipe',
+  });
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts/build-web.mjs'),
+    '--debug',
+    '--outdir',
+    debugScratch,
+  ], {
+    cwd: packageRoot,
+    stdio: 'pipe',
+  });
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts/build-web.mjs'),
+    '--debug',
+    '--outdir',
+    debugRepeatScratch,
   ], {
     cwd: packageRoot,
     stdio: 'pipe',
   });
 });
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+afterAll(() => rmSync(artifactRoot, { recursive: true, force: true }));
 
 describe('committed web bundles', () => {
   it('uses the repository-local cross-platform web build script', () => {
@@ -98,7 +119,7 @@ describe('committed web bundles', () => {
     it(`${step.outfile} matches its sources`, () => {
       const committed = join(packageRoot, step.outfile);
       expect(existsSync(committed), `${step.outfile} is missing — run pnpm build:web`).toBe(true);
-      const rebuilt = join(scratch, step.outfile);
+      const rebuilt = join(releaseScratch, step.outfile);
 
       // Byte comparison, not a hash, so a failure can point at the divergence.
       // Equal-length drift is the common case -- an edited source usually
@@ -116,4 +137,14 @@ describe('committed web bundles', () => {
       ).toBe(true);
     });
   }
+
+  it('builds a reproducible debug stress bundle while release stays stub-only', () => {
+    const debugBundle = readFileSync(join(debugScratch, 'web/runtime-debug.bundle.js'));
+    const repeatedDebugBundle = readFileSync(join(debugRepeatScratch, 'web/runtime-debug.bundle.js'));
+    const releaseBundle = readFileSync(join(releaseScratch, 'web/runtime-debug.bundle.js'));
+
+    expect(debugBundle.equals(repeatedDebugBundle)).toBe(true);
+    expect(debugBundle.toString('utf8')).toMatch(/runStressPlan|buildStressPlan|WEBGL_lose_context|stress-harness/);
+    expect(releaseBundle.toString('utf8')).not.toMatch(/runStressPlan|buildStressPlan|WEBGL_lose_context|stress-harness/);
+  });
 });

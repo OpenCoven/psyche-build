@@ -371,6 +371,7 @@ impl RuntimeDiagnosticsState {
         self.process_metrics.lock().sample()
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn ensure_stress_authorized(&self) -> Result<(), String> {
         if self.stress_authorized {
             Ok(())
@@ -604,6 +605,7 @@ mod tests {
         assert!(options.launch_kind.is_none());
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn runtime_diagnostics_state_exposes_authorization_without_rereading_environment() {
         let state = RuntimeDiagnosticsState {

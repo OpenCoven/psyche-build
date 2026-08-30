@@ -54,6 +54,8 @@ export interface StressGeometry {
 export interface StressResource {
   id: string;
   dispose(signal?: AbortSignal): void | Promise<void>;
+  /** Optional native kill path used if graceful disposal exceeds its deadline. */
+  forceDispose?(): void | Promise<void>;
 }
 
 export interface StressScenarioResult {
@@ -267,15 +269,68 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
 }
 
+interface AbortableOperationOptions<T> {
+  readonly lateSettlements?: Set<Promise<void>>;
+  readonly onLateResolve?: (value: T) => Promise<void> | void;
+  readonly onLateTimeout?: (error: Error) => void;
+}
+
+const LATE_RESOURCE_RESULT_TIMEOUT_MS = 2_000;
+
 async function invokeAbortable<T>(
   operation: () => Promise<T> | T,
   signal: AbortSignal,
+  options: AbortableOperationOptions<T> = {},
 ): Promise<T> {
   throwIfAborted(signal);
   const operationPromise = Promise.resolve().then(() => {
     throwIfAborted(signal);
     return operation();
   });
+  let lateResolve: (() => void) | undefined;
+  let lateReject: ((reason?: unknown) => void) | undefined;
+  let lateTimeout: ReturnType<typeof setTimeout> | undefined;
+  const lateSettlement = options.onLateResolve === undefined
+    ? undefined
+    : new Promise<void>((resolve, reject) => {
+      lateResolve = resolve;
+      lateReject = reject;
+    });
+  if (lateSettlement) {
+    options.lateSettlements?.add(lateSettlement);
+    // The settlement remains handled even if the bounded wait expires before
+    // the native invoke returns. The late-result callback still runs and owns
+    // compensation for a resource that was created after cancellation.
+    void lateSettlement.catch(() => undefined);
+    lateTimeout = setTimeout(() => {
+      const error = new Error('stress resource creation did not settle after cancellation');
+      try {
+        options.onLateTimeout?.(error);
+      } catch {
+        // The tracked late settlement remains the authoritative cleanup error.
+      }
+      lateReject?.(error);
+      options.lateSettlements?.delete(lateSettlement);
+    }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
+  }
+  const settleLate = (value: T): void => {
+    let work: Promise<void> | void;
+    try {
+      work = options.onLateResolve?.(value);
+    } catch (error) {
+      lateReject?.(error);
+      if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+      if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+      return;
+    }
+    void Promise.resolve(work).then(
+      () => lateResolve?.(),
+      (error) => lateReject?.(error),
+    ).finally(() => {
+      if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+      if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+    }).catch(() => undefined);
+  };
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const cleanup = () => signal.removeEventListener('abort', onAbort);
@@ -292,15 +347,29 @@ async function invokeAbortable<T>(
     }
     operationPromise.then(
       (value) => {
-        if (settled) return;
+        if (settled) {
+          if (options.onLateResolve !== undefined) settleLate(value);
+          return;
+        }
         settled = true;
         cleanup();
+        if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+        if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
         resolve(value);
       },
       (error) => {
-        if (settled) return;
+        if (settled) {
+          // A late rejection is still observed by this handler. There is no
+          // resource to compensate, so release the tracked settlement.
+          lateResolve?.();
+          if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+          if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+          return;
+        }
         settled = true;
         cleanup();
+        if (lateTimeout !== undefined) clearTimeout(lateTimeout);
+        if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
         reject(error);
       },
     );
@@ -311,24 +380,40 @@ const CLEANUP_OPERATION_TIMEOUT_MS = 2_000;
 
 async function invokeBoundedCleanup<T>(
   operation: (signal: AbortSignal) => Promise<T> | T,
+  onTimeout?: () => Promise<void> | void,
 ): Promise<T> {
   const controller = new AbortController();
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => {
-      const error = new Error('stress cleanup operation timed out');
-      controller.abort(error);
-      reject(error);
-    }, CLEANUP_OPERATION_TIMEOUT_MS);
-  });
+  let timedOut = false;
+  let timeoutError: Error | undefined;
+  let timeoutCleanup: Promise<void> | undefined;
+  const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+  timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    timeoutError = new Error('stress cleanup operation timed out');
+    controller.abort(timeoutError);
+    timeoutCleanup = Promise.resolve().then(() => onTimeout?.()).then(() => undefined);
+    void timeoutCleanup.catch(() => undefined);
+  }, CLEANUP_OPERATION_TIMEOUT_MS);
   try {
-    return await Promise.race([
-      Promise.resolve().then(() => operation(controller.signal)),
-      timeout,
-    ]);
+    const result = await operationPromise;
+    if (timeoutCleanup) await timeoutCleanup;
+    if (timedOut) throw timeoutError;
+    return result;
+  } catch (error) {
+    if (timeoutCleanup) await timeoutCleanup.catch(() => undefined);
+    if (timedOut) throw timeoutError;
+    throw error;
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
+}
+
+async function disposeStressResource(resource: StressResource): Promise<void> {
+  await invokeBoundedCleanup(
+    (signal) => resource.dispose(signal),
+    () => resource.forceDispose?.(),
+  );
 }
 
 function emitProgress(
@@ -508,21 +593,36 @@ async function runStressScenario(
   const terminalIds: string[] = [];
   const hiddenPaneIds = new Set<string>();
   const cleanupErrors: unknown[] = [];
+  const pendingLateSettlements = new Set<Promise<void>>();
   let primaryError: unknown;
   let result: StressScenarioResult | undefined;
   const startedAt = dependencies.now();
+
+  const createResource = <T extends StressResource>(operation: () => Promise<T>): Promise<T> => (
+    invokeAbortable(operation, signal, {
+      lateSettlements: pendingLateSettlements,
+      onLateResolve: async (resource) => {
+        try {
+          await disposeStressResource(resource);
+        } catch (error) {
+          cleanupErrors.push(error);
+          throw error;
+        }
+      },
+      onLateTimeout: (error) => cleanupErrors.push(error),
+    })
+  );
 
   emitProgress(dependencies, scenarioIndex, scenarioValue, 'setup', 0, 0);
   try {
     throwIfAborted(signal);
     for (let index = 0; index < scenarioValue.paneCount; index += 1) {
-      const terminal = await invokeAbortable(
+      const terminal = await createResource(
         () => dependencies.createTerminal(
           index,
           scenarioValue.fixtures[index] as StressFixture,
           signal,
         ),
-        signal,
       );
       resources.push(terminal);
       terminalIds.push(terminal.id);
@@ -530,22 +630,20 @@ async function runStressScenario(
     }
 
     throwIfAborted(signal);
-    const editor = await invokeAbortable(
+    const editor = await createResource(
       () => dependencies.createEditor(
         createLargeEditorDocument(scenarioValue.paneCount),
         signal,
       ),
-      signal,
     );
     resources.push(editor);
     throwIfAborted(signal);
 
-    const browser = await invokeAbortable(
+    const browser = await createResource(
       () => dependencies.createBrowser(
         createDiagnosticBrowserPage(scenarioValue.paneCount),
         signal,
       ),
-      signal,
     );
     resources.push(browser);
     throwIfAborted(signal);
@@ -652,9 +750,17 @@ async function runStressScenario(
     }
     for (const resource of resources.reverse()) {
       try {
-        await invokeBoundedCleanup((cleanupSignal) => resource.dispose(cleanupSignal));
+        await disposeStressResource(resource);
       } catch (error) {
         cleanupErrors.push(error);
+      }
+    }
+    if (pendingLateSettlements.size > 0) {
+      const lateResults = await Promise.allSettled([...pendingLateSettlements]);
+      for (const lateResult of lateResults) {
+        if (lateResult.status === 'rejected' && !cleanupErrors.includes(lateResult.reason)) {
+          cleanupErrors.push(lateResult.reason);
+        }
       }
     }
   }

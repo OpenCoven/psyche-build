@@ -151,6 +151,18 @@ jobs:
           cargo fmt --manifest-path "$MANIFEST" --check
           cargo test --manifest-path "$MANIFEST" --locked
 
+      - name: Build and verify the release diagnostics contract
+        if: needs.changes.outputs.desktop == 'true'
+        run: |
+          set -euo pipefail
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
+          TARGET_DIR="$RUNNER_TEMP/psyche-release-target"
+          CARGO_TARGET_DIR="$TARGET_DIR" cargo build \
+            --manifest-path "$MANIFEST" \
+            --release \
+            --locked
+          node scripts/verify-tauri-release-contract.mjs --target-dir "$TARGET_DIR"
+
   desktop-check:
     name: Desktop check (${{ matrix.os }})
     needs: changes
