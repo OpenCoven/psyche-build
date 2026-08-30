@@ -84,6 +84,7 @@
     "release:check": "node scripts/release-version.mjs --check",
     "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run --exclude __tests__/beadsProjectRender.test.ts && vitest --run -c vitest.beads-render.config.ts",
+    "test:recovery": "vitest --run __tests__/controlRecoveryScenarios.test.ts",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
     "prepack": "pnpm run build && pnpm run docs:focus:check",
     "smoke:pack": "node scripts/smoke-pack-install.js"
