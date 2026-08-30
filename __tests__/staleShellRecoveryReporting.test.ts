@@ -30,6 +30,7 @@ const currentTmuxServerIdentityMock = vi.hoisted(() => vi.fn());
 const projectConfigFailure = vi.hoisted(() => ({
   remove: false,
   normalize: false,
+  read: false,
 }));
 
 vi.mock('../src/services/TmuxService.js', () => ({
@@ -69,6 +70,17 @@ vi.mock('../src/services/ProjectPaneConfig.js', async (importOriginal) => {
         throw new Error('sidebar normalization unavailable');
       }
       return actual.mutateProjectPaneConfig(...args);
+    },
+    readProjectPaneConfig: async (
+      ...args: Parameters<typeof actual.readProjectPaneConfig>
+    ) => {
+      if (projectConfigFailure.read) {
+        throw new actual.ProjectPaneConfigError(
+          'config_unreadable',
+          'config disk unavailable',
+        );
+      }
+      return actual.readProjectPaneConfig(...args);
     },
   };
 });
@@ -129,6 +141,7 @@ describe('startup stale shell recovery reporting', () => {
     currentTmuxServerIdentityMock.mockReturnValue(currentGeneration);
     projectConfigFailure.remove = false;
     projectConfigFailure.normalize = false;
+    projectConfigFailure.read = false;
   });
 
   it('returns an explicit recovery notice when a stale tmux generation is removed', async () => {
@@ -187,5 +200,121 @@ describe('startup stale shell recovery reporting', () => {
     expect(result.recoveryNotices).not.toEqual([
       expect.objectContaining({ code: 'stale_shell_pane_recovery_required' }),
     ]);
+  });
+
+  it('reports a corrupt pane config without replacing its bytes', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-corrupt-report-'));
+    roots.push(projectRoot);
+    const configDir = join(projectRoot, '.psyche');
+    mkdirSync(configDir, { recursive: true });
+    const panesFile = join(configDir, 'psyche.config.json');
+    const corruptBytes = '{"panes": [';
+    writeFileSync(panesFile, corruptBytes);
+
+    const { loadAndProcessPanes } = await import('../src/hooks/usePaneLoading.js');
+    const result = await loadAndProcessPanes(panesFile, true);
+
+    expect(result.panes).toEqual([]);
+    expect(readFileSync(panesFile, 'utf8')).toBe(corruptBytes);
+    expect(result.recoveryNotices).toEqual([{
+      code: 'project_config_corrupt',
+      severity: 'error',
+      paneRecordIds: [],
+      message: expect.stringMatching(/pane config is corrupt.*preserved.*recovery is required/i),
+    }]);
+    expect(showToastMock).toHaveBeenCalledWith(
+      expect.stringMatching(/pane config is corrupt.*preserved.*recovery is required/i),
+      'error',
+    );
+  });
+
+  it('classifies structurally invalid JSON as corrupt', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-invalid-report-'));
+    roots.push(projectRoot);
+    const configDir = join(projectRoot, '.psyche');
+    mkdirSync(configDir, { recursive: true });
+    const panesFile = join(configDir, 'psyche.config.json');
+    const corruptBytes = '{"panes":{}}';
+    writeFileSync(panesFile, corruptBytes);
+
+    const { loadAndProcessPanes } = await import('../src/hooks/usePaneLoading.js');
+    const result = await loadAndProcessPanes(panesFile, true);
+
+    expect(readFileSync(panesFile, 'utf8')).toBe(corruptBytes);
+    expect(result.recoveryNotices).toEqual([
+      expect.objectContaining({ code: 'project_config_corrupt' }),
+    ]);
+  });
+
+  it.each([
+    ['legacy array member', '[null]'],
+    ['object pane member', '{"panes":[null]}'],
+  ])('classifies an invalid %s as corrupt', async (_label, corruptBytes) => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-entry-report-'));
+    roots.push(projectRoot);
+    const configDir = join(projectRoot, '.psyche');
+    mkdirSync(configDir, { recursive: true });
+    const panesFile = join(configDir, 'psyche.config.json');
+    writeFileSync(panesFile, corruptBytes);
+
+    const { loadAndProcessPanes } = await import('../src/hooks/usePaneLoading.js');
+    const result = await loadAndProcessPanes(panesFile, true);
+
+    expect(readFileSync(panesFile, 'utf8')).toBe(corruptBytes);
+    expect(result.recoveryNotices).toEqual([
+      expect.objectContaining({ code: 'project_config_corrupt' }),
+    ]);
+  });
+
+  it('reports a persistent config failure once and reports it again after recovery', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-repeat-report-'));
+    roots.push(projectRoot);
+    const configDir = join(projectRoot, '.psyche');
+    mkdirSync(configDir, { recursive: true });
+    const panesFile = join(configDir, 'psyche.config.json');
+    writeFileSync(panesFile, '{"panes": [');
+
+    const { loadAndProcessPanes } = await import('../src/hooks/usePaneLoading.js');
+    const first = await loadAndProcessPanes(panesFile, true);
+    const repeated = await loadAndProcessPanes(panesFile, false);
+
+    expect(first.recoveryNotices).toHaveLength(1);
+    expect(repeated.recoveryNotices).toEqual([]);
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+
+    writeFileSync(panesFile, JSON.stringify({
+      projectName: 'project',
+      projectRoot,
+      panes: [],
+      settings: {},
+    }));
+    projectConfigFailure.read = true;
+    const unreadable = await loadAndProcessPanes(panesFile, false);
+
+    expect(unreadable.recoveryNotices).toEqual([
+      expect.objectContaining({ code: 'project_config_unreadable' }),
+    ]);
+    expect(showToastMock).toHaveBeenCalledTimes(2);
+
+    projectConfigFailure.read = false;
+    writeFileSync(panesFile, '{"panes": [');
+    const alternating = await loadAndProcessPanes(panesFile, false);
+
+    expect(alternating.recoveryNotices).toEqual([]);
+    expect(showToastMock).toHaveBeenCalledTimes(2);
+
+    writeFileSync(panesFile, JSON.stringify({
+      projectName: 'project',
+      projectRoot,
+      panes: [],
+      settings: {},
+    }));
+    await loadAndProcessPanes(panesFile, false);
+
+    writeFileSync(panesFile, '{"panes": [');
+    const recurred = await loadAndProcessPanes(panesFile, false);
+
+    expect(recurred.recoveryNotices).toHaveLength(1);
+    expect(showToastMock).toHaveBeenCalledTimes(3);
   });
 });

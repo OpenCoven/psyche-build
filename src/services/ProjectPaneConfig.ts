@@ -1019,7 +1019,13 @@ function assertUniquePaneIds(
   }
 
   const seen = new Set<string>();
-  for (const pane of panes) {
+  for (const [index, pane] of panes.entries()) {
+    if (!pane || typeof pane !== 'object' || Array.isArray(pane)) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `${configPath} contains a non-object pane record at index ${index}`,
+      );
+    }
     const id = paneRecordId(pane);
     if (!id) {
       continue;

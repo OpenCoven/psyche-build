@@ -31,6 +31,8 @@ import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import {
   mutateProjectPaneConfig,
   projectPaneConfigPath,
+  ProjectPaneConfigError,
+  readProjectPaneConfig,
   type ProjectPaneConfigPaneIdentity,
   removeProjectPaneConfigPaneIdentities,
   replaceProjectPaneConfigPaneIdentity,
@@ -99,10 +101,46 @@ export function migrateBackgroundPaneResources(pane: PsychePane): PsychePane {
 }
 
 export interface PaneRecoveryNotice {
-  code: 'stale_shell_pane_removed' | 'stale_shell_pane_recovery_required';
+  code:
+    | 'project_config_corrupt'
+    | 'project_config_unreadable'
+    | 'stale_shell_pane_removed'
+    | 'stale_shell_pane_recovery_required';
   severity: 'warning' | 'error';
   paneRecordIds: string[];
   message: string;
+}
+
+type ConfigRecoveryNotice = PaneRecoveryNotice & {
+  code: 'project_config_corrupt' | 'project_config_unreadable';
+};
+
+const reportedConfigRecoveryCodes = new Map<
+  string,
+  Set<ConfigRecoveryNotice['code']>
+>();
+
+function isConfigRecoveryNotice(
+  notice: PaneRecoveryNotice,
+): notice is ConfigRecoveryNotice {
+  return (
+    notice.code === 'project_config_corrupt'
+    || notice.code === 'project_config_unreadable'
+  );
+}
+
+function appendProjectConfigRecoveryNotice(
+  recoveryNotices: PaneRecoveryNotice[] | undefined,
+  code: ConfigRecoveryNotice['code'],
+): void {
+  recoveryNotices?.push({
+    code,
+    severity: 'error',
+    paneRecordIds: [],
+    message: code === 'project_config_corrupt'
+      ? 'The project pane config is corrupt and was preserved unchanged. Recovery is required before pane state can be restored.'
+      : 'The project pane config could not be read and was not replaced. Recovery is required before pane state can be restored.',
+  });
 }
 
 interface PaneLoadResult {
@@ -195,35 +233,59 @@ export async function fetchTmuxPaneIds(maxRetries = 2): Promise<{
  * Reads and parses the panes config file
  * Handles both old array format and new config format
  */
-export async function loadPanesFromFile(panesFile: string): Promise<PsychePane[]> {
+export async function loadPanesFromFile(
+  panesFile: string,
+  recoveryNotices?: PaneRecoveryNotice[],
+): Promise<PsychePane[]> {
   const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
+  let content: string;
+  let parsed: unknown;
 
   try {
-    const content = await fs.readFile(panesFile, 'utf-8');
-    const parsed: any = JSON.parse(content);
+    content = await fs.readFile(panesFile, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    appendProjectConfigRecoveryNotice(recoveryNotices, 'project_config_unreadable');
+    return [];
+  }
 
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    appendProjectConfigRecoveryNotice(recoveryNotices, 'project_config_corrupt');
+    return [];
+  }
+
+  try {
     if (Array.isArray(parsed)) {
+      if (parsed.some((pane) => !pane || typeof pane !== 'object' || Array.isArray(pane))) {
+        throw new Error('Legacy pane config contains a non-object pane record');
+      }
       return syncPaneColorThemes(
         (parsed as PsychePane[]).map(migrateBackgroundPaneResources),
         [],
         fallbackProjectRoot,
       );
-    } else {
-      const config = parsed as PsycheConfig;
-      const projectRoot = config.projectRoot || fallbackProjectRoot;
-      const panes = Array.isArray(config.panes)
-        ? config.panes.map(migrateBackgroundPaneResources)
-        : [];
-      const sidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
-      return syncPaneColorThemes(panes, sidebarProjects, projectRoot);
     }
+
+    const config = await readProjectPaneConfig(fallbackProjectRoot) as PsycheConfig;
+    const projectRoot = config.projectRoot || fallbackProjectRoot;
+    const panes = Array.isArray(config.panes)
+      ? config.panes.map(migrateBackgroundPaneResources)
+      : [];
+    const sidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
+    return syncPaneColorThemes(panes, sidebarProjects, projectRoot);
   } catch (error) {
-    // Return empty array if config file doesn't exist or is invalid
-    // This is expected on first run
-  //     LogService.getInstance().debug(
-  //       `Config file not found or invalid: ${error instanceof Error ? error.message : String(error)}`,
-  //       'usePaneLoading'
-  //     );
+    const corrupt = (
+      !(error instanceof ProjectPaneConfigError)
+      || error.code === 'config_corrupt'
+    );
+    appendProjectConfigRecoveryNotice(
+      recoveryNotices,
+      corrupt ? 'project_config_corrupt' : 'project_config_unreadable',
+    );
     return [];
   }
 }
@@ -665,8 +727,21 @@ export async function loadAndProcessPanes(
   panesFile: string,
   isInitialLoad: boolean
 ): Promise<PaneLoadResult> {
-  const loadedPanes = await loadPanesFromFile(panesFile);
   const recoveryNotices: PaneRecoveryNotice[] = [];
+  const loadedPanes = await loadPanesFromFile(panesFile, recoveryNotices);
+  const configNotice = recoveryNotices.find(isConfigRecoveryNotice);
+  const configPath = path.resolve(panesFile);
+  if (configNotice) {
+    const reportedCodes = reportedConfigRecoveryCodes.get(configPath) || new Set();
+    if (reportedCodes.has(configNotice.code)) {
+      recoveryNotices.splice(recoveryNotices.indexOf(configNotice), 1);
+    } else {
+      reportedCodes.add(configNotice.code);
+      reportedConfigRecoveryCodes.set(configPath, reportedCodes);
+    }
+  } else {
+    reportedConfigRecoveryCodes.delete(configPath);
+  }
   let { allPaneIds, titleToId, currentWindowPaneIds } = await fetchTmuxPaneIds();
 
   // Attempt to rebind panes whose IDs changed by matching on their stable tmux title.
