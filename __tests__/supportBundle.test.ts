@@ -208,6 +208,15 @@ describe('support bundle v1', () => {
     cancelled.abort();
     const cancelledBundle = await collectSupportBundle([], { signal: cancelled.signal });
     expect(cancelledBundle.status).toBe('recovery_required');
+    expect(cancelledBundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_cancelled', recoveryRequired: true }),
+    ]));
+
+    const emptyBundle = await collectSupportBundle([]);
+    expect(emptyBundle.status).toBe('recovery_required');
+    expect(emptyBundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'no_collectors', recoveryRequired: true }),
+    ]));
 
     const originalDateNow = Date.now;
     let dateNowCalls = 0;
@@ -241,8 +250,8 @@ describe('support bundle v1', () => {
     ]));
   });
 
-  it('fails closed for empty and malformed collector results', async () => {
-    for (const result of [{}, { records: [{}] }]) {
+  it('fails closed for empty, null, and malformed collector results', async () => {
+    for (const result of [undefined, null, {}, { lifecycle: 'not-a-map' }, { records: [{}] }]) {
       const bundle = await collectSupportBundle([{
         name: 'malformed',
         collect: async () => result as never,
@@ -264,6 +273,28 @@ describe('support bundle v1', () => {
     expect(bundle.status).toBe('recovery_required');
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'beta', code: 'collection_conflict', recoveryRequired: true }),
+    ]));
+  });
+
+  it('retains a singleton conflict when earlier collector errors fill the error bound', async () => {
+    const bundle = await collectSupportBundle([
+      {
+        name: 'alpha',
+        collect: async () => ({
+          errors: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxErrorChain }, (_, index) => ({
+            collector: 'alpha',
+            code: `warning-${index}`,
+            at: '2026-01-01T00:00:00.000Z',
+          })),
+        }),
+      },
+      { name: 'beta', collect: async () => ({ lifecycle: { state: 'ready' } }) },
+      { name: 'gamma', collect: async () => ({ lifecycle: { state: 'stale' } }) },
+    ]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_conflict', recoveryRequired: true }),
     ]));
   });
 
@@ -408,6 +439,19 @@ describe('support bundle v1', () => {
     expect(collected.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'duplicate_action_id', recoveryRequired: true }),
     ]));
+
+    const saturated = buildSupportBundle({
+      errors: [
+        { collector: 'one', code: 'collection_conflict', at: '2026-01-01T00:00:00.000Z', recoveryRequired: true },
+        { collector: 'two', code: 'warning-two', at: '2026-01-01T00:00:00.000Z' },
+        { collector: 'three', code: 'warning-three', at: '2026-01-01T00:00:00.000Z' },
+        { collector: 'four', code: 'warning-four', at: '2026-01-01T00:00:00.000Z' },
+      ],
+      receipts: [receipt, { ...receipt, state: 'failed' as const }],
+    });
+    expect(saturated.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_conflict', recoveryRequired: true }),
+    ]));
   });
 
   it('produces a safe fixture with no content-heavy fields', () => {
@@ -496,6 +540,49 @@ describe('support bundle v1', () => {
     expect(buildSupportBundle({ status: 'not-a-status' }).status).toBe('unknown');
     expect(buildSupportBundle({ errors: [{ collector: 'disk', code: 'write_failed', at: 'now', recoveryRequired: true }] }).status)
       .toBe('recovery_required');
+    const timedOut = buildSupportBundle({ lifecycle: { state: 'ready' } }, { maxElapsedMs: 0 });
+    expect(timedOut.status).toBe('recovery_required');
+    expect(timedOut.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'normalization_timeout', recoveryRequired: true }),
+    ]));
+  });
+
+  it('fails closed for untyped state strings and numbers', () => {
+    const bundle = buildSupportBundle({
+      lifecycle: {
+        safeState: 'ready',
+        note: 'glpat-01234567890123456789',
+        proprietaryDetail: 'internal implementation detail',
+        otp: 123456,
+        version: '1.2.3',
+      },
+    });
+
+    expect(bundle.lifecycle).toMatchObject({ safeState: 'ready', version: '1.2.3' });
+    expect(bundle.lifecycle).not.toHaveProperty('note');
+    expect(bundle.lifecycle).not.toHaveProperty('proprietaryDetail');
+    expect(bundle.lifecycle).not.toHaveProperty('otp');
+    expect(serializeSupportBundle(bundle)).not.toContain('glpat-01234567890123456789');
+    expect(serializeSupportBundle(bundle)).not.toContain('internal implementation detail');
+  });
+
+  it('accounts for records omitted while merging bounded collectors', async () => {
+    const record = (sequence: number) => ({
+      sequence,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'sample',
+    });
+    const bundle = await collectSupportBundle([
+      { name: 'alpha', collect: async () => ({ records: Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords }, (_, index) => record(index)) }) },
+      { name: 'beta', collect: async () => ({ records: [record(10_000), record(10_001)] }) },
+    ]);
+
+    expect(bundle.truncation.recordsOmitted).toBe(2);
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_output_overflow', recoveryRequired: true }),
+    ]));
   });
 
   it('selects bounded map keys deterministically and omits unsafe names', () => {
@@ -509,6 +596,25 @@ describe('support bundle v1', () => {
     expect(serializeSupportBundle(first)).not.toContain('private-path');
     expect(first.redaction.categories).toHaveProperty('attribute-keys');
     expect(first.redaction.categories).toHaveProperty('unsafe-field-name');
+  });
+
+  it('accepts unknown fields within v1 and drops them at serialization', () => {
+    const fixture = createSafeSupportBundleFixture();
+    const extended = {
+      ...fixture,
+      futureRootField: { secret: 'must not serialize' },
+      compatibility: { ...fixture.compatibility, futureReaderHint: 'ignored' },
+      lifecycle: { ...fixture.lifecycle, futureState: 'private-detail' },
+      records: [{ ...fixture.records[0], futureRecordField: 'ignored' }],
+    } as unknown as SupportBundle;
+
+    expect(isSupportBundleV1(extended)).toBe(true);
+    const serialized = serializeSupportBundle(extended);
+    expect(serialized).not.toContain('futureRootField');
+    expect(serialized).not.toContain('must not serialize');
+    expect(serialized).not.toContain('futureReaderHint');
+    expect(serialized).not.toContain('futureState');
+    expect(serialized).not.toContain('futureRecordField');
   });
 
   it('omits arbitrary terminal text by default', () => {
