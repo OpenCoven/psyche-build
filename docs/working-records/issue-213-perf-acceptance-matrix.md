@@ -60,6 +60,7 @@ Run from `/home/node/trees/issue-213` (Node v24, pnpm 10.34.5 via `npx pnpm`):
 | `npx pnpm exec vitest --run __tests__/mobileAcceptanceThresholds.test.ts` | **25 passed (25)**, 0 failed |
 | `npx pnpm exec tsc --noEmit` | exit 0 |
 | `npx pnpm exec tsc -p tsconfig.test.json --noEmit` | exit 0 |
+| `npx pnpm run build` | exit 0 (`✓ built in 176ms`); working tree clean afterwards — no generated-output drift |
 | `git diff --check` | clean |
 
 Not run here (gaps, with the unavailable dependency named):
@@ -77,12 +78,13 @@ Not run here (gaps, with the unavailable dependency named):
 
 ## Commits
 
-- Implementation commit: recorded in the PR (see branch
-  `psyche/issue-213-perf-acceptance-matrix`); adds
+- Implementation commit: `e436d798e67ea27fce6a586ab860def836a42fbb` —
+  `feat(perf): mobile acceptance matrix and v1 threshold contract (#213)`; adds
   `src/perf/acceptanceThresholds.ts`, `__tests__/mobileAcceptanceThresholds.test.ts`,
   `docs/perf/MOBILE-ACCEPTANCE-MATRIX.md`.
-- Working record commit: the final branch-head commit adds only this file.
-  Verification above was executed on the implementation commit's exact tree.
+- Working record commit: `c3cc6e36dc5510fa3d841791325ee8d650d2e84b` plus this
+  evidence addendum — verification above was executed on the implementation
+  commit's exact tree; the branch head SHA is visible on the fork PR.
 
 ## Test counts
 
