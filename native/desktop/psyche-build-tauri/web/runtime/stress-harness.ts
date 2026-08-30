@@ -291,6 +291,7 @@ async function invokeAbortable<T>(
   let lateReject: ((reason?: unknown) => void) | undefined;
   let lateTimeout: ReturnType<typeof setTimeout> | undefined;
   let lateHardTimeout: ReturnType<typeof setTimeout> | undefined;
+  let lateSettlementClosed = false;
   const clearLateTimeouts = (): void => {
     if (lateTimeout !== undefined) clearTimeout(lateTimeout);
     if (lateHardTimeout !== undefined) clearTimeout(lateHardTimeout);
@@ -321,12 +322,19 @@ async function invokeAbortable<T>(
       // arrive and be compensated. A second deadline prevents an absent or
       // permanently hung native result from keeping the scenario alive.
       lateHardTimeout = setTimeout(() => {
+        // This is the compensation cutoff. A result that arrives after it must
+        // not start native cleanup after the scenario is allowed to finalize.
+        lateSettlementClosed = true;
         lateReject?.(error);
         options.lateSettlements?.delete(lateSettlement);
       }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
   };
   const settleLate = (value: T): void => {
+    if (lateSettlementClosed) {
+      if (lateSettlement) options.lateSettlements?.delete(lateSettlement);
+      return;
+    }
     let work: Promise<void> | void;
     try {
       work = options.onLateResolve?.(value);

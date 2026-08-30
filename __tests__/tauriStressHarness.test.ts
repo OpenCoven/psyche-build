@@ -401,6 +401,64 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
+  it('does not compensate a resource that resolves after the late cutoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposed: string[] = [];
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(4_000);
+      late.resolve(createResource('late-after-cutoff', disposed));
+
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'AbortError' }),
+        expect.objectContaining({ message: 'stress resource creation did not settle after cancellation' }),
+      ]));
+      expect(disposed).not.toContain('late-after-cutoff');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns after a timed-out disposal and invokes the force path', async () => {
     vi.useFakeTimers();
     try {
