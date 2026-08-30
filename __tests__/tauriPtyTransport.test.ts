@@ -20,6 +20,10 @@ const frontendTransportSource = readFileSync(
   resolve(process.cwd(), 'native/desktop/psyche-build-tauri/web/runtime/pty-client.ts'),
   'utf8',
 );
+const mainSource = readFileSync(
+  resolve(process.cwd(), 'native/desktop/psyche-build-tauri/web/main.js'),
+  'utf8',
+);
 
 function commandSource(sourceText: string, name: string): string {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -164,6 +168,22 @@ describe('Tauri PTY command threading contract', () => {
   test('emits only batched PTY output events', () => {
     expect(source).toContain('.emit("pty:data-batch", payload)');
     expect(source).not.toMatch(/\.emit\s*\(\s*"pty:data"/);
+  });
+
+  test('carries the native session generation through the PTY event fence', () => {
+    const startResult = structSource(source, 'PtyStartResult');
+    const register = rustFunctionSource(source, 'register_pty_client');
+
+    expect(startResult).toContain('generation: u64');
+    expect(register).toContain(
+      'OutputPump::new_with_generation(thread_id.clone(), generation)',
+    );
+    expect(transportSource).toContain('pub generation: u64');
+    expect(frontendTransportSource).toContain('function nativeBatchDisposition');
+    expect(mainSource).toContain(
+      'ptyStartResult && Number.isSafeInteger(ptyStartResult.generation)',
+    );
+    expect(mainSource).toContain('markPtyExited(payload.generation)');
   });
 
   test('defines PTY flow-control commands with the native transport contracts', () => {
@@ -719,6 +739,68 @@ describe('typed frontend PTY batch consumer', () => {
         },
       ],
     ]);
+  });
+
+  test('rejects old native output after a thread id is reused', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    const threadId = 'thread-c-native-generation-fence';
+    runtimeThreadIds.add(threadId);
+    const client = createPtyClient({
+      threadId,
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    await expect(client.markPtyStarted(undefined, 41)).resolves.toBe(true);
+    expect(routePtyBatch(batch(threadId, 1, [1], { generation: 41 }))).toBe(true);
+    writes[0].callback();
+    await flushAsyncWork();
+    client.markPtyExited(41);
+
+    const startAttempt = client.prepareForPtyStart();
+    expect(routePtyBatch(batch(threadId, 1, [9], { generation: 41 }))).toBe(false);
+    expect(routePtyBatch(batch(threadId, 1, [2], { generation: 42 }))).toBe(true);
+
+    await expect(client.markPtyStarted(startAttempt, 42)).resolves.toBe(true);
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[0].bytes)).toEqual([1]);
+    expect(Array.from(writes[1].bytes)).toEqual([2]);
+    expect(routePtyBatch(batch(threadId, 2, [3], { generation: 41 }))).toBe(false);
+    expect(routePtyBatch(batch(threadId, 2, [4], { generation: 42 }))).toBe(true);
+  });
+
+  test('bounds provisional native output to the exact announced generation', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(
+      async (_command: string, _args: Record<string, unknown>) => undefined,
+    );
+    const threadId = 'thread-c-native-generation-quarantine';
+    runtimeThreadIds.add(threadId);
+    const client = createPtyClient({
+      threadId,
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    await expect(client.markPtyStarted(undefined, 51)).resolves.toBe(true);
+    client.markPtyExited(51);
+    const startAttempt = client.prepareForPtyStart();
+
+    expect(routePtyBatch(batch(threadId, 1, [5], { generation: 51 }))).toBe(false);
+    expect(routePtyBatch(batch(threadId, 1, [6], { generation: 52 }))).toBe(true);
+    expect(routePtyBatch(batch(threadId, 2, [7], { generation: 53 }))).toBe(true);
+
+    await expect(client.markPtyStarted(startAttempt, 52)).resolves.toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0].bytes)).toEqual([6]);
+    expect(routePtyBatch(batch(threadId, 2, [8], { generation: 52 }))).toBe(true);
   });
 
   test('retires the old write callback before a successful start can acknowledge the new pump', async () => {

@@ -805,9 +805,9 @@ export function createTerminalPaneController(
     },
     prepareForPtyStart: () => ptyClient.prepareForPtyStart(),
     restoreAfterFailedPtyStart: (attempt) => ptyClient.restoreAfterFailedPtyStart(attempt),
-    adoptRunningPty: (attempt) => ptyClient.adoptRunningPty(attempt),
-    markPtyStarted: (attempt) => ptyClient.markPtyStarted(attempt),
-    markPtyExited: () => ptyClient.markPtyExited(),
+    adoptRunningPty: (attempt, generation) => ptyClient.adoptRunningPty(attempt, generation),
+    markPtyStarted: (attempt, generation) => ptyClient.markPtyStarted(attempt, generation),
+    markPtyExited: (generation) => ptyClient.markPtyExited(generation),
     stopPtyDelivery: () => ptyClient.stopPtyDelivery(),
     dispose() {
       if (disposed) return;

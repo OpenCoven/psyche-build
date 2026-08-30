@@ -1802,7 +1802,8 @@
     var stoppedByUser = thread.stopRequested;
     if (thread.terminalController &&
         typeof thread.terminalController.markPtyExited === "function") {
-      thread.terminalController.markPtyExited();
+      if (payload.generation === undefined) thread.terminalController.markPtyExited();
+      else thread.terminalController.markPtyExited(payload.generation);
     }
     thread.ptyStarted = false;
     if (thread.ptyIoQueue) thread.ptyIoQueue.closed = true;
@@ -2525,7 +2526,7 @@
         rows: terminalSize.rows,
         env: launch.env,
       },
-    }).then(function () {
+    }).then(function (ptyStartResult) {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
         if (terminalController &&
@@ -2553,7 +2554,13 @@
       thread.spawning = false;
       if (thread.terminalController &&
           typeof thread.terminalController.markPtyStarted === "function") {
-        thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+        thread.terminalController.markPtyStarted(
+          ptyStartAttempt,
+          ptyStartResult && Number.isSafeInteger(ptyStartResult.generation) &&
+            ptyStartResult.generation > 0
+            ? ptyStartResult.generation
+            : undefined
+        ).catch(function () {});
       }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
@@ -2678,7 +2685,7 @@
         cols: thread.term ? thread.term.cols : 120,
         rows: thread.term ? thread.term.rows : 40,
       },
-    }).then(function () {
+    }).then(function (ptyStartResult) {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) return stopThreadPty(thread).then(function () { return false; });
       if (thread.exitDuringStart) {
@@ -2690,7 +2697,13 @@
       thread.status = "running";
       thread.spawning = false;
       if (terminalController && typeof terminalController.markPtyStarted === "function") {
-        terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+        terminalController.markPtyStarted(
+          ptyStartAttempt,
+          ptyStartResult && Number.isSafeInteger(ptyStartResult.generation) &&
+            ptyStartResult.generation > 0
+            ? ptyStartResult.generation
+            : undefined
+        ).catch(function () {});
       }
       syncThreadPaneMetadata(thread);
       refreshSidebar();

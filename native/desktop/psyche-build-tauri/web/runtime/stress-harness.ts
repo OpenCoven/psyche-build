@@ -1,5 +1,6 @@
 export type StressFixture = 'steady' | 'burst' | 'rewrite';
 export type StressPhase = 'setup' | 'warmup' | 'measure' | 'restore' | 'cleanup';
+export type StressLateOperation = 'focus' | 'visibility' | 'window' | 'graphics';
 
 export const STRESS_FOCUS_INTERVAL_MS = 250;
 
@@ -100,6 +101,12 @@ export interface StressHarnessDependencies {
   cycleWindow(signal: AbortSignal): Promise<void>;
   loseGraphicsContext(signal: AbortSignal): Promise<boolean>;
   restoreGraphicsContext?: (signal: AbortSignal) => Promise<void>;
+  /**
+   * Synchronously invalidates a native operation whose result arrived after
+   * its async quarantine closed. Implementations must not start new async
+   * work here; they must close the operation's generation/lifecycle fence.
+   */
+  invalidateLateOperation?: (operation: StressLateOperation) => void;
   resetMetrics(): void;
   snapshotMetrics(): unknown;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -292,6 +299,7 @@ type InvokeStressOperation = <T>(
   operation: (signal: AbortSignal) => Promise<T> | T,
   signal: AbortSignal,
   onLateResolve?: (cleanupSignal: AbortSignal) => Promise<void> | void,
+  onLateQuarantine?: (value: T) => void,
 ) => Promise<T>;
 
 const LATE_RESOURCE_RESULT_TIMEOUT_MS = 2_000;
@@ -335,6 +343,7 @@ async function invokeAbortable<T>(
   let lateQuarantineClosed = false;
   let lateCutoffError: Error | undefined;
   let completeLateCompensation: (() => void) | undefined;
+  const hasLateHandler = options.onLateResolve !== undefined || options.onLateQuarantine !== undefined;
   const lateCompensation = options.onLateResolve === undefined
     ? undefined
     : new Promise<void>((resolve) => {
@@ -375,7 +384,7 @@ async function invokeAbortable<T>(
       DETACHED_REAPER_RETENTION_MS,
     );
   };
-  const lateSettlement = options.onLateResolve === undefined
+  const lateSettlement = !hasLateHandler
     ? undefined
     : new Promise<void>((resolve, reject) => {
       lateResolve = resolve;
@@ -411,7 +420,7 @@ async function invokeAbortable<T>(
     }, LATE_RESOURCE_RESULT_TIMEOUT_MS);
   };
   const settleLate = (value: T): void => {
-    // A late native resource is still owned by this harness even when the
+    // A late native operation is still owned by this harness even when the
     // bounded result wait has elapsed. Run async compensation during the
     // quarantine rather than dropping a resource and leaking a pane/PTY. A
     // result that arrives after the quarantine gets only the synchronous
@@ -486,7 +495,7 @@ async function invokeAbortable<T>(
     operationPromise.then(
       (value) => {
         if (settled) {
-          if (options.onLateResolve !== undefined) settleLate(value);
+          if (hasLateHandler) settleLate(value);
           return;
         }
         settled = true;
@@ -561,6 +570,12 @@ async function invokeBoundedOperation<T>(
   } finally {
     clearTimeout(timeout);
     signal.removeEventListener('abort', forwardAbort);
+  }
+}
+
+async function awaitPendingLateSettlements(pending: Set<Promise<void>>): Promise<void> {
+  while (pending.size > 0) {
+    await Promise.allSettled([...pending]);
   }
 }
 
@@ -660,12 +675,13 @@ async function runActivePhase(
   phase: 'warmup' | 'measure',
   durationMs: number,
   focusOrder: readonly string[],
-  invokeOperation: InvokeStressOperation = (operation, operationSignal, onLateResolve) => (
+  invokeOperation: InvokeStressOperation = (operation, operationSignal, onLateResolve, onLateQuarantine) => (
     invokeAbortable(
       () => operation(operationSignal),
       operationSignal,
       onLateResolve === undefined ? {} : {
         onLateResolve: () => invokeBoundedCleanup(onLateResolve),
+        onLateQuarantine,
       },
     )
   ),
@@ -767,6 +783,12 @@ async function runActivePhase(
           focusOrder[0] ?? stressFocusId(focusOrder, 0),
           cleanupSignal,
         ),
+        () => {
+          if (dependencies.invalidateLateOperation === undefined) {
+            throw new Error('late focus operation lacks terminal invalidation');
+          }
+          dependencies.invalidateLateOperation('focus');
+        },
       );
       abortAtPhaseDeadline();
       throwIfAborted(phaseController.signal);
@@ -813,12 +835,13 @@ async function restoreHiddenPanes(
   dependencies: StressHarnessDependencies,
   hiddenPaneIds: Set<string>,
   signal?: AbortSignal,
-  invokeOperation: InvokeStressOperation = (operation, operationSignal, onLateResolve) => (
+  invokeOperation: InvokeStressOperation = (operation, operationSignal, onLateResolve, onLateQuarantine) => (
     invokeAbortable(
       () => operation(operationSignal),
       operationSignal,
       onLateResolve === undefined ? {} : {
         onLateResolve: () => invokeBoundedCleanup(onLateResolve),
+        onLateQuarantine,
       },
     )
   ),
@@ -834,6 +857,12 @@ async function restoreHiddenPanes(
           (operationSignal) => dependencies.setVisible(id, true, operationSignal),
           signal,
           (cleanupSignal) => dependencies.setVisible(id, true, cleanupSignal),
+          () => {
+            if (dependencies.invalidateLateOperation === undefined) {
+              throw new Error('late visibility operation lacks terminal invalidation');
+            }
+            dependencies.invalidateLateOperation('visibility');
+          },
         );
       } else {
         await invokeCleanup((cleanupSignal) => dependencies.setVisible(id, true, cleanupSignal));
@@ -898,10 +927,13 @@ async function runStressScenario(
       () => resource.forceDispose(),
     )
   );
-  const invokeTracked: InvokeStressOperation = (operation, operationSignal, onLateResolve) => (
-    invokeBoundedOperation(operation, operationSignal, onLateResolve === undefined ? {} : {
+  const invokeTracked: InvokeStressOperation = (operation, operationSignal, onLateResolve, onLateQuarantine) => (
+    invokeBoundedOperation(operation, operationSignal, onLateResolve === undefined ? {
+      onLateQuarantine,
+    } : {
       lateSettlements: pendingLateSettlements,
       onLateResolve: () => invokeCleanup(onLateResolve),
+      onLateQuarantine,
       onLateTimeout: recordCleanupError,
       lateReapers: DETACHED_STRESS_REAPERS,
     })
@@ -975,6 +1007,7 @@ async function runStressScenario(
       focusOrder,
       invokeTracked,
     );
+    await awaitPendingLateSettlements(pendingLateSettlements);
 
     throwIfAborted(signal);
     const hiddenStart = Math.ceil(terminalIds.length / 2);
@@ -984,9 +1017,16 @@ async function runStressScenario(
         (operationSignal) => dependencies.setVisible(id, false, operationSignal),
         signal,
         (cleanupSignal) => dependencies.setVisible(id, true, cleanupSignal),
+        () => {
+          if (dependencies.invalidateLateOperation === undefined) {
+            throw new Error('late visibility operation lacks terminal invalidation');
+          }
+          dependencies.invalidateLateOperation('visibility');
+        },
       );
       throwIfAborted(signal);
     }
+    await awaitPendingLateSettlements(pendingLateSettlements);
     const measurementFocusOrder = buildStressFocusOrder(
       terminalIds.slice(0, hiddenStart),
       editor.id,
@@ -1006,6 +1046,7 @@ async function runStressScenario(
       measurementFocusOrder,
       invokeTracked,
     );
+    await awaitPendingLateSettlements(pendingLateSettlements);
     throwIfAborted(signal);
     const afterMeasurement = dependencies.snapshotMetrics();
 
@@ -1034,6 +1075,12 @@ async function runStressScenario(
         (operationSignal) => dependencies.cycleWindow(operationSignal),
         restoreController.signal,
         (cleanupSignal) => dependencies.cycleWindow(cleanupSignal),
+        () => {
+          if (dependencies.invalidateLateOperation === undefined) {
+            throw new Error('late window operation lacks terminal invalidation');
+          }
+          dependencies.invalidateLateOperation('window');
+        },
       );
       throwIfAborted(restoreController.signal);
       await restoreHiddenPanes(
@@ -1053,7 +1100,14 @@ async function runStressScenario(
           }
           return dependencies.restoreGraphicsContext(cleanupSignal);
         },
+        () => {
+          if (dependencies.invalidateLateOperation === undefined) {
+            throw new Error('late graphics operation lacks terminal invalidation');
+          }
+          dependencies.invalidateLateOperation('graphics');
+        },
       );
+      await awaitPendingLateSettlements(pendingLateSettlements);
       const restoreElapsedMs = Math.max(0, dependencies.now() - restoreStartedAt);
       const restoreRemainingMs = Math.max(0, scenarioValue.restoreMs - restoreElapsedMs);
       if (restoreRemainingMs > 0) {

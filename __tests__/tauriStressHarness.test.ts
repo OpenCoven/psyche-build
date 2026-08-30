@@ -9,6 +9,7 @@ import {
   stressFocusId,
   type StressFixture,
   type StressHarnessDependencies,
+  type StressLateOperation,
   type StressPhase,
   type StressResource,
 } from '../native/desktop/psyche-build-tauri/web/runtime/stress-harness';
@@ -773,6 +774,160 @@ describe('Tauri diagnostics stress harness', () => {
     await expect(runStressPlan(dependencies, { signal: controller.signal }))
       .rejects.toMatchObject({ name: 'AbortError' });
     expect(focusPhases).toEqual(['measure']);
+  });
+
+  it('settles late phase operations before entering the next phase', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const lateFocus = deferred<void>();
+      const phaseEvents: StressPhase[] = [];
+      const focusEvents: string[] = [];
+      const controller = new AbortController();
+      let focusCalls = 0;
+      let now = 0;
+      let lateOperationStarted = false;
+      let focusWasStarted = false;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus() {
+          focusCalls += 1;
+          if (!lateOperationStarted && now >= 9_500) {
+            lateOperationStarted = true;
+            focusEvents.push('focus-started');
+            focusWasStarted = true;
+            await lateFocus.promise;
+            return;
+          }
+          if (lateOperationStarted) focusEvents.push('focus-compensated');
+        },
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+          now += ms;
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, ms);
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(signal.reason ?? abortError());
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          });
+          frames.flush(now);
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress(progress) {
+          phaseEvents.push(progress.phase);
+          if (progress.phase === 'measure' && !controller.signal.aborted) {
+            controller.abort(abortError());
+          }
+        },
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(9_500);
+      for (let attempt = 0; attempt < 20 && !focusWasStarted; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(focusWasStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(phaseEvents).not.toContain('measure');
+      await vi.advanceTimersByTimeAsync(1);
+
+      lateFocus.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      const error = await observed;
+      expect(error).toMatchObject({ name: 'AbortError' });
+      expect(focusEvents).toEqual(['focus-started', 'focus-compensated']);
+      expect(phaseEvents.indexOf('measure')).toBeGreaterThan(phaseEvents.indexOf('warmup'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('terminally invalidates a non-resource result after its quarantine closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const lateFocus = deferred<void>();
+      const invalidated: StressLateOperation[] = [];
+      let focusWasStarted = false;
+      let now = 0;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus() {
+          focusWasStarted = true;
+          await lateFocus.promise;
+        },
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        invalidateLateOperation(operation) {
+          invalidated.push(operation);
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+          now += _ms;
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1);
+      for (let attempt = 0; attempt < 20 && !focusWasStarted; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(focusWasStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(11_001);
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+
+      lateFocus.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invalidated).toContain('focus');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps focus operations on absolute 250 ms boundaries when focusing is slow', async () => {

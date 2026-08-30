@@ -1702,6 +1702,12 @@ pub struct PtyExitEvent {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PtyStartResult {
+    generation: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
@@ -2941,7 +2947,7 @@ async fn pty_start(
     webview: tauri::Webview,
     app: AppHandle,
     options: StartOptions,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     ensure_trusted_pty_caller(webview.label())?;
     match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
         Ok(result) => result,
@@ -2949,7 +2955,7 @@ async fn pty_start(
     }
 }
 
-fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
+fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<PtyStartResult, String> {
     pty_start_blocking_with_launch(app, options, None)
 }
 
@@ -2958,7 +2964,7 @@ fn pty_start_blocking_with_trusted_fixture(
     app: AppHandle,
     options: StartOptions,
     fixture_launch: platform::TrustedFixtureLaunch,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     pty_start_blocking_with_launch(app, options, Some(fixture_launch.into_descriptor()))
 }
 
@@ -2966,7 +2972,7 @@ fn pty_start_blocking_with_launch(
     app: AppHandle,
     options: StartOptions,
     trusted_fixture_launch: Option<platform::LaunchDescriptor>,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -3030,7 +3036,7 @@ fn register_pty_client(
     pending_start: PendingPtyStart,
     pair: portable_pty::PtyPair,
     mut child: Box<dyn Child + Send + Sync>,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     let spawn_time_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -3041,7 +3047,9 @@ fn register_pty_client(
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
     let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
+    let generation = pending_start.token.generation;
+    let pump = OutputPump::new_with_generation(thread_id.clone(), generation)
+        .map_err(|e| e.to_string())?;
     let app_for_output = app.clone();
     pump.start_worker(move |payload| {
         app_for_output
@@ -3156,7 +3164,9 @@ fn register_pty_client(
         ));
     }
 
-    Ok(())
+    Ok(PtyStartResult {
+        generation: session_token.generation,
+    })
 }
 
 fn finish_pty_lifecycle(shutdown: &PtyExitShutdown) {
@@ -3187,7 +3197,7 @@ async fn diagnostics_spawn_fixture(
     })
     .await
     {
-        Ok(result) => result,
+        Ok(result) => result.map(|_| ()),
         Err(error) => Err(format!("failed to join PTY start task: {error}")),
     }
 }
@@ -3241,7 +3251,7 @@ async fn pty_attach(
     webview: tauri::Webview,
     app: AppHandle,
     options: PtyAttachOptions,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     ensure_trusted_pty_caller(webview.label())?;
     match tauri::async_runtime::spawn_blocking(move || pty_attach_blocking(app, options)).await {
         Ok(result) => result,
@@ -3249,7 +3259,10 @@ async fn pty_attach(
     }
 }
 
-fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+fn pty_attach_blocking(
+    app: AppHandle,
+    options: PtyAttachOptions,
+) -> Result<PtyStartResult, String> {
     validate_pty_thread_id(&options.thread_id)?;
     let attach_args = native_sessions::build_attach_args(
         &native_sessions::native_socket_path()?,

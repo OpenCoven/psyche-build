@@ -724,6 +724,7 @@ impl PumpState {
 #[serde(rename_all = "camelCase")]
 pub struct PtyDataBatchEvent {
     pub thread_id: String,
+    pub generation: u64,
     pub sequence: u64,
     pub bytes: Vec<u8>,
     pub byte_count: usize,
@@ -1114,6 +1115,7 @@ struct SynchronizedPumpState {
 
 struct OutputPumpShared {
     thread_id: String,
+    generation: u64,
     clock: Arc<dyn PumpClock>,
     state: Mutex<SynchronizedPumpState>,
     wake: Condvar,
@@ -1160,8 +1162,9 @@ impl Error for WorkerStartError {}
 
 impl OutputPump {
     pub fn new(thread_id: String) -> Result<Self, PumpLimitsError> {
-        Self::new_with_clock(
+        Self::new_with_generation_and_clock(
             thread_id,
+            0,
             PumpLimits::default(),
             Arc::new(SystemPumpClock::new()),
         )
@@ -1172,9 +1175,31 @@ impl OutputPump {
         limits: PumpLimits,
         clock: Arc<dyn PumpClock>,
     ) -> Result<Self, PumpLimitsError> {
+        Self::new_with_generation_and_clock(thread_id, 0, limits, clock)
+    }
+
+    pub(crate) fn new_with_generation(
+        thread_id: String,
+        generation: u64,
+    ) -> Result<Self, PumpLimitsError> {
+        Self::new_with_generation_and_clock(
+            thread_id,
+            generation,
+            PumpLimits::default(),
+            Arc::new(SystemPumpClock::new()),
+        )
+    }
+
+    fn new_with_generation_and_clock(
+        thread_id: String,
+        generation: u64,
+        limits: PumpLimits,
+        clock: Arc<dyn PumpClock>,
+    ) -> Result<Self, PumpLimitsError> {
         Ok(Self {
             shared: Arc::new(OutputPumpShared {
                 thread_id,
+                generation,
                 clock,
                 state: Mutex::new(SynchronizedPumpState {
                     state: PumpState::new(limits)?,
@@ -1584,6 +1609,7 @@ where
         (
             PtyDataBatchEvent {
                 thread_id: shared.thread_id.clone(),
+                generation: shared.generation,
                 sequence,
                 bytes: prepared.data.as_ref().to_vec(),
                 byte_count: prepared.data.len(),
@@ -1598,7 +1624,14 @@ where
 
     let result = emitter(&event);
     let mut guard = lock_unpoisoned(&shared.state);
+    let cancelled = guard.cancelled;
     guard.emit_in_progress = false;
+    if cancelled {
+        guard.prepared_event = None;
+        drop(guard);
+        shared.wake.notify_all();
+        return Ok(EmitOutcome::Cancelled);
+    }
     match result {
         Ok(()) => {
             guard.state.commit_prepared(sequence, sample.instant)?;
@@ -1736,6 +1769,16 @@ mod tests {
 
     fn test_pump(thread_id: &str, limits: PumpLimits, clock: Arc<TestClock>) -> OutputPump {
         OutputPump::new_with_clock(thread_id.to_string(), limits, clock)
+            .expect("test pump limits should be valid")
+    }
+
+    fn test_pump_with_generation(
+        thread_id: &str,
+        generation: u64,
+        limits: PumpLimits,
+        clock: Arc<TestClock>,
+    ) -> OutputPump {
+        OutputPump::new_with_generation_and_clock(thread_id.to_string(), generation, limits, clock)
             .expect("test pump limits should be valid")
     }
 
@@ -3355,6 +3398,7 @@ mod tests {
         );
         let first = first.unwrap();
         assert_eq!(first.thread_id, "metadata-thread");
+        assert_eq!(first.generation, 0);
         assert_eq!(first.sequence, 1);
         assert_eq!(first.bytes, b"abcd");
         assert_eq!(first.byte_count, 4);
@@ -3373,6 +3417,7 @@ mod tests {
             Ok(EmitOutcome::Emitted { sequence: 2 })
         );
         let second = second.unwrap();
+        assert_eq!(second.generation, 0);
         assert_eq!(second.sequence, 2);
         assert_eq!(second.bytes, b"ef");
         assert_eq!(second.byte_count, 2);
@@ -3380,5 +3425,62 @@ mod tests {
         assert_eq!(second.emitted_at_micros, 29);
         assert_eq!(second.queued_bytes, 0);
         assert_eq!(second.queue_depth, 0);
+    }
+
+    #[test]
+    fn batch_event_carries_the_native_session_generation() {
+        let clock = TestClock::new();
+        let pump = test_pump_with_generation(
+            "generation-thread",
+            41,
+            PumpLimits {
+                max_batch_bytes: 4,
+                ..zero_cadence_limits()
+            },
+            Arc::clone(&clock),
+        );
+        pump.enqueue(b"output".to_vec()).unwrap();
+
+        let mut event = None;
+        assert_eq!(
+            pump.emit_ready(|payload| {
+                event = Some(payload.clone());
+                Ok(())
+            }),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+
+        let event = event.expect("emitter should receive the batch");
+        assert_eq!(event.thread_id, "generation-thread");
+        assert_eq!(event.generation, 41);
+        assert_eq!(event.bytes, b"outp");
+    }
+
+    #[test]
+    fn cancellation_during_emit_does_not_commit_the_batch() {
+        let clock = TestClock::new();
+        let pump = test_pump("cancel-during-emit", zero_cadence_limits(), clock);
+        pump.enqueue(b"late output".to_vec()).unwrap();
+
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let emitting_pump = pump.clone();
+        let emitter = thread::spawn(move || {
+            emitting_pump.emit_ready(|_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("emitter should start");
+        assert!(pump.cancel());
+        release_tx.send(()).unwrap();
+
+        assert_eq!(emitter.join().unwrap(), Ok(EmitOutcome::Cancelled));
+        assert_eq!(pump.snapshot().metrics.state.bytes_emitted, 0);
+        assert_eq!(pump.snapshot().metrics.state.batches_emitted, 0);
     }
 }

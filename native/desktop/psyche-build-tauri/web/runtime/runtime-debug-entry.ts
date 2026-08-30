@@ -15,6 +15,7 @@ export type {
   StressFixture,
   StressGeometry,
   StressHarnessDependencies,
+  StressLateOperation,
   StressPhase,
   StressProgress,
   StressResource,
