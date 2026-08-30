@@ -3,9 +3,16 @@
 Psyche Build is a runnable, demo-first native cockpit with product and display
 name `Psyche Build` and bundle identifier `ai.opencoven.psyche-ios`. Production
 launches compose one shared protocol v3 transport, request client, workspace
-store, paired-host store, and connection manager, then attempt to reconnect to
-the stored host. The demo store remains available to previews and UI tests, so
-those fixtures do not require a live host.
+store, remote-action store, paired-host store, and connection manager, then
+attempt to reconnect to the stored host. The demo store remains available to
+previews and UI tests, so those fixtures do not require a live host.
+
+Remote pane actions remain host-owned: the native `RemoteActionStore` uses the
+same request client as `WorkspaceStore`, and `AppModel` exposes that one store
+through the SwiftUI environment. Native action surfaces must use this shared
+store rather than constructing a second transport or bypassing the host's
+validation, confirmation, choice, and review sessions. Fixture roots use a
+disconnected store so action-state UI can be tested without network access.
 
 The `v0.0.1` release identity is `Psyche Build` `0.0.1 (1)`. Distribution is
 internal TestFlight only for authorized OpenCoven testers. It is not an
