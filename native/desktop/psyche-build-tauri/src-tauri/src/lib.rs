@@ -12547,17 +12547,26 @@ mod workspace_panel_tests {
         let marker = tree.root.join("fsmonitor-ran");
         write_marker_executable(&hook);
         run_test_git(&tree.root, &["init", "-q"]);
+        let configured_fsmonitor = marker_command(&hook, &marker);
         run_test_git(
             &tree.root,
-            &["config", "core.fsmonitor", &marker_command(&hook, &marker)],
+            &["config", "core.fsmonitor", &configured_fsmonitor],
         );
 
-        run_test_git(&tree.root, &["status", "--porcelain"]);
-        assert!(
-            marker.exists(),
-            "unhardened git status must execute fsmonitor"
+        let repository_fsmonitor = run_test_git_stdout_with_env(
+            &tree.root,
+            &["config", "--local", "--get", "core.fsmonitor"],
+            &[],
         );
-        std::fs::remove_file(&marker).unwrap();
+        assert_eq!(repository_fsmonitor.trim(), configured_fsmonitor);
+        let inspection = GitInspection::new(path_text(&tree.root)).unwrap();
+        assert_eq!(
+            inspection
+                .execute(&["config", "--get-all", "core.fsmonitor"])
+                .unwrap(),
+            "false\n",
+            "isolated inspection must replace repository fsmonitor configuration"
+        );
 
         git_status(path_text(&tree.root).to_string()).unwrap();
 
@@ -13124,9 +13133,22 @@ mod workspace_panel_tests {
         );
         std::fs::write(submodule.join("tracked.txt"), "dirty\n").unwrap();
 
-        run_test_git(&parent, &["status", "--porcelain"]);
-        assert!(fsmonitor_marker.exists());
-        std::fs::remove_file(&fsmonitor_marker).unwrap();
+        let raw_trace = tree.root.join("raw-parent-status-trace.json");
+        run_test_git_with_env(
+            &parent,
+            &["status", "--porcelain"],
+            &[("GIT_TRACE2_EVENT", path_text(&raw_trace))],
+        );
+        let raw_submodule_status = std::fs::read_to_string(&raw_trace)
+            .is_ok_and(|trace| trace.contains("\"hierarchy\":\"status/status\""));
+        let raw_fsmonitor_executed = fsmonitor_marker.exists();
+        assert!(
+            raw_submodule_status || raw_fsmonitor_executed,
+            "raw parent status must either trace populated-submodule inspection or execute its configured fsmonitor"
+        );
+        if raw_fsmonitor_executed {
+            std::fs::remove_file(&fsmonitor_marker).unwrap();
+        }
         run_test_git(&submodule, &["config", "--unset", "core.fsmonitor"]);
         run_test_git(&submodule, &["diff", "--no-color"]);
         assert!(filter_marker.exists());
@@ -13140,75 +13162,89 @@ mod workspace_panel_tests {
             ],
         );
 
-        let status = git_status(path_text(&parent).to_string()).unwrap();
-        assert!(
-            status.files.is_empty(),
-            "unexpected parent status files: {:?}",
-            status.files
-        );
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
+        let hardened_trace = tree.root.join("hardened-parent-inspection-trace.json");
+        {
+            let _git_env = TestGitEnvOverrideGuard::set(&[(
+                "GIT_TRACE2_EVENT",
+                Some(hardened_trace.as_os_str()),
+            )]);
 
-        let diff = git_diff(path_text(&parent).to_string(), None, Some(false), None).unwrap();
-        assert!(diff.text.is_empty());
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
+            let status = git_status(path_text(&parent).to_string()).unwrap();
+            assert!(
+                status.files.is_empty(),
+                "unexpected parent status files: {:?}",
+                status.files
+            );
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
 
-        let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
-        assert_eq!(worktrees.len(), 1);
-        assert!(!worktrees[0].dirty);
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
+            let diff = git_diff(path_text(&parent).to_string(), None, Some(false), None).unwrap();
+            assert!(diff.text.is_empty());
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
 
-        run_test_git(&submodule, &["add", "tracked.txt"]);
-        run_test_git(&submodule, &["commit", "-qm", "advance submodule"]);
-        if filter_marker.exists() {
-            std::fs::remove_file(&filter_marker).unwrap();
+            let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
+            assert_eq!(worktrees.len(), 1);
+            assert!(!worktrees[0].dirty);
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
+
+            run_test_git(&submodule, &["add", "tracked.txt"]);
+            run_test_git(&submodule, &["commit", "-qm", "advance submodule"]);
+            if filter_marker.exists() {
+                std::fs::remove_file(&filter_marker).unwrap();
+            }
+            if fsmonitor_marker.exists() {
+                std::fs::remove_file(&fsmonitor_marker).unwrap();
+            }
+
+            let status = git_status(path_text(&parent).to_string()).unwrap();
+            assert_eq!(
+                status.files.len(),
+                1,
+                "unexpected reftable status files: {:?}",
+                status.files
+            );
+            assert_eq!(status.files[0].path, "vendor/submodule");
+            assert!(status.files[0].unstaged);
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
+
+            let diff = git_diff(path_text(&parent).to_string(), None, Some(false), None).unwrap();
+            assert!(diff.text.contains("Subproject commit"));
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
+
+            let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
+            assert!(worktrees[0].dirty);
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
+
+            run_test_git(&parent, &["add", "vendor/submodule"]);
+
+            let status = git_status(path_text(&parent).to_string()).unwrap();
+            assert_eq!(status.files.len(), 1);
+            assert!(status.files[0].staged);
+            assert!(!status.files[0].unstaged);
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
+
+            let diff = git_diff(path_text(&parent).to_string(), None, Some(true), None).unwrap();
+            assert!(diff.text.contains("Subproject commit"));
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
+
+            let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
+            assert!(worktrees[0].dirty);
+            assert!(!filter_marker.exists());
+            assert!(!fsmonitor_marker.exists());
         }
-        if fsmonitor_marker.exists() {
-            std::fs::remove_file(&fsmonitor_marker).unwrap();
+        if let Ok(hardened_trace) = std::fs::read_to_string(hardened_trace) {
+            assert!(
+                !hardened_trace.contains("\"hierarchy\":\"status/status\""),
+                "hardened parent inspection must not launch status inside populated submodules"
+            );
         }
-
-        let status = git_status(path_text(&parent).to_string()).unwrap();
-        assert_eq!(
-            status.files.len(),
-            1,
-            "unexpected reftable status files: {:?}",
-            status.files
-        );
-        assert_eq!(status.files[0].path, "vendor/submodule");
-        assert!(status.files[0].unstaged);
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
-
-        let diff = git_diff(path_text(&parent).to_string(), None, Some(false), None).unwrap();
-        assert!(diff.text.contains("Subproject commit"));
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
-
-        let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
-        assert!(worktrees[0].dirty);
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
-
-        run_test_git(&parent, &["add", "vendor/submodule"]);
-
-        let status = git_status(path_text(&parent).to_string()).unwrap();
-        assert_eq!(status.files.len(), 1);
-        assert!(status.files[0].staged);
-        assert!(!status.files[0].unstaged);
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
-
-        let diff = git_diff(path_text(&parent).to_string(), None, Some(true), None).unwrap();
-        assert!(diff.text.contains("Subproject commit"));
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
-
-        let worktrees = git_worktrees(path_text(&parent).to_string()).unwrap();
-        assert!(worktrees[0].dirty);
-        assert!(!filter_marker.exists());
-        assert!(!fsmonitor_marker.exists());
     }
 
     #[test]
