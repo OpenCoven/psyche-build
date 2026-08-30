@@ -267,8 +267,10 @@ const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
 const SAFE_REDACTION_CATEGORY_VALUES = new Set([
   'absolute-path', 'attribute-depth', 'attribute-items', 'attribute-keys',
   'attribute-map-too-large', 'attribute-node-limit', 'authorization', 'bounded-text',
+  'duplicate-action-id',
   'certificate-or-key', 'content-field', 'error-message', 'infrastructure-url',
   'invalid-lease-revision', 'invalid-record', 'invalid-receipt', 'invalid-status',
+  'invalid-timestamp',
   'non-authoritative-receipt', 'non-finite-number', 'non-normalized-receipt',
   'record-count', 'record-omitted', 'record-size', 'receipt-identity-too-large',
   'secret-assignment', 'secret-field', 'secret-labeled-value', 'secret-phrase',
