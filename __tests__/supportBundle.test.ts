@@ -202,6 +202,23 @@ describe('support bundle v1', () => {
       .toThrow(/accounting proof/i);
   });
 
+  it('does not retain mutable public redaction metadata as private audit evidence', () => {
+    const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
+    const parsed = parseSupportBundle(
+      serializeSupportBundle(createSafeSupportBundleFixture()),
+      codec,
+    ) as unknown as {
+      redaction: { redactedFields: number; categories: Record<string, number> };
+    };
+    parsed.redaction.redactedFields = 1_234;
+    parsed.redaction.categories.forged = 1_234;
+
+    const rebuilt = buildSupportBundle(parsed);
+    expect(rebuilt.redaction.redactedFields).not.toBe(1_234);
+    expect(rebuilt.redaction.categories).not.toHaveProperty('forged');
+    expect(rebuilt.provenance.verification).toBe('unverified');
+  });
+
   it('preserves bounded redaction and truncation metadata after a JSON round trip', () => {
     const codec = createSupportBundleCodec('support-bundle-test-key-v1');
     const bundle = buildSupportBundle({
@@ -585,6 +602,23 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'oversized-graph', code: 'collection_invalid_output', recoveryRequired: true }),
     ]));
+  });
+
+  it('accounts for payload arrays discarded during collector overflow preflight', async () => {
+    const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
+      sequence,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'sample',
+    }));
+    const bundle = await collectSupportBundle([{
+      name: 'overflowing-collector',
+      collect: async () => ({ records }),
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.records).toEqual([]);
+    expect(bundle.truncation.recordsOmitted).toBe(records.length);
   });
 
   it('detects duplicate and conflicting action IDs as recovery-required', async () => {
@@ -1043,6 +1077,42 @@ describe('support bundle v1', () => {
     const parsed = parseSupportBundle(JSON.stringify(extended), codec);
     expect(serializeSupportBundle(parsed, codec)).toBe(serializeSupportBundle(fixture));
     expect(parsed).not.toHaveProperty('futureRootField');
+  });
+
+  it('rejects noncanonical signed metadata and inconsistent normalized projections', () => {
+    const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
+    const fixture = createSafeSupportBundleFixture();
+    const duplicateReceipts = {
+      ...fixture,
+      receipts: [fixture.receipts[0], fixture.receipts[0]],
+    };
+    expect(isSupportBundleV1(duplicateReceipts)).toBe(false);
+    expect(() => parseSupportBundle(JSON.stringify(duplicateReceipts), codec))
+      .toThrow(/schema is invalid/i);
+
+    const recoveryError = {
+      collector: 'fixture',
+      code: 'collection_failed',
+      at: '2026-01-01T00:00:00.000Z',
+      recoveryRequired: true,
+    };
+    const inconsistent = {
+      ...fixture,
+      status: 'partial',
+      errors: [recoveryError],
+    };
+    expect(isSupportBundleV1(inconsistent)).toBe(false);
+
+    for (const graphics of [null, true, 'ready', ['ready']]) {
+      expect(isSupportBundleV1({ ...fixture, graphics })).toBe(false);
+    }
+
+    const uppercaseProof = {
+      ...fixture,
+      accountingProof: fixture.accountingProof?.toUpperCase(),
+    };
+    expect(() => parseSupportBundle(JSON.stringify(uppercaseProof), codec))
+      .toThrow(/schema is invalid/i);
   });
 
   it('rejects unsupported record attribute shapes and over-deep compatibility values', () => {

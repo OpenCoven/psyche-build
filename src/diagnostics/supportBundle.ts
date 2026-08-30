@@ -1549,6 +1549,13 @@ function auditManifest(audit: MutableAudit): SupportRedactionManifest {
   };
 }
 
+function freezeRedactionManifest(manifest: SupportRedactionManifest): SupportRedactionManifest {
+  return Object.freeze({
+    ...manifest,
+    categories: Object.freeze({ ...manifest.categories }),
+  });
+}
+
 function serializeForSize(value: unknown, deadlineAt?: number): string {
   return JSON.stringify(stableValue(value, { remaining: MAX_ATTRIBUTE_NODES * 4, deadlineAt }));
 }
@@ -1730,14 +1737,24 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       || !Array.isArray(value.errors)
       || !isRecord(value.redaction)
       || !isRecord(value.truncation)
-      || (value.accountingProof !== undefined && !isAccountingProof(value.accountingProof))) return false;
+      || (value.accountingProof !== undefined
+        && (!isAccountingProof(value.accountingProof)
+          || value.accountingProof !== value.accountingProof.toLowerCase()))) return false;
     if (value.terminalTail.length !== 0
       || value.records.length > SUPPORT_BUNDLE_LIMITS.maxRecords
       || value.receipts.length > SUPPORT_BUNDLE_LIMITS.maxReceipts
       || value.errors.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) return false;
     const recordBudget: NormalizationBudget = { remaining: MAX_ATTRIBUTE_NODES * 4, deadlineAt };
+    const receiptIds = new Set<string>();
+    const receiptsValid = value.receipts.every((receipt) => {
+      if (!isSupportReceiptProjection(receipt, deadlineAt)) return false;
+      const actionId = (receipt as SupportReceipt).actionId;
+      if (receiptIds.has(actionId)) return false;
+      receiptIds.add(actionId);
+      return true;
+    });
     if (!value.records.every((record) => isNormalizedRecord(record, deadlineAt, recordBudget))
-      || !value.receipts.every((receipt) => isSupportReceiptProjection(receipt, deadlineAt))
+      || !receiptsValid
       || !value.errors.every((error) => isNormalizedError(error, deadlineAt))) return false;
     const redaction = value.redaction;
     const truncation = value.truncation;
@@ -1757,6 +1774,12 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
         (receipt) => isRecord(receipt) && receipt.verification === undefined,
       ))
       && (value.status !== 'complete' || isAccountingProof(value.accountingProof))
+      && value.status === combineStatus(
+        value.status as SupportBundleStatus,
+        value.errors,
+        isCompleteProvenance(provenance),
+        value.receipts.every((receipt) => isRecord(receipt) && receipt.verification === undefined),
+      )
       && (value.ownerEpoch === undefined || finiteNonNegativeInteger(value.ownerEpoch) !== undefined)
       && (project === undefined || (isRecord(project)
         && hasOnlyKeys(project, SUPPORT_PROJECT_KEYS, deadlineAt)
@@ -1770,7 +1793,8 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       && isBoundedNormalizedValue(value.providers, 0, new Set<object>(), stateBudget, '', true)
       && isBoundedNormalizedValue(value.persistence, 0, new Set<object>(), stateBudget, '', true)
       && isBoundedNormalizedValue(value.updater, 0, new Set<object>(), stateBudget, '', true)
-      && (value.graphics === undefined || isBoundedNormalizedValue(value.graphics, 0, new Set<object>(), stateBudget, '', true))
+      && (value.graphics === undefined || (isRecord(value.graphics)
+        && isBoundedNormalizedValue(value.graphics, 0, new Set<object>(), stateBudget, '', true)))
       && hasOnlyKeys(redaction, SUPPORT_REDACTION_KEYS, deadlineAt)
       && redaction.version === 1
       && boundedMetadataCount(redaction.redactedFields) !== undefined
@@ -2330,7 +2354,7 @@ function buildSupportBundleWithReceiptMode(
   const output = codec === undefined
     ? fitted
     : { ...fitted, accountingProof: signAccountingProof(fitted, codec, deadlineAt) };
-  REDACTION_AUDITS.set(output, auditManifest(audit));
+  REDACTION_AUDITS.set(output, freezeRedactionManifest(output.redaction));
   TRUSTED_TRUNCATIONS.set(output, Object.freeze({ ...output.truncation }));
   const trustedOutputFields = new Set<TrustedSupportField>();
   if (trustedProvenance) trustedOutputFields.add('provenance');
@@ -2365,7 +2389,7 @@ export function serializeSupportBundle(bundle: SupportBundle, codec?: SupportBun
   const resolvedCodec = codec ?? SUPPORT_BUNDLE_CODECS.get(bundle);
   if (resolvedCodec !== undefined) {
     if (hasValidAccountingProof(bundle, resolvedCodec, deadlineAt)) {
-      REDACTION_AUDITS.set(bundle, bundle.redaction);
+      REDACTION_AUDITS.set(bundle, freezeRedactionManifest(bundle.redaction));
       TRUSTED_TRUNCATIONS.set(bundle, Object.freeze({ ...bundle.truncation }));
       TRUSTED_SUPPORT_FIELDS.set(bundle, verifiedSupportFields(bundle));
       SUPPORT_BUNDLE_CODECS.set(bundle, resolvedCodec);
@@ -2468,7 +2492,7 @@ export function parseSupportBundle(serialized: string, codec?: SupportBundleCode
     });
   }
   const bundle = normalized;
-  REDACTION_AUDITS.set(bundle, bundle.redaction);
+  REDACTION_AUDITS.set(bundle, freezeRedactionManifest(bundle.redaction));
   TRUSTED_TRUNCATIONS.set(bundle, Object.freeze({ ...bundle.truncation }));
   TRUSTED_SUPPORT_FIELDS.set(bundle, verifiedSupportFields(bundle));
   SUPPORT_BUNDLE_CODECS.set(bundle, codec);
@@ -2737,6 +2761,14 @@ export async function collectSupportBundle(
       violation = 'invalid';
     }
     if (violation !== undefined) {
+      if (violation === 'overflow') {
+        // The collector is discarded as a unit after bounded preflight. Keep
+        // the loss accounting honest for payload arrays that caused the
+        // overflow instead of reporting only the recovery error.
+        if (Array.isArray(item.result.records)) recordsOmitted += item.result.records.length;
+        if (Array.isArray(item.result.receipts)) receiptsOmitted += item.result.receipts.length;
+        if (Array.isArray(item.result.errors)) errorsOmitted += item.result.errors.length;
+      }
       appendError({
         collector: item.name,
         code: violation === 'overflow' ? 'collection_output_overflow' : 'collection_invalid_output',
