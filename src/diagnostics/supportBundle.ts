@@ -248,7 +248,7 @@ const SAFE_DIAGNOSTIC_VALUES = new Set([
   'arm64', 'aarch64', 'x86_64',
 ]);
 // Record and collection error identifiers are a closed diagnostic vocabulary.
-// Dynamic authority identifiers use safeCategory instead; these fields must
+// Dynamic authority identifiers use safeIdentifierDigest instead; these fields must
 // never become a channel for arbitrary product or user text.
 const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
   ...SAFE_DIAGNOSTIC_VALUES,
@@ -256,12 +256,34 @@ const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
   'disk', 'event', 'failed', 'first', 'fixture', 'four', 'gamma', 'later',
   'malformed', 'no_collectors', 'one', 'oversized-graph', 'path', 'path-test',
   'sample', 'slow-recovery', 'support-bundle', 'test', 'three', 'two', 'warning-two',
-  'warning-three', 'warning-four', 'write_failed', 'zeta',
+  'warning-three', 'warning-four', 'write_failed', 'zeta', 'fixture_ok',
   'collection_cancelled', 'collection_conflict', 'collection_failed',
   'collection_invalid_output', 'collection_output_overflow',
   'collection_timeout_or_cancelled', 'collector_limit', 'duplicate_action_id',
   'duplicate_collector_name', 'invalid_record', 'normalization_cancelled', 'normalization_timeout',
-  'provenance_incomplete', 'record', 'recovery', 'slow',
+  'provenance_incomplete', 'record', 'recovery', 'slow', 'action_invalidated',
+  'action_validation_failed', 'approval_expired', 'effect_failed',
+]);
+const SAFE_REDACTION_CATEGORY_VALUES = new Set([
+  'absolute-path', 'attribute-depth', 'attribute-items', 'attribute-keys',
+  'attribute-map-too-large', 'attribute-node-limit', 'authorization', 'bounded-text',
+  'certificate-or-key', 'content-field', 'error-message', 'infrastructure-url',
+  'invalid-lease-revision', 'invalid-record', 'invalid-receipt', 'invalid-status',
+  'non-authoritative-receipt', 'non-finite-number', 'non-normalized-receipt',
+  'record-count', 'record-omitted', 'record-size', 'receipt-identity-too-large',
+  'secret-assignment', 'secret-field', 'secret-labeled-value', 'secret-phrase',
+  'sensitive-text', 'terminal-field', 'terminal-omitted', 'terminal-redaction',
+  'token', 'untyped-category', 'untyped-number', 'untyped-string', 'unknown-root-field',
+  'unknown-root-field-limit', 'unsafe-category', 'unsafe-field-name', 'unsafe-relative-path',
+  'unsupported-value', 'relative-path-too-long', 'project-identity-too-large',
+  'collection-invalid-output', 'identifier-too-large', 'unsafe-identifier',
+]);
+const SAFE_PROVENANCE_APPLICATION_VALUES = new Set(['psyche-build']);
+const SAFE_PROVENANCE_PLATFORM_VALUES = new Set([
+  'android', 'darwin', 'freebsd', 'ios', 'linux', 'macos', 'web', 'windows', 'unknown',
+]);
+const SAFE_PROVENANCE_ARCHITECTURE_VALUES = new Set([
+  'aarch64', 'arm64', 'arm64-sim', 'wasm32', 'unknown', 'x64', 'x86', 'x86_64',
 ]);
 const SAFE_DIAGNOSTIC_NUMBER_KEYS = new Set([
   'attempts', 'bytes', 'cols', 'count', 'durationms', 'generation', 'height',
@@ -274,6 +296,7 @@ const MAX_ATTRIBUTE_SCAN_KEYS = 1_024;
 const MAX_SUPPORT_COLLECTORS = 64;
 const MAX_ATTRIBUTE_NODES = 4_096;
 const MAX_TEXT_SCAN_CHARS = 16_384;
+const SHA256_DIGEST = /^[a-f0-9]{64}$/i;
 // A collector result is preflighted with one shared graph budget. This keeps
 // the synchronous validation/normalization work bounded across all of its
 // state maps, records, receipt payloads, and nested attributes.
@@ -556,6 +579,32 @@ function safeCategory(value: unknown, audit: MutableAudit, key: string): string 
   return omit(audit, 'unsafe-category');
 }
 
+function safeIdentifierDigest(value: unknown, audit: MutableAudit, key: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string'
+    || value.length > MAX_TEXT_SCAN_CHARS
+    || byteLength(value) > SUPPORT_BUNDLE_LIMITS.maxStringBytes) {
+    return omit(audit, 'identifier-too-large');
+  }
+  if (SHA256_DIGEST.test(value)) return value.toLowerCase();
+  const text = boundedText(value, audit, key);
+  if (!text || text !== value || !SAFE_CATEGORY_VALUE.test(text)) {
+    return omit(audit, 'unsafe-identifier');
+  }
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function safeAllowlistedValue(
+  value: unknown,
+  audit: MutableAudit,
+  key: string,
+  allowed: ReadonlySet<string>,
+): string | undefined {
+  const text = boundedText(value, audit, key);
+  if (!text) return undefined;
+  return allowed.has(text) ? text : omit(audit, 'untyped-category');
+}
+
 function safeDiagnosticCategory(value: unknown, audit: MutableAudit, key: string): string | undefined {
   const text = boundedText(value, audit, key);
   if (!text) return undefined;
@@ -659,9 +708,18 @@ function normalizeHomePath(value: string, homeDirectory: string | undefined): st
 function isSafeRelativePath(value: string): boolean {
   const normalized = value.replaceAll('\\', '/');
   return normalized.length > 0
+    && byteLength(normalized) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes
     && !normalized.startsWith('/')
     && !normalized.split('/').some((segment) => segment === '..')
+    && !hasSensitiveToken(normalized)
     && /^[A-Za-z0-9._/-]+$/.test(normalized);
+}
+
+function hasSensitiveToken(value: string): boolean {
+  API_TOKEN.lastIndex = 0;
+  const matched = API_TOKEN.test(value);
+  API_TOKEN.lastIndex = 0;
+  return matched;
 }
 
 function safeRelativePath(value: unknown, audit: MutableAudit): string | undefined {
@@ -783,30 +841,56 @@ function safeMap(value: unknown, audit: MutableAudit, homeDirectory?: string): R
 
 function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvenance {
   const input = isRecord(value) ? value : {};
-  const get = (key: string, fallback: string): string => safeCategory(input[key], audit, key) ?? fallback;
+  const application = safeAllowlistedValue(
+    input.application,
+    audit,
+    'application',
+    SAFE_PROVENANCE_APPLICATION_VALUES,
+  ) ?? 'psyche-build';
+  const releaseVersion = safeDiagnosticValue(input.releaseVersion as string, audit, 'releaseVersion') ?? 'unknown';
+  const platform = safeAllowlistedValue(
+    input.platform,
+    audit,
+    'platform',
+    SAFE_PROVENANCE_PLATFORM_VALUES,
+  ) ?? 'unknown';
+  const architecture = safeAllowlistedValue(
+    input.architecture,
+    audit,
+    'architecture',
+    SAFE_PROVENANCE_ARCHITECTURE_VALUES,
+  ) ?? 'unknown';
   const sourceSha = typeof input.sourceSha === 'string' && input.sourceSha.length <= MAX_TEXT_SCAN_CHARS
     ? input.sourceSha
     : undefined;
   return {
-    application: get('application', 'psyche-build'),
-    releaseVersion: get('releaseVersion', 'unknown'),
+    application,
+    releaseVersion,
     sourceSha: sourceSha && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sourceSha) ? sourceSha : 'unknown',
-    platform: get('platform', 'unknown'),
-    architecture: get('architecture', 'unknown'),
+    platform,
+    architecture,
   };
 }
 
-function isCompleteProvenance(value: unknown): value is SupportProvenance {
+function isNormalizedProvenance(value: unknown): value is SupportProvenance {
   return isRecord(value)
-    && typeof value.application === 'string'
+    && SAFE_PROVENANCE_APPLICATION_VALUES.has(value.application as string)
+    && (value.releaseVersion === 'unknown'
+      || (typeof value.releaseVersion === 'string' && SAFE_VERSION_VALUE.test(value.releaseVersion)))
+    && (value.sourceSha === 'unknown'
+      || (typeof value.sourceSha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sourceSha)))
+    && SAFE_PROVENANCE_PLATFORM_VALUES.has(value.platform as string)
+    && SAFE_PROVENANCE_ARCHITECTURE_VALUES.has(value.architecture as string)
+    && ['application', 'releaseVersion', 'sourceSha', 'platform', 'architecture']
+      .every((key) => typeof value[key] === 'string' && byteLength(value[key] as string) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes);
+}
+
+function isCompleteProvenance(value: unknown): value is SupportProvenance {
+  return isNormalizedProvenance(value)
     && value.application !== 'unknown'
-    && typeof value.releaseVersion === 'string'
     && value.releaseVersion !== 'unknown'
-    && typeof value.sourceSha === 'string'
     && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sourceSha)
-    && typeof value.platform === 'string'
     && value.platform !== 'unknown'
-    && typeof value.architecture === 'string'
     && value.architecture !== 'unknown';
 }
 
@@ -823,11 +907,9 @@ function sanitizeProject(value: unknown, audit: MutableAudit, homeDirectory?: st
   }
   if (!suppliedDigest && identityText === undefined) return undefined;
   const idDigest = suppliedDigest ?? createHash('sha256').update(identityText!, 'utf8').digest('hex');
-  const name = safeCategory(value.name, audit, 'name');
   const relativePath = safeRelativePath(value.relativePath, audit);
   return {
     idDigest,
-    ...(name ? { name } : {}),
     ...(relativePath ? { relativePath } : {}),
   };
 }
@@ -994,18 +1076,20 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
   if (!isRecord(value)
     || value.sourceSchema !== 'psyche.control.receipt/v1'
     || typeof value.actionId !== 'string'
-    || !SAFE_CATEGORY_VALUE.test(value.actionId)
+    || !SHA256_DIGEST.test(value.actionId)
     || byteLength(value.actionId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes
     || !isActionReceiptState(value.sourceState)
     || !(SUPPORT_ACTION_STATES as readonly unknown[]).includes(value.state)
     || value.state !== mapActionState(value.sourceState)
     || safeCanonicalTimestamp(value.createdAt) === undefined || !isRecord(value.resource)
-    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
-    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
-    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || !SHA256_DIGEST.test(value.taskId) || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || !SHA256_DIGEST.test(value.actorId) || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || !SHA256_DIGEST.test(value.leaseId) || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
     || (value.leaseRevision !== undefined && finiteNonNegativeInteger(value.leaseRevision) === undefined)
     || (value.completedAt !== undefined && safeCanonicalTimestamp(value.completedAt) === undefined)
-    || (value.code !== undefined && (typeof value.code !== 'string' || byteLength(value.code) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.code !== undefined && (typeof value.code !== 'string'
+      || !SAFE_DIAGNOSTIC_CATEGORY_VALUES.has(value.code)
+      || byteLength(value.code) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
     || (value.durationMs !== undefined
       && (typeof value.durationMs !== 'number' || !Number.isSafeInteger(value.durationMs)
         || value.durationMs < 0 || value.durationMs > 86_400_000))) return false;
@@ -1023,15 +1107,15 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
 
 function sanitizeProjectedReceipt(value: SupportReceipt, audit: MutableAudit): SupportReceipt | undefined {
   if (!isSupportReceiptProjection(value, audit.deadlineAt)) return undefined;
-  const actionId = safeCategory(value.actionId, audit, 'actionId');
+  const actionId = safeIdentifierDigest(value.actionId, audit, 'actionId');
   const createdAt = safeTimestamp(value.createdAt, audit, 'createdAt');
   if (!actionId || !createdAt) return undefined;
-  const taskId = value.taskId === undefined ? undefined : safeCategory(value.taskId, audit, 'taskId');
-  const actorId = value.actorId === undefined ? undefined : safeCategory(value.actorId, audit, 'actorId');
-  const leaseId = value.leaseId === undefined ? undefined : safeCategory(value.leaseId, audit, 'leaseId');
+  const taskId = value.taskId === undefined ? undefined : safeIdentifierDigest(value.taskId, audit, 'taskId');
+  const actorId = value.actorId === undefined ? undefined : safeIdentifierDigest(value.actorId, audit, 'actorId');
+  const leaseId = value.leaseId === undefined ? undefined : safeIdentifierDigest(value.leaseId, audit, 'leaseId');
   const leaseRevision = safeLeaseRevision(value.leaseRevision, audit);
   const completedAt = value.completedAt === undefined ? undefined : safeTimestamp(value.completedAt, audit, 'completedAt');
-  const code = value.code === undefined ? undefined : safeCategory(value.code, audit, 'code');
+  const code = value.code === undefined ? undefined : safeDiagnosticCategory(value.code, audit, 'code');
   const durationMs = typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) && value.durationMs >= 0
     ? Math.min(Math.floor(value.durationMs), 86_400_000)
     : undefined;
@@ -1076,14 +1160,14 @@ function sanitizeReceipt(
     note(audit, 'receipt-identity-too-large');
     return undefined;
   }
-  const actionId = safeCategory(value.actionId, audit, 'actionId');
+  const actionId = safeIdentifierDigest(value.actionId, audit, 'actionId');
   const createdAt = safeTimestamp(value.createdAt, audit, 'createdAt');
   if (!actionId || !createdAt) return undefined;
-  const taskId = value.taskId === undefined ? undefined : safeCategory(value.taskId, audit, 'taskId');
-  const actorId = value.actorId === undefined ? undefined : safeCategory(value.actorId, audit, 'actorId');
-  const leaseId = value.leaseId === undefined ? undefined : safeCategory(value.leaseId, audit, 'leaseId');
+  const taskId = value.taskId === undefined ? undefined : safeIdentifierDigest(value.taskId, audit, 'taskId');
+  const actorId = value.actorId === undefined ? undefined : safeIdentifierDigest(value.actorId, audit, 'actorId');
+  const leaseId = value.leaseId === undefined ? undefined : safeIdentifierDigest(value.leaseId, audit, 'leaseId');
   const completedAt = safeTimestamp(value.completedAt, audit, 'completedAt');
-  const code = safeCategory(value.code, audit, 'code');
+  const code = safeDiagnosticCategory(value.code, audit, 'code');
   const leaseRevision = safeLeaseRevision(value.leaseRevision, audit);
   const durationMs = typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) && value.durationMs >= 0
     ? Math.min(Math.floor(value.durationMs), 86_400_000)
@@ -1280,7 +1364,7 @@ function isNormalizedCounterMap(value: unknown, deadlineAt?: number): boolean {
   const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
   return entries !== undefined
     && entries.length <= SUPPORT_BUNDLE_LIMITS.maxAttributeKeys
-    && entries.every(([key, count]) => SAFE_CATEGORY_VALUE.test(key)
+    && entries.every(([key, count]) => SAFE_REDACTION_CATEGORY_VALUES.has(key)
       && finiteNonNegativeInteger(count) !== undefined);
 }
 
@@ -1320,18 +1404,19 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
     const stateBudget: NormalizationBudget = { remaining: MAX_ATTRIBUTE_NODES * 4, deadlineAt };
     const structurallyValid = value.compatibility.policy === SUPPORT_BUNDLE_COMPATIBILITY.policy
       && value.compatibility.minimumReaderVersion === SUPPORT_BUNDLE_COMPATIBILITY.minimumReaderVersion
+      && isNormalizedProvenance(provenance)
       && provenanceKeys.every((key) => typeof provenance[key] === 'string'
         && byteLength(provenance[key]) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes)
-      && typeof provenance.sourceSha === 'string'
-      && (provenance.sourceSha === 'unknown' || /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(provenance.sourceSha))
       && (value.status !== 'complete' || isCompleteProvenance(provenance))
       && (value.status !== 'complete' || value.errors.length === 0)
       && (value.ownerEpoch === undefined || finiteNonNegativeInteger(value.ownerEpoch) !== undefined)
       && (project === undefined || (isRecord(project)
         && typeof project.idDigest === 'string'
-        && /^[a-f0-9]{64}$/i.test(project.idDigest)
-        && (project.name === undefined || (typeof project.name === 'string' && SAFE_CATEGORY_VALUE.test(project.name)))
-        && (project.relativePath === undefined || (typeof project.relativePath === 'string' && isSafeRelativePath(project.relativePath)))))
+        && SHA256_DIGEST.test(project.idDigest)
+        && project.name === undefined
+        && (project.relativePath === undefined || (typeof project.relativePath === 'string'
+          && byteLength(project.relativePath) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes
+          && isSafeRelativePath(project.relativePath)))))
       && isBoundedNormalizedValue(value.lifecycle, 0, new Set<object>(), stateBudget)
       && isBoundedNormalizedValue(value.providers, 0, new Set<object>(), stateBudget)
       && isBoundedNormalizedValue(value.persistence, 0, new Set<object>(), stateBudget)
@@ -1348,7 +1433,7 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       && finiteNonNegativeInteger(truncation.terminalLinesOmitted) !== undefined
       && finiteNonNegativeInteger(truncation.bytesOmitted) !== undefined
       && finiteNonNegativeInteger(truncation.fieldsTruncated) !== undefined
-      && typeof truncation.totalPayloadBounded === 'boolean';
+      && truncation.totalPayloadBounded === true;
     if (!structurallyValid) return false;
     return byteLength(serializeForSize(value, deadlineAt)) <= SUPPORT_BUNDLE_LIMITS.maxBundleBytes;
   } catch {
@@ -1837,7 +1922,21 @@ export async function collectSupportBundle(
       const collectorName = collectorNames[index] ?? `collector-${index}`;
       try {
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
-        const result = await Promise.race([collector.collect(controller.signal), deadline]);
+        const result = await Promise.race([
+          deadline,
+          Promise.resolve().then(async () => {
+            if (Date.now() >= deadlineAt) {
+              controller.abort(timeoutError);
+              throw timeoutError;
+            }
+            const collectedResult = await collector.collect(controller.signal);
+            if (Date.now() >= deadlineAt) {
+              controller.abort(timeoutError);
+              throw timeoutError;
+            }
+            return collectedResult;
+          }),
+        ]);
         collected.push({ index, name: collectorName, result });
       } catch (error) {
         const timedOut = controller.signal.aborted;

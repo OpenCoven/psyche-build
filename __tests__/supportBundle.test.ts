@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { serialize as serializeProtocolFixture } from '../scripts/generate-protocol-fixtures.js';
 import {
   SUPPORT_BUNDLE_LIMITS,
   SUPPORT_BUNDLE_SCHEMA,
@@ -155,11 +156,11 @@ describe('support bundle v1', () => {
     }));
     const bundle = buildSupportBundle({ receipts });
 
-    expect(bundle.receipts.map((receipt) => receipt.sourceState)).toEqual([
-      'queued', 'running', 'succeeded', 'failed', 'unknown', 'expired',
+    expect(bundle.receipts.map((receipt) => receipt.sourceState).sort()).toEqual([
+      'expired', 'failed', 'queued', 'running', 'succeeded', 'unknown',
     ]);
-    expect(bundle.receipts.map((receipt) => receipt.state)).toEqual([
-      'pending', 'executing', 'succeeded', 'failed', 'unknown', 'invalidated',
+    expect(bundle.receipts.map((receipt) => receipt.state).sort()).toEqual([
+      'executing', 'failed', 'invalidated', 'pending', 'succeeded', 'unknown',
     ]);
     expect(serializeSupportBundle(bundle)).not.toContain('private outcome detail');
     expect(serializeSupportBundle(bundle)).not.toContain('private');
@@ -201,6 +202,22 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'slow-recovery', code: 'collection_timeout_or_cancelled', recoveryRequired: true }),
     ]));
+  });
+
+  it('fails closed when a synchronous collector returns after the deadline', async () => {
+    const bundle = await collectSupportBundle([{
+      name: 'sync-overrun',
+      collect: (() => {
+        const deadline = Date.now() + 25;
+        while (Date.now() < deadline) {
+          // Deliberately model a synchronous native/bridge overrun.
+        }
+        return { lifecycle: { state: 'ready' } };
+      }) as never,
+    }], { maxElapsedMs: 5 });
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors.some((error) => error.recoveryRequired === true)).toBe(true);
   });
 
   it('never returns complete after cancellation or a late normalization deadline', async () => {
@@ -322,7 +339,9 @@ describe('support bundle v1', () => {
     ]);
 
     expect(bundle.status).toBe('recovery_required');
-    expect(bundle.receipts.map((item) => item.actionId)).toEqual(['alpha']);
+    expect(bundle.receipts).toHaveLength(1);
+    expect(bundle.receipts[0]?.actionId).toMatch(/^[a-f0-9]{64}$/);
+    expect(bundle.receipts[0]?.actionId).not.toBe('alpha');
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'zeta', code: 'collection_conflict', recoveryRequired: true }),
     ]));
@@ -541,6 +560,24 @@ describe('support bundle v1', () => {
       updater: largeState,
       graphics: largeState,
     } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      project: {
+        ...fixture.project,
+        relativePath: 'src/ghp_01234567890123456789',
+      },
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      project: {
+        ...fixture.project,
+        relativePath: 'a'.repeat(SUPPORT_BUNDLE_LIMITS.maxStringBytes + 1),
+      },
+    } as unknown)).toBe(false);
+    expect(isSupportBundleV1({
+      ...fixture,
+      truncation: { ...fixture.truncation, totalPayloadBounded: false },
+    } as unknown)).toBe(false);
   });
 
   it('omits long valid relative paths without emitting an invalid ellipsis', () => {
@@ -591,6 +628,29 @@ describe('support bundle v1', () => {
       component: 'fixture',
       event: 'ready',
     }] }).records).toEqual([]);
+    const marker = 'collector-marker';
+    const privateBundle = buildSupportBundle({
+      provenance: {
+        application: marker,
+        releaseVersion: marker,
+        sourceSha: '0123456789abcdef0123456789abcdef01234567',
+        platform: marker,
+        architecture: marker,
+      },
+      project: { id: marker, name: marker },
+      receipts: [{
+        schema: 'psyche.control.receipt/v1',
+        actionId: marker,
+        state: 'queued',
+        resource: { kind: 'project', id: marker },
+        createdAt: '2026-01-01T00:00:00.000Z',
+        taskId: marker,
+        actorId: marker,
+        leaseId: marker,
+        code: marker,
+      } as never],
+    });
+    expect(serializeSupportBundle(privateBundle)).not.toContain(marker);
   });
 
   it('does not trust caller redaction metadata and reports honest truncation accounting', () => {
@@ -692,7 +752,9 @@ describe('support bundle v1', () => {
   });
 
   it('keeps the checked-in safe fixture equal to the canonical fixture generator', async () => {
-    const fixture = JSON.parse(await readFile(new URL('../protocol-fixtures/support-bundle/v1/safe-bundle.json', import.meta.url), 'utf8')) as SupportBundle;
+    const fixturePath = new URL('../protocol-fixtures/support-bundle/v1/safe-bundle.json', import.meta.url);
+    const fixture = JSON.parse(await readFile(fixturePath, 'utf8')) as SupportBundle;
     expect(serializeSupportBundle(fixture)).toBe(serializeSupportBundle(createSafeSupportBundleFixture()));
+    expect(await readFile(fixturePath, 'utf8')).toBe(serializeProtocolFixture(createSafeSupportBundleFixture()));
   });
 });

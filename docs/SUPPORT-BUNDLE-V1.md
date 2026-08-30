@@ -22,8 +22,10 @@ reader to ignore unknown fields within a supported major version. Receipt
 entries are projections of validated `psyche.control.receipt/v1` records: source
 states `queued` and `approval_required` map to `pending`, `running` maps to
 `executing`, `denied` maps to `failed`, and `expired` maps to `invalidated`.
-The projection keeps only bounded authority metadata and a resource digest; it
-never copies receipt messages or values.
+The projection keeps only bounded authority metadata, SHA-256 digests for
+action/task/actor/lease identifiers, and a resource digest; it never copies
+receipt messages or values. Project names are omitted; project-relative paths
+are retained only when they pass the same bounded, secret-shaped path guard.
 
 Collection state uses the separate bundle status vocabulary
 `complete`, `partial`, `unknown`, and `recovery_required`; those values are not
@@ -70,7 +72,9 @@ known API-token formats, PEM material, sensitive assignments, infrastructure URL
 and absolute paths are redacted or omitted. Prompts, unrestricted terminal or
 repository content, diffs, environment maps, and source contents are omitted.
 Only explicitly bounded terminal tails, project-relative paths, allowlisted
-diagnostic categories, digests, and categorized errors may survive. Unknown
+diagnostic categories, digests, and categorized errors may survive. Provenance
+uses a closed application/platform/architecture vocabulary and a bounded
+release version. Unknown
 top-level fields are omitted and counted. The redaction manifest records
 categories and counts, never original values; caller-supplied manifests are not
 trusted as evidence.

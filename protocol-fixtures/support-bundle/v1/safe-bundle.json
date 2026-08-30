@@ -16,7 +16,6 @@
   },
   "project": {
     "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035",
-    "name": "sample-project",
     "relativePath": "sample-project"
   },
   "provenance": {
@@ -32,7 +31,7 @@
   },
   "receipts": [
     {
-      "actionId": "fixture-action",
+      "actionId": "4c672c2c878c56962dde682b401440b465896f20102c86d5c54d3943d8b020f8",
       "code": "fixture_ok",
       "completedAt": "2026-01-01T00:00:00.010Z",
       "createdAt": "2026-01-01T00:00:00.000Z",
