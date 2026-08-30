@@ -165,6 +165,50 @@ describe('startup stale shell recovery reporting', () => {
     );
   });
 
+  it('preserves other panes rebound in memory while removing a stale shell record', async () => {
+    const panesFile = createStaleShellConfig();
+    const config = JSON.parse(readFileSync(panesFile, 'utf8'));
+    config.panes.push({
+      id: 'shell-2',
+      slug: 'restored',
+      prompt: '',
+      paneId: '%1',
+      tmuxServerIdentity: oldGeneration,
+      type: 'shell',
+    });
+    writeFileSync(panesFile, JSON.stringify(config));
+    tmuxServiceMock.getAllPaneInfo.mockResolvedValue([
+      {
+        paneId: '%0',
+        title: 'control',
+        left: 0,
+        top: 0,
+        width: 80,
+        height: 24,
+      },
+      {
+        paneId: '%2',
+        title: 'restored',
+        left: 80,
+        top: 0,
+        width: 80,
+        height: 24,
+      },
+    ]);
+    tmuxServiceMock.getAllPaneIds.mockResolvedValue(['%0', '%2']);
+
+    const { loadAndProcessPanes } = await import('../src/hooks/usePaneLoading.js');
+    const result = await loadAndProcessPanes(panesFile, true);
+
+    expect(result.panes).toEqual([
+      expect.objectContaining({
+        id: 'shell-2',
+        paneId: '%2',
+        tmuxServerIdentity: currentGeneration,
+      }),
+    ]);
+  });
+
   it('reports recovery required when stale identity cleanup cannot persist', async () => {
     projectConfigFailure.remove = true;
     const panesFile = createStaleShellConfig();

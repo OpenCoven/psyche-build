@@ -745,10 +745,12 @@ export async function loadAndProcessPanes(
   let { allPaneIds, titleToId, currentWindowPaneIds } = await fetchTmuxPaneIds();
 
   // Attempt to rebind panes whose IDs changed by matching on their stable tmux title.
-  let reboundPanes = syncHiddenStateFromCurrentWindow(
-    loadedPanes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds)),
-    currentWindowPaneIds
-  );
+  const syncRuntimePaneState = (panes: readonly PsychePane[]): PsychePane[] =>
+    syncHiddenStateFromCurrentWindow(
+      panes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds)),
+      currentWindowPaneIds
+    );
+  let reboundPanes = syncRuntimePaneState(loadedPanes);
 
   // CRITICAL FIX: On initial load, immediately filter out shell panes with stale IDs
   // Shell panes cannot be recreated (no worktreePath), so keeping them causes:
@@ -774,9 +776,11 @@ export async function loadAndProcessPanes(
       // outcome reported for the already-durable identity removal.
       try {
         const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-        reboundPanes = await removeStaleShellPaneRecords(
-          sessionProjectRoot,
-          staleShellPanes,
+        reboundPanes = syncRuntimePaneState(
+          await removeStaleShellPaneRecords(
+            sessionProjectRoot,
+            staleShellPanes,
+          ),
         );
         recoveryNotices.push({
           code: 'stale_shell_pane_removed',
@@ -806,7 +810,7 @@ export async function loadAndProcessPanes(
               return persistedPanes;
             }
           );
-          reboundPanes = mutation.result;
+          reboundPanes = syncRuntimePaneState(mutation.result);
         } catch (normalizationError) {
           LogService.getInstance().warn(
             `Removed stale shell pane records, but failed to normalize sidebar state: ${normalizationError}`,
@@ -849,10 +853,7 @@ export async function loadAndProcessPanes(
     currentWindowPaneIds = freshData.currentWindowPaneIds;
 
     // Re-rebind after recreation
-    reboundPanes = syncHiddenStateFromCurrentWindow(
-      reboundPanes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds)),
-      currentWindowPaneIds
-    );
+    reboundPanes = syncRuntimePaneState(reboundPanes);
   }
 
   for (const notice of recoveryNotices) {
