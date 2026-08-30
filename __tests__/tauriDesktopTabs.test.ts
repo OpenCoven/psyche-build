@@ -65,6 +65,10 @@ const macosPlatform = readFileSync(
   'utf8'
 );
 const indexHtml = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'), 'utf8');
+const runtimeBundle = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/runtime.bundle.js'),
+  'utf8',
+);
 const tauriConfig = JSON.parse(
   readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
 );
@@ -382,6 +386,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriBuild).toContain(
       'const CAPABILITIES_PATH_PATTERN: &str = "./capabilities/*.json";',
     );
+    expect(runtimeBundle).not.toMatch(/runStressPlan|buildStressPlan|WEBGL_lose_context|stress-harness/);
   });
 
   it('validates and authorizes the fixed native minimize/restore cycle', () => {
