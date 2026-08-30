@@ -251,7 +251,17 @@ describe('support bundle v1', () => {
   });
 
   it('fails closed for empty, null, and malformed collector results', async () => {
-    for (const result of [undefined, null, {}, { lifecycle: 'not-a-map' }, { records: [{}] }]) {
+    for (const result of [
+      undefined,
+      null,
+      {},
+      { status: 'complete' },
+      { records: [] },
+      { lifecycle: new Map([['state', 'ready']]) },
+      { lifecycle: 'not-a-map' },
+      { records: [{}] },
+      Object.defineProperty({}, 'lifecycle', { get: () => { throw new Error('getter boom'); } }),
+    ]) {
       const bundle = await collectSupportBundle([{
         name: 'malformed',
         collect: async () => result as never,
@@ -454,6 +464,21 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('omits every conflicting receipt revision deterministically', () => {
+    const receipt = (state: 'queued' | 'failed') => ({
+      schema: 'psyche.control.receipt/v1' as const,
+      actionId: 'same-action',
+      state,
+      resource: { kind: 'project' as const, id: 'project' },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const queuedFirst = buildSupportBundle({ receipts: [receipt('queued'), receipt('failed')] });
+    const failedFirst = buildSupportBundle({ receipts: [receipt('failed'), receipt('queued')] });
+    expect(queuedFirst.receipts).toEqual([]);
+    expect(failedFirst.receipts).toEqual([]);
+    expect(serializeSupportBundle(queuedFirst)).toBe(serializeSupportBundle(failedFirst));
+  });
+
   it('produces a safe fixture with no content-heavy fields', () => {
     const fixture = createSafeSupportBundleFixture();
     expect(fixture.schema).toBe(SUPPORT_BUNDLE_SCHEMA);
@@ -545,6 +570,43 @@ describe('support bundle v1', () => {
     expect(timedOut.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'normalization_timeout', recoveryRequired: true }),
     ]));
+    expect(buildSupportBundle({}).status).toBe('partial');
+    expect(buildSupportBundle({ provenance: { sourceSha: 'abcdef0' } }).provenance.sourceSha).toBe('unknown');
+    expect(isSupportBundleV1({
+      ...createSafeSupportBundleFixture(),
+      status: 'complete',
+      errors: [{ collector: 'disk', code: 'failed', at: 'unknown', recoveryRequired: true }],
+    })).toBe(false);
+    expect(isSupportBundleV1({
+      ...createSafeSupportBundleFixture(),
+      lifecycle: { state: 'privateimplementationfragment' },
+    })).toBe(false);
+    expect(buildSupportBundle({ project: { relativePath: '~/.ssh/id_rsa' } }).project?.relativePath).toBeUndefined();
+    expect(buildSupportBundle({ project: { relativePath: 'src/ghp_01234567890123456789' } }).project?.relativePath)
+      .toBeUndefined();
+    expect(buildSupportBundle({ records: [{
+      sequence: 1,
+      at: '2026-02-31T00:00:00.000Z',
+      component: 'fixture',
+      event: 'ready',
+    }] }).records).toEqual([]);
+  });
+
+  it('does not trust caller redaction metadata and reports honest truncation accounting', () => {
+    const bundle = buildSupportBundle({
+      redaction: { version: 1, redactedFields: 123, omittedFields: 456, categories: { forged: 789 } },
+    });
+    expect(bundle.redaction).toEqual({ version: 1, redactedFields: 0, omittedFields: 0, categories: {} });
+    expect(bundle.truncation.bytesOmitted).toBe(0);
+
+    const overflowing = buildSupportBundle({
+      errors: Array.from({ length: 8 }, (_, index) => ({
+        collector: 'c',
+        code: `warning-${index}`,
+        at: '2026-01-01T00:00:00.000Z',
+      })),
+    });
+    expect(overflowing.truncation.errorsOmitted).toBeGreaterThan(0);
   });
 
   it('fails closed for untyped state strings and numbers', () => {
@@ -608,7 +670,7 @@ describe('support bundle v1', () => {
       records: [{ ...fixture.records[0], futureRecordField: 'ignored' }],
     } as unknown as SupportBundle;
 
-    expect(isSupportBundleV1(extended)).toBe(true);
+    expect(isSupportBundleV1(extended)).toBe(false);
     const serialized = serializeSupportBundle(extended);
     expect(serialized).not.toContain('futureRootField');
     expect(serialized).not.toContain('must not serialize');

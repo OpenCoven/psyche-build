@@ -1,83 +1,82 @@
 {
-  "schema": "psyche.diagnostics/v1",
-  "version": 1,
   "compatibility": {
-    "policy": "readers-reject-unknown-major-and-ignore-unknown-fields-within-major",
-    "minimumReaderVersion": 1
+    "minimumReaderVersion": 1,
+    "policy": "readers-reject-unknown-major-and-ignore-unknown-fields-within-major"
   },
+  "errors": [],
   "generatedAt": "2026-01-01T00:00:00.000Z",
-  "status": "complete",
-  "provenance": {
-    "application": "psyche-build",
-    "releaseVersion": "0.0.2",
-    "sourceSha": "0123456789abcdef0123456789abcdef01234567",
-    "platform": "darwin",
-    "architecture": "arm64"
+  "lifecycle": {
+    "panes": 2,
+    "state": "ready"
   },
   "ownerEpoch": 7,
+  "persistence": {
+    "recoveryRequired": false,
+    "state": "healthy"
+  },
   "project": {
     "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035",
     "name": "sample-project",
     "relativePath": "sample-project"
   },
-  "lifecycle": {
-    "panes": 2,
-    "state": "ready"
+  "provenance": {
+    "application": "psyche-build",
+    "architecture": "arm64",
+    "platform": "darwin",
+    "releaseVersion": "0.0.2",
+    "sourceSha": "0123456789abcdef0123456789abcdef01234567"
   },
   "providers": {
     "browser": "unavailable",
     "tmux": "available"
   },
-  "persistence": {
-    "recoveryRequired": false,
-    "state": "healthy"
+  "receipts": [
+    {
+      "actionId": "fixture-action",
+      "code": "fixture_ok",
+      "completedAt": "2026-01-01T00:00:00.010Z",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "durationMs": 10,
+      "resource": {
+        "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035",
+        "kind": "project"
+      },
+      "sourceSchema": "psyche.control.receipt/v1",
+      "sourceState": "succeeded",
+      "state": "succeeded"
+    }
+  ],
+  "records": [
+    {
+      "at": "2026-01-01T00:00:00.000Z",
+      "component": "fixture",
+      "event": "ready",
+      "outcome": "succeeded",
+      "sequence": 1
+    }
+  ],
+  "redaction": {
+    "categories": {},
+    "omittedFields": 0,
+    "redactedFields": 0,
+    "version": 1
+  },
+  "schema": "psyche.diagnostics/v1",
+  "status": "complete",
+  "terminalTail": [],
+  "truncation": {
+    "bytesOmitted": 0,
+    "errorsOmitted": 0,
+    "fieldsTruncated": 0,
+    "receiptsOmitted": 0,
+    "recordsOmitted": 0,
+    "stateFieldsOmitted": 0,
+    "terminalLinesOmitted": 0,
+    "totalPayloadBounded": true
   },
   "updater": {
     "state": "current",
     "version": "0.0.2"
   },
-  "terminalTail": [],
-  "records": [
-    {
-      "sequence": 1,
-      "at": "2026-01-01T00:00:00.000Z",
-      "component": "fixture",
-      "event": "ready",
-      "outcome": "succeeded"
-    }
-  ],
-  "receipts": [
-    {
-      "sourceSchema": "psyche.control.receipt/v1",
-      "actionId": "fixture-action",
-      "state": "succeeded",
-      "sourceState": "succeeded",
-      "resource": {
-        "kind": "project",
-        "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035"
-      },
-      "createdAt": "2026-01-01T00:00:00.000Z",
-      "completedAt": "2026-01-01T00:00:00.010Z",
-      "code": "fixture_ok",
-      "durationMs": 10
-    }
-  ],
-  "errors": [],
-  "redaction": {
-    "categories": {
-      "terminal-omitted": 1
-    },
-    "omittedFields": 1,
-    "redactedFields": 0,
-    "version": 1
-  },
-  "truncation": {
-    "bytesOmitted": 1,
-    "fieldsTruncated": 0,
-    "receiptsOmitted": 0,
-    "recordsOmitted": 0,
-    "stateFieldsOmitted": 0,
-    "terminalLinesOmitted": 1,
-    "totalPayloadBounded": true
-  }
+  "version": 1
 }

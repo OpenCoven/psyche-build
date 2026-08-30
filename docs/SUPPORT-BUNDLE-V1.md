@@ -50,6 +50,7 @@ The v1 implementation enforces the following defaults before serialization:
 | Attribute keys/items | 32 each |
 | Attribute nesting | 5 levels |
 | Collection error chain | 4 |
+| Omitted collection errors | counted in `truncation.errorsOmitted` |
 | Action receipts | 64 |
 | Raw terminal input | 64 lines / 16K characters per line; never emitted |
 
@@ -68,10 +69,11 @@ serialization. Secret-shaped keys, authorization values, bearer/basic tokens,
 known API-token formats, PEM material, sensitive assignments, infrastructure URLs,
 and absolute paths are redacted or omitted. Prompts, unrestricted terminal or
 repository content, diffs, environment maps, and source contents are omitted.
-Only explicitly bounded terminal tails, project-relative paths, enum-like
-states, digests, and categorized errors may survive. Unknown top-level fields
-are omitted and counted. The redaction manifest records categories and counts,
-never original values.
+Only explicitly bounded terminal tails, project-relative paths, allowlisted
+diagnostic categories, digests, and categorized errors may survive. Unknown
+top-level fields are omitted and counted. The redaction manifest records
+categories and counts, never original values; caller-supplied manifests are not
+trusted as evidence.
 
 The support contract intentionally does not capture screenshots, network bodies,
 full process arguments, complete file paths, credentials, source contents, or
