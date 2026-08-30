@@ -9,6 +9,7 @@ const APP_COMMANDS: &[&str] = &[
     "pty_ack",
     "pty_set_visibility",
     "pty_stop",
+    "pty_current_generation",
     "pty_list",
     "pty_transport_metrics",
     "browser_app_shortcut",

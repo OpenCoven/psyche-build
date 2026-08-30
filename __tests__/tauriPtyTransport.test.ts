@@ -180,10 +180,13 @@ describe('Tauri PTY command threading contract', () => {
     );
     expect(transportSource).toContain('pub generation: u64');
     expect(frontendTransportSource).toContain('function nativeBatchDisposition');
+    expect(frontendTransportSource).toContain('acknowledgementArgs(state.threadId, sequence, acknowledgement.nativeGeneration)');
     expect(mainSource).toContain(
       'ptyStartResult && Number.isSafeInteger(ptyStartResult.generation)',
     );
     expect(mainSource).toContain('markPtyExited(payload.generation)');
+    expect(mainSource).toContain('pty_current_generation');
+    expect(mainSource).toContain('if (exitAccepted === false) return false;');
   });
 
   test('defines PTY flow-control commands with the native transport contracts', () => {
@@ -192,10 +195,10 @@ describe('Tauri PTY command threading contract', () => {
     const metrics = commandSource(source, 'pty_transport_metrics');
 
     expect(ack).toMatch(
-      /#\[tauri::command\]\s*fn\s+pty_ack\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*String,\s*sequence:\s*u64,?\s*\)\s*->\s*Result<AckOutcome,\s*String>/,
+      /#\[tauri::command\]\s*fn\s+pty_ack\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*String,\s*sequence:\s*u64,\s*generation:\s*Option<u64>,?\s*\)\s*->\s*Result<AckOutcome,\s*String>/,
     );
     expect(visibility).toMatch(
-      /#\[tauri::command\]\s*fn\s+pty_set_visibility\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*String,\s*visible:\s*bool,?\s*\)\s*->\s*Result<\(\),\s*String>/,
+      /#\[tauri::command\]\s*fn\s+pty_set_visibility\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*String,\s*visible:\s*bool,\s*generation:\s*Option<u64>,?\s*\)\s*->\s*Result<\(\),\s*String>/,
     );
     expect(metrics).toMatch(
       /#\[tauri::command\]\s*fn\s+pty_transport_metrics\s*\(\s*webview:\s*tauri::Webview,\s*thread_id:\s*Option<String>,?\s*\)\s*->\s*Result<Vec<PtyTransportSnapshot>,\s*String>/,
@@ -267,7 +270,7 @@ describe('Tauri PTY command threading contract', () => {
 
     expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_write\b/);
     expect(command).toMatch(
-      /pty_write_operation\(&thread_id\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_write_blocking\s*\(/,
+      /pty_write_operation\(&thread_id,\s*generation\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_write_blocking\s*\(/,
     );
     expect(operation).toMatch(
       /let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*Arc::clone\(&session\.writer\)[\s\S]*Arc::clone\(&session\.operation_lane\)[\s\S]*drop\(guard\)/,
@@ -285,7 +288,7 @@ describe('Tauri PTY command threading contract', () => {
 
     expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_resize\b/);
     expect(command).toMatch(
-      /pty_resize_operation\(&thread_id\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_resize_blocking\s*\(/,
+      /pty_resize_operation\(&thread_id,\s*generation\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_resize_blocking\s*\(/,
     );
     expect(operation).toMatch(
       /let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*Arc::clone\(&session\.master\)[\s\S]*Arc::clone\(&session\.operation_lane\)[\s\S]*drop\(guard\)/,
@@ -294,6 +297,13 @@ describe('Tauri PTY command threading contract', () => {
     const guardEnd = operation.indexOf('drop(guard);');
     expect(guardEnd).toBeGreaterThan(-1);
     expect(operation.slice(0, guardEnd)).not.toMatch(/master\s*\.\s*lock\(\)|\.resize\s*\(\s*PtySize/);
+  });
+
+  test('requires native generations for PTY flow-control commands', () => {
+    expect(source).toContain('fn pty_current_generation(');
+    expect(source).toContain('live_with_generation(thread_id, expected_generation)');
+    expect(source).toContain('pty_ack_inner(thread_id, sequence, generation)');
+    expect(source).toContain('pty_set_visibility_inner(thread_id, visible, generation)');
   });
 });
 
@@ -398,7 +408,7 @@ describe('typed frontend PTY batch consumer', () => {
 
   test('accepts only the exact next sequence for the owning thread', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
-    const invoke = vi.fn(async () => undefined);
+    const invoke = vi.fn(async (_command: string, _args: Record<string, unknown>) => undefined);
     runtimeThreadIds.add('thread-a');
     createPtyClient({
       threadId: 'thread-a',
@@ -479,6 +489,37 @@ describe('typed frontend PTY batch consumer', () => {
       thread_id: 'thread-c',
       sequence: 1,
     });
+  });
+
+  test('scopes acknowledgements to the active native PTY generation', async () => {
+    const writes: Array<{ callback: () => void }> = [];
+    const invoke = vi.fn(async (_command: string, _args: Record<string, unknown>) => undefined);
+    const threadId = 'thread-c-native-ack-generation';
+    runtimeThreadIds.add(threadId);
+    const client = createPtyClient({
+      threadId,
+      invoke,
+      write(_bytes, callback) {
+        writes.push({ callback });
+      },
+    });
+
+    await expect(client.markPtyStarted(undefined, 41)).resolves.toBe(true);
+    expect(routePtyBatch(batch(threadId, 1, [1], { generation: 41 }))).toBe(true);
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'pty_ack')).toEqual([
+      [
+        'pty_ack',
+        {
+          threadId,
+          thread_id: threadId,
+          sequence: 1,
+          generation: 41,
+        },
+      ],
+    ]);
   });
 
   test('retains two replacement payloads while the current acknowledgement is unresolved', async () => {

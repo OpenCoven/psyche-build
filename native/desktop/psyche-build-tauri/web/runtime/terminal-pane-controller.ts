@@ -523,13 +523,21 @@ export function createTerminalPaneController(
     ) {
       return;
     }
-    const flight = options.invoke('pty_resize', {
+    const nativeGeneration = ptyClient.currentPtyGeneration?.() ?? null;
+    const resizeArgs: Record<string, unknown> = {
       threadId: options.threadId,
       thread_id: options.threadId,
       cols: dimensions.cols,
       rows: dimensions.rows,
+    };
+    if (nativeGeneration !== null) resizeArgs.generation = nativeGeneration;
+    const flight = options.invoke('pty_resize', {
+      ...resizeArgs,
     }).then(() => {
-      if (!disposed) lastSentDimensions = dimensions;
+      if (
+        !disposed &&
+        (ptyClient.currentPtyGeneration?.() ?? null) === nativeGeneration
+      ) lastSentDimensions = dimensions;
     }).catch((error) => {
       reportError(error, 'PTY resize');
     }).then(() => undefined).finally(() => {

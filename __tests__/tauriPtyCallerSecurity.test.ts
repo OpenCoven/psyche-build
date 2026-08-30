@@ -38,6 +38,7 @@ describe('Tauri PTY caller security contract', () => {
       'pty_stop',
       'pty_ack',
       'pty_set_visibility',
+      'pty_current_generation',
       'pty_list',
       'pty_transport_metrics',
     ]) {

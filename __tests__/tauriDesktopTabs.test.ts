@@ -464,10 +464,10 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
     expect(tauriLib).toMatch(
-      /async\s+fn\s+pty_write[\s\S]*?pty_write_operation\(&thread_id\)[\s\S]*?try_acquire_owned\(\)[\s\S]*?operation_lane\.lock_owned\(\)\.await[\s\S]*?spawn_blocking/
+      /async\s+fn\s+pty_write[\s\S]*?pty_write_operation\(&thread_id,\s*generation\)[\s\S]*?try_acquire_owned\(\)[\s\S]*?operation_lane\.lock_owned\(\)\.await[\s\S]*?spawn_blocking/
     );
     expect(tauriLib).toMatch(
-      /fn\s+pty_write_operation[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?\.live\(thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?Arc::clone\(&session\.operation_lane\)[\s\S]*?Arc::clone\(&session\.operation_admission\)[\s\S]*?drop\(guard\)/
+      /fn\s+pty_write_operation[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?\.live_with_generation\(thread_id,\s*expected_generation\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?Arc::clone\(&session\.operation_lane\)[\s\S]*?Arc::clone\(&session\.operation_admission\)[\s\S]*?drop\(guard\)/
     );
     expect(tauriLib).toMatch(
       /fn\s+pty_write_blocking[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);[\s\S]*?writer\.write_all\(&bytes\)[\s\S]*?writer\.flush\(\)/
@@ -493,7 +493,7 @@ describe('Tauri desktop tab shortcuts', () => {
       /window\.PsycheRuntime[\s\S]*typeof window\.PsycheRuntime\.createTerminalPaneController !== "function"/,
     );
     expect(tauriLib).toMatch(
-      /fn\s+pty_ack\([\s\S]*?webview:\s*tauri::Webview,[\s\S]*?ensure_trusted_pty_caller\(webview\.label\(\)\)\?;[\s\S]*?pty_ack_inner\(thread_id,\s*sequence\)[\s\S]*?fn\s+pty_ack_inner\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?clone_live_pty_pump\(&thread_id\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,
+      /fn\s+pty_ack\([\s\S]*?webview:\s*tauri::Webview,[\s\S]*?ensure_trusted_pty_caller\(webview\.label\(\)\)\?;[\s\S]*?pty_ack_inner\(thread_id,\s*sequence,\s*generation\)[\s\S]*?fn\s+pty_ack_inner\(\s*thread_id:\s*String,\s*sequence:\s*u64,[\s\S]*?generation:\s*Option<u64>[\s\S]*?clone_live_pty_pump\(&thread_id,\s*generation\)\?[\s\S]*?pump\.acknowledge\(sequence\)/,
     );
     expect(tauriLib).toMatch(/generate_handler!\[[\s\S]*?pty_ack,/);
   });

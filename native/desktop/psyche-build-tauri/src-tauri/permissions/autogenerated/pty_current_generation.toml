@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pty-current-generation"
+description = "Enables the pty_current_generation command without any pre-configured scope."
+commands.allow = ["pty_current_generation"]
+
+[[permission]]
+identifier = "deny-pty-current-generation"
+description = "Denies the pty_current_generation command without any pre-configured scope."
+commands.deny = ["pty_current_generation"]
