@@ -16,6 +16,11 @@ async function promptYesNo(question: string, defaultYes: boolean = true): Promis
     return false;
   }
 
+  // Ink releases its stdin handle when an interactive onboarding screen
+  // unmounts. Re-reference it before handing the same TTY to readline, or a
+  // clean first run can exit while the next prompt is still awaiting input.
+  process.stdin.ref();
+
   const suffix = defaultYes ? '[Y/n]' : '[y/N]';
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 

@@ -188,12 +188,17 @@ status sources.
 | [#190 — graphics reporting](https://github.com/OpenCoven/psyche-build/pull/190) | #199/#243 diagnostics | **Source material only** | Extract bounded pieces after callback safety, readiness retry, schema bounds, and redaction are proven |
 | [#193 — Bonjour/readiness](https://github.com/OpenCoven/psyche-build/pull/193) | #200 iOS | **Source material only** | Extract #241 first, then discovery/reconnect, then physical same-LAN acceptance |
 | [#192 — mobile rituals](https://github.com/OpenCoven/psyche-build/pull/192) | #200 iOS | **Source material only** | Extract #242 publication, execution, and capability-gated UI in order after accepted readiness |
+| [#254 — Psyche compatibility map](https://github.com/OpenCoven/psyche-build/pull/254) | #201/#253 | **Source material only** | PR #254 remains outside Stage 0; preserve its useful mapping material through the focused replacement slice, not as a merge-ready implementation branch |
 | [#262 — Psyche compatibility map](https://github.com/OpenCoven/psyche-build/pull/262) | #201/#253 | **Focused mapping slice** | Completes only #253 delivery slice 1; keep #253 open for the immutable pin, canary, adapters, and reference-flow evidence |
 
 The source-material PRs above are not merge-ready. Rebase success, historical
 green tests, source presence, or conflict resolution alone does not satisfy
 their current contracts. PR #262 is the focused replacement for #254's mapping
 scope and does not complete the broader #201/#253 outcome.
+
+No active implementation PR above is merge-ready. A replacement must start from
+current `main`, have one owning outcome and acceptance gate, and pass required
+checks on its exact final head.
 
 ## Stage 0 — delivered control-state closure wave
 
