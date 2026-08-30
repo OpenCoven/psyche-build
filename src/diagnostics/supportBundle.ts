@@ -1238,6 +1238,11 @@ function sanitizeReceipt(
     note(audit, 'receipt-identity-too-large');
     return undefined;
   }
+  const resource = receiptResource(value);
+  if (!isNonZeroDigest(resource.idDigest)) {
+    note(audit, 'non-authoritative-receipt');
+    return undefined;
+  }
   const actionId = safeIdentifierDigest(value.actionId, audit, 'actionId', false);
   const createdAt = safeTimestamp(value.createdAt, audit, 'createdAt');
   if (!actionId || !createdAt) return undefined;
@@ -1255,7 +1260,7 @@ function sanitizeReceipt(
     actionId,
     state: mapActionState(value.state),
     sourceState: value.state,
-    resource: receiptResource(value),
+    resource,
     createdAt,
     ...(taskId ? { taskId } : {}),
     ...(actorId ? { actorId } : {}),
