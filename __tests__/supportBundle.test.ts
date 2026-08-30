@@ -611,6 +611,22 @@ describe('support bundle v1', () => {
     }
   });
 
+  it('returns bounded recovery when an invalid collector payload getter throws', async () => {
+    const malformed = Object.defineProperty({ status: 'complete' }, 'records', {
+      enumerable: true,
+      get: () => { throw new Error('records getter boom'); },
+    });
+    const bundle = await collectSupportBundle([{
+      name: 'throwing-payload',
+      collect: async () => malformed as never,
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
   it('degrades conflicting singleton collector sections to recovery_required', async () => {
     const bundle = await collectSupportBundle([
       { name: 'alpha', collect: async () => ({ lifecycle: { state: 'ready' } }) },
@@ -665,6 +681,21 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'zeta', code: 'collection_conflict', recoveryRequired: true }),
     ]));
+    expect(bundle.truncation.receiptsOmitted).toBe(1);
+  });
+
+  it('drops private trust after a collector mutates a normalized result', async () => {
+    const fixture = createSafeSupportBundleFixture();
+    const mutableFixture = fixture as unknown as Record<string, unknown>;
+    (mutableFixture.provenance as Record<string, unknown>).releaseVersion = '0.0.3';
+    delete mutableFixture.receipts;
+
+    const bundle = await collectSupportBundle([{
+      name: 'mutated-fixture',
+      collect: async () => fixture as never,
+    }]);
+
+    expect(bundle.provenance.verification).toBe('unverified');
   });
 
   it('bounds scalar array members during collector preflight', async () => {

@@ -522,6 +522,34 @@ function limitedEntries(
   }
 }
 
+type CollectorPayloadField = typeof COLLECTOR_ARRAY_FIELDS[number];
+
+interface CollectorArraySnapshot {
+  readonly length: number;
+  readonly values?: readonly unknown[];
+}
+
+// Collector results are untrusted objects. Read payload arrays through a
+// bounded snapshot so a throwing field/element getter cannot escape the
+// recovery path, and avoid copying an array whose length is already too large.
+function safeCollectorArraySnapshot(value: unknown, field: CollectorPayloadField): CollectorArraySnapshot | undefined {
+  try {
+    if (!isRecord(value)) return undefined;
+    const candidate = value[field];
+    if (!Array.isArray(candidate)) return undefined;
+    const length = candidate.length;
+    if (!Number.isSafeInteger(length) || length < 0) return undefined;
+    if (length > MAX_ATTRIBUTE_SCAN_KEYS) return { length };
+    try {
+      return { length, values: candidate.slice() };
+    } catch {
+      return { length };
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -720,6 +748,13 @@ function normalizedSourceFingerprint(value: object, deadlineAt?: number): string
     if (entries === undefined) return undefined;
     const source = Object.fromEntries(entries.filter(([key]) =>
       key !== 'redaction' && key !== 'truncation' && key !== 'accountingProof'));
+    // Fingerprinting runs before sanitization when checking a previously
+    // normalized object. Reject unbounded or hostile values before hashing so
+    // that trust validation cannot become an unbounded raw-input operation.
+    if (!isBoundedInputValue(source, 0, new Set<object>(), {
+      remaining: MAX_COLLECTOR_RESULT_NODES,
+      deadlineAt,
+    })) return undefined;
     return createHash('sha256').update(serializeForSize(source, deadlineAt), 'utf8').digest('hex');
   } catch {
     return undefined;
@@ -739,18 +774,22 @@ function metadataMatches(
 }
 
 function hasReusablePrivateMetadata(input: SupportBundleInput, deadlineAt?: number): boolean {
-  if (!isRecord(input)) return false;
-  const expectedFingerprint = NORMALIZED_SOURCE_FINGERPRINTS.get(input);
-  if (expectedFingerprint === undefined
-    || normalizedSourceFingerprint(input, deadlineAt) !== expectedFingerprint) return false;
-  const manifest = REDACTION_AUDITS.get(input);
-  if (manifest !== undefined && !metadataMatches(input.redaction, manifest, deadlineAt)) return false;
-  const truncation = TRUSTED_TRUNCATIONS.get(input);
-  if (truncation !== undefined
-    && (input.truncation === undefined || !metadataMatches(input.truncation, truncation, deadlineAt))) return false;
-  return manifest !== undefined
-    || truncation !== undefined
-    || TRUSTED_SUPPORT_FIELDS.has(input);
+  try {
+    if (!isRecord(input)) return false;
+    const expectedFingerprint = NORMALIZED_SOURCE_FINGERPRINTS.get(input);
+    if (expectedFingerprint === undefined
+      || normalizedSourceFingerprint(input, deadlineAt) !== expectedFingerprint) return false;
+    const manifest = REDACTION_AUDITS.get(input);
+    if (manifest !== undefined && !metadataMatches(input.redaction, manifest, deadlineAt)) return false;
+    const truncation = TRUSTED_TRUNCATIONS.get(input);
+    if (truncation !== undefined
+      && (input.truncation === undefined || !metadataMatches(input.truncation, truncation, deadlineAt))) return false;
+    return manifest !== undefined
+      || truncation !== undefined
+      || TRUSTED_SUPPORT_FIELDS.has(input);
+  } catch {
+    return false;
+  }
 }
 
 function safeLeaseRevision(value: unknown, audit: MutableAudit): number | undefined {
@@ -2642,6 +2681,12 @@ export async function collectSupportBundle(
   const appendError = (error: SupportCollectionError): void => {
     errorCandidates.push(error);
   };
+  const accountCollectorArrayLoss = (field: CollectorPayloadField, count: number): void => {
+    if (field === 'records') recordsOmitted += count;
+    else if (field === 'receipts') receiptsOmitted += count;
+    else if (field === 'errors') errorsOmitted += count;
+    else terminalLinesOmitted += count;
+  };
   let requestedStatus: SupportBundleStatus | undefined;
   const collected: Array<{
     index: number;
@@ -2802,15 +2847,23 @@ export async function collectSupportBundle(
       }
       if (item.result === undefined || item.result === null) continue;
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const value = item.result[field];
-        if (!Array.isArray(value)) continue;
+        const snapshot = safeCollectorArraySnapshot(item.result, field);
+        if (snapshot === undefined) continue;
         const fieldKey = `${item.index}:${field}`;
         if (processedCollectorFields.has(fieldKey)) continue;
-        const pendingValue = activePayload?.item.index === item.index && activePayload.field === field
-          ? value.slice(activePayload.nextIndex)
-          : value;
-        if (field === 'records') recoveryRecords.push(...pendingValue);
-        else if (field === 'receipts') recoveryReceipts.push(...pendingValue);
+        const active = activePayload?.item.index === item.index && activePayload.field === field
+          ? activePayload
+          : undefined;
+        const values = active?.values ?? snapshot.values;
+        if (values === undefined) {
+          accountCollectorArrayLoss(field, snapshot.length);
+          continue;
+        }
+        const pendingValue = active === undefined
+          ? values
+          : values.slice(active.nextIndex);
+        if (field === 'records') recoveryRecords.push(...pendingValue as readonly SupportRecord[]);
+        else if (field === 'receipts') recoveryReceipts.push(...pendingValue as readonly SupportReceipt[]);
         else if (field === 'errors') recoveryErrors.push(...pendingValue);
         else if (recoveryTerminalTail === undefined) recoveryTerminalTail = pendingValue;
         else terminalLinesOmitted += pendingValue.length;
@@ -2886,12 +2939,9 @@ export async function collectSupportBundle(
       processedCollectorItems.add(item.index);
       if (item.result !== undefined && item.result !== null) {
         for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-          const value = item.result[field];
-          if (!Array.isArray(value)) continue;
-          if (field === 'records') recordsOmitted += value.length;
-          else if (field === 'receipts') receiptsOmitted += value.length;
-          else if (field === 'errors') errorsOmitted += value.length;
-          else terminalLinesOmitted += value.length;
+          const snapshot = safeCollectorArraySnapshot(item.result, field);
+          if (snapshot === undefined) continue;
+          accountCollectorArrayLoss(field, snapshot.length);
           processedCollectorFields.add(`${item.index}:${field}`);
         }
       }
@@ -2931,19 +2981,18 @@ export async function collectSupportBundle(
       });
       processedCollectorItems.add(item.index);
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const value = item.result[field];
-        if (!Array.isArray(value)) continue;
-        if (field === 'records') recordsOmitted += value.length;
-        else if (field === 'receipts') receiptsOmitted += value.length;
-        else if (field === 'errors') errorsOmitted += value.length;
-        else terminalLinesOmitted += value.length;
+        const snapshot = safeCollectorArraySnapshot(item.result, field);
+        if (snapshot === undefined) continue;
+        accountCollectorArrayLoss(field, snapshot.length);
         processedCollectorFields.add(`${item.index}:${field}`);
       }
       continue;
     }
     const resultTrustedFields = collectionAuthorized
       ? new Set<TrustedSupportField>(['provenance', 'receipts'])
-      : TRUSTED_SUPPORT_FIELDS.get(item.result);
+      : hasReusablePrivateMetadata(item.result, deadlineAt)
+        ? TRUSTED_SUPPORT_FIELDS.get(item.result)
+        : undefined;
     const resultEntries = limitedEntries(item.result, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
     if (!resultEntries) {
       appendError({
@@ -2954,12 +3003,9 @@ export async function collectSupportBundle(
       });
       processedCollectorItems.add(item.index);
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const value = item.result[field];
-        if (!Array.isArray(value)) continue;
-        if (field === 'records') recordsOmitted += value.length;
-        else if (field === 'receipts') receiptsOmitted += value.length;
-        else if (field === 'errors') errorsOmitted += value.length;
-        else terminalLinesOmitted += value.length;
+        const snapshot = safeCollectorArraySnapshot(item.result, field);
+        if (snapshot === undefined) continue;
+        accountCollectorArrayLoss(field, snapshot.length);
         processedCollectorFields.add(`${item.index}:${field}`);
       }
       continue;
@@ -2990,6 +3036,7 @@ export async function collectSupportBundle(
             at: collectionAt,
             recoveryRequired: true,
           });
+          accountCollectorArrayLoss('receipts', value.length);
           processedCollectorFields.add(`${item.index}:receipts`);
           continue;
         }
