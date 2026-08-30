@@ -1459,20 +1459,6 @@ export async function collectSupportBundle(
       try {
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
         const result = await Promise.race([collector.collect(controller.signal), deadline]);
-        const violation = collectorResultViolation(result, maxRecords, maxReceipts, preflightBudget);
-        if (violation !== undefined) {
-          collected.push({
-            index,
-            name: collector.name,
-            error: {
-              collector: collector.name,
-              code: violation === 'overflow' ? 'collection_output_overflow' : 'collection_invalid_output',
-              at: new Date(options.now?.() ?? Date.now()).toISOString(),
-              recoveryRequired: true,
-            },
-          });
-          return;
-        }
         collected.push({ index, name: collector.name, result });
       } catch (error) {
         const timedOut = controller.signal.aborted;
@@ -1530,6 +1516,16 @@ export async function collectSupportBundle(
       continue;
     }
     if (!item.result) continue;
+    const violation = collectorResultViolation(item.result, maxRecords, maxReceipts, preflightBudget);
+    if (violation !== undefined) {
+      appendError({
+        collector: item.name,
+        code: violation === 'overflow' ? 'collection_output_overflow' : 'collection_invalid_output',
+        at: new Date(options.now?.() ?? Date.now()).toISOString(),
+        recoveryRequired: true,
+      });
+      continue;
+    }
     for (const [key, value] of (limitedEntries(item.result) ?? []).sort(([a], [b]) => compareCodeUnits(a, b))) {
       if (normalizationInterrupted()) return recoveryBundle(normalizationError());
       if (key === 'status') {

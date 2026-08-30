@@ -289,22 +289,27 @@ describe('support bundle v1', () => {
 
   it('bounds scalar array members during collector preflight', async () => {
     const result = {
-      lifecycle: { values: Array.from({ length: 1_024 }, () => 'ready') },
-      providers: { values: Array.from({ length: 1_024 }, () => 'available') },
-      persistence: { values: Array.from({ length: 1_024 }, () => 'healthy') },
-      updater: { values: Array.from({ length: 1_024 }, () => 'current') },
-      graphics: { values: Array.from({ length: 1_024 }, () => 'accelerated') },
+      records: Array.from({ length: 128 }, (_, sequence) => ({
+        sequence,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'diagnostics',
+        event: 'sample',
+        attributes: { values: Array.from({ length: 32 }, () => 'ready') },
+      })),
     };
+    const delay = (milliseconds: number) => new Promise<void>((resolve) => {
+      setTimeout(resolve, milliseconds);
+    });
     const bundle = await collectSupportBundle([
-      { name: 'scalar-array-graph', collect: async () => result },
-      { name: 'second-scalar-array-graph', collect: async () => result },
-      { name: 'third-scalar-array-graph', collect: async () => result },
-      { name: 'fourth-scalar-array-graph', collect: async () => result },
+      { name: 'alpha', collect: async () => { await delay(30); return result; } },
+      { name: 'beta', collect: async () => { await delay(20); return result; } },
+      { name: 'gamma', collect: async () => { await delay(10); return result; } },
+      { name: 'zeta', collect: async () => result },
     ]);
 
     expect(bundle.status).toBe('recovery_required');
     expect(bundle.errors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+      expect.objectContaining({ collector: 'zeta', code: 'collection_invalid_output', recoveryRequired: true }),
     ]));
   });
 
