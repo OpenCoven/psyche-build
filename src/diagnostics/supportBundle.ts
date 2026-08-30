@@ -239,7 +239,7 @@ const SENSITIVE_LABELED_VALUE = /["']?(?:token|secret|password|passwd|passphrase
 const SENSITIVE_PHRASE = /\b(?:token|secret|password|passwd|passphrase|credential|authorization(?:header)?|auth|cookie)\b\s+(?:is\s+|value\s+)?[^\r\n]+/gi;
 const SAFE_ATTRIBUTE_KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const SAFE_CATEGORY_VALUE = /^[a-z0-9][a-z0-9._-]{0,95}$/;
-const SENSITIVE_RELATIVE_PATH = /(?:^|\/)(?:\.ssh(?:\/|$)|\.env(?:$|[./])|credentials?(?:$|[._/-])|id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._/-]))/i;
+const SENSITIVE_RELATIVE_PATH = /(?:^|\/)(?:\.ssh(?:\/|$)|\.env(?:$|[./])|credentials?(?:$|[._/-])|passwords?(?:$|[._/-])|secrets?(?:$|[._/-])|tokens?(?:$|[._/-])|id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._/-]))/i;
 const SAFE_DIAGNOSTIC_VALUES = new Set([
   'accelerated', 'active', 'available', 'cancelled', 'complete', 'connected',
   'current', 'degraded', 'denied', 'disabled', 'enabled', 'executing', 'expired',
@@ -293,7 +293,7 @@ const SAFE_DIAGNOSTIC_NUMBER_KEYS = new Set([
   'attempts', 'bytes', 'cols', 'count', 'durationms', 'generation', 'height',
   'items', 'lines', 'ownerepoch', 'panes', 'pid', 'rows', 'size', 'timers', 'width',
 ]);
-const SAFE_VERSION_VALUE = /^\d+(?:\.\d+){0,3}(?:[-+][A-Za-z0-9.-]+)?$/;
+const SAFE_VERSION_VALUE = /^\d+(?:\.\d+){0,3}(?:[-+][A-Za-z][A-Za-z0-9.-]{0,31})?$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const INFRASTRUCTURE_URL = /\b(?:https?|ssh|git|ftp):\/\/[^\s"'`]+/gi;
 const MAX_ATTRIBUTE_SCAN_KEYS = 1_024;
@@ -301,6 +301,14 @@ const MAX_SUPPORT_COLLECTORS = 64;
 const MAX_ATTRIBUTE_NODES = 4_096;
 const MAX_TEXT_SCAN_CHARS = 16_384;
 const SHA256_DIGEST = /^[a-f0-9]{64}$/i;
+
+function isNonZeroDigest(value: string): boolean {
+  return SHA256_DIGEST.test(value) && !/^0+$/i.test(value);
+}
+
+function isNonZeroSourceSha(value: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value) && !/^0+$/i.test(value);
+}
 // A collector result is preflighted with one shared graph budget. This keeps
 // the synchronous validation/normalization work bounded across all of its
 // state maps, records, receipt payloads, and nested attributes.
@@ -351,10 +359,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   }
 }
 
-function isAsyncCollector(collector: SupportCollector): boolean {
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return false;
   try {
-    return typeof collector.collect === 'function'
-      && collector.collect.constructor?.name === 'AsyncFunction';
+    return typeof (value as { then?: unknown }).then === 'function';
   } catch {
     return false;
   }
@@ -629,7 +637,7 @@ function safeIdentifierDigest(
     || byteLength(value) > SUPPORT_BUNDLE_LIMITS.maxStringBytes) {
     return omit(audit, 'identifier-too-large');
   }
-  if (acceptDigest && SHA256_DIGEST.test(value)) return value.toLowerCase();
+  if (acceptDigest && isNonZeroDigest(value)) return value.toLowerCase();
   const text = boundedText(value, audit, key);
   if (!text || text !== value || !SAFE_CATEGORY_VALUE.test(text)) {
     return omit(audit, 'unsafe-identifier');
@@ -802,7 +810,7 @@ function safeUnknown(
   if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth) return omit(audit, 'attribute-depth');
   if (audit.attributeNodesVisited >= MAX_ATTRIBUTE_NODES) return omit(audit, 'attribute-node-limit');
   audit.attributeNodesVisited += 1;
-  if (SENSITIVE_KEY.test(key)) return redact(value, audit, 'secret-field');
+  if (SENSITIVE_KEY.test(key)) return omit(audit, 'secret-field');
   if (CONTENT_KEY.test(key)) return omit(audit, 'content-field');
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
@@ -925,7 +933,11 @@ function sanitizeProvenance(value: unknown, audit: MutableAudit): SupportProvena
   return {
     application,
     releaseVersion,
-    sourceSha: sourceSha && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sourceSha) ? sourceSha : 'unknown',
+    sourceSha: sourceSha
+      && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sourceSha)
+      && !/^0+$/i.test(sourceSha)
+      ? sourceSha
+      : 'unknown',
     platform,
     architecture,
   };
@@ -938,7 +950,7 @@ function isNormalizedProvenance(value: unknown, deadlineAt?: number): value is S
     && (value.releaseVersion === 'unknown'
       || (typeof value.releaseVersion === 'string' && SAFE_VERSION_VALUE.test(value.releaseVersion)))
     && (value.sourceSha === 'unknown'
-      || (typeof value.sourceSha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sourceSha)))
+      || (typeof value.sourceSha === 'string' && isNonZeroSourceSha(value.sourceSha)))
     && SAFE_PROVENANCE_PLATFORM_VALUES.has(value.platform as string)
     && SAFE_PROVENANCE_ARCHITECTURE_VALUES.has(value.architecture as string)
     && ['application', 'releaseVersion', 'sourceSha', 'platform', 'architecture']
@@ -949,14 +961,14 @@ function isCompleteProvenance(value: unknown): value is SupportProvenance {
   return isNormalizedProvenance(value)
     && value.application !== 'unknown'
     && value.releaseVersion !== 'unknown'
-    && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value.sourceSha)
+      && isNonZeroSourceSha(value.sourceSha)
     && value.platform !== 'unknown'
     && value.architecture !== 'unknown';
 }
 
 function sanitizeProject(value: unknown, audit: MutableAudit, homeDirectory?: string): SupportProjectIdentity | undefined {
   if (!isRecord(value)) return undefined;
-  const suppliedDigest = typeof value.idDigest === 'string' && /^[0-9a-f]{64}$/i.test(value.idDigest)
+  const suppliedDigest = typeof value.idDigest === 'string' && isNonZeroDigest(value.idDigest)
     ? value.idDigest.toLowerCase()
     : undefined;
   const identity = value.id ?? value.identity ?? value.name ?? value.relativePath;
@@ -1137,15 +1149,15 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
     || !hasOnlyKeys(value, SUPPORT_RECEIPT_KEYS, deadlineAt)
     || value.sourceSchema !== 'psyche.control.receipt/v1'
     || typeof value.actionId !== 'string'
-    || !SHA256_DIGEST.test(value.actionId)
+    || !isNonZeroDigest(value.actionId)
     || byteLength(value.actionId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes
     || !isActionReceiptState(value.sourceState)
     || !(SUPPORT_ACTION_STATES as readonly unknown[]).includes(value.state)
     || value.state !== mapActionState(value.sourceState)
     || safeCanonicalTimestamp(value.createdAt) === undefined || !isRecord(value.resource)
-    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || !SHA256_DIGEST.test(value.taskId) || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
-    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || !SHA256_DIGEST.test(value.actorId) || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
-    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || !SHA256_DIGEST.test(value.leaseId) || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.taskId !== undefined && (typeof value.taskId !== 'string' || !isNonZeroDigest(value.taskId) || byteLength(value.taskId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.actorId !== undefined && (typeof value.actorId !== 'string' || !isNonZeroDigest(value.actorId) || byteLength(value.actorId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
+    || (value.leaseId !== undefined && (typeof value.leaseId !== 'string' || !isNonZeroDigest(value.leaseId) || byteLength(value.leaseId) > SUPPORT_BUNDLE_LIMITS.maxStringBytes))
     || (value.leaseRevision !== undefined && finiteNonNegativeInteger(value.leaseRevision) === undefined)
     || (value.completedAt !== undefined && safeCanonicalTimestamp(value.completedAt) === undefined)
     || (value.code !== undefined && (typeof value.code !== 'string'
@@ -1163,7 +1175,7 @@ function isSupportReceiptProjection(value: unknown, deadlineAt?: number): value 
     )
     && (resource.kind === 'project' || resource.kind === 'pane' || resource.kind === 'browser_tab')
     && typeof resource.idDigest === 'string'
-    && /^[a-f0-9]{64}$/i.test(resource.idDigest)
+    && isNonZeroDigest(resource.idDigest)
     && (resource.kind === 'project'
       ? resource.generation === undefined
       : typeof resource.generation === 'number'
@@ -1485,7 +1497,7 @@ function isSupportBundleV1AtDeadline(value: unknown, deadlineAt: number): value 
       && (project === undefined || (isRecord(project)
         && hasOnlyKeys(project, SUPPORT_PROJECT_KEYS, deadlineAt)
         && typeof project.idDigest === 'string'
-        && SHA256_DIGEST.test(project.idDigest)
+        && isNonZeroDigest(project.idDigest)
         && project.name === undefined
         && (project.relativePath === undefined || (typeof project.relativePath === 'string'
           && byteLength(project.relativePath) <= SUPPORT_BUNDLE_LIMITS.maxStringBytes
@@ -1655,9 +1667,10 @@ function buildSupportBundleWithReceiptMode(
   const recordCandidates: SupportRecord[] = [];
   const rawRecords = Array.isArray(input.records) ? input.records : [];
   let invalidRecords = 0;
+  const recordsInputOverflow = rawRecords.length > MAX_ATTRIBUTE_SCAN_KEYS;
   // Normalize the bounded candidate window before selecting the cap. This
   // makes over-cap inputs independent of collector/input insertion order.
-  for (const raw of rawRecords.slice(0, MAX_ATTRIBUTE_SCAN_KEYS)) {
+  for (const raw of recordsInputOverflow ? [] : rawRecords) {
     assertNormalizationDeadline(deadlineAt);
     const record = sanitizeRecord(raw, audit, homeDirectory);
     if (!record) {
@@ -1696,12 +1709,16 @@ function buildSupportBundleWithReceiptMode(
     audit.fieldsTruncated += rawRecords.length - records.length;
     note(audit, 'record-count');
   }
-  if (rawRecords.length > MAX_ATTRIBUTE_SCAN_KEYS) note(audit, 'record-count');
+  if (recordsInputOverflow) {
+    audit.fieldsTruncated += rawRecords.length;
+    note(audit, 'record-count');
+  }
 
   const receiptCandidates: SupportReceipt[] = [];
   let invalidReceipts = 0;
   const rawReceipts = Array.isArray(input.receipts) ? input.receipts : [];
-  for (const raw of rawReceipts.slice(0, MAX_ATTRIBUTE_SCAN_KEYS)) {
+  const receiptsInputOverflow = rawReceipts.length > MAX_ATTRIBUTE_SCAN_KEYS;
+  for (const raw of receiptsInputOverflow ? [] : rawReceipts) {
     assertNormalizationDeadline(deadlineAt);
     const receipt = sanitizeReceipt(raw, audit, receiptMode);
     if (receipt) receiptCandidates.push(receipt);
@@ -1733,7 +1750,10 @@ function buildSupportBundleWithReceiptMode(
     audit.fieldsTruncated += rawReceipts.length - receipts.length;
     note(audit, 'receipt-count');
   }
-  if (rawReceipts.length > MAX_ATTRIBUTE_SCAN_KEYS) note(audit, 'receipt-count');
+  if (receiptsInputOverflow) {
+    audit.fieldsTruncated += rawReceipts.length;
+    note(audit, 'receipt-count');
+  }
 
   const errors: SupportCollectionError[] = [];
   // Only a prior result from this module can carry truncation accounting
@@ -1769,6 +1789,14 @@ function buildSupportBundleWithReceiptMode(
     appendError({
       collector: 'support-bundle',
       code: 'invalid_record',
+      at: 'unknown',
+      recoveryRequired: true,
+    });
+  }
+  if (recordsInputOverflow || receiptsInputOverflow) {
+    appendError({
+      collector: 'support-bundle',
+      code: 'collection_output_overflow',
       at: 'unknown',
       recoveryRequired: true,
     });
@@ -1928,7 +1956,8 @@ export async function collectSupportBundle(
   const rejectOnAbort = (): void => rejectDeadline?.(controller.signal.reason ?? new Error('support bundle collection cancelled'));
   controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
   const merged: SupportBundleInput = { generatedAt: collectionAt, records: [], errors: [] };
-  const records: SupportRecord[] = [];
+  const recordCandidates: SupportRecord[] = [];
+  let records: SupportRecord[] = [];
   let receipts: SupportReceipt[] = [];
   const errors: SupportCollectionError[] = [];
   const receiptIds = new Set<string>();
@@ -2020,12 +2049,6 @@ export async function collectSupportBundle(
       const collectorName = collectorNames[index] ?? `collector-${index}`;
       try {
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
-        if (!isAsyncCollector(collector)) {
-          throw Object.assign(new Error('support bundle collectors must be async functions'), {
-            code: 'collection_invalid_output',
-            recoveryRequired: true,
-          });
-        }
         const result = await Promise.race([
           deadline,
           Promise.resolve().then(async () => {
@@ -2033,12 +2056,19 @@ export async function collectSupportBundle(
               controller.abort(timeoutError);
               throw timeoutError;
             }
-            const collectedResult = await collector.collect(controller.signal);
+            const collectedResult = collector.collect(controller.signal);
+            if (!isPromiseLike(collectedResult)) {
+              throw Object.assign(new Error('support bundle collectors must return a promise'), {
+                code: 'collection_invalid_output',
+                recoveryRequired: true,
+              });
+            }
+            const resolvedResult = await collectedResult;
             if (Date.now() >= deadlineAt) {
               controller.abort(timeoutError);
               throw timeoutError;
             }
-            return collectedResult;
+            return resolvedResult;
           }),
         ]);
         collected.push({ index, name: collectorName, result });
@@ -2170,15 +2200,9 @@ export async function collectSupportBundle(
           : 'unknown';
         if (requestedStatus === undefined || statusRank[next] > statusRank[requestedStatus]) requestedStatus = next;
       } else if (key === 'records' && Array.isArray(value)) {
-        const available = Math.max(0, maxRecords - records.length);
-        if (value.length > available) {
-          aggregateOverflow = true;
-          recordsOmitted += value.length - available;
-        }
         for (const record of value) {
           if (normalizationInterrupted()) return recoveryBundle(normalizationError());
-          if (records.length >= maxRecords) break;
-          records.push(record as SupportRecord);
+          recordCandidates.push(record as SupportRecord);
         }
       } else if (key === 'receipts' && Array.isArray(value)) {
         if (claimedCollectorFields.has(key)) {
@@ -2233,6 +2257,23 @@ export async function collectSupportBundle(
       }
     }
   }
+  if (recordCandidates.length > 0) {
+    try {
+      recordCandidates.sort((a, b) => a.sequence - b.sequence
+        || compareCodeUnits(a.at, b.at)
+        || compareCodeUnits(a.component, b.component)
+        || compareCodeUnits(a.event, b.event)
+        || compareStableValues(a, b, deadlineAt));
+    } catch (error) {
+      if (isNormalizationDeadlineError(error)) return recoveryBundle(normalizationError());
+      throw error;
+    }
+  }
+  if (recordCandidates.length > maxRecords) {
+    aggregateOverflow = true;
+    recordsOmitted += recordCandidates.length - maxRecords;
+  }
+  records = recordCandidates.slice(0, maxRecords);
   if (aggregateOverflow) {
     appendError({
       collector: 'support-bundle',

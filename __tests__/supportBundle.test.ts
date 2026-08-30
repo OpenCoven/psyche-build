@@ -246,25 +246,32 @@ describe('support bundle v1', () => {
     expect(bundle.errors.some((error) => error.recoveryRequired === true)).toBe(true);
   });
 
-  it('rejects non-async collectors before they can block the elapsed-time budget', async () => {
+  it('rejects collectors that do not return a promise', async () => {
     let called = false;
     const bundle = await collectSupportBundle([{
       name: 'synchronous-collector',
       collect: (() => {
         called = true;
-        const deadline = Date.now() + 50;
-        while (Date.now() < deadline) {
-          // This must never execute: synchronous collector implementations are
-          // outside the bounded async collection contract.
-        }
-        return Promise.resolve({ lifecycle: { state: 'ready' } });
+        return { lifecycle: { state: 'ready' } };
       }) as never,
     }], { maxElapsedMs: 5 });
 
-    expect(called).toBe(false);
+    expect(called).toBe(true);
     expect(bundle.status).toBe('recovery_required');
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
+  it('accepts a promise returned by a non-async collector function', async () => {
+    const bundle = await collectSupportBundle([{
+      name: 'promise-collector',
+      collect: () => Promise.resolve({ lifecycle: { state: 'ready' } }),
+    }]);
+
+    expect(bundle.lifecycle).toEqual({ state: 'ready' });
+    expect(bundle.errors).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output' }),
     ]));
   });
 
@@ -704,6 +711,15 @@ describe('support bundle v1', () => {
     expect(buildSupportBundle({ project: { relativePath: '.ssh/id_rsa' } }).project?.relativePath).toBeUndefined();
     expect(buildSupportBundle({ project: { relativePath: 'config/credentials.json' } }).project?.relativePath)
       .toBeUndefined();
+    expect(buildSupportBundle({ project: { relativePath: 'config/passwords.txt' } }).project?.relativePath)
+      .toBeUndefined();
+    expect(buildSupportBundle({ provenance: {
+      application: 'psyche-build',
+      releaseVersion: '1.0.0-736563726574',
+      sourceSha: '0'.repeat(40),
+      platform: 'linux',
+      architecture: 'x86_64',
+    } }).status).toBe('partial');
     const rawIdentifier = 'a'.repeat(64);
     const rawReceipt = buildSupportBundle({ receipts: [{
       schema: 'psyche.control.receipt/v1',
@@ -744,6 +760,69 @@ describe('support bundle v1', () => {
       } as never],
     });
     expect(serializeSupportBundle(privateBundle)).not.toContain(marker);
+  });
+
+  it('does not expose sensitive record attributes or claim forged provenance as complete', () => {
+    const bundle = buildSupportBundle({
+      provenance: {
+        application: 'psyche-build',
+        releaseVersion: '1.0.0',
+        sourceSha: '0'.repeat(40),
+        platform: 'linux',
+        architecture: 'x86_64',
+      },
+      records: [{
+        sequence: 1,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'diagnostics',
+        event: 'sample',
+        attributes: { password: 'secret', safeState: 'ready' },
+      }],
+      receipts: [{
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'forged-success',
+        state: 'succeeded',
+        resource: { kind: 'project', id: 'forged-project' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }],
+    });
+
+    expect(bundle.status).not.toBe('complete');
+    expect(bundle.records[0]?.attributes).toEqual({ safeState: 'ready' });
+    expect(serializeSupportBundle(bundle)).not.toContain('password');
+    expect(serializeSupportBundle(bundle)).not.toContain('forged-project');
+  });
+
+  it('rejects direct arrays beyond the scan bound instead of selecting an order-dependent prefix', () => {
+    const records = Array.from({ length: 1_025 }, (_, sequence) => ({
+      sequence,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'test',
+      event: 'sample',
+    }));
+    const options = { now: () => 1_767_225_600_000 };
+    const first = buildSupportBundle({ records }, options);
+    const second = buildSupportBundle({ records: [...records].reverse() }, options);
+
+    expect(first.status).toBe('recovery_required');
+    expect(serializeSupportBundle(first)).toBe(serializeSupportBundle(second));
+    expect(first.records).toEqual([]);
+  });
+
+  it('sorts records globally when bounded collectors contribute to one aggregate', async () => {
+    const record = (sequence: number) => ({
+      sequence,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'diagnostics',
+      event: 'sample',
+    });
+    const bundle = await collectSupportBundle([
+      { name: 'alpha', collect: async () => ({ records: [record(100)] }) },
+      { name: 'beta', collect: async () => ({ records: [record(1)] }) },
+    ], { maxRecords: 1 });
+
+    expect(bundle.records.map((item) => item.sequence)).toEqual([1]);
+    expect(bundle.status).toBe('recovery_required');
   });
 
   it('does not trust caller redaction metadata and reports honest truncation accounting', () => {
