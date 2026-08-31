@@ -1,5 +1,17 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  INVITE_AUTH_CANONICAL_FIXTURE,
+  INVITE_AUTH_DENIAL_FIXTURE,
+  INVITE_AUTH_EXPIRY_FIXTURE,
+  INVITE_AUTH_REPLAY_FIXTURE,
+  type CanonicalInviteFixture,
+  type InviteRedemptionFixture,
+} from "../../protocol-fixtures/fixtures.js";
+import { serialize } from "../../scripts/generate-protocol-fixtures.js";
 import {
   INVITE_DEEP_LINK_PREFIX,
   INVITE_MAX_ATTEMPTS,
@@ -7,9 +19,9 @@ import {
   INVITE_SECRET_BYTES,
   INVITE_TTL_MS,
   InviteStore,
+  MAX_INVITE_PAYLOAD_BYTES,
   MAX_STORED_INVITES,
   denialMessage,
-  deriveHostId,
   encodeInvitePayload,
   inviteSecretVerifier,
   isCanonicalFingerprint,
@@ -17,25 +29,45 @@ import {
   type InviteEndpoint,
   type InvitePayload,
   type IssuedCredential,
+  type IssueInviteInput,
   type RedemptionRequest,
 } from "../../src/services/bridge/inviteAuth.js";
-import selfsigned from "selfsigned";
 
 // Deterministic test material only: every secret below is synthetic vector
 // input, never a real credential (see AGENTS.md "Protected data").
 
-let certPemA = "";
-let certPemB = "";
-
-beforeAll(async () => {
-  const a = await selfsigned.generate([{ name: "commonName", value: "vector-a" }], { keySize: 2048 });
-  const b = await selfsigned.generate([{ name: "commonName", value: "vector-b" }], { keySize: 2048 });
-  certPemA = a.cert;
-  certPemB = b.cert;
-});
-
 const T0 = Date.parse("2026-08-30T00:00:00.000Z");
+const HOST_ID = "host-identity-owned-outside-psyche-build";
 const HOST_FINGERPRINT = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99";
+const INVITE_FIXTURE_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../protocol-fixtures/invite-auth/v1",
+);
+
+function loadInviteFixture<T>(file: string): T {
+  return JSON.parse(fs.readFileSync(path.join(INVITE_FIXTURE_DIR, file), "utf8")) as T;
+}
+
+function fixtureStore(
+  canonical: CanonicalInviteFixture,
+  credential: IssuedCredential,
+  now: () => number,
+): InviteStore {
+  const randomValues = [
+    Buffer.from(canonical.random.inviteIdBytes, "base64url"),
+    Buffer.from(canonical.random.secretBytes, "base64url"),
+  ];
+  return new InviteStore({
+    ...canonical.store,
+    now,
+    random: (bytes) => {
+      const value = randomValues.shift();
+      if (!value || value.length !== bytes) throw new Error("fixture randomness does not match requested bytes");
+      return value;
+    },
+    issueCredential: async () => credential,
+  });
+}
 
 function fixedRandom(seed: number) {
   let counter = seed;
@@ -69,7 +101,7 @@ function makeStore(seed = 7): Harness {
     store: null as unknown as InviteStore,
   };
   harness.store = new InviteStore({
-    hostId: deriveHostId(certPemA),
+    hostId: HOST_ID,
     hostFingerprint: HOST_FINGERPRINT,
     now: () => currentTime,
     random: fixedRandom(seed),
@@ -115,18 +147,18 @@ function wrongSecret(i: number): string {
     .toString("base64url");
 }
 
-describe("deriveHostId", () => {
-  it("is stable for the same certificate and distinct across certificates", () => {
-    const a1 = deriveHostId(certPemA);
-    const a2 = deriveHostId(certPemA);
-    const b = deriveHostId(certPemB);
-    expect(a1).toBe(a2);
-    expect(a1).not.toBe(b);
-    expect(a1).toMatch(/^h1-[0-9a-f]{32}$/);
-  });
-});
-
 describe("invite payloads", () => {
+  it("refuses invalid host binding inputs before issuing", () => {
+    expect(() => new InviteStore({
+      hostId: "",
+      hostFingerprint: HOST_FINGERPRINT,
+    })).toThrow(TypeError);
+    expect(() => new InviteStore({
+      hostId: HOST_ID,
+      hostFingerprint: "not-a-fingerprint",
+    })).toThrow(TypeError);
+  });
+
   it("round-trip through the deep-link encoding", () => {
     const harness = makeStore();
     const { payload, deepLink } = issue(harness);
@@ -135,12 +167,33 @@ describe("invite payloads", () => {
     expect(parsed).toEqual({ ok: true, payload });
   });
 
-  it("bind the durable host identity and certificate fingerprint", () => {
+  it("binds the supplied host identity and certificate fingerprint", () => {
     const harness = makeStore();
     const { payload, record } = issue(harness);
     expect(payload.hostId).toBe(record.hostId);
     expect(payload.hostFingerprint).toBe(record.hostFingerprint);
     expect(isCanonicalFingerprint(payload.hostFingerprint)).toBe(true);
+  });
+
+  it("preserves an opaque host identity supplied by its canonical owner", () => {
+    const hostId = HOST_ID;
+    const store = new InviteStore({
+      hostId,
+      hostFingerprint: HOST_FINGERPRINT,
+      now: () => T0,
+      random: fixedRandom(11),
+    });
+    const result = store.issue({
+      hostName: "Opaque Identity Host",
+      endpoints: [{ kind: "tcp", host: "192.0.2.11", port: 47123 }],
+    });
+    if (!result.ok) throw new Error(`issue failed: ${result.code}`);
+
+    expect(result.invite.payload.hostId).toBe(hostId);
+    expect(parseInvitePayload(result.invite.deepLink, T0)).toEqual({
+      ok: true,
+      payload: result.invite.payload,
+    });
   });
 
   it("reject malformed, oversized, foreign-version, and out-of-bound payloads", () => {
@@ -173,15 +226,157 @@ describe("invite payloads", () => {
     const longLived = { ...payload, expiresAt: new Date(T0 + INVITE_TTL_MS + 10 * 60 * 1000).toISOString() };
     expect(parseInvitePayload(encodeInvitePayload(longLived), T0).ok).toBe(false);
 
+    const wrongProfile = { ...payload, protocolProfile: "bridge.v2" };
+    expect(parseInvitePayload(encodeInvitePayload(wrongProfile), T0)).toEqual({
+      ok: false,
+      code: "invite_invalid_field",
+    });
+
     const badPort = { ...payload, endpoints: [{ kind: "tcp" as const, host: "192.168.1.10", port: 0 }] };
     expect(parseInvitePayload(encodeInvitePayload(badPort)).ok).toBe(false);
+
+    const endpointWithExtraField = JSON.stringify({
+      ...payload,
+      endpoints: [{ kind: "tcp", host: "192.168.1.10", port: 47123, token: "must-not-be-ignored" }],
+    });
+    const endpointWithExtraFieldLink =
+      `${INVITE_DEEP_LINK_PREFIX}${Buffer.from(endpointWithExtraField, "utf8").toString("base64url")}`;
+    expect(parseInvitePayload(endpointWithExtraFieldLink, T0)).toEqual({
+      ok: false,
+      code: "invite_invalid_field",
+    });
 
     const expired = parseInvitePayload(encodeInvitePayload(payload), T0 + INVITE_TTL_MS + 1);
     expect(expired.ok).toBe(false);
   });
+
+  it("refuses issuer input that would create an invalid transfer payload", () => {
+    const harness = makeStore();
+    const validEndpoint: InviteEndpoint = { kind: "tcp", host: "192.0.2.10", port: 47123 };
+    const invalidInputs: IssueInviteInput[] = [
+      { hostName: "", endpoints: [validEndpoint] },
+      { hostName: "x".repeat(129), endpoints: [validEndpoint] },
+      { hostName: "host\nname", endpoints: [validEndpoint] },
+      { hostName: "host", endpoints: Array.from({ length: 5 }, () => validEndpoint) },
+      { hostName: "host", endpoints: [{ kind: "tcp", host: "x".repeat(254), port: 47123 }] },
+      { hostName: "host", endpoints: [{ kind: "tcp", host: "192.0.2.10", port: 0 }] },
+    ];
+
+    for (const input of invalidInputs) {
+      expect(() => harness.store.issue(input)).toThrow(TypeError);
+    }
+  });
+
+  it("rejects an encoded payload that cannot fit before base64 decoding", () => {
+    const maximumEncodedLength = Math.ceil(MAX_INVITE_PAYLOAD_BYTES * 4 / 3);
+    const oversized = `${INVITE_DEEP_LINK_PREFIX}${"A".repeat(maximumEncodedLength + 1)}`;
+    const decode = vi.spyOn(Buffer, "from");
+
+    try {
+      expect(parseInvitePayload(oversized)).toEqual({ ok: false, code: "invite_oversized" });
+      expect(decode).not.toHaveBeenCalled();
+    } finally {
+      decode.mockRestore();
+    }
+  });
+});
+
+describe("canonical invite-auth protocol fixtures", () => {
+  it.each([
+    ["canonical-invite.json", INVITE_AUTH_CANONICAL_FIXTURE],
+    ["denials.json", INVITE_AUTH_DENIAL_FIXTURE],
+    ["expiry.json", INVITE_AUTH_EXPIRY_FIXTURE],
+    ["replay.json", INVITE_AUTH_REPLAY_FIXTURE],
+  ])("keeps %s synchronized with its typed source", (file, source) => {
+    expect(fs.readFileSync(path.join(INVITE_FIXTURE_DIR, file), "utf8")).toBe(serialize(source));
+  });
+
+  it("pins canonical invite generation and parsing", () => {
+    const canonical = loadInviteFixture<CanonicalInviteFixture>("canonical-invite.json");
+    const now = Date.parse(canonical.now);
+    const store = fixtureStore(
+      canonical,
+      {
+        token: "unused-canonical-token",
+        clientId: "unused-canonical-client",
+        clientName: "Unused Canonical Client",
+        pairedAt: canonical.now,
+      },
+      () => now,
+    );
+
+    const issued = store.issue(canonical.issue);
+    expect(issued).toEqual({ ok: true, invite: canonical.expected });
+    expect(parseInvitePayload(canonical.expected.deepLink, now)).toEqual({
+      ok: true,
+      payload: canonical.expected.payload,
+    });
+  });
+
+  it("drives replay denial from the checked-in vector", async () => {
+    const canonical = loadInviteFixture<CanonicalInviteFixture>("canonical-invite.json");
+    const replay = loadInviteFixture<InviteRedemptionFixture>("replay.json");
+    expect(replay.canonicalFixture).toBe("canonical-invite.json");
+
+    let now = Date.parse(canonical.now);
+    const store = fixtureStore(canonical, replay.credential, () => now);
+    const issued = store.issue(canonical.issue);
+    if (!issued.ok) throw new Error(`fixture issue failed: ${issued.code}`);
+    const request = redeemRequest(issued.invite.payload, replay.request);
+
+    const results = [
+      await store.redeem(request),
+      await store.redeem(request),
+    ];
+    expect(results).toEqual(replay.expected);
+  });
+
+  it("drives expiry denial from the checked-in vector", async () => {
+    const canonical = loadInviteFixture<CanonicalInviteFixture>("canonical-invite.json");
+    const expiry = loadInviteFixture<InviteRedemptionFixture>("expiry.json");
+    expect(expiry.canonicalFixture).toBe("canonical-invite.json");
+    if (!expiry.redeemAt) throw new Error("expiry fixture must declare redeemAt");
+
+    let now = Date.parse(canonical.now);
+    const store = fixtureStore(canonical, expiry.credential, () => now);
+    const issued = store.issue(canonical.issue);
+    if (!issued.ok) throw new Error(`fixture issue failed: ${issued.code}`);
+    now = Date.parse(expiry.redeemAt);
+
+    expect([await store.redeem(redeemRequest(issued.invite.payload, expiry.request))])
+      .toEqual(expiry.expected);
+  });
+
+  it("pins every structured denial code and safe message", () => {
+    const denials = loadInviteFixture<Record<string, string>>("denials.json");
+    expect(denials).toEqual({
+      credential_store_unavailable: denialMessage("credential_store_unavailable"),
+      invite_already_redeemed: denialMessage("invite_already_redeemed"),
+      invite_attempts_exhausted: denialMessage("invite_attempts_exhausted"),
+      invite_expired: denialMessage("invite_expired"),
+      invite_revoked: denialMessage("invite_revoked"),
+      invite_secret_mismatch: denialMessage("invite_secret_mismatch"),
+      malformed_request: denialMessage("malformed_request"),
+      profile_mismatch: denialMessage("profile_mismatch"),
+      unknown_invite: denialMessage("unknown_invite"),
+    });
+  });
 });
 
 describe("redemption", () => {
+  it("does not expose mutable references to stored invite records", async () => {
+    const harness = makeStore();
+    const invite = issue(harness);
+
+    invite.record.status = "revoked";
+    const pending = harness.store.pendingInvite();
+    expect(pending).not.toBeNull();
+    if (!pending) throw new Error("expected a pending invite");
+    pending.status = "revoked";
+
+    expect((await harness.store.redeem(redeemRequest(invite.payload))).ok).toBe(true);
+  });
+
   it("commits exactly once; the replay receives a deterministic denial", async () => {
     const harness = makeStore();
     const { payload } = issue(harness);

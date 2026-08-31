@@ -1,0 +1,28 @@
+{
+  "canonicalFixture": "canonical-invite.json",
+  "credential": {
+    "clientId": "fixture-client",
+    "clientName": "Fixture iPhone",
+    "pairedAt": "2026-08-30T00:00:00.000Z",
+    "token": "fixture-token"
+  },
+  "expected": [
+    {
+      "credential": {
+        "clientId": "fixture-client",
+        "clientName": "Fixture iPhone",
+        "pairedAt": "2026-08-30T00:00:00.000Z",
+        "token": "fixture-token"
+      },
+      "ok": true
+    },
+    {
+      "code": "invite_already_redeemed",
+      "ok": false
+    }
+  ],
+  "request": {
+    "clientId": "fixture-client",
+    "clientName": "Fixture iPhone"
+  }
+}

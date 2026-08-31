@@ -2,7 +2,6 @@ import {
   createHash,
   randomBytes,
   timingSafeEqual,
-  X509Certificate,
 } from "node:crypto";
 
 /**
@@ -28,9 +27,10 @@ import {
  *    credential issuance, and never returns an invite to `pending`.
  * 3. Every failed path yields a fixed, structured denial code whose message
  *    contains no secret material and no oracle about *why* beyond the code.
- * 4. Invites are bound to the durable host identity (derived from the pinned
- *    TLS certificate) and to one protocol profile; wrong-host and downgrade
- *    attempts fail closed.
+ * 4. Invites are bound to an opaque host identity supplied by its canonical
+ *    owner, the pinned TLS certificate fingerprint, and one protocol profile;
+ *    wrong-host and downgrade attempts fail closed. This slice does not claim
+ *    ownership of durable host identity while the upstream decision is open.
  * 5. Guessing the secret is bounded: an attempt budget tears the invite down
  *    after `INVITE_MAX_ATTEMPTS` wrong presentations, mirroring
  *    `PairingFlow`'s exhausted-window rule (`docs/BRIDGE-SECURITY.md` rule 3).
@@ -75,34 +75,14 @@ export const MAX_STORED_INVITES = 16;
 /** The encoded QR/deep-link transfer object is refused above this size. */
 export const MAX_INVITE_PAYLOAD_BYTES = 2048;
 
+/** Maximum unpadded base64url characters that can decode to the payload bound. */
+export const MAX_INVITE_PAYLOAD_ENCODED_CHARS = Math.ceil(MAX_INVITE_PAYLOAD_BYTES * 4 / 3);
+
 /** Deep-link scheme prefix for the discovery payload. QR carries the same string. */
 export const INVITE_DEEP_LINK_PREFIX = "psyc://invite/v1/";
 
 /** Clock skew tolerated when validating a client-held payload's expiry bound. */
 export const INVITE_CLOCK_SKEW_MS = 60 * 1000;
-
-// ---------------------------------------------------------------------------
-// Identity
-// ---------------------------------------------------------------------------
-
-/**
- * Durable host identity, derived from the persisted TLS material.
- *
- * `BridgeDaemon.serverId` is a fresh `randomUUID()` per process today
- * (`src/services/bridge/BridgeDaemon.ts`, constructed without `serverId` in
- * `src/index.ts`), so it is a session identifier, not a durable identity. The
- * only durable anchor the host already maintains is the self-signed
- * certificate at `~/.psyche/bridge/cert.pem` (`TLSCertificate.ts`), which the
- * iOS side pins (`PinnedCertificateDelegate`, `PairedHostStore`). Deriving
- * the host id from the certificate's SubjectPublicKeyInfo makes identity
- * durable exactly as long as the pinned key is, with no new stored state.
- */
-export function deriveHostId(certificatePem: string): string {
-  const cert = new X509Certificate(certificatePem);
-  const spki = cert.publicKey.export({ format: "der", type: "spki" });
-  const digest = createHash("sha256").update(spki).digest("hex").slice(0, 32);
-  return `h1-${digest}`;
-}
 
 // ---------------------------------------------------------------------------
 // Invite records and transfer payload
@@ -130,9 +110,10 @@ export interface InviteRecord {
 /**
  * Discovery data + the one-time secret, encoded into a QR code or deep link.
  * Discovery addresses (Bonjour `_psyche._tcp` TXT, endpoint lists here) are
- * routing hints only; the durable identity fields are `hostId` and
- * `hostFingerprint`. This object must never be persisted, logged, or placed
- * in accessibility output, screenshots, fixtures, or crash reports.
+ * routing hints only; the identity-binding fields are `hostId` and
+ * `hostFingerprint`. Runtime instances must never be persisted, logged, or
+ * placed in accessibility output, screenshots, captured fixtures, or crash
+ * reports; checked-in contract fixtures use fixed public synthetic values.
  */
 export interface InvitePayload {
   v: 1;
@@ -262,6 +243,9 @@ export function parseInvitePayload(raw: string, now: number = Date.now()): Invit
   if (encoded.length === 0 || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
     return { ok: false, code: "malformed_invite" };
   }
+  if (encoded.length > MAX_INVITE_PAYLOAD_ENCODED_CHARS) {
+    return { ok: false, code: "invite_oversized" };
+  }
   const json = Buffer.from(encoded, "base64url").toString("utf8");
   if (Buffer.byteLength(json, "utf8") > MAX_INVITE_PAYLOAD_BYTES) {
     return { ok: false, code: "invite_oversized" };
@@ -295,7 +279,7 @@ export function parseInvitePayload(raw: string, now: number = Date.now()): Invit
   const expiresAt = value.expiresAt;
   const protocolProfile = value.protocolProfile;
   const endpoints = value.endpoints;
-  if (typeof hostId !== "string" || !/^h1-[0-9a-f]{32}$/.test(hostId)) {
+  if (!isValidHostId(hostId)) {
     return { ok: false, code: "invite_invalid_field" };
   }
   if (typeof inviteId !== "string" || !/^i1-[A-Za-z0-9_-]{22}$/.test(inviteId)) {
@@ -307,10 +291,10 @@ export function parseInvitePayload(raw: string, now: number = Date.now()): Invit
   if (typeof hostFingerprint !== "string" || !isCanonicalFingerprint(hostFingerprint)) {
     return { ok: false, code: "invite_invalid_field" };
   }
-  if (typeof hostName !== "string" || hostName.length === 0 || hostName.length > 128 || hasControlChars(hostName)) {
+  if (!isValidDisplayName(hostName)) {
     return { ok: false, code: "invite_invalid_field" };
   }
-  if (typeof protocolProfile !== "string" || protocolProfile.length === 0 || protocolProfile.length > 32) {
+  if (protocolProfile !== INVITE_PROTOCOL_PROFILE) {
     return { ok: false, code: "invite_invalid_field" };
   }
   if (typeof expiresAt !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(expiresAt)) {
@@ -332,15 +316,7 @@ export function parseInvitePayload(raw: string, now: number = Date.now()): Invit
     return { ok: false, code: "invite_invalid_field" };
   }
   for (const endpoint of endpoints) {
-    if (!isPlainObject(endpoint) || endpoint.kind !== "tcp") {
-      return { ok: false, code: "invite_invalid_field" };
-    }
-    const host = endpoint.host;
-    const port = endpoint.port;
-    if (typeof host !== "string" || host.length === 0 || host.length > 253 || hasControlChars(host)) {
-      return { ok: false, code: "invite_invalid_field" };
-    }
-    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+    if (!isValidEndpoint(endpoint)) {
       return { ok: false, code: "invite_invalid_field" };
     }
   }
@@ -401,6 +377,9 @@ export class InviteStore {
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(deps: InviteStoreDeps) {
+    if (!isValidHostId(deps.hostId) || !isCanonicalFingerprint(deps.hostFingerprint)) {
+      throw new TypeError("invite store requires a valid host identity and certificate fingerprint");
+    }
     this.deps = { now: Date.now, ...deps };
   }
 
@@ -410,9 +389,7 @@ export class InviteStore {
    * and the retained audit tail is pruned to `MAX_STORED_INVITES`.
    */
   issue(input: IssueInviteInput): IssueInviteResult {
-    if (!Array.isArray(input.endpoints) || input.endpoints.length === 0) {
-      throw new TypeError("issue requires at least one endpoint");
-    }
+    validateIssueInput(input);
     const now = this.deps.now();
     for (const record of this.records.values()) {
       if (record.status === "pending") {
@@ -450,7 +427,14 @@ export class InviteStore {
       protocolProfile: INVITE_PROTOCOL_PROFILE,
       endpoints: input.endpoints.map((endpoint) => ({ ...endpoint })),
     };
-    return { ok: true, invite: { record, payload, deepLink: encodeInvitePayload(payload) } };
+    return {
+      ok: true,
+      invite: {
+        record: { ...record },
+        payload,
+        deepLink: encodeInvitePayload(payload),
+      },
+    };
   }
 
   /**
@@ -536,7 +520,7 @@ export class InviteStore {
     const now = this.deps.now();
     for (const record of this.records.values()) {
       if (record.status === "pending" && Date.parse(record.expiresAt) > now) {
-        return record;
+        return { ...record };
       }
     }
     return null;
@@ -609,7 +593,7 @@ function validateRedemptionShape(request: RedemptionRequest): ShapeResult {
   if (typeof request.inviteId !== "string" || !/^i1-[A-Za-z0-9_-]{22}$/.test(request.inviteId)) {
     return { ok: false, code: "malformed_request" };
   }
-  if (typeof request.hostId !== "string" || !/^h1-[0-9a-f]{32}$/.test(request.hostId)) {
+  if (!isValidHostId(request.hostId)) {
     return { ok: false, code: "malformed_request" };
   }
   if (typeof request.secret !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(request.secret)) {
@@ -668,6 +652,52 @@ export function isCanonicalFingerprint(value: string): boolean {
 
 function hasControlChars(value: string): boolean {
   return /[\x00-\x1f\x7f]/.test(value);
+}
+
+function isValidHostId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 128
+    && !hasControlChars(value);
+}
+
+function isValidDisplayName(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 128
+    && !hasControlChars(value);
+}
+
+function isValidEndpoint(value: unknown): value is InviteEndpoint {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 3 || !keys.every((key) => key === "kind" || key === "host" || key === "port")) {
+    return false;
+  }
+  return value.kind === "tcp"
+    && typeof value.host === "string"
+    && value.host.length > 0
+    && value.host.length <= 253
+    && !hasControlChars(value.host)
+    && typeof value.port === "number"
+    && Number.isInteger(value.port)
+    && value.port >= 1
+    && value.port <= 65535;
+}
+
+function validateIssueInput(input: IssueInviteInput): void {
+  if (
+    !isPlainObject(input)
+    || !isValidDisplayName(input.hostName)
+    || !Array.isArray(input.endpoints)
+    || input.endpoints.length === 0
+    || input.endpoints.length > 4
+    || !input.endpoints.every(isValidEndpoint)
+  ) {
+    throw new TypeError("issue requires a valid host name and one to four TCP endpoints");
+  }
 }
 
 function canonicalInviteJson(payload: InvitePayload): Record<string, unknown> {

@@ -10,6 +10,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CLIENT_FIXTURES,
+  INVITE_AUTH_CANONICAL_FIXTURE,
+  INVITE_AUTH_DENIAL_FIXTURE,
+  INVITE_AUTH_EXPIRY_FIXTURE,
+  INVITE_AUTH_REPLAY_FIXTURE,
   MOBILE_CONTROL_FIXTURES,
   SERVER_FIXTURES,
   WORKSPACE_SNAPSHOT_FIXTURE,
@@ -39,11 +43,17 @@ export const OUTPUTS = [
   ['mobile-control.json', MOBILE_CONTROL_FIXTURES],
   ['server-messages.json', SERVER_FIXTURES],
   ['workspace-snapshot.json', WORKSPACE_SNAPSHOT_FIXTURE],
+  ['invite-auth/v1/canonical-invite.json', INVITE_AUTH_CANONICAL_FIXTURE],
+  ['invite-auth/v1/denials.json', INVITE_AUTH_DENIAL_FIXTURE],
+  ['invite-auth/v1/expiry.json', INVITE_AUTH_EXPIRY_FIXTURE],
+  ['invite-auth/v1/replay.json', INVITE_AUTH_REPLAY_FIXTURE],
 ] as const;
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   for (const [file, fixtures] of OUTPUTS) {
-    fs.writeFileSync(path.join(DIR, file), serialize(fixtures));
+    const outputPath = path.join(DIR, file);
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, serialize(fixtures));
     console.log(`wrote protocol-fixtures/${file}`);
   }
 }

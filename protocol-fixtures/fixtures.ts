@@ -4,6 +4,13 @@ import type {
 } from '../src/services/bridge/wireProtocol.js';
 import type { ServerResponse } from '../src/daemon/protocol.js';
 import { PaneAction } from '../src/actions/types.js';
+import type {
+  InviteDenialCode,
+  InviteRedemptionResult,
+  IssuedCredential,
+  IssuedInvite,
+  IssueInviteInput,
+} from '../src/services/bridge/inviteAuth.js';
 
 /**
  * Typed source of truth for the wire-protocol fixtures.
@@ -541,3 +548,123 @@ export const MOBILE_CONTROL_FIXTURES = {
     },
   },
 } satisfies Record<string, MobileControlFixture>;
+
+export interface CanonicalInviteFixture {
+  now: string;
+  store: {
+    hostId: string;
+    hostFingerprint: string;
+  };
+  random: {
+    inviteIdBytes: string;
+    secretBytes: string;
+  };
+  issue: IssueInviteInput;
+  expected: IssuedInvite;
+}
+
+export interface InviteRedemptionFixture {
+  canonicalFixture: string;
+  request: {
+    clientId: string;
+    clientName: string;
+  };
+  credential: IssuedCredential;
+  expected: InviteRedemptionResult[];
+  redeemAt?: string;
+}
+
+export const INVITE_AUTH_CANONICAL_FIXTURE = {
+  now: '2026-08-30T00:00:00.000Z',
+  store: {
+    hostId: 'fixture-host-id',
+    hostFingerprint: 'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+  },
+  random: {
+    inviteIdBytes: 'AAECAwQFBgcICQoLDA0ODw',
+    secretBytes: 'EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8',
+  },
+  issue: {
+    hostName: 'Fixture Host',
+    endpoints: [{ kind: 'tcp', host: '192.0.2.10', port: 47123 }],
+  },
+  expected: {
+    record: {
+      inviteId: 'i1-AAECAwQFBgcICQoLDA0ODw',
+      hostId: 'fixture-host-id',
+      hostFingerprint: 'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+      protocolProfile: 'bridge.v3',
+      secretVerifier: '5052238d6ed3f185660a2886b34bfc1749537a4fe2966d56997f17215415f2d3',
+      issuedAt: '2026-08-30T00:00:00.000Z',
+      expiresAt: '2026-08-30T00:10:00.000Z',
+      status: 'pending',
+      attemptsUsed: 0,
+    },
+    payload: {
+      v: 1,
+      hostId: 'fixture-host-id',
+      hostFingerprint: 'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+      hostName: 'Fixture Host',
+      inviteId: 'i1-AAECAwQFBgcICQoLDA0ODw',
+      secret: 'EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8',
+      expiresAt: '2026-08-30T00:10:00.000Z',
+      protocolProfile: 'bridge.v3',
+      endpoints: [{ kind: 'tcp', host: '192.0.2.10', port: 47123 }],
+    },
+    deepLink: 'psyc://invite/v1/eyJ2IjoxLCJob3N0SWQiOiJmaXh0dXJlLWhvc3QtaWQiLCJob3N0RmluZ2VycHJpbnQiOiJBQTpCQjpDQzpERDpFRTpGRjowMDoxMToyMjozMzo0NDo1NTo2Njo3Nzo4ODo5OTpBQTpCQjpDQzpERDpFRTpGRjowMDoxMToyMjozMzo0NDo1NTo2Njo3Nzo4ODo5OSIsImhvc3ROYW1lIjoiRml4dHVyZSBIb3N0IiwiaW52aXRlSWQiOiJpMS1BQUVDQXdRRkJnY0lDUW9MREEwT0R3Iiwic2VjcmV0IjoiRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUFoSWlNa0pTWW5LQ2txS3l3dExpOCIsImV4cGlyZXNBdCI6IjIwMjYtMDgtMzBUMDA6MTA6MDAuMDAwWiIsInByb3RvY29sUHJvZmlsZSI6ImJyaWRnZS52MyIsImVuZHBvaW50cyI6W3sia2luZCI6InRjcCIsImhvc3QiOiIxOTIuMC4yLjEwIiwicG9ydCI6NDcxMjN9XX0',
+  },
+} satisfies CanonicalInviteFixture;
+
+export const INVITE_AUTH_REPLAY_FIXTURE = {
+  canonicalFixture: 'canonical-invite.json',
+  request: {
+    clientId: 'fixture-client',
+    clientName: 'Fixture iPhone',
+  },
+  credential: {
+    token: 'fixture-token',
+    clientId: 'fixture-client',
+    clientName: 'Fixture iPhone',
+    pairedAt: '2026-08-30T00:00:00.000Z',
+  },
+  expected: [
+    {
+      ok: true,
+      credential: {
+        token: 'fixture-token',
+        clientId: 'fixture-client',
+        clientName: 'Fixture iPhone',
+        pairedAt: '2026-08-30T00:00:00.000Z',
+      },
+    },
+    { ok: false, code: 'invite_already_redeemed' },
+  ],
+} satisfies InviteRedemptionFixture;
+
+export const INVITE_AUTH_EXPIRY_FIXTURE = {
+  canonicalFixture: 'canonical-invite.json',
+  request: {
+    clientId: 'fixture-client',
+    clientName: 'Fixture iPhone',
+  },
+  credential: {
+    token: 'unused-expiry-token',
+    clientId: 'fixture-client',
+    clientName: 'Fixture iPhone',
+    pairedAt: '2026-08-30T00:10:00.001Z',
+  },
+  redeemAt: '2026-08-30T00:10:00.001Z',
+  expected: [{ ok: false, code: 'invite_expired' }],
+} satisfies InviteRedemptionFixture;
+
+export const INVITE_AUTH_DENIAL_FIXTURE = {
+  unknown_invite: 'This invite is not valid for this host.',
+  invite_expired: 'This invite has expired. Ask the host for a new one.',
+  invite_revoked: 'This invite was revoked. Ask the host for a new one.',
+  invite_already_redeemed: 'This invite was already used. Ask the host for a new one.',
+  invite_attempts_exhausted: 'Too many failed attempts with this invite. Ask the host for a new one.',
+  invite_secret_mismatch: 'The invite did not match. Check it and try again.',
+  profile_mismatch: 'This invite requires a newer app version. Update and try again.',
+  malformed_request: 'The pairing request was malformed.',
+  credential_store_unavailable: 'The host could not store the credential. Ask for a new invite.',
+} satisfies Record<InviteDenialCode, string>;
