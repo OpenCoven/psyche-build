@@ -2695,9 +2695,9 @@ export async function collectSupportBundle(
   const collectionAuthorized = options.authority === CONTROL_PLANE_AUTHORITY;
   const boundedCollectors = collectors.slice(0, MAX_SUPPORT_COLLECTORS);
   const controller = new AbortController();
-  const forwardAbort = (): void => controller.abort(options.signal?.reason);
-  if (options.signal?.aborted) forwardAbort();
-  else options.signal?.addEventListener('abort', forwardAbort, { once: true });
+  const collectionSignal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
   const timeoutError = Object.assign(new Error('support bundle collection timed out'), { code: 'collection_timeout' });
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let rejectDeadline: ((reason?: unknown) => void) | undefined;
@@ -2709,8 +2709,8 @@ export async function collectSupportBundle(
     }, maxElapsedMs);
   });
   void deadline.catch(() => undefined);
-  const rejectOnAbort = (): void => rejectDeadline?.(controller.signal.reason ?? new Error('support bundle collection cancelled'));
-  controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+  const rejectOnAbort = (): void => rejectDeadline?.(collectionSignal.reason ?? new Error('support bundle collection cancelled'));
+  collectionSignal.addEventListener('abort', rejectOnAbort, { once: true });
   const merged: SupportBundleInput = { generatedAt: collectionAt, records: [], errors: [] };
   const trustedMergedFields = new Set<TrustedSupportField>();
   const recordCandidates: SupportRecord[] = [];
@@ -2792,7 +2792,7 @@ export async function collectSupportBundle(
       recoveryRequired: true,
     });
   }
-  if (controller.signal.aborted) {
+  if (collectionSignal.aborted) {
     appendError({
       collector: 'support-bundle',
       code: 'collection_cancelled',
@@ -2843,7 +2843,7 @@ export async function collectSupportBundle(
     await Promise.all(boundedCollectors.map(async (collector, index) => {
       const collectorName = collectorNames[index] ?? `collector-${index}`;
       try {
-        if (controller.signal.aborted) throw controller.signal.reason ?? new Error('collection cancelled');
+        if (collectionSignal.aborted) throw collectionSignal.reason ?? new Error('collection cancelled');
         const result = await Promise.race([
           deadline,
           Promise.resolve().then(async () => {
@@ -2851,7 +2851,7 @@ export async function collectSupportBundle(
               controller.abort(timeoutError);
               throw timeoutError;
             }
-            const collectedResult = collector.collect(controller.signal);
+            const collectedResult = collector.collect(collectionSignal);
             if (Date.now() >= deadlineAt) {
               controller.abort(timeoutError);
               throw timeoutError;
@@ -2872,7 +2872,7 @@ export async function collectSupportBundle(
         ]);
         collected.push({ index, name: collectorName, result });
       } catch (error) {
-        const timedOut = controller.signal.aborted;
+        const timedOut = collectionSignal.aborted;
         const invalidCollector = error instanceof Error
           && (error as Error & { code?: unknown }).code === 'collection_invalid_output';
         collected.push({
@@ -2892,14 +2892,13 @@ export async function collectSupportBundle(
     }));
   } finally {
     if (timeout) clearTimeout(timeout);
-    controller.signal.removeEventListener('abort', rejectOnAbort);
-    options.signal?.removeEventListener('abort', forwardAbort);
+    collectionSignal.removeEventListener('abort', rejectOnAbort);
   }
   const normalizationTimedOut = (): boolean => Date.now() >= deadlineAt;
-  const normalizationInterrupted = (): boolean => controller.signal.aborted || normalizationTimedOut();
+  const normalizationInterrupted = (): boolean => collectionSignal.aborted || normalizationTimedOut();
   const normalizationError = (): SupportCollectionError => ({
     collector: 'support-bundle',
-    code: controller.signal.aborted && !normalizationTimedOut() ? 'normalization_cancelled' : 'normalization_timeout',
+    code: collectionSignal.aborted && !normalizationTimedOut() ? 'normalization_cancelled' : 'normalization_timeout',
     at: collectionAt,
     recoveryRequired: true,
   });

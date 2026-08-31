@@ -657,6 +657,31 @@ describe('support bundle v1', () => {
     expect(roundTripped.truncation).toEqual(bundle.truncation);
   });
 
+  it('keeps caller cancellation connected while collector results are normalized', async () => {
+    const cancelled = new AbortController();
+    const result: Record<string, unknown> = {};
+    Object.defineProperty(result, 'lifecycle', {
+      enumerable: true,
+      get() {
+        cancelled.abort();
+        return { state: 'ready' };
+      },
+    });
+
+    const bundle = await collectSupportBundle([{
+      name: 'abort-during-normalization',
+      collect: async () => result,
+    }], {
+      signal: cancelled.signal,
+      now: () => 1_767_225_600_000,
+    });
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'normalization_cancelled', recoveryRequired: true }),
+    ]));
+  });
+
   it('selects interrupted recovery errors independently of collector completion order', async () => {
     const names = ['alpha', 'beta', 'gamma', 'zeta', 'a', 'b'];
     const run = async (reverseCompletion: boolean) => {
