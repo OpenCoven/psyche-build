@@ -595,6 +595,29 @@ describe("redemption", () => {
     expect(harness.issued).toHaveLength(0);
   });
 
+  it("fails closed when credential persistence is not configured", async () => {
+    const store = new InviteStore({
+      hostId: HOST_ID,
+      hostFingerprint: HOST_FINGERPRINT,
+      now: () => T0,
+      random: fixedRandom(41),
+    });
+    const issued = store.issue({
+      hostName: "No credential store",
+      endpoints: [{ kind: "tcp", host: "192.168.1.10", port: 47123 }],
+    });
+    if (!issued.ok) throw new Error("expected invite issuance");
+
+    await expect(store.redeem(redeemRequest(issued.invite.payload))).resolves.toEqual({
+      ok: false,
+      code: "credential_store_unavailable",
+    });
+    await expect(store.redeem(redeemRequest(issued.invite.payload))).resolves.toEqual({
+      ok: false,
+      code: "invite_already_redeemed",
+    });
+  });
+
   it("rejects malformed requests before touching records", async () => {
     const harness = makeStore();
     const { payload } = issue(harness);

@@ -494,7 +494,10 @@ export class InviteStore {
     }
     // Consume first: from here on the invite can never return to pending.
     record.status = "redeemed";
-    const issue = this.deps.issueCredential ?? defaultIssueCredential;
+    const issue = this.deps.issueCredential;
+    if (!issue) {
+      return { ok: false, code: "credential_store_unavailable" };
+    }
     try {
       const credential = await issue(request);
       return { ok: true, credential };
@@ -574,17 +577,6 @@ export class InviteStore {
     }
     return this.records.size < MAX_STORED_INVITES;
   }
-}
-
-function defaultIssueCredential(request: RedemptionRequest): Promise<IssuedCredential> {
-  // Production wiring (slice 2) passes `TokenStore.issue` here. The default
-  // exists so the reference logic is runnable and testable standalone.
-  return Promise.resolve({
-    token: randomBytes(32).toString("hex"),
-    clientId: request.clientId,
-    clientName: request.clientName,
-    pairedAt: new Date().toISOString(),
-  });
 }
 
 // ---------------------------------------------------------------------------
