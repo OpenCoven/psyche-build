@@ -371,9 +371,19 @@ private final class ReadinessBoundaryRecorder: @unchecked Sendable {
     private var commitFailure: (any Error)?
     private var validationFailure: (any Error)?
     private var applyFailure: (any Error)?
+    private var storedHostID: String?
+    private var workspaceSequence: UInt64?
 
     var calls: [String] {
         lock.withLock { callLog }
+    }
+
+    var committedHostID: String? {
+        lock.withLock { storedHostID }
+    }
+
+    var appliedWorkspaceSequence: UInt64? {
+        lock.withLock { workspaceSequence }
     }
 
     func setCommitFailure(_ error: (any Error)?) {
@@ -393,6 +403,7 @@ private final class ReadinessBoundaryRecorder: @unchecked Sendable {
         if let commitFailure {
             throw commitFailure
         }
+        lock.withLock { storedHostID = host.serverID }
     }
 
     func validateSnapshot(_ candidate: HostReadinessSnapshotCandidate) throws {
@@ -407,6 +418,35 @@ private final class ReadinessBoundaryRecorder: @unchecked Sendable {
         if let applyFailure {
             throw applyFailure
         }
+        lock.withLock { workspaceSequence = candidate.sequence }
+    }
+}
+
+private actor ReadinessBoundaryGate {
+    private var entered = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        entered = true
+        let waiters = entryWaiters
+        entryWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 
@@ -674,14 +714,18 @@ final class HostReadinessMachineTests: XCTestCase {
         HostReadinessMachine(
             committedHost: committedHost,
             adapters: HostReadinessAdapters(
-                commitHostIdentity: { host in
-                    try recorder.commitHostIdentity(host)
+                prepareHostIdentity: { host in
+                    HostReadinessPublication {
+                        try recorder.commitHostIdentity(host)
+                    }
                 },
                 validateSnapshot: { candidate in
                     try recorder.validateSnapshot(candidate)
                 },
-                applyWorkspace: { candidate in
-                    try recorder.applyWorkspace(candidate)
+                prepareWorkspace: { candidate in
+                    HostReadinessPublication {
+                        try recorder.applyWorkspace(candidate)
+                    }
                 }
             ),
             now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
@@ -994,6 +1038,7 @@ final class HostReadinessMachineTests: XCTestCase {
         } catch let error as HostReadinessError {
             XCTAssertEqual(error, .supersededFlow)
         }
+
         do {
             try await machine.synchronizeWorkspace(makeCandidate(sequence: 9), for: superseded)
             XCTFail("A superseded flow must not be able to apply a snapshot")
@@ -1009,6 +1054,152 @@ final class HostReadinessMachineTests: XCTestCase {
             recorder.calls,
             ["commit:old-host", "validate:5", "apply:5", "commit:new-host"],
             "only the owning flow ever crosses the commit boundary"
+        )
+    }
+
+    func testAStaleCommitCannotOverwriteANewerAuthoritativeHost() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let staleCommitGate = ReadinessBoundaryGate()
+        let machine = HostReadinessMachine(
+            adapters: HostReadinessAdapters(
+                prepareHostIdentity: { host in
+                    if host.serverID == "stale-host" {
+                        await staleCommitGate.suspend()
+                    }
+                    return HostReadinessPublication {
+                        try recorder.commitHostIdentity(host)
+                    }
+                },
+                validateSnapshot: { candidate in
+                    try recorder.validateSnapshot(candidate)
+                },
+                prepareWorkspace: { candidate in
+                    HostReadinessPublication {
+                        try recorder.applyWorkspace(candidate)
+                    }
+                }
+            ),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+
+        let staleFlow = try await machine.beginPairing(expectedServerID: "stale-host")
+        _ = try await machine.markAuthenticated(for: staleFlow)
+        let staleHost = makeHost(serverID: "stale-host")
+        let staleCommit = Task {
+            try await machine.commitHostIdentity(staleHost, for: staleFlow)
+        }
+        await staleCommitGate.waitUntilEntered()
+
+        _ = try await machine.revoke(reason: "Credential revoked")
+        _ = try await machine.beginDiscovery()
+        let freshFlow = try await machine.beginPairing(expectedServerID: "fresh-host")
+        _ = try await machine.markAuthenticated(for: freshFlow)
+        let freshHost = makeHost(serverID: "fresh-host", clientID: "client-fresh")
+        try await machine.commitHostIdentity(freshHost, for: freshFlow)
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
+
+        await staleCommitGate.release()
+        do {
+            try await staleCommit.value
+            XCTFail("The stale commit must be rejected after revocation and replacement")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(error, .supersededFlow)
+        }
+
+        let state = await machine.state
+        let committedHost = await machine.committedHost
+        XCTAssertEqual(state, .ready)
+        XCTAssertEqual(committedHost, freshHost)
+        XCTAssertEqual(
+            recorder.committedHostID,
+            "fresh-host",
+            "a stale async commit must never overwrite the newer durable authority"
+        )
+    }
+
+    func testAStaleWorkspaceApplyCannotOverwriteANewerAuthoritativeWorkspace() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let staleApplyGate = ReadinessBoundaryGate()
+        let machine = HostReadinessMachine(
+            adapters: HostReadinessAdapters(
+                prepareHostIdentity: { host in
+                    HostReadinessPublication {
+                        try recorder.commitHostIdentity(host)
+                    }
+                },
+                validateSnapshot: { candidate in
+                    try recorder.validateSnapshot(candidate)
+                },
+                prepareWorkspace: { candidate in
+                    if candidate.sequence == 7 {
+                        await staleApplyGate.suspend()
+                    }
+                    return HostReadinessPublication {
+                        try recorder.applyWorkspace(candidate)
+                    }
+                }
+            ),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+
+        let staleFlow = try await machine.beginPairing(expectedServerID: "stale-host")
+        _ = try await machine.markAuthenticated(for: staleFlow)
+        try await machine.commitHostIdentity(makeHost(serverID: "stale-host"), for: staleFlow)
+        let staleCandidate = makeCandidate(sequence: 7)
+        let staleApply = Task {
+            try await machine.synchronizeWorkspace(staleCandidate, for: staleFlow)
+        }
+        await staleApplyGate.waitUntilEntered()
+
+        _ = try await machine.revoke(reason: "Credential revoked")
+        _ = try await machine.beginDiscovery()
+        let freshFlow = try await machine.beginPairing(expectedServerID: "fresh-host")
+        _ = try await machine.markAuthenticated(for: freshFlow)
+        try await machine.commitHostIdentity(
+            makeHost(serverID: "fresh-host", clientID: "client-fresh"),
+            for: freshFlow
+        )
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
+
+        await staleApplyGate.release()
+        do {
+            try await staleApply.value
+            XCTFail("The stale apply must be rejected after revocation and replacement")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(error, .supersededFlow)
+        }
+
+        let state = await machine.state
+        XCTAssertEqual(state, .ready)
+        XCTAssertEqual(
+            recorder.appliedWorkspaceSequence,
+            8,
+            "a stale async apply must never overwrite the newer authoritative workspace"
+        )
+    }
+
+    func testAnAtomicPublicationFailureDoesNotPublishOrAdvanceReadiness() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let machine = makeMachine(recorder: recorder)
+        let host = makeHost(serverID: "new-host")
+        let flow = try await machine.beginPairing(expectedServerID: host.serverID)
+        _ = try await machine.markAuthenticated(for: flow)
+
+        recorder.setCommitFailure(ReadinessBoundaryError.commitFailed)
+        do {
+            try await machine.commitHostIdentity(host, for: flow)
+            XCTFail("A failed atomic host publication must fail the flow")
+        } catch {
+            // Expected.
+        }
+
+        let state = await machine.state
+        let committedHost = await machine.committedHost
+        XCTAssertEqual(state, .unknown)
+        XCTAssertNil(committedHost)
+        XCTAssertNil(
+            recorder.committedHostID,
+            "a throwing publication must fail closed without durable authority"
         )
     }
 

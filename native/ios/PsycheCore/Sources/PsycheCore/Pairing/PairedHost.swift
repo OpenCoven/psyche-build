@@ -308,32 +308,49 @@ public enum HostReadinessError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
+/// A prepared externally visible state change. Preparation may suspend, but
+/// publication cannot: the operation must synchronously perform one atomic,
+/// all-or-nothing mutation or throw without changing externally visible state.
+///
+/// The readiness actor invokes the operation only after rechecking flow
+/// ownership, then updates its matching internal state without yielding. This
+/// makes the external publication and readiness transition one serialized
+/// critical section with respect to revocation and replacement flows.
+public struct HostReadinessPublication: Sendable {
+    private let operation: @Sendable () throws -> Void
+
+    public init(_ operation: @escaping @Sendable () throws -> Void) {
+        self.operation = operation
+    }
+
+    fileprivate func publish() throws {
+        try operation()
+    }
+}
+
 /// The boundaries a readiness flow crosses, bound to their concrete
-/// implementations at composition time. `commitHostIdentity` must run to
-/// completion — secure-store write included — before `validateSnapshot` and
-/// `applyWorkspace` may run at all; that ordering is what makes a newly
-/// fetched workspace unable to become authoritative when authentication,
-/// host persistence, snapshot validation, or workspace application fails.
+/// implementations at composition time. Async adapters may prepare a
+/// publication but must not mutate durable or visible authoritative state.
+/// Their returned `HostReadinessPublication` performs the final mutation
+/// synchronously and atomically after the machine revalidates flow ownership.
 public struct HostReadinessAdapters: Sendable {
-    /// Persists the authoritative paired-host identity and selected-host
-    /// state. Throwing here is the secure-store boundary: the snapshot is
-    /// never applied afterward.
-    public let commitHostIdentity: @Sendable (PairedHost) async throws -> Void
+    /// Prepares an atomic secure-store publication for the authoritative
+    /// paired-host identity and selected-host state.
+    public let prepareHostIdentity: @Sendable (PairedHost) async throws -> HostReadinessPublication
     /// The decode/revision boundary. Runs after the commit succeeded and
     /// before anything touches the workspace.
     public let validateSnapshot: @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
-    /// Applies an already-validated snapshot as authoritative. Runs only
-    /// after the commit and the validation both succeeded.
-    public let applyWorkspace: @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
+    /// Prepares an atomic publication of an already-validated workspace.
+    public let prepareWorkspace: @Sendable (HostReadinessSnapshotCandidate) async throws -> HostReadinessPublication
 
     public init(
-        commitHostIdentity: @escaping @Sendable (PairedHost) async throws -> Void,
+        prepareHostIdentity: @escaping @Sendable (PairedHost) async throws -> HostReadinessPublication,
         validateSnapshot: @escaping @Sendable (HostReadinessSnapshotCandidate) async throws -> Void,
-        applyWorkspace: @escaping @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
+        prepareWorkspace: @escaping @Sendable (HostReadinessSnapshotCandidate) async throws -> HostReadinessPublication
     ) {
-        self.commitHostIdentity = commitHostIdentity
+        self.prepareHostIdentity = prepareHostIdentity
         self.validateSnapshot = validateSnapshot
-        self.applyWorkspace = applyWorkspace
+        self.prepareWorkspace = prepareWorkspace
     }
 }
 
@@ -433,20 +450,24 @@ public actor HostReadinessMachine {
                 actual: host.serverID
             )
         }
+        let publication: HostReadinessPublication
         do {
-            try await adapters.commitHostIdentity(host)
+            publication = try await adapters.prepareHostIdentity(host)
         } catch {
             _ = try rollback(.secureStore, reason: error.localizedDescription, for: flow)
             throw error
         }
-        // The commit crossed the secure-store boundary. From here the
-        // machine's committed authority is this host, and nothing after this
-        // point may report success unless it actually succeeds.
         guard activeFlow == flow, state == .authenticating else {
             throw HostReadinessError.supersededFlow
         }
-        committedHost = host
-        _ = try apply(.hostCommitSucceeded)
+        do {
+            try publication.publish()
+            committedHost = host
+            _ = try apply(.hostCommitSucceeded)
+        } catch {
+            _ = try rollback(.secureStore, reason: error.localizedDescription, for: flow)
+            throw error
+        }
     }
 
     /// Takes an already-fetched snapshot candidate through the remaining
@@ -476,8 +497,9 @@ public actor HostReadinessMachine {
             throw HostReadinessError.supersededFlow
         }
 
+        let publication: HostReadinessPublication
         do {
-            try await adapters.applyWorkspace(candidate)
+            publication = try await adapters.prepareWorkspace(candidate)
         } catch {
             _ = try rollback(.workspaceApply, reason: error.localizedDescription, for: flow)
             throw error
@@ -487,13 +509,19 @@ public actor HostReadinessMachine {
             throw HostReadinessError.supersededFlow
         }
 
-        _ = try apply(.workspaceAccepted)
-        lastFailure = nil
-        activeFlow = nil
-        presentation = .live(
-            hostID: committedHost?.serverID ?? "",
-            confirmedAt: now()
-        )
+        do {
+            try publication.publish()
+            _ = try apply(.workspaceAccepted)
+            lastFailure = nil
+            activeFlow = nil
+            presentation = .live(
+                hostID: committedHost?.serverID ?? "",
+                confirmedAt: now()
+            )
+        } catch {
+            _ = try rollback(.workspaceApply, reason: error.localizedDescription, for: flow)
+            throw error
+        }
     }
 
     /// The active flow failed at one boundary. Rolls the machine back
