@@ -9,10 +9,11 @@ import type {
 } from './editor/types.js';
 
 /**
- * Versioned, fail-closed loader for the shared Vim v1 fixture set shipped in
- * `fixtures/v1/`. Desktop, web, Ink, and iOS adapters replay the same traces
- * through their platform seam, so every adapter consumes documents parsed by
- * this module: one format, one version, strict validation, no silent drift.
+ * Versioned, fail-closed loader for the shared Vim v1 fixture set owned by
+ * `protocol-fixtures/vim/v1/`. TypeScript adapters consume documents parsed by
+ * this module; non-TypeScript adapters mirror the same schema and replay the
+ * same traces through their platform seam: one format, one version, strict
+ * validation, no silent drift.
  *
  * The module is intentionally platform-pure (no node/browser imports): it
  * parses and validates in-memory documents. Hosts read the JSON bytes with
@@ -20,7 +21,7 @@ import type {
  * decoders elsewhere) and hand the text to `parseVimFixtureDocument`.
  */
 
-/** The single shared fixture version. Same value as every `fixtures/v1/*.json` document. */
+/** The single shared fixture version. Same value as every canonical Vim v1 document. */
 export const VIM_FIXTURE_VERSION = 'vim/v1' as const;
 
 export type VimFixtureVersion = typeof VIM_FIXTURE_VERSION;
@@ -106,7 +107,7 @@ export interface VimEditorFixtureTrace {
   readonly expected: VimEditorFixtureExpected;
 }
 
-/** A `fixtures/v1/*.json` document covering the editor state machine. */
+/** A canonical Vim v1 document covering the editor state machine. */
 export interface VimEditorFixtureDocument {
   readonly version: VimFixtureVersion;
   readonly kind: 'editor';
@@ -119,6 +120,9 @@ export type ParsedVimFixtureDocument =
   | { readonly kind: 'editor'; readonly document: VimEditorFixtureDocument };
 
 const chromeTraceFields = new Set(['id', 'context', 'sequence', 'disposition', 'expected', 'actions']);
+const chromeTokenFields = new Set(['key', 'ctrl', 'alt', 'shift', 'meta']);
+const chromeExpectedFields = new Set(['context', 'pending']);
+const chromeDirectionalActionTypes = new Set(['focus.move', 'pane.focus', 'pane.resize']);
 
 function invalid(origin: string, message: string): never {
   throw new TypeError(`Invalid Vim fixture${origin ? ` (${origin})` : ''}: ${message}`);
@@ -126,6 +130,28 @@ function invalid(origin: string, message: string): never {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function exceedsUtf8ByteLength(value: string, maximum: number): boolean {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) bytes += 1;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > maximum) return true;
+  }
+  return false;
 }
 
 function rejectUnknownFields(
@@ -412,8 +438,12 @@ export function validateEditorFixtures(document: unknown): asserts document is V
  * schema. Unknown versions and malformed JSON fail closed with a `TypeError`.
  */
 export function parseVimFixtureDocument(source: string, origin = ''): ParsedVimFixtureDocument {
-  if (typeof source !== 'string' || source.length === 0 || source.length > MAX_FIXTURE_SOURCE_LENGTH) {
-    invalid(origin, `source must be a non-empty string of up to ${MAX_FIXTURE_SOURCE_LENGTH} characters`);
+  if (
+    typeof source !== 'string'
+    || source.length === 0
+    || exceedsUtf8ByteLength(source, MAX_FIXTURE_SOURCE_LENGTH)
+  ) {
+    invalid(origin, `source must be a non-empty UTF-8 string of up to ${MAX_FIXTURE_SOURCE_LENGTH} bytes`);
   }
   let parsed: unknown;
   try {
@@ -428,12 +458,29 @@ export function parseVimFixtureDocument(source: string, origin = ''): ParsedVimF
   }
   if (parsed.kind === undefined) {
     // Chrome (input contract) documents reuse the core validator, plus a
-    // document-level strict field check so drift fails closed here too.
+    // strict shape check at every nested level so drift fails closed here too.
     rejectUnknownFields(parsed, new Set(['version', 'traces']), origin, 'document');
     if (!Array.isArray(parsed.traces)) invalid(origin, 'document must contain traces');
     for (const trace of parsed.traces) {
       if (!isPlainObject(trace)) invalid(origin, 'trace must be an object');
       rejectUnknownFields(trace, chromeTraceFields, origin, 'trace');
+      if (Array.isArray(trace.sequence)) {
+        for (const token of trace.sequence) {
+          if (isPlainObject(token)) rejectUnknownFields(token, chromeTokenFields, origin, 'trace token');
+        }
+      }
+      if (isPlainObject(trace.expected)) {
+        rejectUnknownFields(trace.expected, chromeExpectedFields, origin, 'trace expected state');
+      }
+      if (Array.isArray(trace.actions)) {
+        for (const action of trace.actions) {
+          if (!isPlainObject(action)) continue;
+          const allowed = typeof action.type === 'string' && chromeDirectionalActionTypes.has(action.type)
+            ? new Set(['type', 'direction'])
+            : new Set(['type']);
+          rejectUnknownFields(action, allowed, origin, 'trace action');
+        }
+      }
     }
     validateVimFixtures(parsed);
     return { kind: 'chrome', document: parsed as VimFixtureDocument };

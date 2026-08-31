@@ -1,18 +1,19 @@
 # Vim v1 shared fixture set
 
 Versioned, deterministic conformance fixtures for the shared Vim semantic core
-([`@opencoven/psyche-vim-core`](../../src/index.ts)). Desktop, web (browser),
-Ink TUI, and iOS adapters replay the **same traces** through their own platform
-seam and must produce the same semantic output for each one. This is the
-machine-readable half of the conformance requirement `fixture-conformance` in
-[`docs/vim/ACCEPTANCE-MATRIX.md`](../../../docs/vim/ACCEPTANCE-MATRIX.md)
-(#227 owns that acceptance contract; this directory owns the fixture data).
+([`@opencoven/psyche-vim-core`](../../../packages/vim-core/src/index.ts)).
+Desktop, web (browser), Ink TUI, and iOS adapters replay the **same traces**
+from this protocol-owned directory through their own platform seam and must
+produce the same semantic output for each one. No package or platform may keep
+a second canonical copy. This is the machine-readable half of the conformance
+requirement `fixture-conformance` in the planned acceptance contract owned by
+#227; this directory owns the fixture data.
 
 ## Documents
 
 | File | Schema | Covers |
 | --- | --- | --- |
-| `chrome-navigation.json` | Chrome input contract (`version` + `traces`, no `kind` field) | F6 trigger, `Esc` exit, focus movement (`h`/`j`/`k`/`l`, `g g`, `G`, `Enter`), `Ctrl-w` pane commands, chrome search, target close/refresh, help, disabled passthrough, unsupported-key consumption |
+| `chrome.json` | Chrome input contract (`version` + `traces`, no `kind` field) | F6 trigger, `Esc` exit, focus movement (`h`/`j`/`k`/`l`, `g g`, `G`, `Enter`), `Ctrl-w` pane commands, chrome search, target close/refresh, help, disabled passthrough, unsupported-key consumption |
 | `motions.json` | Editor contract (`kind: "editor"`) | Character/word/line motions, counts, `f`/`F`/`t`/`T`, `%`, paragraph `{`/`}`, error consumption for failed motions and unsupported modified keys |
 | `edits.json` | Editor contract | `dw`, `ciw`, `yy`, `p`, `o`, insert/replace sessions with counts, visual character/line/block deletes, `J`, `>>`, `g~w`, undo through the document port, `.` repeat, committed IME text (Unicode) |
 | `search.json` | Editor contract | `/` and `?` with `n`/`N` cycling, `*` whole-word search, error cases (`No previous search`, unsupported/invalid patterns) |
@@ -22,20 +23,21 @@ machine-readable half of the conformance requirement `fixture-conformance` in
 
 Every document declares `"version": "vim/v1"` — the single shared fixture
 version defined by `VIM_FIXTURE_VERSION` in
-[`src/fixtureLoader.ts`](../../src/fixtureLoader.ts) and mirrored by
+[`packages/vim-core/src/fixtureLoader.ts`](../../../packages/vim-core/src/fixtureLoader.ts) and mirrored by
 `VIM_ACCEPTANCE_FIXTURE_VERSION` in the #227 acceptance manifest.
 
 ### Chrome documents (input contract)
 
 The exact schema validated by `validateVimFixtures` in
-[`src/fixtures.ts`](../../src/fixtures.ts): a bounded list of traces, each with
-a starting `context`, a `sequence` of normalized key tokens, and the expected
-`disposition`, `context`/`pending` state, and semantic `actions`.
+[`packages/vim-core/src/fixtures.ts`](../../../packages/vim-core/src/fixtures.ts):
+a bounded list of traces, each with a starting `context`, a `sequence` of
+normalized key tokens, and the expected `disposition`, `context`/`pending`
+state, and semantic `actions`.
 
 ### Editor documents (editing contract)
 
 Declared with `"kind": "editor"` and validated by `validateEditorFixtures` in
-[`src/fixtureLoader.ts`](../../src/fixtureLoader.ts):
+[`packages/vim-core/src/fixtureLoader.ts`](../../../packages/vim-core/src/fixtureLoader.ts):
 
 ```jsonc
 {
@@ -109,7 +111,7 @@ reference traces unambiguously.
   editing an existing trace's inputs or expectations is a contract change.
 - A change that alters what any existing trace expects (machine semantics,
   action shape, error wording) must **bump the version** in one reviewed
-  change: move this directory to `fixtures/v2/`, update
+  change: create `protocol-fixtures/vim/v2/`, update
   `VIM_FIXTURE_VERSION`, the core validators, the #227
   `VIM_ACCEPTANCE_FIXTURE_VERSION` constant, and every platform manifest
   together. Per-platform version drift is always a defect, never a migration

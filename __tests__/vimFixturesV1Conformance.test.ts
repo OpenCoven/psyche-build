@@ -16,7 +16,7 @@ import {
 } from '@opencoven/psyche-vim-core';
 import { describe, expect, it } from 'vitest';
 
-const fixtureDirectory = join(process.cwd(), 'packages/vim-core/fixtures/v1');
+const fixtureDirectory = join(process.cwd(), 'protocol-fixtures/vim/v1');
 const fixtureFiles = readdirSync(fixtureDirectory).filter((name) => name.endsWith('.json')).sort();
 
 function readDocument(name: string): string {

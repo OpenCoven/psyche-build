@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   VIM_FIXTURE_VERSION,
@@ -10,7 +10,8 @@ import {
 } from '@opencoven/psyche-vim-core';
 import { describe, expect, it } from 'vitest';
 
-const fixtureDirectory = join(process.cwd(), 'packages/vim-core/fixtures/v1');
+const fixtureDirectory = join(process.cwd(), 'protocol-fixtures/vim/v1');
+const legacyFixtureDirectory = join(process.cwd(), 'packages/vim-core/fixtures/v1');
 const fixtureFiles = readdirSync(fixtureDirectory).filter((name) => name.endsWith('.json')).sort();
 
 function readDocument(name: string): string {
@@ -29,10 +30,23 @@ function firstEditorDocument(): { name: string; document: VimEditorFixtureDocume
   throw new Error('no editor fixture document found');
 }
 
-describe('Vim v1 fixture set (packages/vim-core/fixtures/v1)', () => {
+describe('Vim v1 fixture set (protocol-fixtures/vim/v1)', () => {
+  it('uses the canonical protocol fixture root without a package-local copy', () => {
+    expect(fixtureFiles).toEqual([
+      'chrome.json',
+      'edits.json',
+      'ex-commands.json',
+      'motions.json',
+      'search.json',
+    ]);
+    expect(existsSync(legacyFixtureDirectory)
+      ? readdirSync(legacyFixtureDirectory).filter((name) => name.endsWith('.json') || name === 'README.md')
+      : []).toEqual([]);
+  });
+
   it('ships at least one chrome and one editor fixture document', () => {
     const parsed = parseAll();
-    expect(fixtureFiles).toContain('chrome-navigation.json');
+    expect(fixtureFiles).toContain('chrome.json');
     expect(fixtureFiles).toContain('motions.json');
     expect(fixtureFiles).toContain('edits.json');
     expect(fixtureFiles).toContain('search.json');
@@ -56,8 +70,19 @@ describe('Vim v1 fixture set (packages/vim-core/fixtures/v1)', () => {
 
   it('rejects malformed JSON sources', () => {
     expect(() => parseVimFixtureDocument('{', 'broken.json')).toThrow(/not valid JSON/i);
-    expect(() => parseVimFixtureDocument('', 'empty.json')).toThrow(/non-empty string/i);
+    expect(() => parseVimFixtureDocument('', 'empty.json')).toThrow(/non-empty.*string/i);
     expect(() => parseVimFixtureDocument('[]', 'array.json')).toThrow(/JSON object/i);
+  });
+
+  it('bounds fixture source bytes before parsing multibyte JSON', () => {
+    const oversized = JSON.stringify({
+      version: 'vim/v1',
+      traces: [],
+      padding: 'é'.repeat(600_000),
+    });
+    expect(oversized.length).toBeLessThan(1024 * 1024);
+    expect(Buffer.byteLength(oversized, 'utf8')).toBeGreaterThan(1024 * 1024);
+    expect(() => parseVimFixtureDocument(oversized, 'oversized.json')).toThrow(/source must be.*1048576 bytes/i);
   });
 
   it('fails closed on unsupported fixture versions', () => {
@@ -151,15 +176,28 @@ describe('Vim v1 fixture set (packages/vim-core/fixtures/v1)', () => {
   });
 
   it('rejects chrome documents that declare extra fields or drift their traces', () => {
-    const chrome = parseVimFixtureDocument(readDocument('chrome-navigation.json'), 'chrome-navigation.json');
+    const chrome = parseVimFixtureDocument(readDocument('chrome.json'), 'chrome.json');
     expect(chrome.kind).toBe('chrome');
-    const source = JSON.parse(readDocument('chrome-navigation.json')) as Record<string, unknown>;
+    const source = JSON.parse(readDocument('chrome.json')) as Record<string, unknown>;
+    const trace = (source.traces as Record<string, unknown>[])[0]!;
 
     expect(() => parseVimFixtureDocument(JSON.stringify({ ...source, kind: 'terminal' }), 'chrome.json')).toThrow(/unsupported kind/i);
     expect(() => parseVimFixtureDocument(JSON.stringify({ ...source, owner: 'x' }), 'chrome.json')).toThrow(/unknown field owner/i);
     expect(() => parseVimFixtureDocument(JSON.stringify({
       ...source,
-      traces: [{ ...(source.traces as Record<string, unknown>[])[0], unknown: 1 }],
+      traces: [{ ...trace, unknown: 1 }],
+    }), 'chrome.json')).toThrow(/unknown field unknown/i);
+    expect(() => parseVimFixtureDocument(JSON.stringify({
+      ...source,
+      traces: [{ ...trace, sequence: [{ ...(trace.sequence as Record<string, unknown>[])[0], unknown: 1 }] }],
+    }), 'chrome.json')).toThrow(/unknown field unknown/i);
+    expect(() => parseVimFixtureDocument(JSON.stringify({
+      ...source,
+      traces: [{ ...trace, expected: { ...(trace.expected as Record<string, unknown>), unknown: 1 } }],
+    }), 'chrome.json')).toThrow(/unknown field unknown/i);
+    expect(() => parseVimFixtureDocument(JSON.stringify({
+      ...source,
+      traces: [{ ...trace, actions: [{ ...(trace.actions as Record<string, unknown>[])[0], unknown: 1 }] }],
     }), 'chrome.json')).toThrow(/unknown field unknown/i);
   });
 });
