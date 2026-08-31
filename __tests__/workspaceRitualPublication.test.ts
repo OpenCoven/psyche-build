@@ -1,4 +1,4 @@
-import {
+import fs, {
   chmodSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildRitualPublication,
@@ -380,6 +380,58 @@ describe('ritual publication', () => {
       } finally {
         rmSync(root, { recursive: true, force: true });
         rmSync(external, { recursive: true, force: true });
+      }
+    });
+
+    it('closes every ritual descriptor when post-open directory validation fails', () => {
+      const root = tempProjectWithRituals();
+      const ritualPath = path.join(root, '.psyche', 'rituals', 'project-standup.json');
+      const openedRitualDescriptors: number[] = [];
+      const closedDescriptors = new Set<number>();
+      let failPostOpenValidation = false;
+      const realOpenSync = fs.openSync.bind(fs);
+      const realLstatSync = fs.lstatSync.bind(fs);
+      const realCloseSync = fs.closeSync.bind(fs);
+      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation((
+        filePath,
+        flags,
+        mode,
+      ) => {
+        const descriptor = realOpenSync(filePath, flags, mode);
+        if (filePath === ritualPath) {
+          openedRitualDescriptors.push(descriptor);
+          failPostOpenValidation = true;
+        }
+        return descriptor;
+      });
+      const lstatSpy = vi.spyOn(fs, 'lstatSync').mockImplementation((filePath, options) => {
+        if (failPostOpenValidation) {
+          failPostOpenValidation = false;
+          throw Object.assign(new Error('directory replaced after ritual open'), {
+            code: 'ENOENT',
+          });
+        }
+        return realLstatSync(filePath, options);
+      });
+      const closeSpy = vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+        closedDescriptors.add(descriptor);
+        return realCloseSync(descriptor);
+      });
+
+      try {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const listing = readProjectRitualStore(root);
+          expect(listing.rituals).toEqual([]);
+        }
+        expect(openedRitualDescriptors).toHaveLength(8);
+        expect(openedRitualDescriptors.every((descriptor) => (
+          closedDescriptors.has(descriptor)
+        ))).toBe(true);
+      } finally {
+        closeSpy.mockRestore();
+        lstatSpy.mockRestore();
+        openSpy.mockRestore();
+        rmSync(root, { recursive: true, force: true });
       }
     });
 

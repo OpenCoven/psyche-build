@@ -641,7 +641,6 @@ function readBoundedUtf8File(
   try {
     assertRitualDirectoryChain(directoryChain);
     descriptor = fs.openSync(filePath, ritualFileReadFlags());
-    assertRitualDirectoryChain(directoryChain);
   } catch (error) {
     result.missing = isMissingError(error);
     result.denied = isPermissionError(error);
@@ -651,6 +650,7 @@ function readBoundedUtf8File(
   }
 
   try {
+    assertRitualDirectoryChain(directoryChain);
     const openedStats = fs.fstatSync(descriptor, { bigint: true });
     if (!openedStats.isFile()) {
       result.incompatible = true;
