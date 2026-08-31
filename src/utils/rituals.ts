@@ -14,6 +14,8 @@ export const MAX_PROJECT_RITUAL_FILES = 100;
 export const MAX_PROJECT_RITUAL_FILE_BYTES = 64 * 1024;
 export const MAX_PROJECT_RITUAL_STORE_BYTES = 512 * 1024;
 export const MAX_PROJECT_RITUAL_MANIFEST_BYTES = 16 * 1024;
+export const MAX_PROJECT_RITUAL_READ_BYTES =
+  MAX_PROJECT_RITUAL_STORE_BYTES + MAX_PROJECT_RITUAL_MANIFEST_BYTES;
 export const MAX_PUBLISHED_RITUAL_ID_BYTES = 128;
 export const MAX_PUBLISHED_RITUAL_NAME_BYTES = 256;
 export const MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES = 1024;
@@ -418,6 +420,8 @@ export interface RitualStoreListing {
   failed: boolean;
   /** The store exceeded its file-count, per-file, or aggregate byte limit. */
   limitExceeded: boolean;
+  /** Bytes actually read from accepted regular files. */
+  bytesRead: number;
 }
 
 export interface RitualManifestListing {
@@ -430,15 +434,21 @@ export interface RitualManifestListing {
   incompatible: boolean;
   /** The manifest exceeds its byte or identifier limit. */
   limitExceeded: boolean;
+  /** Bytes actually read from the accepted regular manifest file. */
+  bytesRead: number;
 }
 
-export function readProjectRitualStore(projectRoot: string): RitualStoreListing {
+export function readProjectRitualStore(
+  projectRoot: string,
+  maxStoreBytes: number = MAX_PROJECT_RITUAL_STORE_BYTES,
+): RitualStoreListing {
   const listing: RitualStoreListing = {
     rituals: [],
     incompatibleCount: 0,
     denied: false,
     failed: false,
     limitExceeded: false,
+    bytesRead: 0,
   };
   const dir = getProjectRitualsDir(projectRoot);
 
@@ -453,19 +463,26 @@ export function readProjectRitualStore(projectRoot: string): RitualStoreListing 
     return listing;
   }
 
+  const aggregateLimit = Math.min(
+    MAX_PROJECT_RITUAL_STORE_BYTES,
+    normalizeReadBudget(maxStoreBytes),
+  );
   let aggregateBytes = 0;
   for (const entry of directoryRead.entries) {
     const fileRead = readBoundedUtf8File(
       path.join(dir, entry),
       MAX_PROJECT_RITUAL_FILE_BYTES,
-      MAX_PROJECT_RITUAL_STORE_BYTES - aggregateBytes,
+      aggregateLimit - aggregateBytes,
     );
     aggregateBytes += fileRead.bytes;
+    listing.bytesRead = aggregateBytes;
     if (fileRead.content === undefined) {
       if (fileRead.denied) {
         listing.denied = true;
       } else if (fileRead.limitExceeded) {
         listing.limitExceeded = true;
+      } else if (fileRead.incompatible) {
+        listing.incompatibleCount += 1;
       } else {
         // A single unreadable entry must not mask the rest of the store, but
         // it does mean the listing is not a faithful read.
@@ -560,6 +577,7 @@ function readBoundedUtf8File(
   missing: boolean;
   denied: boolean;
   failed: boolean;
+  incompatible: boolean;
   limitExceeded: boolean;
   aggregateLimitExceeded: boolean;
 } {
@@ -568,6 +586,7 @@ function readBoundedUtf8File(
     missing: false,
     denied: false,
     failed: false,
+    incompatible: false,
     limitExceeded: false,
     aggregateLimitExceeded: false,
   } as {
@@ -576,39 +595,65 @@ function readBoundedUtf8File(
     missing: boolean;
     denied: boolean;
     failed: boolean;
+    incompatible: boolean;
     limitExceeded: boolean;
     aggregateLimitExceeded: boolean;
   };
   let descriptor: number;
   try {
-    descriptor = fs.openSync(filePath, 'r');
+    descriptor = fs.openSync(filePath, ritualFileReadFlags());
   } catch (error) {
     result.missing = isMissingError(error);
     result.denied = isPermissionError(error);
-    result.failed = !result.missing && !result.denied;
+    result.incompatible = isUnsafeRitualPathError(error);
+    result.failed = !result.missing && !result.denied && !result.incompatible;
     return result;
   }
 
-  const aggregateLimit = Math.max(0, aggregateBytesRemaining);
-  const readLimit = Math.min(maxFileBytes, aggregateLimit);
-  const buffer = Buffer.alloc(readLimit + 1);
   try {
-    while (result.bytes < buffer.length) {
+    const openedStats = fs.fstatSync(descriptor, { bigint: true });
+    if (!openedStats.isFile()) {
+      result.incompatible = true;
+      return result;
+    }
+    const aggregateLimit = Math.max(0, aggregateBytesRemaining);
+    if (
+      openedStats.size > BigInt(maxFileBytes)
+      || openedStats.size > BigInt(aggregateLimit)
+    ) {
+      result.limitExceeded = true;
+      result.aggregateLimitExceeded = openedStats.size > BigInt(aggregateLimit);
+      return result;
+    }
+    const expectedBytes = Number(openedStats.size);
+    const buffer = Buffer.alloc(expectedBytes);
+    while (result.bytes < expectedBytes) {
       const bytesRead = fs.readSync(
         descriptor,
         buffer,
         result.bytes,
-        buffer.length - result.bytes,
-        null,
+        expectedBytes - result.bytes,
+        result.bytes,
       );
-      if (bytesRead === 0) break;
+      if (bytesRead === 0) {
+        result.failed = true;
+        return result;
+      }
       result.bytes += bytesRead;
     }
-    result.limitExceeded = result.bytes > maxFileBytes || result.bytes > aggregateLimit;
-    result.aggregateLimitExceeded = result.bytes > aggregateLimit;
-    if (!result.limitExceeded) {
-      result.content = buffer.subarray(0, result.bytes).toString('utf8');
+    const currentStats = fs.fstatSync(descriptor, { bigint: true });
+    if (!currentStats.isFile()) {
+      result.incompatible = true;
+      return result;
     }
+    if (currentStats.size !== openedStats.size) {
+      result.limitExceeded = currentStats.size > BigInt(maxFileBytes)
+        || currentStats.size > BigInt(aggregateLimit);
+      result.aggregateLimitExceeded = currentStats.size > BigInt(aggregateLimit);
+      result.failed = !result.limitExceeded;
+      return result;
+    }
+    result.content = buffer.toString('utf8');
   } catch (error) {
     result.denied = isPermissionError(error);
     result.failed = !result.denied;
@@ -624,6 +669,22 @@ function readBoundedUtf8File(
   return result;
 }
 
+function normalizeReadBudget(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) return 0;
+  return value;
+}
+
+function ritualFileReadFlags(): number {
+  let flags = fs.constants.O_RDONLY;
+  if (process.platform !== 'win32') {
+    flags |= fs.constants.O_NONBLOCK;
+    if (typeof fs.constants.O_NOFOLLOW === 'number') {
+      flags |= fs.constants.O_NOFOLLOW;
+    }
+  }
+  return flags;
+}
+
 function isPermissionError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return code === 'EACCES' || code === 'EPERM';
@@ -631,6 +692,11 @@ function isPermissionError(error: unknown): boolean {
 
 function isMissingError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+}
+
+function isUnsafeRitualPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'ELOOP' || code === 'ENXIO' || code === 'ENODEV';
 }
 
 export function listAvailableRituals(projectRoot: string): RitualDefinition[] {
@@ -649,18 +715,26 @@ export function loadRitual(projectRoot: string, ritualId: string): RitualDefinit
     .find((ritual) => ritual.id === ritualId) || null;
 }
 
-export function readProjectRitualManifest(projectRoot: string): RitualManifestListing {
+export function readProjectRitualManifest(
+  projectRoot: string,
+  maxManifestBytes: number = MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+): RitualManifestListing {
   const manifestPath = getProjectRitualManifestPath(projectRoot);
+  const manifestLimit = Math.min(
+    MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+    normalizeReadBudget(maxManifestBytes),
+  );
   const fileRead = readBoundedUtf8File(
     manifestPath,
-    MAX_PROJECT_RITUAL_MANIFEST_BYTES,
-    MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+    manifestLimit,
+    manifestLimit,
   );
   const result: RitualManifestListing = {
     denied: fileRead.denied,
     failed: fileRead.failed,
-    incompatible: false,
+    incompatible: fileRead.incompatible,
     limitExceeded: fileRead.limitExceeded,
+    bytesRead: fileRead.bytes,
   };
   if (fileRead.missing || fileRead.content === undefined) {
     return result;

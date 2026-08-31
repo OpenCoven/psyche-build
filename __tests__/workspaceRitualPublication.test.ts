@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -268,6 +269,18 @@ describe('ritual publication', () => {
       }
     });
 
+    it('rejects a FIFO default ritual manifest without blocking', () => {
+      if (process.platform === 'win32') return;
+      const root = tempProjectWithRituals();
+      try {
+        execFileSync('mkfifo', [path.join(root, '.psyche', 'rituals.json')]);
+        const publication = readRitualPublicationInChild(root);
+        expect(publication.state).toBe('incompatible');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('propagates reader failures to the provider degradation seam', () => {
       expect(() => readProjectRitualPublication('/repo', {
         builtInRituals: () => [],
@@ -288,6 +301,7 @@ describe('ritual publication', () => {
         denied: false,
         failed: false,
         limitExceeded: false,
+        bytesRead: 0,
       });
     });
 
@@ -378,6 +392,19 @@ describe('ritual publication', () => {
       }
     });
 
+    it('rejects a FIFO ritual entry without blocking', () => {
+      if (process.platform === 'win32') return;
+      const root = tempProjectWithRituals();
+      try {
+        execFileSync('mkfifo', [path.join(root, '.psyche', 'rituals', 'special.json')]);
+        const listing = readRitualStoreInChild(root);
+        expect(listing.incompatibleCount).toBe(1);
+        expect(listing.failed).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('reports denied when the store directory is unreadable', () => {
       const root = tempProjectWithRituals();
       try {
@@ -421,6 +448,7 @@ function listing(
     denied: false,
     failed: false,
     limitExceeded: false,
+    bytesRead: 0,
     ...overrides,
   };
 }
@@ -431,7 +459,40 @@ function manifestListing() {
     failed: false,
     incompatible: false,
     limitExceeded: false,
+    bytesRead: 0,
   };
+}
+
+function readRitualStoreInChild(root: string): RitualStoreListing {
+  return runRitualReaderChild(
+    root,
+    "import { readProjectRitualStore } from './src/utils/rituals.ts';"
+      + "process.stdout.write(JSON.stringify(readProjectRitualStore(process.env.RITUAL_TEST_ROOT)));",
+  ) as RitualStoreListing;
+}
+
+function readRitualPublicationInChild(root: string): ReturnType<typeof readProjectRitualPublication> {
+  return runRitualReaderChild(
+    root,
+    "import { readProjectRitualPublication } from './src/workspace/ritualPublication.ts';"
+      + "process.stdout.write(JSON.stringify(readProjectRitualPublication(process.env.RITUAL_TEST_ROOT)));",
+  ) as ReturnType<typeof readProjectRitualPublication>;
+}
+
+function runRitualReaderChild(root: string, source: string): unknown {
+  const child = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '--eval', source],
+    {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, RITUAL_TEST_ROOT: root },
+      timeout: 15_000,
+    },
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status).toBe(0);
+  return JSON.parse(child.stdout);
 }
 
 function tempProjectWithRituals(): string {

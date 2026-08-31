@@ -15,10 +15,17 @@ import * as tuiSnapshotModule from '../src/workspace/tuiSnapshot.js';
 const {
   buildTuiWorkspaceSnapshot,
   createTuiWorkspaceProvider,
+  MAX_WORKSPACE_RITUAL_OUTPUT_BYTES,
+  MAX_WORKSPACE_RITUAL_PROJECT_READS,
+  MAX_WORKSPACE_RITUAL_READ_BYTES,
   TuiWorkspaceState,
 } = tuiSnapshotModule;
 
 type MutableWorkspaceSnapshot = ReturnType<typeof buildTuiWorkspaceSnapshot>;
+
+function pathSlug(value: string): string {
+  return value.replace(/[^a-z0-9]+/gi, '-');
+}
 
 function createTuiWorkspaceState(
   options?: { initialRevision?: number },
@@ -655,6 +662,120 @@ describe('TUI workspace snapshot adapter', () => {
       expect(unchanged).toBe(first);
       expect(changed.revision).toBe(2);
       expect(project(changed, '/repo/primary').rituals).toEqual(listings[1]);
+    });
+
+    it('limits ritual reads by deterministic workspace project order', async () => {
+      const sidebarProjects = Array.from(
+        { length: MAX_WORKSPACE_RITUAL_PROJECT_READS + 2 },
+        (_, index): SidebarProject => ({
+          projectRoot: `/repo/a-sidebar-${String(index).padStart(2, '0')}`,
+          projectName: `Sidebar ${String(index).padStart(2, '0')}`,
+        }),
+      );
+      const roots = ['/repo/z-primary', ...sidebarProjects.map((project) => project.projectRoot)];
+      const loadedRoots: string[] = [];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/z-primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => sidebarProjects,
+        worktreesByProjectRoot: () => new Map(
+          roots.map((root) => [root, [worktree(root, { isMain: true, branch: 'main' })]]),
+        ),
+        loadRituals: (projectRoot) => {
+          loadedRoots.push(projectRoot);
+          return { state: 'empty', rituals: [] };
+        },
+      });
+
+      const snapshot = await provider();
+      const budgetedRoots = snapshot.projects
+        .slice(0, MAX_WORKSPACE_RITUAL_PROJECT_READS)
+        .map((entry) => entry.root);
+
+      expect(loadedRoots).toEqual(budgetedRoots);
+      expect(snapshot.projects.slice(MAX_WORKSPACE_RITUAL_PROJECT_READS))
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            rituals: { state: 'limit-exceeded', rituals: [] },
+          }),
+        ]));
+    });
+
+    it('stops ritual reads when the workspace read-byte budget is exhausted', async () => {
+      const sidebarProjects = [
+        { projectRoot: '/repo/sidebar-a', projectName: 'Sidebar A' },
+        { projectRoot: '/repo/sidebar-b', projectName: 'Sidebar B' },
+      ];
+      const roots = ['/repo/primary', ...sidebarProjects.map((project) => project.projectRoot)];
+      const observedBudgets: Array<number | undefined> = [];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => sidebarProjects,
+        worktreesByProjectRoot: () => new Map(
+          roots.map((root) => [root, [worktree(root, { isMain: true, branch: 'main' })]]),
+        ),
+        loadRituals: (projectRoot, maxReadBytes) => {
+          observedBudgets.push(maxReadBytes);
+          return {
+            publication: {
+              state: 'available',
+              rituals: [{ id: projectRoot, displayName: projectRoot, scope: 'project' }],
+            },
+            readBytes: maxReadBytes ?? 0,
+          };
+        },
+      });
+
+      const snapshot = await provider();
+
+      expect(observedBudgets).toEqual([MAX_WORKSPACE_RITUAL_READ_BYTES]);
+      expect(snapshot.projects[0]!.rituals.state).toBe('available');
+      expect(snapshot.projects.slice(1).every(
+        (entry) => entry.rituals.state === 'limit-exceeded' && entry.rituals.rituals.length === 0,
+      )).toBe(true);
+    });
+
+    it('limits aggregate serialized ritual output across the workspace', async () => {
+      const sidebarProjects = Array.from({ length: 7 }, (_, index): SidebarProject => ({
+        projectRoot: `/repo/sidebar-${String(index).padStart(2, '0')}`,
+        projectName: `Sidebar ${String(index).padStart(2, '0')}`,
+      }));
+      const roots = ['/repo/primary', ...sidebarProjects.map((project) => project.projectRoot)];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => sidebarProjects,
+        worktreesByProjectRoot: () => new Map(
+          roots.map((root) => [root, [worktree(root, { isMain: true, branch: 'main' })]]),
+        ),
+        loadRituals: (projectRoot) => ({
+          state: 'available',
+          rituals: Array.from({ length: 50 }, (_, index) => ({
+            id: `${pathSlug(projectRoot)}-${index}`,
+            displayName: `Ritual ${index}`,
+            description: 'd'.repeat(1024),
+            scope: 'project' as const,
+          })),
+        }),
+      });
+
+      const snapshot = await provider();
+      const firstLimited = snapshot.projects.findIndex(
+        (entry) => entry.rituals.state === 'limit-exceeded',
+      );
+      const publishedBytes = snapshot.projects
+        .filter((entry) => entry.rituals.state !== 'limit-exceeded')
+        .reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry.rituals)), 0);
+
+      expect(firstLimited).toBeGreaterThan(0);
+      expect(snapshot.projects.slice(firstLimited).every(
+        (entry) => entry.rituals.state === 'limit-exceeded' && entry.rituals.rituals.length === 0,
+      )).toBe(true);
+      expect(publishedBytes).toBeLessThanOrEqual(MAX_WORKSPACE_RITUAL_OUTPUT_BYTES);
     });
 
     it('serializes concurrent provider reads so revisions follow request order', async () => {

@@ -91,7 +91,7 @@ import {
   createTuiWorkspaceProvider,
   groupCovenSessionsByProject,
 } from './workspace/tuiSnapshot.js';
-import { readProjectRitualPublication } from './workspace/ritualPublication.js';
+import { readProjectRitualPublicationWithUsage } from './workspace/ritualPublication.js';
 import os from 'node:os';
 import {
   acknowledgeWorktreeRecoveryMarker,
@@ -789,7 +789,8 @@ class Psyche {
         // Production ritual publication: the live provider reads the canonical
         // project's own ritual store for each root it publishes, and the
         // bounded, sanitized result rides the workspace snapshot to clients.
-        loadRituals: (projectRoot) => readProjectRitualPublication(projectRoot),
+        loadRituals: (projectRoot, maxReadBytes) =>
+          readProjectRitualPublicationWithUsage(projectRoot, {}, maxReadBytes),
       });
 
       this.bridgeDaemon = new BridgeDaemon({

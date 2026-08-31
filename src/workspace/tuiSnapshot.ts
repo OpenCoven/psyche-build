@@ -20,7 +20,12 @@ import {
   type WorkspaceProjectInput,
   type WorkspaceSnapshot,
 } from './snapshot.js';
-import { readProjectRitualPublication } from './ritualPublication.js';
+import type { RitualPublicationReadResult } from './ritualPublication.js';
+
+// Keep ritual fan-out aligned with the desktop's established hard project cap.
+export const MAX_WORKSPACE_RITUAL_PROJECT_READS = 10;
+export const MAX_WORKSPACE_RITUAL_READ_BYTES = 2 * 1024 * 1024;
+export const MAX_WORKSPACE_RITUAL_OUTPUT_BYTES = 256 * 1024;
 
 export interface BuildTuiWorkspaceSnapshotInput {
   revision: number;
@@ -61,11 +66,13 @@ export interface TuiWorkspaceProviderOptions {
    * Composes the bounded ritual publication for one published project root.
    * Called only for roots the workspace actually publishes, so a client can
    * never steer reads at arbitrary paths. When omitted, every project
-   * publishes as `unavailable`.
+   * publishes as `unavailable`. The byte argument is the remaining
+   * workspace-wide filesystem read budget.
    */
   loadRituals?: (
     projectRoot: string,
-  ) => MaybePromise<RitualPublicationSnapshot>;
+    maxReadBytes: number,
+  ) => MaybePromise<RitualPublicationSnapshot | RitualPublicationReadResult>;
   worktreeCacheTtlMs?: number;
   onWorktreeReadError?: (projectRoot: string, error: unknown) => void;
   state?: TuiWorkspaceState;
@@ -217,10 +224,10 @@ export function createTuiWorkspaceProvider(
 
     const ritualsByProjectRoot = loadRituals
       ? await loadRitualPublications(
-        uniqueSortedStrings([
-          ...publishedProjects.map((project) => project.root),
-          ...associatedCovenSessions.keys(),
-        ]),
+        mergeProjectSeeds(
+          publishedProjects,
+          [...associatedCovenSessions.keys()],
+        ).map((project) => project.root),
         loadRituals,
       )
       : undefined;
@@ -244,22 +251,75 @@ export function createTuiWorkspaceProvider(
 }
 
 /**
- * Compose one publication per published root. A failing loader degrades that
- * project to `unavailable` — a read failure is a state the client can see,
- * never a reason the whole snapshot should fail to publish.
+ * Compose publications in deterministic project order under workspace-wide
+ * project, filesystem-read, and serialized-output budgets. A failing loader
+ * degrades that project to `unavailable`; roots beyond a budget publish
+ * `limit-exceeded` without another store read.
  */
 async function loadRitualPublications(
   projectRoots: readonly string[],
-  loadRituals: (projectRoot: string) => MaybePromise<RitualPublicationSnapshot>,
+  loadRituals: (
+    projectRoot: string,
+    maxReadBytes: number,
+  ) => MaybePromise<RitualPublicationSnapshot | RitualPublicationReadResult>,
 ): Promise<Map<string, RitualPublicationSnapshot>> {
-  const publications = await Promise.all(projectRoots.map(async (projectRoot) => {
-    try {
-      return [projectRoot, await loadRituals(projectRoot)] as const;
-    } catch {
-      return [projectRoot, unpublishedRituals()] as const;
+  const publications = new Map<string, RitualPublicationSnapshot>();
+  let remainingReadBytes = MAX_WORKSPACE_RITUAL_READ_BYTES;
+  let remainingOutputBytes = MAX_WORKSPACE_RITUAL_OUTPUT_BYTES;
+  let readsStarted = 0;
+
+  for (const projectRoot of projectRoots) {
+    if (
+      readsStarted >= MAX_WORKSPACE_RITUAL_PROJECT_READS
+      || remainingReadBytes <= 0
+      || remainingOutputBytes <= 0
+    ) {
+      publications.set(projectRoot, exceededRitualBudget());
+      continue;
     }
-  }));
-  return new Map(publications);
+
+    readsStarted += 1;
+    try {
+      const loaded = await loadRituals(projectRoot, remainingReadBytes);
+      const publication = isRitualPublicationReadResult(loaded)
+        ? loaded.publication
+        : loaded;
+      const readBytes = isRitualPublicationReadResult(loaded) ? loaded.readBytes : 0;
+      if (
+        !Number.isSafeInteger(readBytes)
+        || readBytes < 0
+        || readBytes > remainingReadBytes
+      ) {
+        remainingReadBytes = 0;
+        publications.set(projectRoot, exceededRitualBudget());
+        continue;
+      }
+      remainingReadBytes -= readBytes;
+
+      const outputBytes = Buffer.byteLength(JSON.stringify(publication), 'utf8');
+      if (outputBytes > remainingOutputBytes) {
+        remainingOutputBytes = 0;
+        publications.set(projectRoot, exceededRitualBudget());
+        continue;
+      }
+      remainingOutputBytes -= outputBytes;
+      publications.set(projectRoot, publication);
+    } catch {
+      remainingReadBytes = 0;
+      publications.set(projectRoot, unpublishedRituals());
+    }
+  }
+  return publications;
+}
+
+function isRitualPublicationReadResult(
+  value: RitualPublicationSnapshot | RitualPublicationReadResult,
+): value is RitualPublicationReadResult {
+  return 'publication' in value;
+}
+
+function exceededRitualBudget(): RitualPublicationSnapshot {
+  return { state: 'limit-exceeded', rituals: [] };
 }
 
 export function normalizeCovenSessionsForPublication(

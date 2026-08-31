@@ -3,6 +3,9 @@ import {
   MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES,
   MAX_PUBLISHED_RITUAL_ID_BYTES,
   MAX_PUBLISHED_RITUAL_NAME_BYTES,
+  MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+  MAX_PROJECT_RITUAL_READ_BYTES,
+  MAX_PROJECT_RITUAL_STORE_BYTES,
   readProjectRitualManifest,
   readProjectRitualStore,
   type RitualDefinition,
@@ -31,9 +34,14 @@ export interface RitualPublicationDeps {
   /** Host-owned launch templates publishable from any project. */
   builtInRituals?: () => RitualDefinition[];
   /** Classified read of the project's own ritual store. */
-  readStore?: (projectRoot: string) => RitualStoreListing;
+  readStore?: (projectRoot: string, maxBytes?: number) => RitualStoreListing;
   /** Classified read of the project's default ritual manifest. */
-  readManifest?: (projectRoot: string) => RitualManifestListing;
+  readManifest?: (projectRoot: string, maxBytes?: number) => RitualManifestListing;
+}
+
+export interface RitualPublicationReadResult {
+  publication: RitualPublicationSnapshot;
+  readBytes: number;
 }
 
 /**
@@ -62,15 +70,38 @@ export function readProjectRitualPublication(
   projectRoot: string,
   deps: RitualPublicationDeps = {},
 ): RitualPublicationSnapshot {
+  return readProjectRitualPublicationWithUsage(projectRoot, deps).publication;
+}
+
+export function readProjectRitualPublicationWithUsage(
+  projectRoot: string,
+  deps: RitualPublicationDeps = {},
+  maxReadBytes: number = MAX_PROJECT_RITUAL_READ_BYTES,
+): RitualPublicationReadResult {
   const builtInRituals = deps.builtInRituals ?? getBuiltInRituals;
   const readStore = deps.readStore ?? readProjectRitualStore;
   const readManifest = deps.readManifest ?? readProjectRitualManifest;
+  const readBudget = normalizeReadBudget(maxReadBytes);
+  const store = readStore(
+    projectRoot,
+    Math.min(MAX_PROJECT_RITUAL_STORE_BYTES, readBudget),
+  );
+  const manifest = readManifest(
+    projectRoot,
+    Math.min(
+      MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+      Math.max(0, readBudget - store.bytesRead),
+    ),
+  );
 
-  return buildRitualPublication({
-    builtIns: builtInRituals(),
-    store: readStore(projectRoot),
-    manifest: readManifest(projectRoot),
-  });
+  return {
+    publication: buildRitualPublication({
+      builtIns: builtInRituals(),
+      store,
+      manifest,
+    }),
+    readBytes: store.bytesRead + manifest.bytesRead,
+  };
 }
 
 /**
@@ -155,6 +186,11 @@ function publicationState(input: {
     return 'stale';
   }
   return input.publishedIds.size > 0 ? 'available' : 'empty';
+}
+
+function normalizeReadBudget(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) return 0;
+  return value;
 }
 
 function isBoundedPublishedRitual(ritual: RitualDefinition): boolean {
