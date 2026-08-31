@@ -1816,11 +1816,32 @@
     payload = payload || {};
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
+    var hasNativeGeneration = payload.generation !== undefined;
+    var knownNativeGeneration = Number.isSafeInteger(thread.ptyGeneration) &&
+      thread.ptyGeneration > 0 ? thread.ptyGeneration : null;
+    if (thread.terminalController &&
+        typeof thread.terminalController.currentPtyGeneration === "function") {
+      var controllerGeneration = thread.terminalController.currentPtyGeneration();
+      if (Number.isSafeInteger(controllerGeneration) && controllerGeneration > 0) {
+        knownNativeGeneration = controllerGeneration;
+      }
+    }
+    if (!hasNativeGeneration && knownNativeGeneration !== null) return false;
+    if (hasNativeGeneration && Number.isSafeInteger(payload.generation) &&
+        payload.generation > 0 && knownNativeGeneration !== null &&
+        payload.generation !== knownNativeGeneration) return false;
     var stoppedByUser = thread.stopRequested;
+    var exitAccepted = true;
     if (thread.terminalController &&
         typeof thread.terminalController.markPtyExited === "function") {
-      thread.terminalController.markPtyExited();
+      exitAccepted = !hasNativeGeneration
+        ? thread.terminalController.markPtyExited()
+        : thread.terminalController.markPtyExited(payload.generation);
     }
+    if (exitAccepted === false) return false;
+    thread.ptyLifecycleToken = (thread.ptyLifecycleToken || 0) + 1;
+    var exitLifecycleToken = thread.ptyLifecycleToken;
+    thread.ptyGeneration = null;
     thread.ptyStarted = false;
     if (thread.ptyIoQueue) thread.ptyIoQueue.closed = true;
     thread.ptyIoQueue = {
@@ -1840,12 +1861,15 @@
     if (isPersistentThread(thread)) {
       try {
         var liveSessionIds = await invoke("native_session_list");
+        if (thread.ptyLifecycleToken !== exitLifecycleToken) return false;
         persistentLive = Array.isArray(liveSessionIds) && liveSessionIds.indexOf(thread.id) !== -1;
       } catch (error) {
+        if (thread.ptyLifecycleToken !== exitLifecycleToken) return false;
         console.warn("[native_session_list] failed after client exit: " + String(error));
         persistentLive = true;
       }
     }
+    if (thread.ptyLifecycleToken !== exitLifecycleToken) return false;
     thread.persistentLive = persistentLive;
     thread.status = persistentLive ? "failed" : "exited";
     thread.isWorking = false;
@@ -2366,6 +2390,8 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      ptyGeneration: null,
+      ptyLifecycleToken: 0,
       terminalController: null,
       ptyIoQueue: {
         closed: false,
@@ -2468,6 +2494,8 @@
       startInFlight: false,
       stopRequested: false,
       ptyStarted: false,
+      ptyGeneration: null,
+      ptyLifecycleToken: 0,
     };
     commitPanePlacement(placement);
     state.threads.push(pane);
@@ -2488,9 +2516,25 @@
   function stopThreadPty(thread) {
     if (!thread || thread.stopRequested) return Promise.resolve(false);
     thread.stopRequested = true;
-    return invoke("pty_stop", {
-      threadId: thread.id,
-      thread_id: thread.id,
+    var knownGeneration = Number.isSafeInteger(thread.ptyGeneration) && thread.ptyGeneration > 0
+      ? thread.ptyGeneration
+      : null;
+    var generationLookup = knownGeneration !== null ||
+      (!thread.ptyStarted && thread.status !== "running")
+      ? Promise.resolve(knownGeneration)
+      : invoke("pty_current_generation", {
+        threadId: thread.id,
+        thread_id: thread.id,
+      }).then(function (value) {
+        return Number.isSafeInteger(value) && value > 0 ? value : null;
+      });
+    return generationLookup.then(function (generation) {
+      var args = {
+        threadId: thread.id,
+        thread_id: thread.id,
+      };
+      if (generation !== null) args.generation = generation;
+      return invoke("pty_stop", args);
     }).then(function () {
       return true;
     }).catch(function (err) {
@@ -2506,6 +2550,9 @@
     }
     var launch = thread.launch;
     var terminalController = ensureThreadPtyController(thread);
+    thread.ptyLifecycleToken = (thread.ptyLifecycleToken || 0) + 1;
+    var ptyLifecycleToken = thread.ptyLifecycleToken;
+    thread.ptyGeneration = null;
     var ptyStartAttempt = null;
     if (terminalController && typeof terminalController.prepareForPtyStart === "function") {
       ptyStartAttempt = terminalController.prepareForPtyStart();
@@ -2548,8 +2595,12 @@
         rows: terminalSize.rows,
         env: launch.env,
       },
-    }).then(function () {
+    }).then(function (ptyStartResult) {
       thread.startInFlight = false;
+      thread.ptyGeneration = ptyStartResult && Number.isSafeInteger(ptyStartResult.generation) &&
+        ptyStartResult.generation > 0
+        ? ptyStartResult.generation
+        : null;
       if (!isLiveThread(thread)) {
         if (terminalController &&
             typeof terminalController.restoreAfterFailedPtyStart === "function") {
@@ -2559,6 +2610,7 @@
       }
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
+        thread.ptyGeneration = null;
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
@@ -2576,7 +2628,13 @@
       thread.spawning = false;
       if (thread.terminalController &&
           typeof thread.terminalController.markPtyStarted === "function") {
-        thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+        thread.terminalController.markPtyStarted(
+          ptyStartAttempt,
+          ptyStartResult && Number.isSafeInteger(ptyStartResult.generation) &&
+            ptyStartResult.generation > 0
+            ? ptyStartResult.generation
+            : undefined
+        ).catch(function () {});
       }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
@@ -2587,6 +2645,7 @@
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
+      thread.ptyGeneration = null;
       var msg = String(err);
       if (!isLiveThread(thread)) {
         if (terminalController &&
@@ -2601,6 +2660,7 @@
       }
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
+        thread.ptyGeneration = null;
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
@@ -2632,16 +2692,62 @@
         thread.ptyStarted = true;
         thread.status = "running";
         thread.stopRequested = false;
-        if (thread.terminalController &&
-            typeof thread.terminalController.adoptRunningPty === "function") {
-          thread.terminalController.adoptRunningPty(ptyStartAttempt).catch(function () {});
-        } else if (thread.terminalController &&
-            typeof thread.terminalController.markPtyStarted === "function") {
-          thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
-        }
+        var adoptionPromise = invoke("pty_current_generation", {
+          threadId: thread.id,
+          thread_id: thread.id,
+        }).then(function (generation) {
+          if (thread.ptyLifecycleToken !== ptyLifecycleToken || !isLiveThread(thread)) {
+            if (terminalController &&
+                typeof terminalController.restoreAfterFailedPtyStart === "function") {
+              terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+            }
+            return false;
+          }
+          var nativeGeneration = Number.isSafeInteger(generation) && generation > 0
+            ? generation
+            : null;
+          if (nativeGeneration === null) {
+            throw new Error("native PTY generation was not returned for adoption");
+          }
+          thread.ptyGeneration = nativeGeneration;
+          if (terminalController &&
+              typeof terminalController.adoptRunningPty === "function") {
+            return terminalController.adoptRunningPty(ptyStartAttempt, nativeGeneration);
+          }
+          if (terminalController &&
+              typeof terminalController.markPtyStarted === "function") {
+            return terminalController.markPtyStarted(ptyStartAttempt, nativeGeneration);
+          }
+          return true;
+        }).catch(function (adoptionError) {
+          if (terminalController &&
+              typeof terminalController.restoreAfterFailedPtyStart === "function") {
+            terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+          }
+          thread.ptyGeneration = null;
+          thread.ptyStarted = false;
+          thread.status = "failed";
+          thread.isWorking = false;
+          thread.finishedAt = Date.now();
+          thread.exitCode = null;
+          if (thread.terminalController) {
+            thread.terminalController.write(
+              "\r\n\x1b[31m[pty adoption error]\x1b[0m " +
+                String(adoptionError) + "\r\n",
+            );
+          }
+          syncThreadPaneMetadata(thread);
+          refreshSidebar();
+          refreshTabs();
+          return false;
+        });
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        return adoptionPromise;
       } else {
         if (terminalController &&
             typeof terminalController.restoreAfterFailedPtyStart === "function") {
@@ -2672,6 +2778,9 @@
       return Promise.resolve(false);
     }
     var terminalController = ensureThreadPtyController(thread);
+    thread.ptyLifecycleToken = (thread.ptyLifecycleToken || 0) + 1;
+    var ptyLifecycleToken = thread.ptyLifecycleToken;
+    thread.ptyGeneration = null;
     var ptyStartAttempt = terminalController &&
       typeof terminalController.prepareForPtyStart === "function"
         ? terminalController.prepareForPtyStart()
@@ -2701,11 +2810,16 @@
         cols: thread.term ? thread.term.cols : 120,
         rows: thread.term ? thread.term.rows : 40,
       },
-    }).then(function () {
+    }).then(function (ptyStartResult) {
       thread.startInFlight = false;
+      thread.ptyGeneration = ptyStartResult && Number.isSafeInteger(ptyStartResult.generation) &&
+        ptyStartResult.generation > 0
+        ? ptyStartResult.generation
+        : null;
       if (!isLiveThread(thread)) return stopThreadPty(thread).then(function () { return false; });
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
+        thread.ptyGeneration = null;
         thread.spawning = false;
         return false;
       }
@@ -2713,7 +2827,13 @@
       thread.status = "running";
       thread.spawning = false;
       if (terminalController && typeof terminalController.markPtyStarted === "function") {
-        terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
+        terminalController.markPtyStarted(
+          ptyStartAttempt,
+          ptyStartResult && Number.isSafeInteger(ptyStartResult.generation) &&
+            ptyStartResult.generation > 0
+            ? ptyStartResult.generation
+            : undefined
+        ).catch(function () {});
       }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
@@ -2722,6 +2842,7 @@
       return true;
     }).catch(function (error) {
       thread.startInFlight = false;
+      thread.ptyGeneration = null;
       if (terminalController &&
           typeof terminalController.restoreAfterFailedPtyStart === "function") {
         terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
@@ -9811,11 +9932,16 @@
     var previous = queue.inputTail;
     var result = previous.then(function () {
       if (queue.closed) return false;
-      return invoke("pty_write", {
+      var args = {
         threadId: thread.id,
         thread_id: thread.id,
         bytes: bytes,
-      }).then(function () {
+      };
+      var generation = Number.isSafeInteger(thread.ptyGeneration) && thread.ptyGeneration > 0
+        ? thread.ptyGeneration
+        : null;
+      if (generation !== null) args.generation = generation;
+      return invoke("pty_write", args).then(function () {
         return true;
       });
     }).catch(function (err) {
@@ -13740,6 +13866,8 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      ptyGeneration: null,
+      ptyLifecycleToken: 0,
       terminalController: null,
       ptyIoQueue: createThreadPtyIoQueue(),
       metricsGeneration: 0,

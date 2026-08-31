@@ -26,6 +26,13 @@ pub(super) fn default_shell() -> (String, Vec<String>) {
     (command_processor(), Vec::new())
 }
 
+#[cfg(debug_assertions)]
+pub(super) fn diagnostics_shell() -> Result<String, String> {
+    find_powershell().ok_or_else(|| {
+        "no verified PowerShell executable was found in PATH or known system locations".to_string()
+    })
+}
+
 pub(super) fn command_processor() -> String {
     let comspec = std::env::var_os("COMSPEC")
         .filter(|shell| !shell.is_empty())

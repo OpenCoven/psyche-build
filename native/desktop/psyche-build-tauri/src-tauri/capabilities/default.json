@@ -21,6 +21,7 @@
     "allow-pty-ack",
     "allow-pty-set-visibility",
     "allow-pty-stop",
+    "allow-pty-current-generation",
     "allow-pty-list",
     "allow-pty-transport-metrics",
     "allow-browser-app-shortcut",

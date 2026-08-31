@@ -71,8 +71,10 @@ describe('Tauri Coven session native contract', () => {
     expect(nativeLaunchCommand).not.toContain('--session-id');
 
     const ptyStart = functionBody(libSource, 'pty_start_blocking');
-    expect(ptyStart.indexOf('prepare_pty_start(&options)?')).toBeLessThan(
-      ptyStart.indexOf('validate_coven_launch(&options)?'),
+    const ptyStartImplementation = functionBody(libSource, 'pty_start_blocking_with_launch');
+    expect(ptyStart).toContain('pty_start_blocking_with_launch(app, options, None)');
+    expect(ptyStartImplementation.indexOf('prepare_pty_start(&options)?')).toBeLessThan(
+      ptyStartImplementation.indexOf('validate_coven_launch(&options)?'),
     );
   });
 

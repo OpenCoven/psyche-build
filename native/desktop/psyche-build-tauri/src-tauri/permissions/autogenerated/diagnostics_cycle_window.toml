@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-diagnostics-cycle-window"
+description = "Enables the diagnostics_cycle_window command without any pre-configured scope."
+commands.allow = ["diagnostics_cycle_window"]
+
+[[permission]]
+identifier = "deny-diagnostics-cycle-window"
+description = "Denies the diagnostics_cycle_window command without any pre-configured scope."
+commands.deny = ["diagnostics_cycle_window"]
