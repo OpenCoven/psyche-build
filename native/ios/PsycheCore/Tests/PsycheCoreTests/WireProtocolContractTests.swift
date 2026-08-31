@@ -268,6 +268,30 @@ final class WireProtocolContractTests: XCTestCase {
         )
     }
 
+    func testUnknownRitualPublicationStateDegradesWithoutRejectingProject() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "id": "project-1",
+              "root": "/repo",
+              "title": "psyche-build",
+              "worktrees": [],
+              "projectPanes": [],
+              "runningCount": 0,
+              "attentionCount": 0,
+              "rituals": {
+                "state": "future-host-state",
+                "rituals": []
+              }
+            }
+            """.data(using: .utf8)
+        )
+
+        let project = try JSONDecoder().decode(WorkspaceProjectSnapshot.self, from: data)
+
+        XCTAssertEqual(project.rituals?.state, .unavailable)
+    }
+
     // MARK: - Spot checks the host side also asserts
 
     func testDecodedPaneSnapshotUsesTheWireIdSpelling() throws {

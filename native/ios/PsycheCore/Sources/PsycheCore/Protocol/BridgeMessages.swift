@@ -229,6 +229,11 @@ public enum RitualPublicationState: String, Codable, Sendable, Equatable {
     case incompatible
     case limitExceeded = "limit-exceeded"
     case permissionDenied = "permission-denied"
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = RitualPublicationState(rawValue: raw) ?? .unavailable
+    }
 }
 
 /// One published ritual: identifiers and description only. Commands, prompts,
