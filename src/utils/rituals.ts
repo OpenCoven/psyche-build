@@ -419,9 +419,6 @@ export function readProjectRitualStore(projectRoot: string): RitualStoreListing 
     failed: false,
   };
   const dir = getProjectRitualsDir(projectRoot);
-  if (!fs.existsSync(dir)) {
-    return listing;
-  }
 
   let entries: string[];
   try {
@@ -429,6 +426,9 @@ export function readProjectRitualStore(projectRoot: string): RitualStoreListing 
       .filter((entry) => entry.endsWith('.json'))
       .sort();
   } catch (error) {
+    if (isMissingError(error)) {
+      return listing;
+    }
     listing.denied = isPermissionError(error);
     listing.failed = !listing.denied;
     return listing;
@@ -471,6 +471,10 @@ export function readProjectRitualStore(projectRoot: string): RitualStoreListing 
 function isPermissionError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return code === 'EACCES' || code === 'EPERM';
+}
+
+function isMissingError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
 export function listAvailableRituals(projectRoot: string): RitualDefinition[] {

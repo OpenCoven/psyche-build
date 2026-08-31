@@ -177,6 +177,20 @@ describe('ritual publication', () => {
       }
     });
 
+    it('publishes permission-denied when an existing ritual store is inaccessible', () => {
+      const root = tempProjectWithRituals();
+      const psycheDir = path.join(root, '.psyche');
+      try {
+        chmodSync(psycheDir, 0o000);
+        const publication = readProjectRitualPublication(root);
+        expect(publication.state).toBe('permission-denied');
+        expect(publication.rituals.every((ritual) => ritual.scope === 'builtIn')).toBe(true);
+      } finally {
+        chmodSync(psycheDir, 0o755);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('propagates reader failures to the provider degradation seam', () => {
       expect(() => readProjectRitualPublication('/repo', {
         builtInRituals: () => [],
