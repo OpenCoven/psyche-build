@@ -226,8 +226,7 @@ export type InviteParseResult =
  * byte-identical payloads can be asserted in contract tests.
  */
 export function encodeInvitePayload(payload: InvitePayload): string {
-  const json = JSON.stringify(canonicalInviteJson(payload));
-  return INVITE_DEEP_LINK_PREFIX + Buffer.from(json, "utf8").toString("base64url");
+  return canonicalInviteEncoding(payload).deepLink;
 }
 
 /**
@@ -391,14 +390,6 @@ export class InviteStore {
   issue(input: IssueInviteInput): IssueInviteResult {
     validateIssueInput(input);
     const now = this.deps.now();
-    for (const record of this.records.values()) {
-      if (record.status === "pending") {
-        record.status = "revoked";
-      }
-    }
-    if (!this.makeRoom(now)) {
-      return { ok: false, code: "store_full" };
-    }
     const idBytes = this.deps.random?.(INVITE_ID_BYTES) ?? randomBytes(INVITE_ID_BYTES);
     const inviteId = `i1-${idBytes.toString("base64url")}`;
     const secret = this.deps.random?.(INVITE_SECRET_BYTES) ?? randomBytes(INVITE_SECRET_BYTES);
@@ -415,7 +406,6 @@ export class InviteStore {
       status: "pending",
       attemptsUsed: 0,
     };
-    this.records.set(inviteId, record);
     const payload: InvitePayload = {
       v: 1,
       hostId: this.deps.hostId,
@@ -427,12 +417,22 @@ export class InviteStore {
       protocolProfile: INVITE_PROTOCOL_PROFILE,
       endpoints: input.endpoints.map((endpoint) => ({ ...endpoint })),
     };
+    const deepLink = encodeBoundedInvitePayload(payload);
+    for (const stored of this.records.values()) {
+      if (stored.status === "pending") {
+        stored.status = "revoked";
+      }
+    }
+    if (!this.makeRoom(now)) {
+      return { ok: false, code: "store_full" };
+    }
+    this.records.set(inviteId, record);
     return {
       ok: true,
       invite: {
         record: { ...record },
         payload,
-        deepLink: encodeInvitePayload(payload),
+        deepLink,
       },
     };
   }
@@ -698,6 +698,31 @@ function validateIssueInput(input: IssueInviteInput): void {
   ) {
     throw new TypeError("issue requires a valid host name and one to four TCP endpoints");
   }
+}
+
+function canonicalInviteEncoding(payload: InvitePayload): {
+  json: string;
+  encoded: string;
+  deepLink: string;
+} {
+  const json = JSON.stringify(canonicalInviteJson(payload));
+  const encoded = Buffer.from(json, "utf8").toString("base64url");
+  return {
+    json,
+    encoded,
+    deepLink: INVITE_DEEP_LINK_PREFIX + encoded,
+  };
+}
+
+function encodeBoundedInvitePayload(payload: InvitePayload): string {
+  const encoding = canonicalInviteEncoding(payload);
+  if (
+    Buffer.byteLength(encoding.json, "utf8") > MAX_INVITE_PAYLOAD_BYTES
+    || encoding.encoded.length > MAX_INVITE_PAYLOAD_ENCODED_CHARS
+  ) {
+    throw new TypeError("issued invite payload exceeds protocol size bounds");
+  }
+  return encoding.deepLink;
 }
 
 function canonicalInviteJson(payload: InvitePayload): Record<string, unknown> {

@@ -267,6 +267,26 @@ describe("invite payloads", () => {
     }
   });
 
+  it("rejects oversized Unicode payloads without replacing the usable pending invite", () => {
+    const harness = makeStore();
+    const prior = issue(harness);
+    const recordsBefore = harness.store.list();
+    expect(parseInvitePayload(prior.deepLink, T0)).toEqual({ ok: true, payload: prior.payload });
+
+    const unicodeHost = "界".repeat(252);
+    expect(() => harness.store.issue({
+      hostName: "🌐".repeat(64),
+      endpoints: Array.from(
+        { length: 4 },
+        (_, index): InviteEndpoint => ({ kind: "tcp", host: `${unicodeHost}${index}`, port: 47123 + index }),
+      ),
+    })).toThrow(TypeError);
+
+    expect(harness.store.pendingInvite()).toEqual(prior.record);
+    expect(harness.store.list()).toEqual(recordsBefore);
+    expect(parseInvitePayload(prior.deepLink, T0)).toEqual({ ok: true, payload: prior.payload });
+  });
+
   it("rejects an encoded payload that cannot fit before base64 decoding", () => {
     const maximumEncodedLength = Math.ceil(MAX_INVITE_PAYLOAD_BYTES * 4 / 3);
     const oversized = `${INVITE_DEEP_LINK_PREFIX}${"A".repeat(maximumEncodedLength + 1)}`;
