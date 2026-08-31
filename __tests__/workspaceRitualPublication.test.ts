@@ -1,6 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -16,6 +22,7 @@ import {
   MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES,
   MAX_PUBLISHED_RITUAL_ID_BYTES,
   MAX_PUBLISHED_RITUAL_NAME_BYTES,
+  readProjectRitualManifest,
   readProjectRitualStore,
   type RitualDefinition,
 } from '../src/utils/rituals.js';
@@ -269,6 +276,25 @@ describe('ritual publication', () => {
       }
     });
 
+    it('rejects a default ritual manifest through a symlinked .psyche directory', () => {
+      const root = tempProject();
+      const external = tempProjectWithRituals();
+      try {
+        writeFileSync(path.join(external, '.psyche', 'rituals.json'), JSON.stringify({
+          version: 1,
+          defaultRitualId: 'project-standup',
+        }), 'utf-8');
+        symlinkDirectory(path.join(external, '.psyche'), path.join(root, '.psyche'));
+
+        const manifest = readProjectRitualManifest(root);
+        expect(manifest.incompatible).toBe(true);
+        expect(manifest.defaultRitualId).toBeUndefined();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(external, { recursive: true, force: true });
+      }
+    });
+
     it('rejects a FIFO default ritual manifest without blocking', () => {
       if (process.platform === 'win32') return;
       const root = tempProjectWithRituals();
@@ -294,7 +320,9 @@ describe('ritual publication', () => {
 
   describe('readProjectRitualStore', () => {
     it('classifies an absent store as an empty faithful read', () => {
-      const listing = readProjectRitualStore(path.join(tmpdir(), `psyche-absent-${Date.now()}`));
+      const listing = readProjectRitualStore(
+        path.join(process.cwd(), `.psyche-absent-${process.pid}-${Date.now()}`),
+      );
       expect(listing).toEqual({
         rituals: [],
         incompatibleCount: 0,
@@ -316,6 +344,42 @@ describe('ritual publication', () => {
         expect(listing.failed).toBe(false);
       } finally {
         rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects a ritual store through a symlinked .psyche directory', () => {
+      const root = tempProject();
+      const external = tempProjectWithRituals();
+      try {
+        symlinkDirectory(path.join(external, '.psyche'), path.join(root, '.psyche'));
+
+        const listing = readProjectRitualStore(root);
+        expect(listing.rituals).toEqual([]);
+        expect(listing.incompatibleCount).toBe(1);
+        expect(listing.failed).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(external, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects a symlinked rituals directory', () => {
+      const root = tempProject();
+      const external = tempProjectWithRituals();
+      try {
+        mkdirSync(path.join(root, '.psyche'));
+        symlinkDirectory(
+          path.join(external, '.psyche', 'rituals'),
+          path.join(root, '.psyche', 'rituals'),
+        );
+
+        const listing = readProjectRitualStore(root);
+        expect(listing.rituals).toEqual([]);
+        expect(listing.incompatibleCount).toBe(1);
+        expect(listing.failed).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(external, { recursive: true, force: true });
       }
     });
 
@@ -496,7 +560,7 @@ function runRitualReaderChild(root: string, source: string): unknown {
 }
 
 function tempProjectWithRituals(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'psyche-ritual-publication-'));
+  const root = tempProject();
   const ritualsDir = path.join(root, '.psyche', 'rituals');
   mkdirSync(ritualsDir, { recursive: true });
   writeFileSync(
@@ -510,4 +574,12 @@ function tempProjectWithRituals(): string {
     'utf-8',
   );
   return root;
+}
+
+function tempProject(): string {
+  return mkdtempSync(path.join(process.cwd(), '.psyche-ritual-publication-'));
+}
+
+function symlinkDirectory(target: string, linkPath: string): void {
+  symlinkSync(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
 }

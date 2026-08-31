@@ -450,74 +450,98 @@ export function readProjectRitualStore(
     limitExceeded: false,
     bytesRead: 0,
   };
-  const dir = getProjectRitualsDir(projectRoot);
-
-  const directoryRead = readBoundedRitualEntries(dir);
-  if (directoryRead.missing) {
+  const directoryChainRead = openRitualDirectoryChain(projectRoot, ['.psyche', 'rituals']);
+  if (directoryChainRead.missing) {
     return listing;
   }
-  if (directoryRead.denied || directoryRead.failed || directoryRead.limitExceeded) {
-    listing.denied = directoryRead.denied;
-    listing.failed = directoryRead.failed;
-    listing.limitExceeded = directoryRead.limitExceeded;
+  if (
+    directoryChainRead.denied
+    || directoryChainRead.failed
+    || directoryChainRead.incompatible
+    || !directoryChainRead.chain
+  ) {
+    listing.denied = directoryChainRead.denied;
+    listing.failed = directoryChainRead.failed;
+    listing.incompatibleCount = directoryChainRead.incompatible ? 1 : 0;
     return listing;
   }
 
-  const aggregateLimit = Math.min(
-    MAX_PROJECT_RITUAL_STORE_BYTES,
-    normalizeReadBudget(maxStoreBytes),
-  );
-  let aggregateBytes = 0;
-  for (const entry of directoryRead.entries) {
-    const fileRead = readBoundedUtf8File(
-      path.join(dir, entry),
-      MAX_PROJECT_RITUAL_FILE_BYTES,
-      aggregateLimit - aggregateBytes,
+  const directoryChain = directoryChainRead.chain;
+  try {
+    const directoryRead = readBoundedRitualEntries(directoryChain);
+    if (
+      directoryRead.denied
+      || directoryRead.failed
+      || directoryRead.incompatible
+      || directoryRead.limitExceeded
+    ) {
+      listing.denied = directoryRead.denied;
+      listing.failed = directoryRead.failed;
+      listing.incompatibleCount = directoryRead.incompatible ? 1 : 0;
+      listing.limitExceeded = directoryRead.limitExceeded;
+      return listing;
+    }
+
+    const aggregateLimit = Math.min(
+      MAX_PROJECT_RITUAL_STORE_BYTES,
+      normalizeReadBudget(maxStoreBytes),
     );
-    aggregateBytes += fileRead.bytes;
-    listing.bytesRead = aggregateBytes;
-    if (fileRead.content === undefined) {
-      if (fileRead.denied) {
-        listing.denied = true;
-      } else if (fileRead.limitExceeded) {
-        listing.limitExceeded = true;
-      } else if (fileRead.incompatible) {
+    let aggregateBytes = 0;
+    for (const entry of directoryRead.entries) {
+      const fileRead = readBoundedUtf8File(
+        path.join(directoryChain.leafPath, entry),
+        MAX_PROJECT_RITUAL_FILE_BYTES,
+        aggregateLimit - aggregateBytes,
+        directoryChain,
+      );
+      aggregateBytes += fileRead.bytes;
+      listing.bytesRead = aggregateBytes;
+      if (fileRead.content === undefined) {
+        if (fileRead.denied) {
+          listing.denied = true;
+        } else if (fileRead.limitExceeded) {
+          listing.limitExceeded = true;
+        } else if (fileRead.incompatible) {
+          listing.incompatibleCount += 1;
+        } else {
+          // A single unreadable entry must not mask the rest of the store, but
+          // it does mean the listing is not a faithful read.
+          listing.failed = true;
+        }
+        if (fileRead.aggregateLimitExceeded) {
+          break;
+        }
+        continue;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fileRead.content);
+      } catch {
+        // Malformed content is an unsupported entry, not a broken store read.
         listing.incompatibleCount += 1;
+        continue;
+      }
+
+      const ritual = normalizeRitual(parsed, 'project');
+      if (ritual) {
+        listing.rituals.push(ritual);
       } else {
-        // A single unreadable entry must not mask the rest of the store, but
-        // it does mean the listing is not a faithful read.
-        listing.failed = true;
+        listing.incompatibleCount += 1;
       }
-      if (fileRead.aggregateLimitExceeded) {
-        break;
-      }
-      continue;
     }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(fileRead.content);
-    } catch {
-      // Malformed content is an unsupported entry, not a broken store read.
-      listing.incompatibleCount += 1;
-      continue;
-    }
-
-    const ritual = normalizeRitual(parsed, 'project');
-    if (ritual) {
-      listing.rituals.push(ritual);
-    } else {
-      listing.incompatibleCount += 1;
-    }
+  } finally {
+    applyRitualDirectoryCloseFailure(listing, closeRitualDirectoryChain(directoryChain));
   }
   return listing;
 }
 
-function readBoundedRitualEntries(dirPath: string): {
+function readBoundedRitualEntries(directoryChain: RitualDirectoryChain): {
   entries: string[];
   missing: boolean;
   denied: boolean;
   failed: boolean;
+  incompatible: boolean;
   limitExceeded: boolean;
 } {
   const result = {
@@ -525,21 +549,31 @@ function readBoundedRitualEntries(dirPath: string): {
     missing: false,
     denied: false,
     failed: false,
+    incompatible: false,
     limitExceeded: false,
   };
-  let directory: fs.Dir;
+  let directory: fs.Dir | undefined;
   try {
-    directory = fs.opendirSync(dirPath);
+    assertRitualDirectoryChain(directoryChain);
+    directory = fs.opendirSync(directoryChain.leafPath);
+    assertRitualDirectoryChain(directoryChain);
   } catch (error) {
-    result.missing = isMissingError(error);
+    try {
+      directory?.closeSync();
+    } catch {
+      // The path validation failure remains the authoritative classification.
+    }
+    result.missing = false;
     result.denied = isPermissionError(error);
-    result.failed = !result.missing && !result.denied;
+    result.incompatible = isMissingError(error) || isUnsafeRitualPathError(error);
+    result.failed = !result.denied && !result.incompatible;
     return result;
   }
+  const openedDirectory = directory;
 
   try {
     while (true) {
-      const entry = directory.readSync();
+      const entry = openedDirectory.readSync();
       if (!entry) break;
       if (!entry.name.endsWith('.json')) continue;
       if (result.entries.length >= MAX_PROJECT_RITUAL_FILES) {
@@ -549,16 +583,19 @@ function readBoundedRitualEntries(dirPath: string): {
       }
       result.entries.push(entry.name);
     }
+    assertRitualDirectoryChain(directoryChain);
   } catch (error) {
     result.denied = isPermissionError(error);
-    result.failed = !result.denied;
+    result.incompatible = isUnsafeRitualPathError(error);
+    result.failed = !result.denied && !result.incompatible;
     result.entries = [];
   } finally {
     try {
-      directory.closeSync();
+      openedDirectory.closeSync();
     } catch (error) {
       result.denied ||= isPermissionError(error);
-      result.failed ||= !result.denied;
+      result.incompatible ||= isUnsafeRitualPathError(error);
+      result.failed ||= !result.denied && !result.incompatible;
       result.entries = [];
     }
   }
@@ -571,6 +608,7 @@ function readBoundedUtf8File(
   filePath: string,
   maxFileBytes: number,
   aggregateBytesRemaining: number,
+  directoryChain: RitualDirectoryChain,
 ): {
   content?: string;
   bytes: number;
@@ -601,7 +639,9 @@ function readBoundedUtf8File(
   };
   let descriptor: number;
   try {
+    assertRitualDirectoryChain(directoryChain);
     descriptor = fs.openSync(filePath, ritualFileReadFlags());
+    assertRitualDirectoryChain(directoryChain);
   } catch (error) {
     result.missing = isMissingError(error);
     result.denied = isPermissionError(error);
@@ -616,6 +656,7 @@ function readBoundedUtf8File(
       result.incompatible = true;
       return result;
     }
+    assertOpenedRitualFileIdentity(filePath, openedStats);
     const aggregateLimit = Math.max(0, aggregateBytesRemaining);
     if (
       openedStats.size > BigInt(maxFileBytes)
@@ -653,10 +694,13 @@ function readBoundedUtf8File(
       result.failed = !result.limitExceeded;
       return result;
     }
+    assertRitualDirectoryChain(directoryChain);
+    assertOpenedRitualFileIdentity(filePath, currentStats);
     result.content = buffer.toString('utf8');
   } catch (error) {
     result.denied = isPermissionError(error);
-    result.failed = !result.denied;
+    result.incompatible = isMissingError(error) || isUnsafeRitualPathError(error);
+    result.failed = !result.denied && !result.incompatible;
   } finally {
     try {
       fs.closeSync(descriptor);
@@ -672,6 +716,219 @@ function readBoundedUtf8File(
 function normalizeReadBudget(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) return 0;
   return value;
+}
+
+interface RitualDirectoryIdentity {
+  directoryPath: string;
+  realPath: string;
+  dev: bigint;
+  ino: bigint;
+  descriptor?: number;
+}
+
+interface RitualDirectoryChain {
+  directories: RitualDirectoryIdentity[];
+  leafPath: string;
+}
+
+// Node does not expose openat-style directory reads, so retain each verified
+// descriptor and re-check path identity around every path-based operation.
+function openRitualDirectoryChain(
+  projectRoot: string,
+  components: readonly string[],
+): {
+  chain?: RitualDirectoryChain;
+  missing: boolean;
+  denied: boolean;
+  failed: boolean;
+  incompatible: boolean;
+} {
+  const result = {
+    missing: false,
+    denied: false,
+    failed: false,
+    incompatible: false,
+  } as {
+    chain?: RitualDirectoryChain;
+    missing: boolean;
+    denied: boolean;
+    failed: boolean;
+    incompatible: boolean;
+  };
+  const directories: RitualDirectoryIdentity[] = [];
+  try {
+    const canonicalRoot = fs.realpathSync.native(path.resolve(projectRoot));
+    const directoryPaths = [canonicalRoot];
+    for (const component of components) {
+      directoryPaths.push(path.join(directoryPaths.at(-1)!, component));
+    }
+    for (const directoryPath of directoryPaths) {
+      directories.push(openRitualDirectory(directoryPath));
+    }
+    result.chain = {
+      directories,
+      leafPath: directoryPaths.at(-1)!,
+    };
+  } catch (error) {
+    result.missing = isMissingError(error);
+    result.denied = isPermissionError(error);
+    result.incompatible = isUnsafeRitualPathError(error);
+    result.failed = !result.missing && !result.denied && !result.incompatible;
+    closeRitualDirectoryChain({
+      directories,
+      leafPath: directories.at(-1)?.directoryPath ?? path.resolve(projectRoot),
+    });
+  }
+  return result;
+}
+
+function openRitualDirectory(directoryPath: string): RitualDirectoryIdentity {
+  const initialStats = fs.lstatSync(directoryPath, { bigint: true });
+  if (!initialStats.isDirectory() || initialStats.isSymbolicLink()) {
+    throw unsafeRitualPathError();
+  }
+
+  let descriptor: number | undefined;
+  try {
+    if (process.platform !== 'win32') {
+      descriptor = fs.openSync(directoryPath, ritualDirectoryReadFlags());
+      const openedStats = fs.fstatSync(descriptor, { bigint: true });
+      if (
+        !openedStats.isDirectory()
+        || openedStats.dev !== initialStats.dev
+        || openedStats.ino !== initialStats.ino
+      ) {
+        throw unsafeRitualPathError();
+      }
+    }
+
+    const realPath = fs.realpathSync.native(directoryPath);
+    if (!sameRitualPath(realPath, directoryPath)) {
+      throw unsafeRitualPathError();
+    }
+    const currentStats = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !currentStats.isDirectory()
+      || currentStats.isSymbolicLink()
+      || currentStats.dev !== initialStats.dev
+      || currentStats.ino !== initialStats.ino
+    ) {
+      throw unsafeRitualPathError();
+    }
+    return {
+      directoryPath,
+      realPath,
+      dev: currentStats.dev,
+      ino: currentStats.ino,
+      ...(descriptor === undefined ? {} : { descriptor }),
+    };
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Preserve the validation failure that made this directory unsafe.
+      }
+    }
+    throw error;
+  }
+}
+
+function assertRitualDirectoryChain(directoryChain: RitualDirectoryChain): void {
+  for (const identity of directoryChain.directories) {
+    try {
+      if (identity.descriptor !== undefined) {
+        const openedStats = fs.fstatSync(identity.descriptor, { bigint: true });
+        if (
+          !openedStats.isDirectory()
+          || openedStats.dev !== identity.dev
+          || openedStats.ino !== identity.ino
+        ) {
+          throw unsafeRitualPathError();
+        }
+      }
+      const currentStats = fs.lstatSync(identity.directoryPath, { bigint: true });
+      if (
+        !currentStats.isDirectory()
+        || currentStats.isSymbolicLink()
+        || currentStats.dev !== identity.dev
+        || currentStats.ino !== identity.ino
+      ) {
+        throw unsafeRitualPathError();
+      }
+      const currentRealPath = fs.realpathSync.native(identity.directoryPath);
+      if (
+        !sameRitualPath(currentRealPath, identity.realPath)
+        || !sameRitualPath(currentRealPath, identity.directoryPath)
+      ) {
+        throw unsafeRitualPathError();
+      }
+    } catch (error) {
+      if (isPermissionError(error) || !isMissingError(error)) throw error;
+      throw unsafeRitualPathError();
+    }
+  }
+}
+
+function assertOpenedRitualFileIdentity(filePath: string, openedStats: fs.BigIntStats): void {
+  try {
+    const currentStats = fs.lstatSync(filePath, { bigint: true });
+    if (
+      !currentStats.isFile()
+      || currentStats.isSymbolicLink()
+      || currentStats.dev !== openedStats.dev
+      || currentStats.ino !== openedStats.ino
+    ) {
+      throw unsafeRitualPathError();
+    }
+  } catch (error) {
+    if (isPermissionError(error) || !isMissingError(error)) throw error;
+    throw unsafeRitualPathError();
+  }
+}
+
+function closeRitualDirectoryChain(directoryChain: RitualDirectoryChain): unknown {
+  let closeError: unknown;
+  for (const identity of [...directoryChain.directories].reverse()) {
+    if (identity.descriptor === undefined) continue;
+    try {
+      fs.closeSync(identity.descriptor);
+    } catch (error) {
+      closeError ??= error;
+    }
+  }
+  return closeError;
+}
+
+function applyRitualDirectoryCloseFailure(
+  listing: Pick<RitualStoreListing, 'denied' | 'failed' | 'rituals'>,
+  error: unknown,
+): void {
+  if (!error) return;
+  listing.denied ||= isPermissionError(error);
+  listing.failed ||= !listing.denied;
+  listing.rituals = [];
+}
+
+function sameRitualPath(left: string, right: string): boolean {
+  const normalizedLeft = path.normalize(path.resolve(left));
+  const normalizedRight = path.normalize(path.resolve(right));
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function ritualDirectoryReadFlags(): number {
+  let flags = fs.constants.O_RDONLY;
+  if (process.platform !== 'win32') {
+    if (typeof fs.constants.O_NOFOLLOW === 'number') {
+      flags |= fs.constants.O_NOFOLLOW;
+    }
+    if (typeof fs.constants.O_DIRECTORY === 'number') {
+      flags |= fs.constants.O_DIRECTORY;
+    }
+  }
+  return flags;
 }
 
 function ritualFileReadFlags(): number {
@@ -696,7 +953,17 @@ function isMissingError(error: unknown): boolean {
 
 function isUnsafeRitualPathError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
-  return code === 'ELOOP' || code === 'ENXIO' || code === 'ENODEV';
+  return code === 'ELOOP'
+    || code === 'ENXIO'
+    || code === 'ENODEV'
+    || code === 'ENOTDIR'
+    || code === 'RITUAL_PATH_UNSAFE';
+}
+
+function unsafeRitualPathError(): NodeJS.ErrnoException {
+  return Object.assign(new Error('Ritual path contains an unsafe directory component'), {
+    code: 'RITUAL_PATH_UNSAFE',
+  });
 }
 
 export function listAvailableRituals(projectRoot: string): RitualDefinition[] {
@@ -719,16 +986,55 @@ export function readProjectRitualManifest(
   projectRoot: string,
   maxManifestBytes: number = MAX_PROJECT_RITUAL_MANIFEST_BYTES,
 ): RitualManifestListing {
-  const manifestPath = getProjectRitualManifestPath(projectRoot);
+  const directoryChainRead = openRitualDirectoryChain(projectRoot, ['.psyche']);
+  if (
+    directoryChainRead.missing
+    || directoryChainRead.denied
+    || directoryChainRead.failed
+    || directoryChainRead.incompatible
+    || !directoryChainRead.chain
+  ) {
+    return {
+      denied: directoryChainRead.denied,
+      failed: directoryChainRead.failed,
+      incompatible: directoryChainRead.incompatible,
+      limitExceeded: false,
+      bytesRead: 0,
+    };
+  }
+
+  const directoryChain = directoryChainRead.chain;
+  const manifestPath = path.join(directoryChain.leafPath, 'rituals.json');
   const manifestLimit = Math.min(
     MAX_PROJECT_RITUAL_MANIFEST_BYTES,
     normalizeReadBudget(maxManifestBytes),
   );
-  const fileRead = readBoundedUtf8File(
-    manifestPath,
-    manifestLimit,
-    manifestLimit,
-  );
+  let fileRead: ReturnType<typeof readBoundedUtf8File> | undefined;
+  let readError: unknown;
+  try {
+    fileRead = readBoundedUtf8File(
+      manifestPath,
+      manifestLimit,
+      manifestLimit,
+      directoryChain,
+    );
+  } catch (error) {
+    readError = error;
+  }
+  const closeError = closeRitualDirectoryChain(directoryChain);
+  if (readError) throw readError;
+  if (!fileRead) throw new Error('Ritual manifest read did not produce a result');
+  if (closeError) {
+    fileRead = {
+      bytes: fileRead.bytes,
+      missing: false,
+      denied: isPermissionError(closeError),
+      failed: !isPermissionError(closeError),
+      incompatible: false,
+      limitExceeded: false,
+      aggregateLimitExceeded: false,
+    };
+  }
   const result: RitualManifestListing = {
     denied: fileRead.denied,
     failed: fileRead.failed,
