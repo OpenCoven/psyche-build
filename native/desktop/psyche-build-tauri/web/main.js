@@ -2411,7 +2411,7 @@
       finishedAt: null,
       exitCode: null,
     };
-    if (isPersistentThread(thread)) {
+    if (isPersistentThread(thread) && !opts.deferStart) {
       try {
         await invoke("native_session_create", { request: nativeSessionRequest(thread) });
       } catch (error) {
@@ -2426,6 +2426,9 @@
     focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
     refreshSidebar();
     refreshTabs();
+    if (opts.deferStart) {
+      return thread;
+    }
     // The controller's initial keyed frame fits before this later spawn frame,
     // so the PTY starts at the visible xterm size instead of 80x24.
     if (opts.waitForPtyStart) {
@@ -2441,6 +2444,97 @@
       if (isPersistentThread(thread)) attachThreadClient(thread);
       else spawnPty(thread);
     });
+    return thread;
+  }
+
+  function reserveCovenLaunchThread(opts) {
+    return createThread({
+      project: opts.project,
+      worktreePath: opts.worktreePath,
+      name: opts.name + " launch recovery",
+      kind: "coven-recovery",
+      launchKind: "coven-recovery",
+      projectRoot: opts.projectRoot,
+      cwd: opts.worktreePath,
+      promptDigest: opts.promptDigest || null,
+      deferStart: true,
+      focusTerminal: false,
+    });
+  }
+
+  function hasCovenLaunchRecovery(projectId, worktreePath) {
+    return state.threads.some(function (thread) {
+      return thread.projectId === projectId
+        && thread.worktreePath === worktreePath
+        && thread.launch
+        && thread.launch.launchKind === "coven-recovery";
+    });
+  }
+
+  async function markCovenLaunchRecoveryRequired(thread, message) {
+    if (!isLiveThread(thread)) return null;
+    thread.status = "failed";
+    thread.spawning = false;
+    thread.finishedAt = Date.now();
+    thread.sidebarStatusKey = "error";
+    if (thread.terminalController) {
+      thread.terminalController.write(
+        "\r\n\x1b[33m[launch outcome unknown]\x1b[0m " + String(message) + "\r\n"
+      );
+    }
+    syncThreadPaneMetadata(thread);
+    refreshSidebar();
+    refreshTabs();
+    await saveWorkspaceNow();
+    return thread;
+  }
+
+  async function releaseCovenLaunchReservation(thread) {
+    if (!thread) return false;
+    return closeThread(thread.id, { skipNativeSessionStop: true });
+  }
+
+  async function acceptCovenLaunchReservation(thread, options) {
+    thread.name = options.name || thread.name;
+    thread.kind = "coven-attach";
+    thread.launch.command = state.env.coven_path;
+    thread.launch.args = ["attach", options.sessionId];
+    thread.launch.launchKind = "coven-attach";
+    thread.launch.covenSessionId = options.sessionId;
+    thread.launch.promptDigest = options.promptDigest || null;
+    thread.launch.metricsProvider = options.harness || "coven";
+    thread.status = "starting";
+    thread.spawning = true;
+    thread.finishedAt = null;
+    syncThreadPaneMetadata(thread);
+    refreshSidebar();
+    refreshTabs();
+    await saveWorkspaceNow();
+    try {
+      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+      thread.persistentLive = true;
+    } catch (error) {
+      thread.status = "failed";
+      thread.spawning = false;
+      thread.finishedAt = Date.now();
+      if (thread.terminalController) {
+        thread.terminalController.write(
+          "\r\n\x1b[31m[Coven session accepted; local attachment unavailable]\x1b[0m " +
+            String(error) + "\r\n"
+        );
+      }
+      setStatus(
+        thread.name + " was accepted by Coven but could not be attached: " + String(error),
+        "error"
+      );
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      await saveWorkspaceNow();
+      return thread;
+    }
+    await attachThreadClient(thread);
+    await saveWorkspaceNow();
     return thread;
   }
 
@@ -2869,6 +2963,13 @@
     var thread = findThread(id);
     if (!thread || thread.startInFlight || thread.closeStarted) return false;
     if (thread.status !== "exited" && thread.status !== "failed") return false;
+    if (thread.launch.launchKind === "coven-recovery") {
+      setStatus(
+        "Coven launch outcome is unknown; inspect Coven sessions before retrying",
+        "warn"
+      );
+      return false;
+    }
     if (thread.launch.launchKind === "coven-attach") {
       var project = findProject(thread.projectId);
       await refreshCovenSessions();
@@ -5347,7 +5448,7 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
-    if (isPersistentThread(thread)) {
+    if (isPersistentThread(thread) && !(options && options.skipNativeSessionStop)) {
       try {
         await invoke("native_session_stop", { id: thread.id });
       } catch (error) {
@@ -14207,7 +14308,9 @@
     }
     if (
       launchResult &&
-      (launchResult.status === "unavailable" || launchResult.status === "incompatible")
+      (launchResult.status === "unavailable" ||
+        launchResult.status === "incompatible" ||
+        launchResult.status === "effect_unknown")
     ) {
       return "recovery_required";
     }
@@ -14434,6 +14537,22 @@
       return null;
     }
     if (!(await showTerminalView())) return null;
+    if (hasCovenLaunchRecovery(project.id, worktree.path)) {
+      setStatus(
+        "Coven launch outcome is unknown; inspect Coven sessions before retrying",
+        "warn"
+      );
+      return null;
+    }
+    var promptDigest = await covenPromptDigest(userPrompt);
+    var reservation = await reserveCovenLaunchThread({
+      project: project,
+      projectRoot: project.root,
+      worktreePath: worktree.path,
+      name: entry.label,
+      promptDigest: promptDigest,
+    });
+    if (!reservation) return null;
     // The composer prompt rides the daemon launch request body only. It is
     // never placed in process argv and never stored on the launch model; the
     // pane attaches to the canonical Coven session returned by the daemon.
@@ -14445,30 +14564,35 @@
         prompt: userPrompt,
         title: entry.label,
       },
-    }).catch(function (error) {
-      setStatus(entry.label + " failed to start: " + String(error), "error");
-      return null;
+    }).catch(function () {
+      return {
+        status: "effect_unknown",
+        message: "Coven launch outcome is unknown; inspect Coven sessions before retrying",
+      };
     });
-    if (!launchResult) return null;
+    if (!launchResult) {
+      await markCovenLaunchRecoveryRequired(
+        reservation,
+        "Coven launch outcome is unknown; inspect Coven sessions before retrying"
+      );
+      return reservation;
+    }
     if (covenLaunchOutcome(launchResult) !== "accepted") {
+      if (launchResult.status === "effect_unknown") {
+        var recoveryMessage = covenLaunchFailureStatus(entry, launchResult);
+        await markCovenLaunchRecoveryRequired(reservation, recoveryMessage);
+        setStatus(recoveryMessage, "error");
+        return reservation;
+      }
+      await releaseCovenLaunchReservation(reservation);
       setStatus(covenLaunchFailureStatus(entry, launchResult), "error");
       return null;
     }
-    var promptDigest = await covenPromptDigest(userPrompt);
-    return createThread({
-      project: project,
-      worktreePath: worktree.path,
+    return acceptCovenLaunchReservation(reservation, {
       name: entry.label,
-      kind: "coven-attach",
-      command: state.env.coven_path,
-      args: ["attach", launchResult.sessionId],
-      launchKind: "coven-attach",
-      covenSessionId: launchResult.sessionId,
+      sessionId: launchResult.sessionId,
       promptDigest: promptDigest,
-      metricsProvider: launchResult.harness || entry.harness || "coven",
-      projectRoot: project.root,
-      cwd: worktree.path,
-      waitForPtyStart: true,
+      harness: launchResult.harness || entry.harness || "coven",
     });
   }
 

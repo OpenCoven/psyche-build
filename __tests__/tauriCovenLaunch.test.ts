@@ -544,7 +544,10 @@ describe('Tauri Coven launch project scope', () => {
     expect(libRs).toContain('if !matches!(launch_kind, "coven-code" | "coven-attach")');
 
     const spawnAgentThread = functionSource('spawnAgentThread');
-    expect(spawnAgentThread).toContain('launchKind: "coven-attach"');
+    expect(spawnAgentThread).toContain('acceptCovenLaunchReservation');
+    expect(functionSource('acceptCovenLaunchReservation')).toContain(
+      'thread.launch.launchKind = "coven-attach"',
+    );
 
     const covenCliLaunch = functionSource('covenCliLaunch');
     expect(covenCliLaunch).toContain('launchKind: "coven-code"');

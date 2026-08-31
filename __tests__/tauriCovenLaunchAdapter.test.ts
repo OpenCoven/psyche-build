@@ -58,7 +58,10 @@ describe('Coven launch adapter compatibility profile', () => {
     expect(spawnAgentThread).toContain('prompt: userPrompt');
     expect(spawnAgentThread).not.toContain('args.push');
     expect(spawnAgentThread).toMatch(
-      /args: \["attach", launchResult\.sessionId\]/,
+      /sessionId: launchResult\.sessionId/,
+    );
+    expect(functionSource('acceptCovenLaunchReservation')).toContain(
+      'thread.launch.args = ["attach", options.sessionId]',
     );
 
     const rustLaunch = covenSessionsRs;

@@ -1629,6 +1629,26 @@ fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+fn verified_worktree_root(project_root: &str, cwd: &Path) -> Result<PathBuf, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let canonical_cwd = cwd
+        .canonicalize()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd.display(), e))?;
+    if canonical_cwd.starts_with(&canonical_root) {
+        return Ok(canonical_root);
+    }
+    linked_worktree_roots(&canonical_root)?
+        .into_iter()
+        .filter(|root| canonical_cwd.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .ok_or_else(|| {
+            format!(
+                "PTY cwd is outside the project and its linked worktrees: {}",
+                cwd.display()
+            )
+        })
+}
+
 fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
     let candidate = pty_cwd_candidate(&canonical_root, cwd);

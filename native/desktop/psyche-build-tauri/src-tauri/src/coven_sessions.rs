@@ -47,6 +47,9 @@ const ERROR_MESSAGE: &str = "Coven sessions could not be loaded";
 const LAUNCH_REJECTED_MESSAGE: &str = "Coven rejected the launch request";
 const LAUNCH_FAILED_MESSAGE: &str = "Coven launch could not be completed";
 #[cfg(unix)]
+const LAUNCH_EFFECT_UNKNOWN_MESSAGE: &str =
+    "Coven launch outcome is unknown; inspect Coven sessions before retrying";
+#[cfg(unix)]
 const ADAPTER_LIST_FAILED_MESSAGE: &str = "Coven adapters could not be listed";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,6 +86,7 @@ enum CovenAdapterError {
     Unavailable,
     Incompatible,
     Failed,
+    EffectUnknown,
 }
 
 #[derive(Deserialize)]
@@ -99,7 +103,7 @@ pub(crate) struct CovenProjectScope {
     worktree_roots: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CanonicalProjectScope {
     project_root: String,
     owned_roots: HashSet<PathBuf>,
@@ -304,7 +308,7 @@ fn load_coven_sessions_with_scopes(
             sessions: Vec::new(),
             message: Some(INCOMPATIBLE_MESSAGE.to_string()),
         },
-        Err(CovenAdapterError::Failed) => error_response(),
+        Err(CovenAdapterError::Failed | CovenAdapterError::EffectUnknown) => error_response(),
     }
 }
 
@@ -486,12 +490,12 @@ fn validate_launch_request(mut request: CovenLaunchRequest) -> Result<CovenLaunc
     if prompt.is_empty() {
         return Err("Coven launch requires a non-empty prompt".to_string());
     }
-    if request.prompt.chars().count() > MAX_PROMPT_CHARS {
+    if prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(format!(
             "Coven launch prompt exceeds the {MAX_PROMPT_CHARS}-character limit"
         ));
     }
-    if request.prompt.contains('\0') {
+    if prompt.contains('\0') {
         return Err("Coven launch prompt must not contain NUL".to_string());
     }
     if let Some(title) = request.title.as_deref() {
@@ -500,17 +504,25 @@ fn validate_launch_request(mut request: CovenLaunchRequest) -> Result<CovenLaunc
         }
     }
 
-    let canonical_project_root = super::canonical_project_root(&request.project_root)
+    super::canonical_project_root(&request.project_root)
         .map_err(|_| "Coven launch project root is unavailable".to_string())?;
     let requested_cwd = request.cwd.as_deref().unwrap_or(&request.project_root);
     let opened_cwd = super::open_pty_cwd(&request.project_root, requested_cwd).map_err(|_| {
         "Coven launch working directory is outside the project or its linked worktrees".to_string()
     })?;
 
-    request.project_root = canonical_project_root.to_string_lossy().into_owned();
+    let canonical_cwd = opened_cwd.canonical_path.clone();
+    let daemon_project_root = super::verified_worktree_root(&request.project_root, &canonical_cwd)
+        .map_err(|_| {
+            "Coven launch working directory is outside the project or its linked worktrees"
+                .to_string()
+        })?;
+
+    request.project_root = daemon_project_root.to_string_lossy().into_owned();
     if request.cwd.is_some() {
-        request.cwd = Some(opened_cwd.canonical_path.to_string_lossy().into_owned());
+        request.cwd = Some(canonical_cwd.to_string_lossy().into_owned());
     }
+    request.prompt = prompt.to_string();
     Ok(request)
 }
 
@@ -604,14 +616,16 @@ fn try_launch_coven_session(
         "/api/v1/sessions",
         Some(&body),
         deadline,
-    )?;
+    )
+    .map_err(|_| CovenAdapterError::EffectUnknown)?;
     if response.status == 400 || response.status == 403 || response.status == 404 {
         return Ok(rejected_launch_response(&response.body));
     }
     if !(200..=299).contains(&response.status) {
         return Err(CovenAdapterError::Failed);
     }
-    let (session_id, harness) = parse_launch_record(&response.body)?;
+    let (session_id, harness) =
+        parse_launch_record(&response.body).map_err(|_| CovenAdapterError::EffectUnknown)?;
     Ok(CovenLaunchResponse {
         status: "accepted".to_string(),
         session_id: Some(session_id),
@@ -630,7 +644,7 @@ fn try_load_launch_capabilities(
         status: match error {
             CovenAdapterError::Unavailable => "unavailable",
             CovenAdapterError::Incompatible => "incompatible",
-            CovenAdapterError::Failed => "error",
+            CovenAdapterError::Failed | CovenAdapterError::EffectUnknown => "error",
         }
         .to_string(),
         api_version: None,
@@ -717,7 +731,6 @@ fn parse_adapter_list(stdout: &[u8]) -> Result<Vec<CovenHarnessCapability>, ()> 
 #[cfg(unix)]
 fn run_coven_adapter_list(coven_binary: &str, timeout: Duration) -> Result<Vec<u8>, ()> {
     use std::process::Stdio;
-    use std::sync::mpsc;
 
     let mut command = std::process::Command::new(coven_binary);
     command
@@ -732,16 +745,17 @@ fn run_coven_adapter_list(coven_binary: &str, timeout: Duration) -> Result<Vec<u
     }
     let mut child = command.spawn().map_err(|_| ())?;
     let Some(stdout) = child.stdout.take() else {
+        terminate_process_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
         return Err(());
     };
-    let (sender, receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut bounded = stdout.take((MAX_ADAPTER_LIST_BYTES + 1) as u64);
         let mut buffer = Vec::new();
-        let read_result = io::Read::read_to_end(&mut bounded, &mut buffer);
-        let _ = sender.send(read_result.map(|_| buffer));
+        io::Read::read_to_end(&mut bounded, &mut buffer)
+            .map(|_| buffer)
+            .map_err(|_| ())
     });
     let deadline = Instant::now() + timeout;
     let mut status = None;
@@ -755,20 +769,22 @@ fn run_coven_adapter_list(coven_binary: &str, timeout: Duration) -> Result<Vec<u
             Err(_) => break,
         }
     }
+    terminate_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
-    // The reader finishes when the pipe reaches EOF. A daemonizing grandchild
-    // that inherited stdout could keep the pipe open, so the receive is
-    // bounded by the same deadline instead of an unbounded join.
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let Ok(Ok(buffer)) = receiver.recv_timeout(remaining) else {
-        return Err(());
-    };
-    let _ = reader.join();
+    let buffer = reader.join().map_err(|_| ())??;
     if buffer.len() > MAX_ADAPTER_LIST_BYTES || !status.is_some_and(|exit| exit.success()) {
         return Err(());
     }
     Ok(buffer)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child_id: u32) {
+    let process_group = -(child_id as i32);
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
 }
 
 fn adapter_launch_message(error: CovenAdapterError) -> &'static str {
@@ -776,6 +792,7 @@ fn adapter_launch_message(error: CovenAdapterError) -> &'static str {
         CovenAdapterError::Unavailable => UNAVAILABLE_MESSAGE,
         CovenAdapterError::Incompatible => INCOMPATIBLE_MESSAGE,
         CovenAdapterError::Failed => LAUNCH_FAILED_MESSAGE,
+        CovenAdapterError::EffectUnknown => LAUNCH_EFFECT_UNKNOWN_MESSAGE,
     }
 }
 
@@ -785,6 +802,7 @@ fn launch_failure_response(error: CovenAdapterError) -> CovenLaunchResponse {
             CovenAdapterError::Unavailable => "unavailable".to_string(),
             CovenAdapterError::Incompatible => "incompatible".to_string(),
             CovenAdapterError::Failed => "error".to_string(),
+            CovenAdapterError::EffectUnknown => "effect_unknown".to_string(),
         },
         session_id: None,
         harness: None,
@@ -956,6 +974,7 @@ fn adapter_error_message(error: CovenAdapterError) -> &'static str {
         CovenAdapterError::Unavailable => UNAVAILABLE_MESSAGE,
         CovenAdapterError::Incompatible => INCOMPATIBLE_MESSAGE,
         CovenAdapterError::Failed => "Coven session could not be stopped",
+        CovenAdapterError::EffectUnknown => "Coven session stop outcome is unknown",
     }
 }
 
@@ -1653,7 +1672,7 @@ fn canonical_project_scopes(
     project_scopes: &[CovenProjectScope],
     requested_roots: &HashMap<PathBuf, String>,
 ) -> HashMap<PathBuf, CanonicalProjectScope> {
-    let mut canonical_scopes = HashMap::new();
+    let mut owner_scopes = Vec::new();
     for scope in project_scopes {
         let Ok(canonical_project_root) = Path::new(&scope.project_root).canonicalize() else {
             continue;
@@ -1661,12 +1680,10 @@ fn canonical_project_scopes(
         let Some(project_root) = requested_roots.get(&canonical_project_root) else {
             continue;
         };
-        let canonical_scope = canonical_scopes
-            .entry(canonical_project_root.clone())
-            .or_insert_with(|| CanonicalProjectScope {
-                project_root: project_root.clone(),
-                owned_roots: HashSet::from([canonical_project_root]),
-            });
+        let mut canonical_scope = CanonicalProjectScope {
+            project_root: project_root.clone(),
+            owned_roots: HashSet::from([canonical_project_root.clone()]),
+        };
         for worktree_root in &scope.worktree_roots {
             let Ok(canonical_worktree_root) = Path::new(worktree_root).canonicalize() else {
                 continue;
@@ -1674,6 +1691,19 @@ fn canonical_project_scopes(
             if requested_roots.contains_key(&canonical_worktree_root) {
                 canonical_scope.owned_roots.insert(canonical_worktree_root);
             }
+        }
+        owner_scopes.push((canonical_project_root, canonical_scope));
+    }
+
+    let mut canonical_scopes = HashMap::new();
+    for (canonical_project_root, scope) in &owner_scopes {
+        canonical_scopes.insert(canonical_project_root.clone(), scope.clone());
+    }
+    for (_, scope) in owner_scopes {
+        for owned_root in &scope.owned_roots {
+            canonical_scopes
+                .entry(owned_root.clone())
+                .or_insert_with(|| scope.clone());
         }
     }
     canonical_scopes
@@ -2760,6 +2790,35 @@ mod tests {
     }
 
     #[test]
+    fn maps_worktree_rooted_sessions_back_to_the_owning_project() {
+        let tree = TempTree::new("worktree-rooted-session");
+        let project = tree.directory("project");
+        let linked_worktree = tree.directory("external-worktree");
+        let nested = tree.directory("external-worktree/nested");
+        let requested = vec![project.clone(), linked_worktree.clone()];
+        let project_scopes = vec![CovenProjectScope {
+            project_root: project.to_string_lossy().into_owned(),
+            worktree_roots: vec![linked_worktree.to_string_lossy().into_owned()],
+        }];
+        let payload = json!([{
+            "id": "linked-root",
+            "projectRoot": linked_worktree,
+            "cwd": nested
+        }]);
+
+        let sessions =
+            normalize_sessions_with_scopes(payload, &requested, &project_scopes).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "linked-root");
+        assert_eq!(sessions[0].project_root, project.to_string_lossy().as_ref());
+        assert_eq!(
+            sessions[0].cwd.as_deref(),
+            Some(nested.canonicalize().unwrap().to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
     fn legacy_flat_roots_preserve_union_cwd_authorization() {
         let tree = TempTree::new("legacy-flat-cwd");
         let project = tree.directory("project");
@@ -3518,6 +3577,22 @@ mod tests {
     }
 
     #[test]
+    fn launch_request_validation_normalizes_the_prompt_before_serialization() {
+        let tree = TempTree::new("launch-prompt-normalization");
+        let project = tree.directory("project");
+        let mut request = launch_fixture();
+        request.project_root = project.to_string_lossy().into_owned();
+        request.cwd = Some(project.to_string_lossy().into_owned());
+        request.prompt = "  Fix the failing tests \n".to_string();
+
+        let request = validate_launch_request(request).unwrap();
+        let body = launch_request_body(&request).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(value["prompt"], "Fix the failing tests");
+    }
+
+    #[test]
     fn launch_request_validation_rejects_unbounded_input() {
         let tree = TempTree::new("launch-validation");
         let project = tree.directory("project");
@@ -3646,6 +3721,14 @@ mod tests {
                     .as_ref()
             )
         );
+        assert_eq!(
+            canonical.project_root,
+            linked_worktree
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
     }
 
     #[test]
@@ -3711,6 +3794,49 @@ mod tests {
         server.finish();
 
         assert_eq!(response.unwrap_err(), CovenAdapterError::Incompatible);
+    }
+
+    #[test]
+    fn launch_session_marks_a_missing_post_response_as_effect_unknown() {
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            Vec::new(),
+        ]);
+
+        let response = try_launch_coven_session(&endpoint, &launch_fixture());
+        assert_server_requests(&server, &["/api/v1/health"]);
+        assert!(server.recv_request().starts_with(b"POST /api/v1/sessions "));
+        server.finish();
+
+        assert_eq!(response.unwrap_err(), CovenAdapterError::EffectUnknown);
+        assert_eq!(
+            launch_failure_response(CovenAdapterError::EffectUnknown),
+            CovenLaunchResponse {
+                status: "effect_unknown".to_string(),
+                session_id: None,
+                harness: None,
+                message: Some(LAUNCH_EFFECT_UNKNOWN_MESSAGE.to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn adapter_timeout_terminates_descendants_that_hold_stdout() {
+        let tree = TempTree::new("adapter-process-group");
+        let script = tree.root.join("coven-wrapper");
+        fs::write(&script, "#!/bin/sh\n/bin/sleep 30 &\nwait\n").unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let started = Instant::now();
+        assert!(
+            run_coven_adapter_list(script.to_str().unwrap(), Duration::from_millis(100)).is_err()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "adapter cleanup exceeded its bounded deadline"
+        );
     }
 
     #[test]
