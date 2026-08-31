@@ -1072,6 +1072,31 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('shares the bounded snapshot budget across collectors', async () => {
+    let originalValueReads = 0;
+    const lifecycle = () => Object.fromEntries(Array.from({ length: 9 }, (_, section) => {
+      const values = Array.from({ length: 1_000 }, () => 'ready');
+      const countedValues = new Proxy(values, {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property)) originalValueReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      return [`section-${section}`, countedValues];
+    }));
+
+    const bundle = await collectSupportBundle([
+      { name: 'alpha', collect: async () => ({ lifecycle: lifecycle() }) },
+      { name: 'beta', collect: async () => ({ lifecycle: lifecycle() }) },
+    ]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(originalValueReads).toBeLessThanOrEqual(16_384);
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    ]));
+  });
+
   it('accounts for payload arrays discarded during collector overflow preflight', async () => {
     const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
       sequence,

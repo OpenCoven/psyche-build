@@ -563,14 +563,22 @@ function safeCollectorArraySnapshot(value: unknown, field: CollectorPayloadField
   }
 }
 
-function snapshotCollectorResult(value: unknown, deadlineAt?: number): SupportBundleInput | undefined {
+function snapshotCollectorResult(
+  value: unknown,
+  budget: NormalizationBudget,
+): SupportBundleInput | undefined {
+  assertNormalizationDeadline(budget.deadlineAt);
+  if (budget.remaining <= 0) return undefined;
+  budget.remaining -= 1;
   if (!isRecord(value)) return undefined;
-  const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
+  const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, budget.deadlineAt);
   if (entries === undefined) return undefined;
   const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  const budget: NormalizationBudget = { remaining: MAX_COLLECTOR_RESULT_NODES, deadlineAt };
   for (const [key, childValue] of entries) {
-    if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField)) {
+    if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField) && Array.isArray(childValue)) {
+      assertNormalizationDeadline(budget.deadlineAt);
+      if (budget.remaining <= 0) return undefined;
+      budget.remaining -= 1;
       snapshot[key] = childValue;
       continue;
     }
@@ -579,6 +587,13 @@ function snapshotCollectorResult(value: unknown, deadlineAt?: number): SupportBu
     snapshot[key] = childSnapshot;
   }
   return snapshot as SupportBundleInput;
+}
+
+function boundedCollectorArrayValues(value: readonly unknown[], budget: NormalizationBudget): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isBoundedInputValue(value[index], 1, new Set<object>(), budget)) return false;
+  }
+  return true;
 }
 
 function hasOnlyKeys(
@@ -746,7 +761,6 @@ function collectorSnapshotViolation(
   const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, budget.deadlineAt);
   if (!entries || entries.length === 0 || entries.length > ROOT_FIELDS.size
     || entries.some(([key]) => key.length > MAX_TEXT_SCAN_CHARS || !ROOT_FIELDS.has(key))) return 'invalid';
-  if (!isBoundedInputValue(value, 0, new Set<object>(), budget)) return 'invalid';
   if (value.status !== undefined
     && value.status !== 'complete'
     && value.status !== 'partial'
@@ -764,6 +778,10 @@ function collectorSnapshotViolation(
   if (Array.isArray(value.receipts) && value.receipts.length > maxReceipts) return 'overflow';
   if (Array.isArray(value.errors) && value.errors.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) return 'overflow';
   if (Array.isArray(value.terminalTail) && value.terminalTail.length > SUPPORT_BUNDLE_LIMITS.maxTerminalLines) return 'overflow';
+  if (Array.isArray(value.records) && !boundedCollectorArrayValues(value.records, budget)) return 'invalid';
+  if (Array.isArray(value.receipts) && !boundedCollectorArrayValues(value.receipts, budget)) return 'invalid';
+  if (Array.isArray(value.errors) && !boundedCollectorArrayValues(value.errors, budget)) return 'invalid';
+  if (Array.isArray(value.terminalTail) && !boundedCollectorArrayValues(value.terminalTail, budget)) return 'invalid';
   if (Array.isArray(value.records) && !value.records.every((item) => isCollectorRecordShape(item))) return 'invalid';
   if (Array.isArray(value.receipts) && !value.receipts.every((item) => isCollectorReceiptShape(item))) return 'invalid';
   if (Array.isArray(value.errors) && !value.errors.every((item) => isCollectorErrorShape(item))) return 'invalid';
@@ -3124,7 +3142,7 @@ export async function collectSupportBundle(
         : undefined;
     let violation: 'invalid' | 'overflow' | undefined;
     try {
-      const resultSnapshot = snapshotCollectorResult(item.result, deadlineAt);
+      const resultSnapshot = snapshotCollectorResult(item.result, preflightBudget);
       if (resultSnapshot === undefined) {
         violation = 'invalid';
       } else {
