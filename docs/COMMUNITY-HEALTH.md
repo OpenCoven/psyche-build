@@ -32,23 +32,9 @@ Measured 2026-08-30 via `GET /repos/OpenCoven/psyche-build/community/profile`:
 GitHub documents YAML issue forms with `name` and `description` as valid
 community-profile intake surfaces. The repository has three such forms, but the
 REST community-profile endpoint still reports `files.issue_template: null`.
-Cross-repository comparison measured on 2026-08-30 through the same endpoint:
-
-| Repository | Public intake | Health |
-| --- | --- | --- |
-| OpenCoven/psyche-build | YAML forms only | 87 |
-| vitejs/vite | YAML forms only | 87 |
-| prettier/prettier | YAML forms only | 87 |
-| grafana/grafana | YAML forms only | 87 |
-| microsoft/vscode | Markdown templates | 100 |
-| nodejs/node | Markdown templates | 100 |
-| facebook/react | Markdown templates | 100 |
-| kubernetes/kubernetes | Markdown templates | 100 |
-
-Every repository above reports `files.issue_template: null`; the field does not
-describe the available YAML forms. The observed percentage difference tracks
-the presence of a legacy Markdown template rather than the presence or quality
-of the bounded intake surfaces.
+The endpoint therefore does not describe the repository's available YAML issue
+forms, and its percentage is not used as proof that the intake surface is
+missing or unsafe.
 
 ## Resolution
 
