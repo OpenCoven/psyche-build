@@ -13,7 +13,7 @@ use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -94,6 +94,8 @@ use pty_transport::{
     PumpMetrics as TransportPumpMetrics, RecentOutputSnapshots, TransportSessionKey,
     EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
+#[cfg(debug_assertions)]
+use runtime_diagnostics::{fixture_start_request, DiagnosticsFixture};
 use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
@@ -220,12 +222,32 @@ impl<T> Default for PtyLifecycleRegistry<T> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PtyLifecycleError {
-    AlreadyRunning { thread_id: String },
-    CleanupInProgress { thread_id: String },
+    AlreadyRunning {
+        thread_id: String,
+    },
+    CleanupInProgress {
+        thread_id: String,
+    },
+    GenerationRequired {
+        thread_id: String,
+    },
+    StaleOperation {
+        thread_id: String,
+        expected: u64,
+        actual: u64,
+    },
     GenerationExhausted,
-    StaleStart { thread_id: String, generation: u64 },
-    NotFound { thread_id: String },
-    AlreadyStopping { thread_id: String, generation: u64 },
+    StaleStart {
+        thread_id: String,
+        generation: u64,
+    },
+    NotFound {
+        thread_id: String,
+    },
+    AlreadyStopping {
+        thread_id: String,
+        generation: u64,
+    },
 }
 
 impl std::fmt::Display for PtyLifecycleError {
@@ -237,6 +259,17 @@ impl std::fmt::Display for PtyLifecycleError {
             Self::CleanupInProgress { thread_id } => {
                 write!(formatter, "thread '{thread_id}' cleanup in progress")
             }
+            Self::GenerationRequired { thread_id } => {
+                write!(formatter, "thread '{thread_id}' operation requires a PTY generation")
+            }
+            Self::StaleOperation {
+                thread_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "thread '{thread_id}' operation generation {expected} is stale; current generation is {actual}"
+            ),
             Self::GenerationExhausted => formatter.write_str("PTY session generation exhausted"),
             Self::StaleStart {
                 thread_id,
@@ -340,13 +373,30 @@ impl<T> PtyLifecycleRegistry<T> {
         }
     }
 
-    fn stop(&mut self, thread_id: &str) -> Result<StopSessionOutcome<T>, PtyLifecycleError> {
+    fn stop(
+        &mut self,
+        thread_id: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<StopSessionOutcome<T>, PtyLifecycleError> {
         let entry = self
             .entries
             .get_mut(thread_id)
             .ok_or_else(|| PtyLifecycleError::NotFound {
                 thread_id: thread_id.to_string(),
             })?;
+        if let Some(expected) = expected_generation {
+            if expected != entry.generation {
+                return Err(PtyLifecycleError::StaleOperation {
+                    thread_id: thread_id.to_string(),
+                    expected,
+                    actual: entry.generation,
+                });
+            }
+        } else if matches!(entry.state, PtyLifecycleState::Running(_)) {
+            return Err(PtyLifecycleError::GenerationRequired {
+                thread_id: thread_id.to_string(),
+            });
+        }
         match &mut entry.state {
             PtyLifecycleState::Starting { stop_requested } => {
                 *stop_requested = true;
@@ -432,6 +482,42 @@ impl<T> PtyLifecycleRegistry<T> {
             })
     }
 
+    fn current_generation(&self, thread_id: &str) -> Option<u64> {
+        self.entries.get(thread_id).map(|entry| entry.generation)
+    }
+
+    fn live_with_generation(
+        &self,
+        thread_id: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<&T, PtyLifecycleError> {
+        let entry = self
+            .entries
+            .get(thread_id)
+            .ok_or_else(|| PtyLifecycleError::NotFound {
+                thread_id: thread_id.to_string(),
+            })?;
+        if let Some(expected) = expected_generation {
+            if expected != entry.generation {
+                return Err(PtyLifecycleError::StaleOperation {
+                    thread_id: thread_id.to_string(),
+                    expected,
+                    actual: entry.generation,
+                });
+            }
+        } else if matches!(entry.state, PtyLifecycleState::Running(_)) {
+            return Err(PtyLifecycleError::GenerationRequired {
+                thread_id: thread_id.to_string(),
+            });
+        }
+        match &entry.state {
+            PtyLifecycleState::Running(session) => Ok(session),
+            _ => Err(PtyLifecycleError::NotFound {
+                thread_id: thread_id.to_string(),
+            }),
+        }
+    }
+
     #[cfg(test)]
     fn is_live(&self, thread_id: &str) -> bool {
         self.live(thread_id).is_some()
@@ -478,6 +564,10 @@ impl std::fmt::Display for PtyProcessTerminatorSetupError {
 #[cfg(windows)]
 #[derive(Debug)]
 struct WindowsProcessTreeKiller {
+    // portable-pty's Windows child implementation owns a dedicated kill-on-close
+    // job and assigns the child through its process-creation attributes.
+    // ChildKiller therefore carries a duplicated job handle; retaining that
+    // capability avoids PID-reuse races and terminates descendants with the PTY root.
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
@@ -490,6 +580,9 @@ impl WindowsProcessTreeKiller {
     }
 
     fn terminate(&self) -> std::io::Result<()> {
+        // This is a job-wide termination through portable-pty's Windows killer,
+        // rather than a raw PID termination. It is intentionally idempotent at
+        // the job boundary: an already-exited job is handled by the backend.
         self.killer.lock().kill()
     }
 }
@@ -1693,6 +1786,12 @@ pub struct PtyExitEvent {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PtyStartResult {
+    generation: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
@@ -2339,10 +2438,18 @@ struct UnixPtyReaderCancellation {
     cancelled: AtomicBool,
 }
 
+#[cfg(windows)]
+struct WindowsPtyReaderCancellation {
+    cancelled: AtomicBool,
+    reader_thread: Mutex<Option<std::os::windows::io::OwnedHandle>>,
+}
+
 #[derive(Clone)]
 struct PtyReaderCancellation {
     #[cfg(unix)]
     inner: Arc<UnixPtyReaderCancellation>,
+    #[cfg(windows)]
+    inner: Arc<WindowsPtyReaderCancellation>,
 }
 
 impl PtyReaderCancellation {
@@ -2374,10 +2481,50 @@ impl PtyReaderCancellation {
                 return Err(error);
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.inner.cancelled.store(true, Ordering::Release);
+            let reader_thread = self.inner.reader_thread.lock();
+            let Some(reader_thread) = reader_thread.as_ref() else {
+                // The reader installs its handle at thread start. If it has
+                // not started yet, the atomic check makes its first read a
+                // clean EOF and no synchronous I/O is pending to cancel.
+                return Ok(());
+            };
+            let result = unsafe {
+                windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(
+                    std::os::windows::io::AsRawHandle::as_raw_handle(reader_thread),
+                ))
+            };
+            match result {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if error.code()
+                        == windows::core::HRESULT::from_win32(
+                            windows::Win32::Foundation::ERROR_NOT_FOUND.0,
+                        ) =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(std::io::Error::other(error.to_string())),
+            }
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             Ok(())
         }
+    }
+
+    #[cfg(windows)]
+    fn install_current_thread(&self) -> std::io::Result<()> {
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::System::Threading::{GetCurrentThreadId, OpenThread, THREAD_TERMINATE};
+
+        let handle = unsafe { OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId()) }
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.0) };
+        *self.inner.reader_thread.lock() = Some(owned);
+        Ok(())
     }
 }
 
@@ -2405,7 +2552,50 @@ fn prepare_pty_reader(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+struct WindowsPtyReader {
+    reader: Box<dyn Read + Send>,
+    cancellation: Arc<WindowsPtyReaderCancellation>,
+}
+
+#[cfg(windows)]
+impl Read for WindowsPtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancellation.cancelled.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let result = self.reader.read(buffer);
+        if self.cancellation.cancelled.load(Ordering::Acquire) {
+            Ok(0)
+        } else {
+            result
+        }
+    }
+}
+
+#[cfg(windows)]
+fn prepare_pty_reader(
+    master: &dyn MasterPty,
+) -> Result<(Box<dyn Read + Send>, PtyReaderCancellation), String> {
+    let cancellation = Arc::new(WindowsPtyReaderCancellation {
+        cancelled: AtomicBool::new(false),
+        reader_thread: Mutex::new(None),
+    });
+    let reader = master
+        .try_clone_reader()
+        .map_err(|error| error.to_string())?;
+    Ok((
+        Box::new(WindowsPtyReader {
+            reader,
+            cancellation: cancellation.clone(),
+        }),
+        PtyReaderCancellation {
+            inner: cancellation,
+        },
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn prepare_pty_reader(
     master: &dyn MasterPty,
 ) -> Result<(Box<dyn Read + Send>, PtyReaderCancellation), String> {
@@ -2503,7 +2693,7 @@ impl PtyExitShutdown {
         }
     }
 
-    fn finish_terminated_threads(&mut self, timeout: std::time::Duration) {
+    fn finish_terminated_threads(&mut self, timeout: std::time::Duration) -> bool {
         let started_at = std::time::Instant::now();
         let deadline = started_at.checked_add(timeout).unwrap_or(started_at);
         if !self.reader_completion_known {
@@ -2518,39 +2708,47 @@ impl PtyExitShutdown {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .unwrap_or(std::time::Duration::ZERO);
-        if self.pump.wait_for_worker_timeout(remaining) == CompletionOutcome::Completed {
-            if self.pump.join_worker_after_completion().is_err() {
-                log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
-            }
-        } else {
-            log::warn!(
-                "PTY output worker did not finish after terminating '{}'",
-                self.token.thread_id
-            );
-        }
+        let worker_completed =
+            if self.pump.wait_for_worker_timeout(remaining) == CompletionOutcome::Completed {
+                if self.pump.join_worker_after_completion().is_err() {
+                    log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+                }
+                true
+            } else {
+                log::warn!(
+                    "PTY output worker did not finish after terminating '{}'",
+                    self.token.thread_id
+                );
+                false
+            };
         if !self.reader_completion_known {
             log::warn!(
                 "PTY reader did not finish after terminating and cancelling '{}'",
                 self.token.thread_id
             );
         }
+        self.reader_completion_known && worker_completed
     }
 
-    fn finish_terminated_threads_to_completion(&mut self) {
-        if !self.reader_completion_known {
-            match self.reader_done_rx.recv() {
-                Ok(result) => {
-                    self.reader_result = Some(result);
-                    self.reader_completion_known = true;
-                }
-                Err(_) => {
-                    self.reader_completion_known = true;
-                }
-            }
+    fn abandon_terminated_threads(&mut self) {
+        // The reader and output pump were already cancelled by the bounded
+        // shutdown path. Dropping their join handles deliberately detaches
+        // any OS thread that ignored cancellation; the cancelled pump rejects
+        // late output, so the lifecycle entry can leave Exiting without an
+        // unbounded reaper or a permanently reserved thread id.
+        if let Err(error) = self.reader_cancellation.cancel() {
+            log::warn!(
+                "failed to re-cancel PTY reader before detaching '{}': {error}",
+                self.token.thread_id
+            );
         }
-        self.join_reader_after_completion();
-        if self.pump.cancel_and_join().is_err() {
-            log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+        self.pump.cancel();
+        self.pump.abandon_worker();
+        if self.reader_thread.take().is_some() {
+            log::warn!(
+                "detaching PTY reader after bounded cleanup for '{}'",
+                self.token.thread_id
+            );
         }
     }
 }
@@ -2652,13 +2850,16 @@ fn validate_pty_thread_id(thread_id: &str) -> Result<(), String> {
     }
 }
 
-fn clone_live_pty_pump(thread_id: &str) -> Result<OutputPump, String> {
+fn clone_live_pty_pump(
+    thread_id: &str,
+    expected_generation: Option<u64>,
+) -> Result<OutputPump, String> {
     validate_pty_thread_id(thread_id)?;
     let guard = PTY_LIFECYCLES.lock();
     guard
-        .live(thread_id)
+        .live_with_generation(thread_id, expected_generation)
         .map(|session| session.pump.clone())
-        .ok_or_else(|| format!("thread '{}' not found", thread_id))
+        .map_err(|error| error.to_string())
 }
 
 fn duration_to_micros(duration: std::time::Duration) -> u64 {
@@ -2833,7 +3034,7 @@ async fn pty_start(
     webview: tauri::Webview,
     app: AppHandle,
     options: StartOptions,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     ensure_trusted_pty_caller(webview.label())?;
     match tauri::async_runtime::spawn_blocking(move || pty_start_blocking(app, options)).await {
         Ok(result) => result,
@@ -2841,7 +3042,24 @@ async fn pty_start(
     }
 }
 
-fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), String> {
+fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<PtyStartResult, String> {
+    pty_start_blocking_with_launch(app, options, None)
+}
+
+#[cfg(debug_assertions)]
+fn pty_start_blocking_with_trusted_fixture(
+    app: AppHandle,
+    options: StartOptions,
+    fixture_launch: platform::TrustedFixtureLaunch,
+) -> Result<PtyStartResult, String> {
+    pty_start_blocking_with_launch(app, options, Some(fixture_launch.into_descriptor()))
+}
+
+fn pty_start_blocking_with_launch(
+    app: AppHandle,
+    options: StartOptions,
+    trusted_fixture_launch: Option<platform::LaunchDescriptor>,
+) -> Result<PtyStartResult, String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;
@@ -2860,7 +3078,10 @@ fn pty_start_blocking(app: AppHandle, options: StartOptions) -> Result<(), Strin
         command,
         args,
         env: launch_env,
-    } = platform::pty_launch_descriptor(options.command, options.args)?;
+    } = match trusted_fixture_launch {
+        Some(fixture_launch) => fixture_launch,
+        None => platform::pty_launch_descriptor(options.command, options.args)?,
+    };
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
     cmd.env("PATH", platform::augmented_path());
@@ -2902,7 +3123,7 @@ fn register_pty_client(
     pending_start: PendingPtyStart,
     pair: portable_pty::PtyPair,
     mut child: Box<dyn Child + Send + Sync>,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     let spawn_time_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2913,7 +3134,9 @@ fn register_pty_client(
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
     let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
+    let generation = pending_start.token.generation;
+    let pump = OutputPump::new_with_generation(thread_id.clone(), generation)
+        .map_err(|e| e.to_string())?;
     let app_for_output = app.clone();
     pump.start_worker(move |payload| {
         app_for_output
@@ -2937,7 +3160,17 @@ fn register_pty_client(
 
     let reader_pump = pump.clone();
     let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
+    #[cfg(windows)]
+    let reader_cancellation_for_thread = reader_cancellation.clone();
     let data_thread = std::thread::spawn(move || {
+        #[cfg(windows)]
+        let reader_result = match reader_cancellation_for_thread.install_current_thread() {
+            Ok(()) => pump_pty_reader(&mut reader, reader_pump),
+            Err(error) => Err(format!(
+                "failed to retain Windows PTY reader thread handle: {error}"
+            )),
+        };
+        #[cfg(not(windows))]
         let reader_result = pump_pty_reader(&mut reader, reader_pump);
         let _ = reader_done_tx.send(reader_result);
     });
@@ -2986,11 +3219,22 @@ fn register_pty_client(
             );
         }
         // Timeout cleanup has its own bounded budget, so it must happen only after
-        // observers receive the exit. Keep the generation reserved until the old
-        // reader and worker can no longer collide with a replacement session.
+        // observers receive the exit. If reader or worker cleanup is still
+        // incomplete, give it one final bounded retry. If cancellation still
+        // cannot quiesce a thread, detach its handle after the cancelled pump
+        // has been sealed and release the lifecycle entry; the pump rejects
+        // late old-generation output before a new session can reuse the id.
         if outcome == ExitShutdownOutcome::TimedOut {
-            shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT);
-            shutdown.finish_terminated_threads_to_completion();
+            if !shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT) {
+                std::thread::spawn(move || {
+                    let mut shutdown = shutdown;
+                    if !shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT) {
+                        shutdown.abandon_terminated_threads();
+                    }
+                    finish_pty_lifecycle(&shutdown);
+                });
+                return;
+            }
         }
         if shutdown.exit_event_allowed {
             PTY_LIFECYCLES.lock().finish_exit(&exit_token);
@@ -3007,6 +3251,85 @@ fn register_pty_client(
         ));
     }
 
+    Ok(PtyStartResult {
+        generation: session_token.generation,
+    })
+}
+
+fn finish_pty_lifecycle(shutdown: &PtyExitShutdown) {
+    if shutdown.exit_event_allowed && !PTY_LIFECYCLES.lock().finish_exit(&shutdown.token) {
+        log::debug!(
+            "PTY lifecycle entry was already finalized for '{}' generation {}",
+            shutdown.token.thread_id,
+            shutdown.token.generation,
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+async fn diagnostics_spawn_fixture(
+    webview: tauri::Webview,
+    app: AppHandle,
+    state: State<'_, RuntimeDiagnosticsState>,
+    thread_id: String,
+    fixture: DiagnosticsFixture,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    state.ensure_stress_authorized()?;
+    let (options, fixture_launch) = fixture_start_request(&thread_id, fixture)?;
+
+    match tauri::async_runtime::spawn_blocking(move || {
+        pty_start_blocking_with_trusted_fixture(app, options, fixture_launch)
+    })
+    .await
+    {
+        Ok(result) => result.map(|_| ()),
+        Err(error) => Err(format!("failed to join PTY start task: {error}")),
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+async fn diagnostics_cycle_window(
+    webview: tauri::Webview,
+    state: State<'_, RuntimeDiagnosticsState>,
+) -> Result<(), String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    state.ensure_stress_authorized()?;
+    let window = webview.window();
+    window
+        .minimize()
+        .map_err(|error| format!("failed to minimize diagnostics window: {error}"))?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut cycle_result: Result<(), String> =
+        Err("failed to restore diagnostics window: no restore attempt was made".to_string());
+    for _attempt in 0..3 {
+        cycle_result = window
+            .unminimize()
+            .map_err(|error| format!("failed to restore diagnostics window: {error}"))
+            .and_then(|()| {
+                window.set_focus().map_err(|error| {
+                    format!("failed to focus restored diagnostics window: {error}")
+                })
+            });
+        if cycle_result.is_ok() {
+            return Ok(());
+        }
+    }
+    if let Err(error) = cycle_result {
+        let mut rollback_error: Option<String> = None;
+        for _attempt in 0..3 {
+            match window.unminimize().and_then(|()| window.set_focus()) {
+                Ok(()) => return Err(format!("{error}; diagnostics window rollback succeeded")),
+                Err(error) => rollback_error = Some(error.to_string()),
+            }
+        }
+        return Err(format!(
+            "{error}; failed to rollback diagnostics window state: {}",
+            rollback_error.unwrap_or_else(|| "unknown rollback error".to_string()),
+        ));
+    }
     Ok(())
 }
 
@@ -3015,7 +3338,7 @@ async fn pty_attach(
     webview: tauri::Webview,
     app: AppHandle,
     options: PtyAttachOptions,
-) -> Result<(), String> {
+) -> Result<PtyStartResult, String> {
     ensure_trusted_pty_caller(webview.label())?;
     match tauri::async_runtime::spawn_blocking(move || pty_attach_blocking(app, options)).await {
         Ok(result) => result,
@@ -3023,7 +3346,10 @@ async fn pty_attach(
     }
 }
 
-fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), String> {
+fn pty_attach_blocking(
+    app: AppHandle,
+    options: PtyAttachOptions,
+) -> Result<PtyStartResult, String> {
     validate_pty_thread_id(&options.thread_id)?;
     let attach_args = native_sessions::build_attach_args(
         &native_sessions::native_socket_path()?,
@@ -3058,10 +3384,12 @@ fn pty_attach_blocking(app: AppHandle, options: PtyAttachOptions) -> Result<(), 
 async fn pty_write(
     webview: tauri::Webview,
     thread_id: String,
+    generation: Option<u64>,
     bytes: Vec<u8>,
 ) -> Result<(), String> {
     ensure_trusted_pty_caller(webview.label())?;
-    let (writer, operation_lane, operation_admission) = pty_write_operation(&thread_id)?;
+    let (writer, operation_lane, operation_admission) =
+        pty_write_operation(&thread_id, generation)?;
     let operation_permit = operation_admission
         .try_acquire_owned()
         .map_err(|_| format!("thread '{}' PTY operation queue is full", thread_id))?;
@@ -3078,6 +3406,7 @@ async fn pty_write(
 
 fn pty_write_operation(
     thread_id: &str,
+    expected_generation: Option<u64>,
 ) -> Result<
     (
         Arc<Mutex<Box<dyn Write + Send>>>,
@@ -3088,8 +3417,8 @@ fn pty_write_operation(
 > {
     let guard = PTY_LIFECYCLES.lock();
     let session = guard
-        .live(thread_id)
-        .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+        .live_with_generation(thread_id, expected_generation)
+        .map_err(|error| error.to_string())?;
     let operation = (
         Arc::clone(&session.writer),
         Arc::clone(&session.operation_lane),
@@ -3115,11 +3444,13 @@ fn pty_write_blocking(
 async fn pty_resize(
     webview: tauri::Webview,
     thread_id: String,
+    generation: Option<u64>,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     ensure_trusted_pty_caller(webview.label())?;
-    let Some((master, operation_lane, operation_admission)) = pty_resize_operation(&thread_id)
+    let Some((master, operation_lane, operation_admission)) =
+        pty_resize_operation(&thread_id, generation)?
     else {
         return Ok(());
     };
@@ -3139,21 +3470,28 @@ async fn pty_resize(
 
 fn pty_resize_operation(
     thread_id: &str,
-) -> Option<(
-    Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    Arc<tokio::sync::Mutex<()>>,
-    Arc<tokio::sync::Semaphore>,
-)> {
+    expected_generation: Option<u64>,
+) -> Result<
+    Option<(
+        Arc<Mutex<Box<dyn MasterPty + Send>>>,
+        Arc<tokio::sync::Mutex<()>>,
+        Arc<tokio::sync::Semaphore>,
+    )>,
+    String,
+> {
+    validate_pty_thread_id(thread_id)?;
     let guard = PTY_LIFECYCLES.lock();
-    let operation = guard.live(thread_id).map(|session| {
-        (
+    let operation = match guard.live_with_generation(thread_id, expected_generation) {
+        Ok(session) => Some((
             Arc::clone(&session.master),
             Arc::clone(&session.operation_lane),
             Arc::clone(&session.operation_admission),
-        )
-    });
+        )),
+        Err(PtyLifecycleError::NotFound { .. }) => None,
+        Err(error) => return Err(error.to_string()),
+    };
     drop(guard);
-    operation
+    Ok(operation)
 }
 
 fn pty_resize_blocking(
@@ -3185,12 +3523,16 @@ struct PtyStopResult {
 }
 
 #[tauri::command]
-fn pty_stop(webview: tauri::Webview, thread_id: String) -> Result<PtyStopResult, String> {
+fn pty_stop(
+    webview: tauri::Webview,
+    thread_id: String,
+    generation: Option<u64>,
+) -> Result<PtyStopResult, String> {
     ensure_trusted_pty_caller(webview.label())?;
     let action = {
         let mut registry = PTY_LIFECYCLES.lock();
         registry
-            .stop(&thread_id)
+            .stop(&thread_id, generation)
             .map_err(|error| error.to_string())?
     };
     match action {
@@ -3216,17 +3558,32 @@ fn pty_stop(webview: tauri::Webview, thread_id: String) -> Result<PtyStopResult,
 }
 
 #[tauri::command]
+fn pty_current_generation(webview: tauri::Webview, thread_id: String) -> Result<u64, String> {
+    ensure_trusted_pty_caller(webview.label())?;
+    validate_pty_thread_id(&thread_id)?;
+    PTY_LIFECYCLES
+        .lock()
+        .current_generation(&thread_id)
+        .ok_or_else(|| format!("thread '{}' not found", thread_id))
+}
+
+#[tauri::command]
 fn pty_ack(
     webview: tauri::Webview,
     thread_id: String,
     sequence: u64,
+    generation: Option<u64>,
 ) -> Result<AckOutcome, String> {
     ensure_trusted_pty_caller(webview.label())?;
-    pty_ack_inner(thread_id, sequence)
+    pty_ack_inner(thread_id, sequence, generation)
 }
 
-fn pty_ack_inner(thread_id: String, sequence: u64) -> Result<AckOutcome, String> {
-    let pump = clone_live_pty_pump(&thread_id)?;
+fn pty_ack_inner(
+    thread_id: String,
+    sequence: u64,
+    generation: Option<u64>,
+) -> Result<AckOutcome, String> {
+    let pump = clone_live_pty_pump(&thread_id, generation)?;
     pump.acknowledge(sequence)
         .map(AckOutcome::from)
         .map_err(|error| error.to_string())
@@ -3237,13 +3594,18 @@ fn pty_set_visibility(
     webview: tauri::Webview,
     thread_id: String,
     visible: bool,
+    generation: Option<u64>,
 ) -> Result<(), String> {
     ensure_trusted_pty_caller(webview.label())?;
-    pty_set_visibility_inner(thread_id, visible)
+    pty_set_visibility_inner(thread_id, visible, generation)
 }
 
-fn pty_set_visibility_inner(thread_id: String, visible: bool) -> Result<(), String> {
-    let pump = clone_live_pty_pump(&thread_id)?;
+fn pty_set_visibility_inner(
+    thread_id: String,
+    visible: bool,
+    generation: Option<u64>,
+) -> Result<(), String> {
+    let pump = clone_live_pty_pump(&thread_id, generation)?;
     pump.set_visibility(if visible {
         TransportPaneVisibility::Visible
     } else {
@@ -8648,6 +9010,7 @@ pub fn run() {
             pty_ack,
             pty_set_visibility,
             pty_stop,
+            pty_current_generation,
             pty_list,
             pty_transport_metrics,
             browser_app_shortcut,
@@ -8692,6 +9055,10 @@ pub fn run() {
             control_state,
             runtime_diagnostics,
             runtime_process_metrics,
+            #[cfg(debug_assertions)]
+            diagnostics_spawn_fixture,
+            #[cfg(debug_assertions)]
+            diagnostics_cycle_window,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -9787,8 +10154,10 @@ mod pty_runtime_tests {
                 .unwrap();
             let writer = pair.master.take_writer().unwrap();
             let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
-            let pump = OutputPump::new(thread_id.to_string()).unwrap();
             let pending = PendingPtyStart::reserve(thread_id).unwrap();
+            let pump =
+                OutputPump::new_with_generation(thread_id.to_string(), pending.token.generation)
+                    .unwrap();
             let (token, install_outcome) = pending
                 .install(PtySession {
                     master: Arc::new(Mutex::new(pair.master)),
@@ -9817,7 +10186,7 @@ mod pty_runtime_tests {
         fn drop(&mut self) {
             let action = {
                 let mut registry = PTY_LIFECYCLES.lock();
-                registry.stop(&self.token.thread_id)
+                registry.stop(&self.token.thread_id, Some(self.token.generation))
             };
             if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
                 drop(session);
@@ -10042,6 +10411,42 @@ mod pty_runtime_tests {
         drop(pair.master);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_cancellation_releases_a_blocked_pty_read() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+        let reader_cancellation_for_thread = reader_cancellation.clone();
+        let (reader_tx, reader_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            reader_cancellation_for_thread
+                .install_current_thread()
+                .expect("reader thread handle must be retained");
+            let mut bytes = Vec::new();
+            let _ = reader_tx.send(reader.read_to_end(&mut bytes));
+        });
+
+        assert!(matches!(
+            reader_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        reader_cancellation.cancel().unwrap();
+        reader_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader cancellation must release the blocked PTY read")
+            .expect("cancelled PTY reader must exit cleanly");
+
+        drop(pair.slave);
+        drop(pair.master);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_termination_selects_distinct_foreground_and_original_groups() {
@@ -10175,7 +10580,9 @@ mod pty_runtime_tests {
         let start = registry.reserve("racing-start").unwrap();
 
         assert_eq!(
-            registry.stop("racing-start").unwrap(),
+            registry
+                .stop("racing-start", Some(start.generation))
+                .unwrap(),
             StopSessionOutcome::RecordedDuringStart {
                 generation: start.generation,
             }
@@ -10202,7 +10609,7 @@ mod pty_runtime_tests {
             InstallSessionOutcome::Running
         );
         assert_eq!(
-            registry.stop("same-id").unwrap(),
+            registry.stop("same-id", Some(old.generation)).unwrap(),
             StopSessionOutcome::Terminate {
                 generation: old.generation,
                 session: "old-session",
@@ -10274,11 +10681,11 @@ mod pty_runtime_tests {
     #[test]
     fn pty_ack_reports_missing_invalid_duplicate_future_and_skipped_sequences() {
         assert_eq!(
-            pty_ack_inner("missing-pane".to_string(), 1).unwrap_err(),
+            pty_ack_inner("missing-pane".to_string(), 1, None).unwrap_err(),
             "thread 'missing-pane' not found"
         );
         assert_eq!(
-            pty_ack_inner("../unsafe".to_string(), 1).unwrap_err(),
+            pty_ack_inner("../unsafe".to_string(), 1, None).unwrap_err(),
             "thread id is unsafe"
         );
 
@@ -10296,7 +10703,7 @@ mod pty_runtime_tests {
         );
 
         assert!(matches!(
-            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
+            pty_ack_inner("ack-pane".to_string(), 1, Some(session.token.generation)).unwrap(),
             AckOutcome::Advanced {
                 sequence: 1,
                 bytes: 1,
@@ -10304,11 +10711,11 @@ mod pty_runtime_tests {
             } if latency_micros >= duration_to_micros(pty_transport::VISIBLE_CADENCE)
         ));
         assert_eq!(
-            pty_ack_inner("ack-pane".to_string(), 1).unwrap(),
+            pty_ack_inner("ack-pane".to_string(), 1, Some(session.token.generation)).unwrap(),
             AckOutcome::Duplicate { sequence: 1 }
         );
         assert!(matches!(
-            pty_ack_inner("ack-pane".to_string(), 2).unwrap(),
+            pty_ack_inner("ack-pane".to_string(), 2, Some(session.token.generation)).unwrap(),
             AckOutcome::Advanced {
                 sequence: 2,
                 bytes: 1,
@@ -10329,11 +10736,21 @@ mod pty_runtime_tests {
             Ok(pty_transport::EmitOutcome::Emitted { sequence: 2 })
         );
         assert_eq!(
-            pty_ack_inner("ack-skipped-pane".to_string(), 2).unwrap_err(),
+            pty_ack_inner(
+                "ack-skipped-pane".to_string(),
+                2,
+                Some(skipped.token.generation),
+            )
+            .unwrap_err(),
             "PTY batch acknowledgement 2 skipped expected sequence 1"
         );
         assert_eq!(
-            pty_ack_inner("ack-skipped-pane".to_string(), 3).unwrap_err(),
+            pty_ack_inner(
+                "ack-skipped-pane".to_string(),
+                3,
+                Some(skipped.token.generation),
+            )
+            .unwrap_err(),
             "PTY batch acknowledgement 3 is newer than emitted sequence 2"
         );
     }
@@ -10342,7 +10759,7 @@ mod pty_runtime_tests {
     #[test]
     fn pty_set_visibility_only_updates_metrics_on_actual_transitions() {
         assert_eq!(
-            pty_set_visibility_inner("missing-visibility".to_string(), false).unwrap_err(),
+            pty_set_visibility_inner("missing-visibility".to_string(), false, None).unwrap_err(),
             "thread 'missing-visibility' not found"
         );
 
@@ -10357,7 +10774,12 @@ mod pty_runtime_tests {
         assert_eq!(initial.effective_cadence_micros, visible_cadence);
         assert_eq!(initial.metrics.visibility_transition_count, 0);
 
-        pty_set_visibility_inner("visibility-pane".to_string(), true).unwrap();
+        pty_set_visibility_inner(
+            "visibility-pane".to_string(),
+            true,
+            Some(session.token.generation),
+        )
+        .unwrap();
         let noop_visible = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();
@@ -10365,7 +10787,12 @@ mod pty_runtime_tests {
         assert_eq!(noop_visible.effective_cadence_micros, visible_cadence);
         assert_eq!(noop_visible.metrics.visibility_transition_count, 0);
 
-        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        pty_set_visibility_inner(
+            "visibility-pane".to_string(),
+            false,
+            Some(session.token.generation),
+        )
+        .unwrap();
         let hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();
@@ -10373,7 +10800,12 @@ mod pty_runtime_tests {
         assert_eq!(hidden.effective_cadence_micros, hidden_cadence);
         assert_eq!(hidden.metrics.visibility_transition_count, 1);
 
-        pty_set_visibility_inner("visibility-pane".to_string(), false).unwrap();
+        pty_set_visibility_inner(
+            "visibility-pane".to_string(),
+            false,
+            Some(session.token.generation),
+        )
+        .unwrap();
         let noop_hidden = pty_transport_metrics_inner(Some("visibility-pane".to_string()))
             .pop()
             .unwrap();

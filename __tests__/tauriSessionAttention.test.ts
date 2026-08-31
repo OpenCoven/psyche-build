@@ -269,7 +269,7 @@ describe('desktop shell wiring', () => {
 
   it('initialises local threads with sidebar activity fields', () => {
     expect(mainJs).toMatch(
-      /function createThread\(opts\)[\s\S]{0,2600}lastOutputAt:\s*0,[\s\S]{0,120}isWorking:\s*false,[\s\S]{0,120}sidebarStatusKey:\s*"busy"/,
+      /function createThread\(opts\)[\s\S]{0,2800}lastOutputAt:\s*0,[\s\S]{0,120}isWorking:\s*false,[\s\S]{0,120}sidebarStatusKey:\s*"busy"/,
     );
   });
 

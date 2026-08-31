@@ -1,110 +1,76 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
  * The committed web bundles are generated build output, so nothing but a
- * test stops them drifting from the sources they were built from. This rebuilds
- * each one with the *same* flags the build script uses -- parsed out of
- * package.json rather than restated here, so changing the build cannot leave
- * the check validating yesterday's command -- and compares the bytes.
+ * test stops them drifting from the sources they were built from. This invokes
+ * the same repository build script in an isolated output directory and
+ * compares the bytes, so the check cannot validate yesterday's command.
  */
 const packageRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri');
 const webRoot = join(packageRoot, 'web');
-const require = createRequire(import.meta.url);
-
-/**
- * Where the esbuild binary lands depends on how the workspace was installed:
- * a fresh clone gives the member its own node_modules, while an install that
- * can dedupe against an existing one may only hoist it to the workspace root.
- * Assuming a single location made this check fail with "esbuild is not
- * installed" in a perfectly good tree, so try both before giving up.
- */
-function resolveEsbuild(): string | null {
-  const candidates = [
-    join(packageRoot, 'node_modules/.bin/esbuild'),
-    join(process.cwd(), 'node_modules/.bin/esbuild'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-type EsbuildLauncher = {
-  command: string;
-  args: string[];
-  packageBinPath: string | null;
-  shimPath: string | null;
-};
-
-function resolveEsbuildLauncher(): EsbuildLauncher | null {
-  const shimPath = resolveEsbuild();
-
-  for (const base of [packageRoot, process.cwd()]) {
-    try {
-      const packageJsonPath = require.resolve('esbuild/package.json', { paths: [base] });
-      const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
-        bin?: string | Record<string, string>;
-      };
-      const bin = typeof packageJson.bin === 'string' ? packageJson.bin : packageJson.bin?.esbuild;
-      if (!bin) throw new Error(`esbuild package.json at ${packageJsonPath} has no bin entry`);
-      const packageBinPath = join(dirname(packageJsonPath), bin);
-      return {
-        command: process.execPath,
-        args: [packageBinPath],
-        packageBinPath,
-        shimPath,
-      };
-    } catch (error) {
-      const candidate = error as NodeJS.ErrnoException;
-      if (candidate.code !== 'MODULE_NOT_FOUND') throw error;
-    }
-  }
-
-  return null;
-}
-
 const buildScript = (
   JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
     scripts: Record<string, string>;
   }
 ).scripts['build:web'];
 
-/** One `esbuild <entry> <flags> --outfile=web/x.bundle.js` step of build:web. */
-type BundleStep = { argv: string[]; outfile: string };
+type BundleStep = { outfile: string };
 
-function parseBuildScript(script: string): BundleStep[] {
-  return script.split('&&').map((command) => {
-    const argv = command.trim().split(/\s+/);
-    expect(argv[0]).toBe('esbuild');
-    const outfileArg = argv.find((arg) => arg.startsWith('--outfile='));
-    if (!outfileArg) throw new Error(`build:web step has no --outfile: ${command}`);
-    return { argv: argv.slice(1), outfile: outfileArg.slice('--outfile='.length) };
+const steps: BundleStep[] = [
+  { outfile: 'web/control.bundle.js' },
+  { outfile: 'web/diffs.bundle.js' },
+  { outfile: 'web/editor.bundle.js' },
+  { outfile: 'web/input.bundle.js' },
+  { outfile: 'web/panes.bundle.js' },
+  { outfile: 'web/runtime-debug.bundle.js' },
+  { outfile: 'web/runtime.bundle.js' },
+  { outfile: 'web/sessions.bundle.js' },
+  { outfile: 'web/status.bundle.js' },
+  { outfile: 'web/workspace.bundle.js' },
+];
+const artifactRoot = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
+const releaseScratch = join(artifactRoot, 'release');
+const debugScratch = join(artifactRoot, 'debug');
+const debugRepeatScratch = join(artifactRoot, 'debug-repeat');
+rmSync(artifactRoot, { recursive: true, force: true });
+mkdirSync(artifactRoot, { recursive: true });
+beforeAll(() => {
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts/build-web.mjs'),
+    '--outdir',
+    releaseScratch,
+  ], {
+    cwd: packageRoot,
+    stdio: 'pipe',
   });
-}
-
-const steps = parseBuildScript(buildScript);
-const scratch = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
-rmSync(scratch, { recursive: true, force: true });
-mkdirSync(scratch, { recursive: true });
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts/build-web.mjs'),
+    '--debug',
+    '--outdir',
+    debugScratch,
+  ], {
+    cwd: packageRoot,
+    stdio: 'pipe',
+  });
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts/build-web.mjs'),
+    '--debug',
+    '--outdir',
+    debugRepeatScratch,
+  ], {
+    cwd: packageRoot,
+    stdio: 'pipe',
+  });
+});
+afterAll(() => rmSync(artifactRoot, { recursive: true, force: true }));
 
 describe('committed web bundles', () => {
-  it('launches esbuild without depending on the POSIX-only .bin shim contract', () => {
-    const launcher = resolveEsbuildLauncher();
-    expect(launcher, 'esbuild launcher').not.toBeNull();
-    expect(launcher?.command).toBe(process.execPath);
-    expect(launcher?.args).toHaveLength(1);
-    expect(launcher?.packageBinPath).toBe(launcher?.args[0]);
-    expect(launcher?.packageBinPath).toMatch(/node_modules[/\\].*esbuild[/\\]bin[/\\]esbuild$/);
-
-    const shimPath = launcher?.shimPath;
-    if (!shimPath) return;
-
-    expect(readFileSync(shimPath, 'utf8')).toContain('#!/bin/sh');
-    expect(readFileSync(launcher!.packageBinPath!, 'utf8')).toContain('#!/usr/bin/env node');
-    expect(launcher?.packageBinPath).not.toBe(shimPath);
+  it('uses the repository-local cross-platform web build script', () => {
+    expect(buildScript).toBe('node scripts/build-web.mjs');
+    expect(existsSync(join(packageRoot, 'scripts/build-web.mjs'))).toBe(true);
   });
 
   it('parses the native workspace shell before packaging it', () => {
@@ -121,6 +87,7 @@ describe('committed web bundles', () => {
       'web/editor.bundle.js',
       'web/input.bundle.js',
       'web/panes.bundle.js',
+      'web/runtime-debug.bundle.js',
       'web/runtime.bundle.js',
       'web/sessions.bundle.js',
       'web/status.bundle.js',
@@ -152,23 +119,7 @@ describe('committed web bundles', () => {
     it(`${step.outfile} matches its sources`, () => {
       const committed = join(packageRoot, step.outfile);
       expect(existsSync(committed), `${step.outfile} is missing — run pnpm build:web`).toBe(true);
-
-      const launcher = resolveEsbuildLauncher();
-      if (!launcher) {
-        throw new Error(
-          'esbuild is not installed for psyche-build-tauri. Run `pnpm install` at the ' +
-            'repo root — it is a workspace member, so a root install provides it.',
-        );
-      }
-
-      const rebuilt = join(scratch, step.outfile.replace(/\//g, '_'));
-      const argv = step.argv.map((arg) =>
-        arg.startsWith('--outfile=') ? `--outfile=${rebuilt}` : arg,
-      );
-      execFileSync(launcher.command, [...launcher.args, ...argv], {
-        cwd: packageRoot,
-        stdio: 'pipe',
-      });
+      const rebuilt = join(releaseScratch, step.outfile);
 
       // Byte comparison, not a hash, so a failure can point at the divergence.
       // Equal-length drift is the common case -- an edited source usually
@@ -186,4 +137,14 @@ describe('committed web bundles', () => {
       ).toBe(true);
     });
   }
+
+  it('builds a reproducible debug stress bundle while release stays stub-only', () => {
+    const debugBundle = readFileSync(join(debugScratch, 'web/runtime-debug.bundle.js'));
+    const repeatedDebugBundle = readFileSync(join(debugRepeatScratch, 'web/runtime-debug.bundle.js'));
+    const releaseBundle = readFileSync(join(releaseScratch, 'web/runtime-debug.bundle.js'));
+
+    expect(debugBundle.equals(repeatedDebugBundle)).toBe(true);
+    expect(debugBundle.toString('utf8')).toMatch(/runStressPlan|buildStressPlan|WEBGL_lose_context|stress-harness/);
+    expect(releaseBundle.toString('utf8')).not.toMatch(/runStressPlan|buildStressPlan|WEBGL_lose_context|stress-harness/);
+  });
 });

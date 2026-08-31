@@ -1,5 +1,6 @@
 export interface PtyDataBatch {
   threadId: string;
+  generation?: number;
   sequence: number;
   bytes: number[];
   byteCount: number;
@@ -20,10 +21,11 @@ export interface PtyClientController {
   threadId: string;
   prepareForPtyStart(): number;
   restoreAfterFailedPtyStart(startAttemptId?: number): void;
-  adoptRunningPty(startAttemptId?: number): Promise<boolean>;
+  adoptRunningPty(startAttemptId?: number, nativeGeneration?: number): Promise<boolean>;
   setVisible(visible: boolean): Promise<boolean>;
-  markPtyStarted(startAttemptId?: number): Promise<boolean>;
-  markPtyExited(): void;
+  currentPtyGeneration?(): number | null;
+  markPtyStarted(startAttemptId?: number, nativeGeneration?: number): Promise<boolean>;
+  markPtyExited(nativeGeneration?: number): boolean;
   stopPtyDelivery(): void;
   dispose(): void;
 }
@@ -32,16 +34,19 @@ type QueuedBatch = {
   sequence: number;
   bytes: Uint8Array;
   generation: number;
+  nativeGeneration: number | null;
 };
 
 type Acknowledgement = {
   lane: DeliveryLane;
   sequence: number;
   generation: number;
+  nativeGeneration: number | null;
   inFlight: boolean;
 };
 
 type QuarantinedBatch = {
+  nativeGeneration: number | null;
   sequence: number;
   bytes: Uint8Array;
 };
@@ -88,6 +93,10 @@ type PtyClientState = PtyClientController & {
   pendingStartPtyStarted: boolean | null;
   pendingStartLastVisibilitySent: boolean | null;
   pendingStartPtyExited: boolean | null;
+  nativeGeneration: number | null;
+  nativePtyActive: boolean;
+  pendingStartNativeGeneration: number | null;
+  pendingStartNativePtyActive: boolean | null;
 };
 
 const MAX_ACCEPTED_IN_FLIGHT = 2;
@@ -100,20 +109,41 @@ function normalizeBatchBytes(batch: PtyDataBatch): Uint8Array {
   return Uint8Array.from(batch.bytes).subarray(0, count);
 }
 
-function visibilityArgs(threadId: string, visible: boolean): Record<string, unknown> {
-  return {
+function isNativeGeneration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function readBatchNativeGeneration(batch: PtyDataBatch): number | null | undefined {
+  if (batch.generation === undefined) return null;
+  return isNativeGeneration(batch.generation) ? batch.generation : undefined;
+}
+
+function visibilityArgs(
+  threadId: string,
+  visible: boolean,
+  nativeGeneration: number | null,
+): Record<string, unknown> {
+  const args: Record<string, unknown> = {
     threadId,
     thread_id: threadId,
     visible,
   };
+  if (nativeGeneration !== null) args.generation = nativeGeneration;
+  return args;
 }
 
-function acknowledgementArgs(threadId: string, sequence: number): Record<string, unknown> {
-  return {
+function acknowledgementArgs(
+  threadId: string,
+  sequence: number,
+  nativeGeneration: number | null,
+): Record<string, unknown> {
+  const args: Record<string, unknown> = {
     threadId,
     thread_id: threadId,
     sequence,
   };
+  if (nativeGeneration !== null) args.generation = nativeGeneration;
+  return args;
 }
 
 function createDeliveryLane(generation: number): DeliveryLane {
@@ -137,10 +167,15 @@ function clearStartQuarantine(state: PtyClientState): void {
   state.startQuarantine = null;
 }
 
-function takeStartQuarantine(state: PtyClientState): QuarantinedBatch[] {
+function takeStartQuarantine(
+  state: PtyClientState,
+  nativeGeneration?: number,
+): QuarantinedBatch[] {
   const batches = state.startQuarantine?.batches ?? [];
   state.startQuarantine = null;
-  return batches;
+  return nativeGeneration === undefined
+    ? batches
+    : batches.filter((batch) => batch.nativeGeneration === nativeGeneration);
 }
 
 function clearAckRetry(lane: DeliveryLane): void {
@@ -261,10 +296,25 @@ function acknowledgeCurrentSequence(state: PtyClientState, lane: DeliveryLane): 
     drainAnyQueuedBatch(state);
     return;
   }
+  if (
+    acknowledgement.nativeGeneration !== null &&
+    (
+      !state.nativePtyActive ||
+      state.nativeGeneration !== acknowledgement.nativeGeneration
+    )
+  ) {
+    clearAckRetry(lane);
+    state.acknowledgement = null;
+    drainAnyQueuedBatch(state);
+    return;
+  }
 
   acknowledgement.inFlight = true;
   void state
-    .invoke('pty_ack', acknowledgementArgs(state.threadId, sequence))
+    .invoke(
+      'pty_ack',
+      acknowledgementArgs(state.threadId, sequence, acknowledgement.nativeGeneration),
+    )
     .then(() => {
       if (
         state.disposed ||
@@ -303,6 +353,7 @@ function completeWritingBatch(
   lane: DeliveryLane,
   sequence: number,
   generation: number,
+  nativeGeneration: number | null,
   writeGate: WriteGate,
 ): void {
   if (state.writeGate !== writeGate) return;
@@ -311,7 +362,8 @@ function completeWritingBatch(
   if (
     !lane.writingBatch ||
     lane.writingBatch.sequence !== sequence ||
-    lane.writingBatch.generation !== generation
+    lane.writingBatch.generation !== generation ||
+    lane.writingBatch.nativeGeneration !== nativeGeneration
   ) {
     drainAnyQueuedBatch(state);
     return;
@@ -328,6 +380,7 @@ function completeWritingBatch(
     lane,
     sequence,
     generation,
+    nativeGeneration,
     inFlight: false,
   };
   if (lane === state.checkpointDelivery && state.pendingStartAttempt != null) {
@@ -347,11 +400,18 @@ function startWrite(state: PtyClientState, lane: DeliveryLane, batch: QueuedBatc
   if (state.writeGate || state.acknowledgement) return false;
   lane.writingBatch = batch;
   const writeGate: WriteGate = {};
-  const { sequence, generation } = batch;
+  const { sequence, generation, nativeGeneration } = batch;
   state.writeGate = writeGate;
   try {
     state.write(batch.bytes, () => {
-      completeWritingBatch(state, lane, sequence, generation, writeGate);
+      completeWritingBatch(
+        state,
+        lane,
+        sequence,
+        generation,
+        nativeGeneration,
+        writeGate,
+      );
     });
     return true;
   } catch {
@@ -383,6 +443,7 @@ function acceptBatchForLane(
   const queued: QueuedBatch = {
     ...batch,
     generation: lane.generation,
+    nativeGeneration: batch.nativeGeneration,
   };
   const reservedNextSequence = batch.sequence + 1;
   lane.nextSequence = reservedNextSequence;
@@ -405,6 +466,7 @@ function acceptBatchForLane(
 function quarantinePendingStartBatch(
   state: PtyClientState,
   batch: PtyDataBatch,
+  nativeGeneration: number | null,
 ): boolean | null {
   const checkpoint = state.checkpointDelivery;
   if (
@@ -418,7 +480,7 @@ function quarantinePendingStartBatch(
   if (!quarantine) {
     if (
       batch.sequence !== state.delivery.nextSequence ||
-      batch.sequence !== checkpoint.nextSequence
+      (nativeGeneration === null && batch.sequence !== checkpoint.nextSequence)
     ) {
       return null;
     }
@@ -443,6 +505,7 @@ function quarantinePendingStartBatch(
   }
 
   quarantine.batches.push({
+    nativeGeneration,
     sequence: batch.sequence,
     bytes: normalizeBatchBytes(batch),
   });
@@ -468,8 +531,18 @@ async function syncVisibility(
 ): Promise<boolean> {
   if (state.disposed || !state.ptyStarted) return false;
   if (!force && state.lastVisibilitySent === visible) return false;
-  await state.invoke('pty_set_visibility', visibilityArgs(state.threadId, visible));
-  if (state.disposed || state.visibilitySyncRevision !== revision || !state.ptyStarted) return false;
+  const nativeGeneration = state.nativePtyActive ? state.nativeGeneration : null;
+  await state.invoke(
+    'pty_set_visibility',
+    visibilityArgs(state.threadId, visible, nativeGeneration),
+  );
+  if (
+    state.disposed ||
+    state.visibilitySyncRevision !== revision ||
+    !state.ptyStarted ||
+    (nativeGeneration !== null &&
+      (!state.nativePtyActive || state.nativeGeneration !== nativeGeneration))
+  ) return false;
   state.lastVisibilitySent = visible;
   return true;
 }
@@ -520,13 +593,27 @@ type RestoredPtyStart = {
   ptyExited: boolean;
 };
 
+function takeRestorableQuarantine(state: PtyClientState): QuarantinedBatch[] {
+  const priorGeneration = state.pendingStartNativeGeneration;
+  const priorWasActive = state.pendingStartNativePtyActive === true;
+  const batches = takeStartQuarantine(state);
+  if (priorGeneration === null) {
+    return batches.filter((batch) => batch.nativeGeneration === null);
+  }
+  return batches.filter(
+    (batch) =>
+      batch.nativeGeneration === null ||
+      (priorWasActive && batch.nativeGeneration === priorGeneration),
+  );
+}
+
 function restorePreparedPtyStart(
   state: PtyClientState,
   startAttemptId?: number,
 ): RestoredPtyStart | null {
   if (state.pendingStartAttempt == null) return null;
   if (startAttemptId != null && startAttemptId !== state.pendingStartAttempt) return null;
-  const quarantine = takeStartQuarantine(state);
+  const quarantine = takeRestorableQuarantine(state);
   const ptyExited = Boolean(state.pendingStartPtyExited);
   closeDeliveryLane(state, state.delivery);
   if (state.checkpointDelivery) {
@@ -539,12 +626,16 @@ function restorePreparedPtyStart(
     Boolean(state.pendingStartPtyStarted),
     state.pendingStartLastVisibilitySent ?? null,
   );
+  state.nativeGeneration = state.pendingStartNativeGeneration;
+  state.nativePtyActive = Boolean(state.pendingStartNativePtyActive);
   state.ptyExited = ptyExited;
   state.deliveryStopped = ptyExited;
   state.pendingStartAttempt = null;
   state.pendingStartPtyStarted = null;
   state.pendingStartLastVisibilitySent = null;
   state.pendingStartPtyExited = null;
+  state.pendingStartNativeGeneration = null;
+  state.pendingStartNativePtyActive = null;
   return { quarantine, ptyExited };
 }
 
@@ -564,23 +655,61 @@ function resumeDelivery(
 function commitPreparedPtyStart(
   state: PtyClientState,
   startAttemptId?: number,
+  nativeGeneration?: number,
 ): QuarantinedBatch[] | null {
-  if (state.pendingStartAttempt == null) return startAttemptId == null ? [] : null;
+  if (state.pendingStartAttempt == null) {
+    if (startAttemptId != null) return null;
+    if (
+      nativeGeneration !== undefined &&
+      (!isNativeGeneration(nativeGeneration) ||
+        (state.nativeGeneration !== null && nativeGeneration < state.nativeGeneration))
+    ) {
+      return null;
+    }
+    if (nativeGeneration !== undefined) state.nativeGeneration = nativeGeneration;
+    state.nativePtyActive = true;
+    return [];
+  }
   if (startAttemptId != null && startAttemptId !== state.pendingStartAttempt) return null;
+  if (
+    nativeGeneration !== undefined &&
+    (!isNativeGeneration(nativeGeneration) ||
+      (state.nativeGeneration !== null && nativeGeneration < state.nativeGeneration))
+  ) {
+    return null;
+  }
 
-  const quarantine = takeStartQuarantine(state);
+  const quarantine = takeStartQuarantine(state, nativeGeneration);
   if (state.checkpointDelivery) {
     closeDeliveryLane(state, state.checkpointDelivery);
     state.checkpointDelivery = null;
   }
+  if (nativeGeneration !== undefined) state.nativeGeneration = nativeGeneration;
+  state.nativePtyActive = true;
   state.pendingStartAttempt = null;
   state.pendingStartPtyStarted = null;
   state.pendingStartLastVisibilitySent = null;
   state.pendingStartPtyExited = null;
+  state.pendingStartNativeGeneration = null;
+  state.pendingStartNativePtyActive = null;
   return quarantine;
 }
 
-function markPtyExitedState(state: PtyClientState): void {
+function markPtyExitedState(state: PtyClientState, nativeGeneration?: number): boolean {
+  if (nativeGeneration !== undefined) {
+    if (!isNativeGeneration(nativeGeneration)) return false;
+    if (state.nativeGeneration !== null) {
+      if (nativeGeneration < state.nativeGeneration) return false;
+      if (nativeGeneration === state.nativeGeneration && !state.nativePtyActive) return false;
+    }
+    if (state.pendingStartAttempt == null &&
+        state.nativeGeneration !== null &&
+        nativeGeneration > state.nativeGeneration) {
+      return false;
+    }
+  }
+  if (nativeGeneration !== undefined) state.nativeGeneration = nativeGeneration;
+  state.nativePtyActive = false;
   state.deliveryStopped = true;
   state.ptyExited = true;
   clearStartQuarantine(state);
@@ -600,7 +729,30 @@ function markPtyExitedState(state: PtyClientState): void {
   state.pendingStartPtyStarted = null;
   state.pendingStartLastVisibilitySent = null;
   state.pendingStartPtyExited = null;
+  state.pendingStartNativeGeneration = null;
+  state.pendingStartNativePtyActive = null;
   resetVisibilitySyncState(state, false, null);
+  return true;
+}
+
+type NativeBatchDisposition = 'legacy' | 'active' | 'pending' | 'stale';
+
+function nativeBatchDisposition(
+  state: PtyClientState,
+  batch: PtyDataBatch,
+): NativeBatchDisposition {
+  const nativeGeneration = readBatchNativeGeneration(batch);
+  if (nativeGeneration === undefined) return 'stale';
+  if (nativeGeneration === null) {
+    return state.nativeGeneration === null ? 'legacy' : 'stale';
+  }
+
+  if (state.nativeGeneration !== null && nativeGeneration <= state.nativeGeneration) {
+    return state.nativePtyActive && nativeGeneration === state.nativeGeneration
+      ? 'active'
+      : 'stale';
+  }
+  return state.pendingStartAttempt == null ? 'stale' : 'pending';
 }
 
 function createClientState(options: PtyClientOptions): PtyClientState {
@@ -629,6 +781,10 @@ function createClientState(options: PtyClientOptions): PtyClientState {
     pendingStartPtyStarted: null,
     pendingStartLastVisibilitySent: null,
     pendingStartPtyExited: null,
+    nativeGeneration: null,
+    nativePtyActive: false,
+    pendingStartNativeGeneration: null,
+    pendingStartNativePtyActive: null,
     prepareForPtyStart() {
       clearStartQuarantine(state);
       state.nextStartAttempt += 1;
@@ -636,6 +792,8 @@ function createClientState(options: PtyClientOptions): PtyClientState {
       state.pendingStartPtyStarted = state.ptyStarted;
       state.pendingStartLastVisibilitySent = state.lastVisibilitySent;
       state.pendingStartPtyExited = state.ptyExited;
+      state.pendingStartNativeGeneration = state.nativeGeneration;
+      state.pendingStartNativePtyActive = state.nativePtyActive;
       if (state.checkpointDelivery) closeDeliveryLane(state, state.checkpointDelivery);
       state.checkpointDelivery = state.delivery;
       clearAckRetry(state.checkpointDelivery);
@@ -649,10 +807,19 @@ function createClientState(options: PtyClientOptions): PtyClientState {
       if (!restored || restored.ptyExited) return;
       resumeDelivery(state, restored.quarantine);
     },
-    async adoptRunningPty(startAttemptId) {
+    async adoptRunningPty(startAttemptId, nativeGeneration) {
       if (state.disposed) return false;
+      if (
+        nativeGeneration !== undefined &&
+        (!isNativeGeneration(nativeGeneration) ||
+          (state.nativeGeneration !== null && nativeGeneration < state.nativeGeneration))
+      ) {
+        return false;
+      }
       const restored = restorePreparedPtyStart(state, startAttemptId);
       if (!restored) return false;
+      if (nativeGeneration !== undefined) state.nativeGeneration = nativeGeneration;
+      state.nativePtyActive = true;
       state.deliveryStopped = false;
       state.ptyExited = false;
       state.delivery.closed = false;
@@ -666,9 +833,12 @@ function createClientState(options: PtyClientOptions): PtyClientState {
       state.visible = visible;
       return requestVisibilitySync(state, false);
     },
-    async markPtyStarted(startAttemptId) {
+    currentPtyGeneration() {
+      return state.nativePtyActive ? state.nativeGeneration : null;
+    },
+    async markPtyStarted(startAttemptId, nativeGeneration) {
       if (state.disposed) return false;
-      const quarantine = commitPreparedPtyStart(state, startAttemptId);
+      const quarantine = commitPreparedPtyStart(state, startAttemptId, nativeGeneration);
       if (!quarantine) return false;
       state.deliveryStopped = false;
       state.ptyExited = false;
@@ -677,9 +847,9 @@ function createClientState(options: PtyClientOptions): PtyClientState {
       drainAnyQueuedBatch(state);
       return requestVisibilitySync(state, true);
     },
-    markPtyExited() {
-      if (state.disposed) return;
-      markPtyExitedState(state);
+    markPtyExited(nativeGeneration) {
+      if (state.disposed) return false;
+      return markPtyExitedState(state, nativeGeneration);
     },
     stopPtyDelivery() {
       if (state.disposed) return;
@@ -717,8 +887,39 @@ export function routePtyBatch(batch: PtyDataBatch): boolean {
   const state = clients.get(batch.threadId);
   if (!state || state.disposed || state.deliveryStopped) return false;
 
-  const quarantined = quarantinePendingStartBatch(state, batch);
-  if (quarantined != null) return quarantined;
+  const nativeGeneration = readBatchNativeGeneration(batch);
+  const disposition = nativeBatchDisposition(state, batch);
+  if (disposition === 'stale' || nativeGeneration === undefined) return false;
+
+  if (disposition === 'pending') {
+    const quarantined = quarantinePendingStartBatch(
+      state,
+      batch,
+      nativeGeneration,
+    );
+    return quarantined ?? false;
+  }
+
+  if (disposition === 'active' && state.pendingStartAttempt != null) {
+    const checkpoint = state.checkpointDelivery;
+    if (
+      !checkpoint ||
+      !checkpoint.routable ||
+      batch.sequence !== checkpoint.nextSequence
+    ) {
+      return false;
+    }
+    return acceptBatchForLane(state, checkpoint, {
+      nativeGeneration,
+      sequence: batch.sequence,
+      bytes: normalizeBatchBytes(batch),
+    });
+  }
+
+  if (disposition === 'legacy') {
+    const quarantined = quarantinePendingStartBatch(state, batch, null);
+    if (quarantined != null) return quarantined;
+  }
 
   const targetLane =
     batch.sequence === state.delivery.nextSequence
@@ -730,6 +931,7 @@ export function routePtyBatch(batch: PtyDataBatch): boolean {
         : null;
   if (!targetLane) return false;
   return acceptBatchForLane(state, targetLane, {
+    nativeGeneration,
     sequence: batch.sequence,
     bytes: normalizeBatchBytes(batch),
   });
