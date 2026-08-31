@@ -170,7 +170,7 @@ const spawnPtyRuntimeDeps = {
     const controller = {
       prepareForPtyStart: () => 1,
       restoreAfterFailedPtyStart: () => undefined,
-      adoptRunningPty: () => Promise.resolve(false),
+      adoptRunningPty: () => Promise.resolve(true),
       markPtyStarted: () => Promise.resolve(false),
       stopPtyDelivery: () => undefined,
       dimensions: () => ({
@@ -974,6 +974,55 @@ describe('native Coven launch routing', () => {
     expect((invoked[0].options as Record<string, unknown>)).not.toHaveProperty('metricsProvider');
   });
 
+  it('can wait for the first PTY start before reporting thread creation success', async () => {
+    const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
+    const start = deferred<boolean>();
+    let frame: (() => void) | null = null;
+    let settled = false;
+    const createThread = compileFunction<(
+      opts: Record<string, any>,
+    ) => Promise<Record<string, any> | null>>(
+      functionSource('createThread'),
+      {
+        makeThreadId: () => 'thread-1',
+        activeProject: () => null,
+        activeWorkspaceRoot: () => '/repo',
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        commitPanePlacement: () => undefined,
+        state,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        mountTerminal: () => undefined,
+        focusThread: () => undefined,
+        requestAnimationFrame: (callback: () => void) => { frame = callback; },
+        isLiveThread: (thread: Record<string, any>) => state.threads.includes(thread),
+        isPersistentThread: () => false,
+        attachThreadClient: () => Promise.resolve(false),
+        spawnPty: () => start.promise,
+      },
+    );
+
+    const creation = createThread({
+      worktreePath: '/repo',
+      command: '/bin/coven',
+      waitForPtyStart: true,
+    }).then((thread) => {
+      settled = true;
+      return thread;
+    });
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(frame).not.toBeNull();
+    (frame as unknown as () => void)();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    start.resolve(false);
+    await expect(creation).resolves.toBeNull();
+  });
+
   it('suppresses initial terminal focus only when thread creation requests it', async () => {
     const state = { threads: [] as Array<Record<string, any>>, activeThreadId: null };
     const focusCalls: Array<{
@@ -1516,8 +1565,10 @@ describe('native Coven launch routing', () => {
       const state = { threads: [thread], activeThreadId: thread.id };
       const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(source, {
         ...spawnPtyRuntimeDeps,
+        adoptRunningPty: () => Promise.resolve(true),
         invoke: async (command: string) => {
           if (command === 'pty_start') return invokePtyStart();
+          if (command === 'pty_current_generation') return 1;
           return undefined;
         },
         isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
@@ -1671,6 +1722,7 @@ describe('native Coven launch routing', () => {
     runtimeThreadIds.add('thread-1');
     const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'pty_start') throw new Error('PTY already running for thread');
+      if (command === 'pty_current_generation') return 1;
       if (command === 'pty_ack') ackedSequences.push(args?.sequence as number);
       return undefined;
     });
@@ -1739,6 +1791,7 @@ describe('native Coven launch routing', () => {
       sequence: 3,
       bytes: [3],
       byteCount: 1,
+      generation: 1,
     })).toBe(true);
     expect(Array.from(writes[2].bytes)).toEqual([3]);
     writes[2].callback();

@@ -545,7 +545,7 @@ describe('desktop Tauri layout', () => {
 
     expect(configs[0].build.beforeDevCommand).toBe('pnpm run serve:web');
     expect(desktopPackage.scripts['serve:web'])
-      .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
+      .toBe('vite web --config vite.config.mjs --host 127.0.0.1 --port 1420 --strictPort');
     expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
@@ -676,6 +676,7 @@ describe('desktop Tauri layout', () => {
     const mainSource = readFileSync(mainSourcePath, 'utf8');
     const appEnvironment = bracedItem(libSource, 'fn app_environment');
     const ptyStart = bracedItem(libSource, 'fn pty_start_blocking');
+    const ptyStartImplementation = bracedItem(libSource, 'fn pty_start_blocking_with_launch');
     const spawnShellThread = bracedItem(mainSource, 'function spawnShellThread');
     const spawnPsycheThread = bracedItem(mainSource, 'function spawnPsycheThread');
 
@@ -686,12 +687,13 @@ describe('desktop Tauri layout', () => {
     expect(appEnvironment).toMatch(
       /AppEnvironment\s*\{[\s\S]*default_shell,[\s\S]*default_shell_args,/,
     );
-    expect(ptyStart).toMatch(
+    expect(ptyStart).toContain('pty_start_blocking_with_launch(app, options, None)');
+    expect(ptyStartImplementation).toMatch(
       /platform::pty_launch_descriptor\(options\.command,\s*options\.args\)/,
     );
-    expect(ptyStart).toContain('let platform::LaunchDescriptor');
-    expect(ptyStart).toContain('cmd.args(args)');
-    expect(ptyStart).toContain('for (key, value) in launch_env');
+    expect(ptyStartImplementation).toContain('let platform::LaunchDescriptor');
+    expect(ptyStartImplementation).toContain('cmd.args(args)');
+    expect(ptyStartImplementation).toContain('for (key, value) in launch_env');
 
     expect(spawnShellThread).toContain('command: state.env.default_shell');
     expect(spawnShellThread).toContain('args: state.env.default_shell_args');

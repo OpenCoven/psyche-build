@@ -1,0 +1,11 @@
+{
+  "$schema": "../../gen/schemas/macOS-schema.json",
+  "identifier": "main-runtime-render-stress",
+  "description": "Allows only the main app webview to run the debug-only rendering stress harness",
+  "local": true,
+  "webviews": ["main"],
+  "permissions": [
+    "allow-diagnostics-spawn-fixture",
+    "allow-diagnostics-cycle-window"
+  ]
+}

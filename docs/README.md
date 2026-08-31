@@ -36,19 +36,28 @@ not prove that a capability shipped.
 
 ## Development
 
+The docs site is a pnpm workspace member declared by `pnpm-workspace.yaml`.
+Run its scripts through pnpm from the repository root, matching
+[CONTRIBUTING.md](../CONTRIBUTING.md):
+
 ```bash
-# Install dependencies (from docs directory)
-npm install
+# Install the locked workspace dependency graph (from the repository root)
+pnpm install --frozen-lockfile
 
 # Start dev server
-npm run dev
+pnpm --dir docs dev
 
 # Build for production
-npm run build
+pnpm --dir docs build
 
 # Preview production build
-npm run preview
+pnpm --dir docs preview
 ```
+
+`bash ./scripts/agent-check full` runs `pnpm --dir docs build` as part of the
+repository gate. The nested `docs/pnpm-lock.yaml` serves the standalone Vercel
+deployment configured by `docs/vercel.json`; root workspace installation uses
+the root lockfile's `docs` importer.
 
 ## Features
 
@@ -125,6 +134,7 @@ TestFlight, and public App Store distribution are unavailable. See the
 
 - [Contributing guide](../CONTRIBUTING.md)
 - [Repository map and change routing](REPOSITORY-MAP.md)
+- [Community surfaces and health](COMMUNITY-HEALTH.md)
 - [Repository test guide](https://github.com/OpenCoven/psyche-build/blob/main/__tests__/README.md)
 
 When a change alters support status, roadmap dependencies, execution order, or

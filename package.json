@@ -63,6 +63,7 @@
     "build:tauri": "pnpm --filter psyche-build-tauri run build",
     "app:stable": "node scripts/build-macos-app.mjs stable",
     "dev:tauri": "pnpm --filter psyche-build-tauri run dev",
+    "dev:tauri:diagnostics": "node scripts/dev-tauri-diagnostics.mjs",
     "app:dev": "node scripts/build-macos-app.mjs dev",
     "docs:focus:check": "node scripts/check-public-docs-focus.mjs",
     "generate:hooks-docs": "node scripts/generate-hooks-docs.js",
