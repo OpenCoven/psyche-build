@@ -42,3 +42,4 @@ native/desktop/psyche-build-tauri/pnpm-lock.yaml
 /.claude
 /.c
 /native/ios/ui-target.xcresult
+/files
