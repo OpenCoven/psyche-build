@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { serialize as serializeProtocolFixture } from '../scripts/generate-protocol-fixtures.js';
+import { STABLE_SURFACE_EFFECT_CODES } from '../src/control/effectCodes.js';
 import {
   SUPPORT_BUNDLE_LIMITS,
   SUPPORT_BUNDLE_SCHEMA,
@@ -306,6 +307,30 @@ describe('support bundle v1', () => {
       { sourceState: 'unknown', state: 'unknown', code: 'effect_unknown' },
       { sourceState: 'failed', state: 'failed', code: 'queue_full' },
     ]));
+  });
+
+  it('preserves the closed stable surface effect-code vocabulary through a round trip', () => {
+    const representativeCodes = [
+      'resource_missing', 'snapshot_stale', 'provider_unavailable', 'serialization_failed',
+    ] as const;
+    const bundle = buildSupportBundle({
+      receipts: STABLE_SURFACE_EFFECT_CODES.map((code, index) => ({
+        schema: 'psyche.control.receipt/v1' as const,
+        actionId: `${code}-action`,
+        state: 'failed' as const,
+        resource: { kind: 'project' as const, id: `${code}-project` },
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+        completedAt: new Date(Date.UTC(2026, 0, 1, 0, 1, index)).toISOString(),
+        code,
+      })),
+    });
+    const roundTripped = parseSupportBundle(serializeSupportBundle(bundle));
+    const preservedCodes = roundTripped.receipts.map((receipt) => receipt.code);
+
+    expect(preservedCodes.sort()).toEqual([...STABLE_SURFACE_EFFECT_CODES].sort());
+    expect(preservedCodes).toEqual(expect.arrayContaining([...representativeCodes]));
+    expect(roundTripped.receipts.every((receipt) =>
+      receipt.sourceState === 'failed' && receipt.state === 'failed')).toBe(true);
   });
 
   it('bounds record count, record size, terminal data, and final payload', () => {

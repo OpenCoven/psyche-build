@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { STABLE_SURFACE_EFFECT_CODES } from '../control/effectCodes.js';
 import { isActionReceiptState, isActionStatusReceipt } from '../control/types.js';
 import type { ActionStatusReceipt, ActionReceiptState } from '../control/types.js';
 
@@ -319,7 +320,7 @@ const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
   'duplicate_collector_name', 'invalid_record', 'normalization_cancelled', 'normalization_timeout',
   'provenance_incomplete', 'record', 'recovery', 'slow', 'action_invalidated',
   'action_validation_failed', 'approval_denied', 'approval_expired', 'effect_failed',
-  'effect_unknown', 'queue_full',
+  'effect_unknown', 'queue_full', ...STABLE_SURFACE_EFFECT_CODES,
 ]);
 const SAFE_REDACTION_CATEGORY_VALUES = new Set([
   'absolute-path', 'attribute-depth', 'attribute-items', 'attribute-keys',
