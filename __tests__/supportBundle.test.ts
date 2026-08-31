@@ -1074,20 +1074,25 @@ describe('support bundle v1', () => {
 
   it('shares the bounded snapshot budget across collectors', async () => {
     let originalValueReads = 0;
+    const countedArray = (values: unknown[]) => new Proxy(values, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) originalValueReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
     const lifecycle = () => Object.fromEntries(Array.from({ length: 9 }, (_, section) => {
-      const values = Array.from({ length: 1_000 }, () => 'ready');
-      const countedValues = new Proxy(values, {
-        get(target, property, receiver) {
-          if (typeof property === 'string' && /^\d+$/.test(property)) originalValueReads += 1;
-          return Reflect.get(target, property, receiver);
-        },
-      });
-      return [`section-${section}`, countedValues];
+      return [`section-${section}`, countedArray(Array.from({ length: 1_000 }, () => 'ready'))];
     }));
+    const rejectedRecords = countedArray(Array.from({ length: 1_024 }, () => ({
+      sequence: 1,
+      at: '2026-01-01T00:00:00.000Z',
+      component: 'collector',
+      event: 'ready',
+    })));
 
     const bundle = await collectSupportBundle([
       { name: 'alpha', collect: async () => ({ lifecycle: lifecycle() }) },
-      { name: 'beta', collect: async () => ({ lifecycle: lifecycle() }) },
+      { name: 'beta', collect: async () => ({ lifecycle: lifecycle(), records: rejectedRecords }) },
     ]);
 
     expect(bundle.status).toBe('recovery_required');

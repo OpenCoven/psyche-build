@@ -563,6 +563,18 @@ function safeCollectorArraySnapshot(value: unknown, field: CollectorPayloadField
   }
 }
 
+function safeCollectorArrayLength(value: unknown, field: CollectorPayloadField): number | undefined {
+  try {
+    if (!isRecord(value)) return undefined;
+    const fieldValue = value[field];
+    if (!Array.isArray(fieldValue)) return undefined;
+    const length = fieldValue.length;
+    return Number.isSafeInteger(length) && length >= 0 ? length : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function snapshotCollectorResult(
   value: unknown,
   budget: NormalizationBudget,
@@ -2856,6 +2868,7 @@ export async function collectSupportBundle(
   let activePayload: ActiveCollectorPayload | undefined;
   const processedCollectorItems = new Set<number>();
   const processedCollectorFields = new Set<string>();
+  const snapshottedCollectorItems = new Set<number>();
   let recordsFinalized = false;
   if (collectors.length > boundedCollectors.length) {
     appendError({
@@ -3020,10 +3033,12 @@ export async function collectSupportBundle(
         else if (recoveryTerminalTail === undefined) recoveryTerminalTail = pendingValue;
         else terminalLinesOmitted += pendingValue.length;
       }
-      accountCollectorMapLoss(
-        item.result,
-        (field) => !processedCollectorFields.has(`${item.index}:${field}`),
-      );
+      if (snapshottedCollectorItems.has(item.index)) {
+        accountCollectorMapLoss(
+          item.result,
+          (field) => !processedCollectorFields.has(`${item.index}:${field}`),
+        );
+      }
     }
     recoveryErrors.push(error);
     const recoveryInput: SupportBundleInput = {
@@ -3109,13 +3124,22 @@ export async function collectSupportBundle(
     if (duplicateCollectorNames.has(item.name)) {
       processedCollectorItems.add(item.index);
       if (item.result !== undefined && item.result !== null) {
+        try {
+          const resultSnapshot = snapshotCollectorResult(item.result, preflightBudget);
+          if (resultSnapshot !== undefined) {
+            item.result = resultSnapshot;
+            snapshottedCollectorItems.add(item.index);
+          }
+        } catch (error) {
+          if (isNormalizationDeadlineError(error)) return recoveryBundle(normalizationError());
+        }
         for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-          const snapshot = safeCollectorArraySnapshot(item.result, field);
-          if (snapshot === undefined) continue;
-          accountCollectorArrayLoss(field, snapshot.length);
+          const length = safeCollectorArrayLength(item.result, field);
+          if (length === undefined) continue;
+          accountCollectorArrayLoss(field, length);
           processedCollectorFields.add(`${item.index}:${field}`);
         }
-        accountCollectorMapLoss(item.result);
+        if (snapshottedCollectorItems.has(item.index)) accountCollectorMapLoss(item.result);
         for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       }
       continue;
@@ -3147,6 +3171,7 @@ export async function collectSupportBundle(
         violation = 'invalid';
       } else {
         item.result = resultSnapshot;
+        snapshottedCollectorItems.add(item.index);
         violation = collectorSnapshotViolation(item.result, maxRecords, maxReceipts, preflightBudget);
       }
     } catch (error) {
@@ -3165,12 +3190,12 @@ export async function collectSupportBundle(
       });
       processedCollectorItems.add(item.index);
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const snapshot = safeCollectorArraySnapshot(item.result, field);
-        if (snapshot === undefined) continue;
-        accountCollectorArrayLoss(field, snapshot.length);
+        const length = safeCollectorArrayLength(item.result, field);
+        if (length === undefined) continue;
+        accountCollectorArrayLoss(field, length);
         processedCollectorFields.add(`${item.index}:${field}`);
       }
-      accountCollectorMapLoss(item.result);
+      if (snapshottedCollectorItems.has(item.index)) accountCollectorMapLoss(item.result);
       for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       continue;
     }
@@ -3184,12 +3209,12 @@ export async function collectSupportBundle(
       });
       processedCollectorItems.add(item.index);
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const snapshot = safeCollectorArraySnapshot(item.result, field);
-        if (snapshot === undefined) continue;
-        accountCollectorArrayLoss(field, snapshot.length);
+        const length = safeCollectorArrayLength(item.result, field);
+        if (length === undefined) continue;
+        accountCollectorArrayLoss(field, length);
         processedCollectorFields.add(`${item.index}:${field}`);
       }
-      accountCollectorMapLoss(item.result);
+      if (snapshottedCollectorItems.has(item.index)) accountCollectorMapLoss(item.result);
       for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       continue;
     }
