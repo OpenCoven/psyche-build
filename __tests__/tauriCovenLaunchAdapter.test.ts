@@ -83,8 +83,9 @@ describe('Coven launch adapter compatibility profile', () => {
     expect(rustPromptMax).toBe('8_192');
     expect(jsPromptMax).toBe('8192');
     expect(covenSessionsRs).toContain(
-      'fn validate_launch_request(request: &CovenLaunchRequest) -> Result<(), String>',
+      'fn validate_launch_request(',
     );
+    expect(covenSessionsRs).toContain('Result<CovenLaunchRequest, String>');
     expect(functionSource('spawnAgentThread')).toContain(
       'COVEN_LAUNCH_PROMPT_MAX_CHARS',
     );

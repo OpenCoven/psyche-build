@@ -1679,10 +1679,7 @@ fn validate_coven_launch_with(
         return Err(format!("unsupported launch kind: {launch_kind}"));
     }
 
-    let resolved_coven = resolved_coven.ok_or_else(|| "Coven executable not found".to_string())?;
-    if options.command.as_deref() != Some(resolved_coven) {
-        return Err("Coven launch command does not match the resolved executable".to_string());
-    }
+    trusted_coven_executable_with(options.command.as_deref(), resolved_coven)?;
 
     match launch_kind {
         "coven-code" => {
@@ -1718,6 +1715,23 @@ fn validate_coven_launch_with(
         }
         _ => unreachable!("launch kind was checked above"),
     }
+}
+
+fn trusted_coven_executable_with(
+    requested_coven: Option<&str>,
+    resolved_coven: Option<&str>,
+) -> Result<String, String> {
+    let resolved_coven = resolved_coven.ok_or_else(|| "Coven executable not found".to_string())?;
+    if requested_coven != Some(resolved_coven) {
+        return Err("Coven launch command does not match the resolved executable".to_string());
+    }
+    Ok(resolved_coven.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_coven_executable(requested_coven: &str) -> Result<String, String> {
+    let resolved_coven = which_on_path("coven");
+    trusted_coven_executable_with(Some(requested_coven), resolved_coven.as_deref())
 }
 
 fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {

@@ -91,7 +91,7 @@ struct CovenHealthResponse {
     api_version: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CovenProjectScope {
     project_root: String,
@@ -402,7 +402,7 @@ pub(crate) async fn coven_session_kill(_session_id: String) -> Result<(), String
 /// prompt travels only inside this request body over the local daemon
 /// transport — never as process argv and never into the persisted launch
 /// model.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CovenLaunchRequest {
     project_root: String,
@@ -470,7 +470,7 @@ fn is_bounded_launch_path(path: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn validate_launch_request(request: &CovenLaunchRequest) -> Result<(), String> {
+fn validate_launch_request(mut request: CovenLaunchRequest) -> Result<CovenLaunchRequest, String> {
     if !is_bounded_launch_path(&request.project_root) {
         return Err("Coven launch requires a bounded project root".to_string());
     }
@@ -499,7 +499,19 @@ fn validate_launch_request(request: &CovenLaunchRequest) -> Result<(), String> {
             return Err("Coven launch title must be bounded and NUL-free".to_string());
         }
     }
-    Ok(())
+
+    let canonical_project_root = super::canonical_project_root(&request.project_root)
+        .map_err(|_| "Coven launch project root is unavailable".to_string())?;
+    let requested_cwd = request.cwd.as_deref().unwrap_or(&request.project_root);
+    let opened_cwd = super::open_pty_cwd(&request.project_root, requested_cwd).map_err(|_| {
+        "Coven launch working directory is outside the project or its linked worktrees".to_string()
+    })?;
+
+    request.project_root = canonical_project_root.to_string_lossy().into_owned();
+    if request.cwd.is_some() {
+        request.cwd = Some(opened_cwd.canonical_path.to_string_lossy().into_owned());
+    }
+    Ok(request)
 }
 
 /// Build the daemon launch body. The title deliberately never defaults to the
@@ -808,9 +820,10 @@ fn launch_validation_rejection(message: String) -> CovenLaunchResponse {
 pub(crate) async fn coven_launch_session(request: CovenLaunchRequest) -> CovenLaunchResponse {
     match tauri::async_runtime::spawn_blocking(
         move || -> Result<CovenLaunchResponse, CovenAdapterError> {
-            if let Err(message) = validate_launch_request(&request) {
-                return Ok(launch_validation_rejection(message));
-            }
+            let request = match validate_launch_request(request) {
+                Ok(request) => request,
+                Err(message) => return Ok(launch_validation_rejection(message)),
+            };
             let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
             try_launch_coven_session(&endpoint, &request)
         },
@@ -830,12 +843,37 @@ pub(crate) async fn coven_launch_session(_request: CovenLaunchRequest) -> CovenL
 }
 
 #[cfg(unix)]
+fn load_launch_capabilities_with_trusted_executable(
+    endpoint: &CovenEndpoint,
+    coven_path: &str,
+    resolved_coven: Option<&str>,
+) -> CovenLaunchCapabilities {
+    let coven_path = match super::trusted_coven_executable_with(Some(coven_path), resolved_coven) {
+        Ok(coven_path) => coven_path,
+        Err(message) => {
+            return CovenLaunchCapabilities {
+                status: "error".to_string(),
+                api_version: None,
+                adapters: Vec::new(),
+                message: Some(message),
+            }
+        }
+    };
+    try_load_launch_capabilities(endpoint, &coven_path)
+}
+
+#[cfg(unix)]
 #[tauri::command]
 pub(crate) async fn coven_launch_capabilities(coven_path: String) -> CovenLaunchCapabilities {
     match tauri::async_runtime::spawn_blocking(
         move || -> Result<CovenLaunchCapabilities, CovenAdapterError> {
             let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
-            Ok(try_load_launch_capabilities(&endpoint, &coven_path))
+            let resolved_coven = super::which_on_path("coven");
+            Ok(load_launch_capabilities_with_trusted_executable(
+                &endpoint,
+                &coven_path,
+                resolved_coven.as_deref(),
+            ))
         },
     )
     .await
@@ -852,7 +890,15 @@ pub(crate) async fn coven_launch_capabilities(coven_path: String) -> CovenLaunch
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-pub(crate) async fn coven_launch_capabilities(_coven_path: String) -> CovenLaunchCapabilities {
+pub(crate) async fn coven_launch_capabilities(coven_path: String) -> CovenLaunchCapabilities {
+    if let Err(message) = super::trusted_coven_executable(&coven_path) {
+        return CovenLaunchCapabilities {
+            status: "error".to_string(),
+            api_version: None,
+            adapters: Vec::new(),
+            message: Some(message),
+        };
+    }
     CovenLaunchCapabilities {
         status: "unavailable".to_string(),
         api_version: None,
@@ -1755,6 +1801,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener};
     use std::path::Path;
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
     use std::sync::Arc;
@@ -1810,6 +1857,26 @@ mod tests {
             fs::create_dir_all(&path).unwrap();
             path
         }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+    }
+
+    fn initialize_git_repo(path: &Path) {
+        run_git(path, &["init", "-q"]);
+        run_git(path, &["config", "user.name", "Psyche Tests"]);
+        run_git(
+            path,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_git(path, &["commit", "--allow-empty", "-qm", "baseline"]);
     }
 
     impl Drop for TempTree {
@@ -3452,31 +3519,133 @@ mod tests {
 
     #[test]
     fn launch_request_validation_rejects_unbounded_input() {
-        assert!(validate_launch_request(&launch_fixture()).is_ok());
+        let tree = TempTree::new("launch-validation");
+        let project = tree.directory("project");
+        let worktree = tree.directory("project/worktree");
+        let mut valid = launch_fixture();
+        valid.project_root = project.to_string_lossy().into_owned();
+        valid.cwd = Some(worktree.to_string_lossy().into_owned());
+        assert!(validate_launch_request(valid).is_ok());
 
         let mut request = launch_fixture();
         request.prompt = "   ".to_string();
-        assert!(validate_launch_request(&request).is_err());
+        assert!(validate_launch_request(request).is_err());
 
         let mut request = launch_fixture();
         request.prompt = "x".repeat(MAX_PROMPT_CHARS + 1);
-        assert!(validate_launch_request(&request).is_err());
+        assert!(validate_launch_request(request).is_err());
 
         let mut request = launch_fixture();
         request.prompt = "bad\0prompt".to_string();
-        assert!(validate_launch_request(&request).is_err());
+        assert!(validate_launch_request(request).is_err());
 
         let mut request = launch_fixture();
         request.harness = "Codex".to_string();
-        assert!(validate_launch_request(&request).is_err());
+        assert!(validate_launch_request(request).is_err());
 
         let mut request = launch_fixture();
         request.project_root = String::new();
-        assert!(validate_launch_request(&request).is_err());
+        assert!(validate_launch_request(request).is_err());
 
         let mut request = launch_fixture();
         request.title = Some("x".repeat(MAX_TITLE_CHARS + 1).to_string());
-        assert!(validate_launch_request(&request).is_err());
+        assert!(validate_launch_request(request).is_err());
+    }
+
+    #[test]
+    fn launch_request_validation_rejects_cwds_outside_the_selected_project() {
+        let tree = TempTree::new("launch-cwd-scope");
+        let project = tree.directory("project");
+        let sibling_prefix = tree.directory("project-copy");
+        initialize_git_repo(&project);
+        let mut request = launch_fixture();
+        request.project_root = project.to_string_lossy().into_owned();
+        request.cwd = Some(sibling_prefix.to_string_lossy().into_owned());
+
+        assert!(validate_launch_request(request).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_request_validation_rejects_symlink_cwd_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("launch-cwd-symlink");
+        let project = tree.directory("project");
+        let outside = tree.directory("outside");
+        let escape = project.join("escape");
+        initialize_git_repo(&project);
+        symlink(&outside, &escape).unwrap();
+        let mut request = launch_fixture();
+        request.project_root = project.to_string_lossy().into_owned();
+        request.cwd = Some(escape.to_string_lossy().into_owned());
+
+        assert!(validate_launch_request(request).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_request_canonicalizes_authorized_project_and_cwd_paths() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("launch-canonical-paths");
+        let project = tree.directory("project");
+        let worktree = tree.directory("project/worktree");
+        let project_alias = tree.root.join("project-alias");
+        let worktree_alias = project.join("worktree-alias");
+        symlink(&project, &project_alias).unwrap();
+        symlink(&worktree, &worktree_alias).unwrap();
+        let mut request = launch_fixture();
+        request.project_root = project_alias.to_string_lossy().into_owned();
+        request.cwd = Some(worktree_alias.to_string_lossy().into_owned());
+
+        let canonical = validate_launch_request(request).unwrap();
+
+        assert_eq!(
+            canonical.project_root,
+            project.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            canonical.cwd.as_deref(),
+            Some(worktree.canonicalize().unwrap().to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn launch_request_accepts_a_verified_linked_worktree() {
+        let tree = TempTree::new("launch-linked-worktree");
+        let project = tree.directory("project");
+        let linked_worktree = tree.root.join("linked-worktree");
+        initialize_git_repo(&project);
+        run_git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "launch-test",
+                linked_worktree.to_str().unwrap(),
+            ],
+        );
+        let linked_cwd = linked_worktree.join("nested");
+        fs::create_dir_all(&linked_cwd).unwrap();
+        let mut request = launch_fixture();
+        request.project_root = project.to_string_lossy().into_owned();
+        request.cwd = Some(linked_cwd.to_string_lossy().into_owned());
+
+        let canonical = validate_launch_request(request).unwrap();
+
+        assert_eq!(
+            canonical.cwd.as_deref(),
+            Some(
+                linked_cwd
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
     }
 
     #[test]
@@ -3661,5 +3830,26 @@ mod tests {
         let (adapters, message) = load_adapter_capabilities(broken.to_str().unwrap());
         assert!(adapters.is_empty());
         assert_eq!(message.as_deref(), Some(ADAPTER_LIST_FAILED_MESSAGE));
+    }
+
+    #[test]
+    fn launch_capabilities_rejects_an_executable_other_than_the_discovered_coven() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+        let response = load_launch_capabilities_with_trusted_executable(
+            &endpoint,
+            "/attacker/bin/coven",
+            Some("/trusted/bin/coven"),
+        );
+
+        assert_eq!(response.status, "error");
+        assert_eq!(
+            response.message.as_deref(),
+            Some("Coven launch command does not match the resolved executable")
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 }
