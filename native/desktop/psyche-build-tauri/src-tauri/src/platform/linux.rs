@@ -20,6 +20,11 @@ pub(super) fn default_shell() -> (String, Vec<String>) {
     (shell, vec!["-l".to_string()])
 }
 
+#[cfg(debug_assertions)]
+pub(super) fn diagnostics_shell() -> Result<String, String> {
+    super::verified_fixed_executable("/bin/sh")
+}
+
 pub(super) fn augmented_path() -> OsString {
     std::env::var_os("PATH").unwrap_or_default()
 }
