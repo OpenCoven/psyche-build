@@ -84,6 +84,8 @@ export const INVITE_DEEP_LINK_PREFIX = "psyc://invite/v1/";
 /** Clock skew tolerated when validating a client-held payload's expiry bound. */
 export const INVITE_CLOCK_SKEW_MS = 60 * 1000;
 
+const INVITE_PAYLOAD_DECODER = new TextDecoder("utf-8", { fatal: true });
+
 // ---------------------------------------------------------------------------
 // Invite records and transfer payload
 // ---------------------------------------------------------------------------
@@ -230,9 +232,10 @@ export function encodeInvitePayload(payload: InvitePayload): string {
 }
 
 /**
- * Strict, fail-closed decode. Rejects oversize input before decoding, unknown
- * versions, unknown or missing fields, out-of-bound field shapes, an expiry
- * beyond the issuance bound, and payloads already expired at parse time.
+ * Strict, fail-closed decode. Rejects oversize input before decoding, invalid
+ * UTF-8 before JSON parsing, unknown versions, unknown or missing fields,
+ * out-of-bound field shapes, an expiry beyond the issuance bound, and
+ * payloads already expired at parse time.
  */
 export function parseInvitePayload(raw: string, now: number = Date.now()): InviteParseResult {
   if (typeof raw !== "string" || !raw.startsWith(INVITE_DEEP_LINK_PREFIX)) {
@@ -245,9 +248,15 @@ export function parseInvitePayload(raw: string, now: number = Date.now()): Invit
   if (encoded.length > MAX_INVITE_PAYLOAD_ENCODED_CHARS) {
     return { ok: false, code: "invite_oversized" };
   }
-  const json = Buffer.from(encoded, "base64url").toString("utf8");
-  if (Buffer.byteLength(json, "utf8") > MAX_INVITE_PAYLOAD_BYTES) {
+  const bytes = Buffer.from(encoded, "base64url");
+  if (bytes.length > MAX_INVITE_PAYLOAD_BYTES) {
     return { ok: false, code: "invite_oversized" };
+  }
+  let json: string;
+  try {
+    json = INVITE_PAYLOAD_DECODER.decode(bytes);
+  } catch {
+    return { ok: false, code: "malformed_invite" };
   }
   let value: unknown;
   try {

@@ -250,6 +250,22 @@ describe("invite payloads", () => {
     expect(expired.ok).toBe(false);
   });
 
+  it("rejects malformed UTF-8 instead of accepting replacement-decoded JSON", () => {
+    const harness = makeStore();
+    const { deepLink } = issue(harness);
+    const bytes = Buffer.from(deepLink.slice(INVITE_DEEP_LINK_PREFIX.length), "base64url");
+    const hostNameValue = Buffer.from("Vector Host", "utf8");
+    const hostNameOffset = bytes.indexOf(hostNameValue);
+    if (hostNameOffset < 0) throw new Error("fixture host name not found in canonical payload");
+    bytes[hostNameOffset] = 0x80;
+
+    const malformedUtf8Link = `${INVITE_DEEP_LINK_PREFIX}${bytes.toString("base64url")}`;
+    expect(parseInvitePayload(malformedUtf8Link, T0)).toEqual({
+      ok: false,
+      code: "malformed_invite",
+    });
+  });
+
   it("refuses issuer input that would create an invalid transfer payload", () => {
     const harness = makeStore();
     const validEndpoint: InviteEndpoint = { kind: "tcp", host: "192.0.2.10", port: 47123 };
