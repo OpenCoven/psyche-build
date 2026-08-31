@@ -563,6 +563,24 @@ function safeCollectorArraySnapshot(value: unknown, field: CollectorPayloadField
   }
 }
 
+function snapshotCollectorResult(value: unknown, deadlineAt?: number): SupportBundleInput | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
+  if (entries === undefined) return undefined;
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  const budget: NormalizationBudget = { remaining: MAX_COLLECTOR_RESULT_NODES, deadlineAt };
+  for (const [key, childValue] of entries) {
+    if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField)) {
+      snapshot[key] = childValue;
+      continue;
+    }
+    const childSnapshot = snapshotBoundedInputValue(childValue, 1, new Set<object>(), budget);
+    if (childSnapshot === undefined) return undefined;
+    snapshot[key] = childSnapshot;
+  }
+  return snapshot as SupportBundleInput;
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -606,6 +624,51 @@ function isBoundedInputValue(
   }
   seen.delete(value);
   return valid;
+}
+
+function snapshotBoundedInputValue(
+  value: unknown,
+  depth = 0,
+  seen = new Set<object>(),
+  budget: NormalizationBudget = { remaining: MAX_ATTRIBUTE_NODES },
+): unknown | undefined {
+  assertNormalizationDeadline(budget.deadlineAt);
+  if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth || budget.remaining <= 0) return undefined;
+  budget.remaining -= 1;
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return value.length <= MAX_TEXT_SCAN_CHARS ? value : undefined;
+  if (typeof value !== 'object' || seen.has(value)) return undefined;
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const length = value.length;
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ATTRIBUTE_SCAN_KEYS) return undefined;
+      const snapshot: unknown[] = [];
+      for (let index = 0; index < length; index += 1) {
+        const child = snapshotBoundedInputValue(value[index], depth + 1, seen, budget);
+        if (child === undefined) return undefined;
+        snapshot.push(child);
+      }
+      return snapshot;
+    }
+    if (!isRecord(value)) return undefined;
+    const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, budget.deadlineAt);
+    if (entries === undefined) return undefined;
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const [key, childValue] of entries) {
+      if (key.length > MAX_TEXT_SCAN_CHARS) return undefined;
+      const child = snapshotBoundedInputValue(childValue, depth + 1, seen, budget);
+      if (child === undefined) return undefined;
+      snapshot[key] = child;
+    }
+    return snapshot;
+  } catch (error) {
+    if (isNormalizationDeadlineError(error)) throw error;
+    return undefined;
+  } finally {
+    seen.delete(value);
+  }
 }
 
 function isCollectorRecordShape(value: unknown): value is SupportRecord {
@@ -673,7 +736,7 @@ function safeCollectorErrorShape(value: unknown): value is SupportCollectionErro
   }
 }
 
-function collectorResultViolation(
+function collectorSnapshotViolation(
   value: unknown,
   maxRecords: number = SUPPORT_BUNDLE_LIMITS.maxRecords,
   maxReceipts: number = SUPPORT_BUNDLE_LIMITS.maxReceipts,
@@ -3054,9 +3117,20 @@ export async function collectSupportBundle(
       processedCollectorItems.add(item.index);
       continue;
     }
+    const resultTrustedFields = collectionAuthorized
+      ? new Set<TrustedSupportField>(['provenance', 'receipts'])
+      : hasReusablePrivateMetadata(item.result, deadlineAt)
+        ? TRUSTED_SUPPORT_FIELDS.get(item.result)
+        : undefined;
     let violation: 'invalid' | 'overflow' | undefined;
     try {
-      violation = collectorResultViolation(item.result, maxRecords, maxReceipts, preflightBudget);
+      const resultSnapshot = snapshotCollectorResult(item.result, deadlineAt);
+      if (resultSnapshot === undefined) {
+        violation = 'invalid';
+      } else {
+        item.result = resultSnapshot;
+        violation = collectorSnapshotViolation(item.result, maxRecords, maxReceipts, preflightBudget);
+      }
     } catch (error) {
       if (isNormalizationDeadlineError(error)) return recoveryBundle(normalizationError());
       violation = 'invalid';
@@ -3082,11 +3156,6 @@ export async function collectSupportBundle(
       for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       continue;
     }
-    const resultTrustedFields = collectionAuthorized
-      ? new Set<TrustedSupportField>(['provenance', 'receipts'])
-      : hasReusablePrivateMetadata(item.result, deadlineAt)
-        ? TRUSTED_SUPPORT_FIELDS.get(item.result)
-        : undefined;
     const resultEntries = limitedEntries(item.result, MAX_ATTRIBUTE_SCAN_KEYS, deadlineAt);
     if (!resultEntries) {
       appendError({

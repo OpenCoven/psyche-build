@@ -1047,6 +1047,31 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('snapshots singleton map fields before preflight and merge', async () => {
+    let lifecycleReads = 0;
+    const result: Record<string, unknown> = {};
+    Object.defineProperty(result, 'lifecycle', {
+      enumerable: true,
+      get() {
+        lifecycleReads += 1;
+        if (lifecycleReads === 1) return { state: 'ready' };
+        return Object.fromEntries(Array.from({ length: 1_025 }, (_, index) => [`state-${index}`, 'ready']));
+      },
+    });
+
+    const bundle = await collectSupportBundle([{
+      name: 'stateful-lifecycle',
+      collect: async () => result,
+    }]);
+
+    expect(lifecycleReads).toBe(1);
+    expect(bundle.lifecycle).toEqual({ state: 'ready' });
+    expect(bundle.truncation.stateFieldsOmitted).toBe(0);
+    expect(bundle.errors).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ collector: 'stateful-lifecycle', recoveryRequired: true }),
+    ]));
+  });
+
   it('accounts for payload arrays discarded during collector overflow preflight', async () => {
     const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
       sequence,
