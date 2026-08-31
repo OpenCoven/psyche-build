@@ -10,8 +10,17 @@ import {
 } from '@opencoven/psyche-vim-core';
 import { describe, expect, it } from 'vitest';
 
-const fixtureDirectory = join(process.cwd(), 'packages/vim-core/fixtures/v1');
-const fixtureFiles = readdirSync(fixtureDirectory).filter((name) => name.endsWith('.json')).sort();
+// The cross-language canonical root for every Vim v1 fixture document.
+const fixtureDirectory = join(process.cwd(), 'protocol-fixtures/vim/v1');
+// The fixture set this slice owns: every JSON document in the canonical root
+// except `chrome.json`, the pre-existing input-contract document exercised by
+// `__tests__/vimContract.test.ts`. It shares the chrome-* trace-id namespace
+// (for example `chrome-pane-focus-left` also appears in
+// `chrome-navigation.json`), so the two groups are validated separately.
+const contractOwnedDocuments = new Set(['chrome.json']);
+const fixtureFiles = readdirSync(fixtureDirectory)
+  .filter((name) => name.endsWith('.json') && !contractOwnedDocuments.has(name))
+  .sort();
 
 function readDocument(name: string): string {
   return readFileSync(join(fixtureDirectory, name), 'utf8');
@@ -29,7 +38,7 @@ function firstEditorDocument(): { name: string; document: VimEditorFixtureDocume
   throw new Error('no editor fixture document found');
 }
 
-describe('Vim v1 fixture set (packages/vim-core/fixtures/v1)', () => {
+describe('Vim v1 fixture set (protocol-fixtures/vim/v1)', () => {
   it('ships at least one chrome and one editor fixture document', () => {
     const parsed = parseAll();
     expect(fixtureFiles).toContain('chrome-navigation.json');

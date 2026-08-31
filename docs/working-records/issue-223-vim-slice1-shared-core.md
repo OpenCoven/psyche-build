@@ -63,3 +63,14 @@ Fixture-development honesty note: three hand-computed expectations were correcte
 ## Rollback
 
 Single revert of the implementation commit `bbb1effdde69ca18aeaff767eafd484548f3b27f` (or deletion of the five new fixture JSON files, `README.md`, `src/fixtureLoader.ts`, the two test files, `docs/vim/DESKTOP-REFERENCE-ADAPTER.md`, and the one export line in `packages/vim-core/src/index.ts`) restores the prior tree exactly; no data migrations, generated outputs, or shared state are involved. The record commit itself is documentation-only.
+
+## Update — maintainer review round (2026-08-31)
+
+Maintainer review ([PR #299, review 5063209205](https://github.com/OpenCoven/psyche-build/pull/299#pullrequestreview-5063209205)) kept the slice but required the v1 fixtures to live at the approved cross-language canonical root so the package directory does not become a second claimed protocol source. Applied changes:
+
+- The five fixture documents and this set's `README.md` moved unchanged (git renames, byte-identical content) from `packages/vim-core/fixtures/v1/` to `protocol-fixtures/vim/v1/`, joining the pre-existing #103 `chrome.json` input-contract document; `packages/vim-core/fixtures/` no longer exists.
+- `packages/vim-core/src/fixtureLoader.ts` path references in doc comments now name `protocol-fixtures/vim/v1/`; the loader itself stays platform-pure (hosts own IO, so no path code existed to move).
+- Both focused tests resolve the canonical root and scope their fixture set to the five slice documents, excluding `chrome.json` (owned by `__tests__/vimContract.test.ts`); the two groups share the `chrome-*` trace-id namespace — `chrome-pane-focus-left` exists in both `chrome.json` and `chrome-navigation.json` with byte-identical content — so a single merged set would fail `validateVimFixtureSet` id-uniqueness without editing fixture data, which this round does not do.
+- The moved `README.md` fixed its now-invalid relative links to `packages/vim-core/src/*`, updated the versioning-policy bump path to `protocol-fixtures/vim/v2/`, and documents the canonical-root layout and the `chrome.json` coexistence.
+- `docs/vim/DESKTOP-REFERENCE-ADAPTER.md` fixture-evidence paths now name `protocol-fixtures/vim/v1/*`.
+- Branch rebased onto current `origin/main`; validation rerun on the rebased head (see the PR comment for exact commands, counts, and CI status).

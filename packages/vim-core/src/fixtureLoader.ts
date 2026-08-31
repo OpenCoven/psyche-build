@@ -10,7 +10,8 @@ import type {
 
 /**
  * Versioned, fail-closed loader for the shared Vim v1 fixture set shipped in
- * `fixtures/v1/`. Desktop, web, Ink, and iOS adapters replay the same traces
+ * the cross-language canonical root `protocol-fixtures/vim/v1/`. Desktop, web,
+ * Ink, and iOS adapters replay the same traces
  * through their platform seam, so every adapter consumes documents parsed by
  * this module: one format, one version, strict validation, no silent drift.
  *
@@ -20,7 +21,7 @@ import type {
  * decoders elsewhere) and hand the text to `parseVimFixtureDocument`.
  */
 
-/** The single shared fixture version. Same value as every `fixtures/v1/*.json` document. */
+/** The single shared fixture version. Same value as every `protocol-fixtures/vim/v1/*.json` document. */
 export const VIM_FIXTURE_VERSION = 'vim/v1' as const;
 
 export type VimFixtureVersion = typeof VIM_FIXTURE_VERSION;
@@ -106,7 +107,7 @@ export interface VimEditorFixtureTrace {
   readonly expected: VimEditorFixtureExpected;
 }
 
-/** A `fixtures/v1/*.json` document covering the editor state machine. */
+/** A `protocol-fixtures/vim/v1/*.json` document covering the editor state machine. */
 export interface VimEditorFixtureDocument {
   readonly version: VimFixtureVersion;
   readonly kind: 'editor';

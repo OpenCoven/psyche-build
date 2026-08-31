@@ -1,12 +1,22 @@
 # Vim v1 shared fixture set
 
 Versioned, deterministic conformance fixtures for the shared Vim semantic core
-([`@opencoven/psyche-vim-core`](../../src/index.ts)). Desktop, web (browser),
+([`@opencoven/psyche-vim-core`](../../../packages/vim-core/src/index.ts)). Desktop, web (browser),
 Ink TUI, and iOS adapters replay the **same traces** through their own platform
 seam and must produce the same semantic output for each one. This is the
 machine-readable half of the conformance requirement `fixture-conformance` in
 [`docs/vim/ACCEPTANCE-MATRIX.md`](../../../docs/vim/ACCEPTANCE-MATRIX.md)
 (#227 owns that acceptance contract; this directory owns the fixture data).
+
+This is the single cross-language canonical root for every Vim v1 fixture
+document. Alongside the documents below, `chrome.json` — the pre-existing
+input-contract document added with the hardened Vim input core (#103) — lives
+in the same directory and is exercised by `__tests__/vimContract.test.ts`.
+Because the two groups share the `chrome-*` trace-id namespace (one trace id,
+`chrome-pane-focus-left`, appears in both `chrome.json` and
+`chrome-navigation.json` with byte-identical content), `validateVimFixtureSet`
+is applied to each group separately; replaying `chrome.json` traces through
+the shared machines remains covered by the #103 contract test.
 
 ## Documents
 
@@ -22,20 +32,20 @@ machine-readable half of the conformance requirement `fixture-conformance` in
 
 Every document declares `"version": "vim/v1"` — the single shared fixture
 version defined by `VIM_FIXTURE_VERSION` in
-[`src/fixtureLoader.ts`](../../src/fixtureLoader.ts) and mirrored by
+[`packages/vim-core/src/fixtureLoader.ts`](../../../packages/vim-core/src/fixtureLoader.ts) and mirrored by
 `VIM_ACCEPTANCE_FIXTURE_VERSION` in the #227 acceptance manifest.
 
 ### Chrome documents (input contract)
 
 The exact schema validated by `validateVimFixtures` in
-[`src/fixtures.ts`](../../src/fixtures.ts): a bounded list of traces, each with
+[`packages/vim-core/src/fixtures.ts`](../../../packages/vim-core/src/fixtures.ts): a bounded list of traces, each with
 a starting `context`, a `sequence` of normalized key tokens, and the expected
 `disposition`, `context`/`pending` state, and semantic `actions`.
 
 ### Editor documents (editing contract)
 
 Declared with `"kind": "editor"` and validated by `validateEditorFixtures` in
-[`src/fixtureLoader.ts`](../../src/fixtureLoader.ts):
+[`packages/vim-core/src/fixtureLoader.ts`](../../../packages/vim-core/src/fixtureLoader.ts):
 
 ```jsonc
 {
@@ -99,8 +109,9 @@ All platforms load the JSON through `parseVimFixtureDocument` (TypeScript) or
 its Swift mirror, which dispatch on the optional `kind` field, reject unknown
 versions and fields, and fail closed. Hosts own the IO: tests and Node tools
 read the files from this directory, bundled adapters inline them at build time,
-and iOS embeds them as decoded resources. Every trace id is unique across the
-whole set (enforced by `validateVimFixtureSet`) so acceptance evidence can
+and iOS embeds them as decoded resources. Every trace id is unique within each
+document group (enforced by `validateVimFixtureSet`, per the `chrome.json`
+note above) so acceptance evidence can
 reference traces unambiguously.
 
 ## Versioning policy
@@ -109,7 +120,7 @@ reference traces unambiguously.
   editing an existing trace's inputs or expectations is a contract change.
 - A change that alters what any existing trace expects (machine semantics,
   action shape, error wording) must **bump the version** in one reviewed
-  change: move this directory to `fixtures/v2/`, update
+  change: move this directory to `protocol-fixtures/vim/v2/`, update
   `VIM_FIXTURE_VERSION`, the core validators, the #227
   `VIM_ACCEPTANCE_FIXTURE_VERSION` constant, and every platform manifest
   together. Per-platform version drift is always a defect, never a migration

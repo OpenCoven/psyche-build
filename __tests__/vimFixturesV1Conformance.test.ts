@@ -16,8 +16,17 @@ import {
 } from '@opencoven/psyche-vim-core';
 import { describe, expect, it } from 'vitest';
 
-const fixtureDirectory = join(process.cwd(), 'packages/vim-core/fixtures/v1');
-const fixtureFiles = readdirSync(fixtureDirectory).filter((name) => name.endsWith('.json')).sort();
+// The cross-language canonical root for every Vim v1 fixture document.
+const fixtureDirectory = join(process.cwd(), 'protocol-fixtures/vim/v1');
+// The replay set this slice owns: every JSON document in the canonical root
+// except `chrome.json`, the pre-existing input-contract document exercised by
+// `__tests__/vimContract.test.ts`. It shares the chrome-* trace-id namespace
+// (for example `chrome-pane-focus-left` also appears in
+// `chrome-navigation.json`), so the two groups are validated separately.
+const contractOwnedDocuments = new Set(['chrome.json']);
+const fixtureFiles = readdirSync(fixtureDirectory)
+  .filter((name) => name.endsWith('.json') && !contractOwnedDocuments.has(name))
+  .sort();
 
 function readDocument(name: string): string {
   return readFileSync(join(fixtureDirectory, name), 'utf8');

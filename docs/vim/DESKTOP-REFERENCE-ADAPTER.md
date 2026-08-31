@@ -23,7 +23,9 @@ What exists on `main` today:
   machine, and the editor state machine with bounded registers, marks,
   search, macros, and Ex handling.
 - The versioned shared fixture set
-  [`packages/vim-core/fixtures/v1/`](../../packages/vim-core/fixtures/v1/README.md)
+  [`protocol-fixtures/vim/v1/`](../../protocol-fixtures/vim/v1/README.md) — the
+  cross-language canonical root, shared with the #103 input-contract
+  `chrome.json` document —
   with its fail-closed loader (`parseVimFixtureDocument`), replayed against the
   real machines by `__tests__/vimFixturesV1Conformance.test.ts`.
 
@@ -135,15 +137,15 @@ sets that pin each row:
 
 | Capability | v1 status | Fixture evidence |
 | --- | --- | --- |
-| Character/word/line motions with counts, `f`/`F`/`t`/`T`, `%`, paragraphs | Covered | `fixtures/v1/motions.json` |
-| Operator edits `d`/`c`/`y` with motions and text objects (`dw`, `ciw`, `dl`) | Covered | `fixtures/v1/edits.json` |
+| Character/word/line motions with counts, `f`/`F`/`t`/`T`, `%`, paragraphs | Covered | `protocol-fixtures/vim/v1/motions.json` |
+| Operator edits `d`/`c`/`y` with motions and text objects (`dw`, `ciw`, `dl`) | Covered | `protocol-fixtures/vim/v1/edits.json` |
 | Registers (named, numbered, read-only `.`/`"`), linewise yank/paste | Covered | `edits.json` (`edit-delete-word-dw`, `edit-yank-line-yy`, `edit-yank-word-then-put`) |
 | Insert/replace/open sessions with counts; committed IME text boundaries | Covered | `edits.json` (`edit-counted-insert-3i`, `edit-unicode-committed-text`) |
 | Visual character/line/block selection and delete | Covered | `edits.json` (`edit-visual-character-delete`, `edit-visual-line-delete`, `edit-visual-block-delete`) |
 | `J`, `>>`/`<<`, case operators (`g~w`) | Covered | `edits.json` |
 | Undo through the host history port; `.` repeat | Covered | `edits.json` (`edit-undo-restores-via-port`, `edit-repeat-last-change-dot`) |
-| Search `/`, `?`, `n`, `N`, `*` with bounded patterns and error consumption | Covered | `fixtures/v1/search.json` |
-| Bounded Ex: `:w`, `:wq`, `:q`, `:%s` (incl. confirm through the port), `:set`, `:b`, line goto, `:noh` | Covered | `fixtures/v1/ex-commands.json` |
+| Search `/`, `?`, `n`, `N`, `*` with bounded patterns and error consumption | Covered | `protocol-fixtures/vim/v1/search.json` |
+| Bounded Ex: `:w`, `:wq`, `:q`, `:%s` (incl. confirm through the port), `:set`, `:b`, line goto, `:noh` | Covered | `protocol-fixtures/vim/v1/ex-commands.json` |
 | Ex rejection (shell, pipes, `:g`, `:source`, filesystem args, unknown) — never executes shell code | Covered | `ex-commands.json` rejection traces |
 | Macros (`q`/`@`), global (`A`–`Z`) marks, jump list, counts > 10 000 | Core-supported, fixture coverage to be extended with the adapter slice | `__tests__/vimEditorMachine.test.ts` on `main` |
 | Folds, tags, window management, `.vimrc`/plugins/arbitrary mappings, `:g` | **Out of scope for v1** — rejected or unsupported, never approximated | `ex-commands.json` |
