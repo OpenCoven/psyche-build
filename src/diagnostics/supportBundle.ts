@@ -318,7 +318,8 @@ const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
   'collection_timeout_or_cancelled', 'collector_limit', 'duplicate_action_id',
   'duplicate_collector_name', 'invalid_record', 'normalization_cancelled', 'normalization_timeout',
   'provenance_incomplete', 'record', 'recovery', 'slow', 'action_invalidated',
-  'action_validation_failed', 'approval_expired', 'effect_failed',
+  'action_validation_failed', 'approval_denied', 'approval_expired', 'effect_failed',
+  'effect_unknown', 'queue_full',
 ]);
 const SAFE_REDACTION_CATEGORY_VALUES = new Set([
   'absolute-path', 'attribute-depth', 'attribute-items', 'attribute-keys',
@@ -2721,6 +2722,7 @@ export async function collectSupportBundle(
   let recordsOmitted = 0;
   let receiptsOmitted = 0;
   let errorsOmitted = 0;
+  let stateFieldsOmitted = 0;
   let terminalLinesOmitted = 0;
   const preflightBudget: NormalizationBudget = {
     remaining: MAX_COLLECTOR_RESULT_NODES,
@@ -2734,6 +2736,25 @@ export async function collectSupportBundle(
     else if (field === 'receipts') receiptsOmitted += count;
     else if (field === 'errors') errorsOmitted += count;
     else terminalLinesOmitted += count;
+  };
+  const accountCollectorMapLoss = (
+    value: SupportBundleInput,
+    includeField: (field: typeof COLLECTOR_MAP_FIELDS[number]) => boolean = () => true,
+  ): void => {
+    try {
+      const resultEntries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS);
+      if (resultEntries === undefined) return;
+      for (const [key, state] of resultEntries) {
+        if (!COLLECTOR_MAP_FIELDS.includes(key as typeof COLLECTOR_MAP_FIELDS[number]) || !isRecord(state)) continue;
+        const field = key as typeof COLLECTOR_MAP_FIELDS[number];
+        if (!includeField(field)) continue;
+        stateFieldsOmitted = boundedCount(
+          stateFieldsOmitted + (limitedEntries(state, MAX_ATTRIBUTE_SCAN_KEYS)?.length ?? 0),
+        );
+      }
+    } catch {
+      // The recovery error already reports an unreadable collector result.
+    }
   };
   let requestedStatus: SupportBundleStatus | undefined;
   const collected: Array<{
@@ -2916,6 +2937,10 @@ export async function collectSupportBundle(
         else if (recoveryTerminalTail === undefined) recoveryTerminalTail = pendingValue;
         else terminalLinesOmitted += pendingValue.length;
       }
+      accountCollectorMapLoss(
+        item.result,
+        (field) => !processedCollectorFields.has(`${item.index}:${field}`),
+      );
     }
     recoveryErrors.push(error);
     const recoveryInput: SupportBundleInput = {
@@ -2929,6 +2954,7 @@ export async function collectSupportBundle(
         recordsOmitted,
         receiptsOmitted,
         errorsOmitted,
+        stateFieldsOmitted,
         terminalLinesOmitted,
       },
     };
@@ -2937,6 +2963,7 @@ export async function collectSupportBundle(
       recordsOmitted,
       receiptsOmitted,
       errorsOmitted,
+      stateFieldsOmitted,
       terminalLinesOmitted,
     }));
     const recoveryFingerprint = normalizedSourceFingerprint(recoveryInput, deadlineAt);
@@ -2954,6 +2981,7 @@ export async function collectSupportBundle(
               recordsOmitted,
               receiptsOmitted,
               errorsOmitted,
+              stateFieldsOmitted,
               terminalLinesOmitted,
             },
           });
@@ -2967,6 +2995,7 @@ export async function collectSupportBundle(
             recordsOmitted,
             receiptsOmitted,
             errorsOmitted,
+            stateFieldsOmitted,
             terminalLinesOmitted,
           },
         });
@@ -3003,6 +3032,8 @@ export async function collectSupportBundle(
           accountCollectorArrayLoss(field, snapshot.length);
           processedCollectorFields.add(`${item.index}:${field}`);
         }
+        accountCollectorMapLoss(item.result);
+        for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       }
       continue;
     }
@@ -3045,6 +3076,8 @@ export async function collectSupportBundle(
         accountCollectorArrayLoss(field, snapshot.length);
         processedCollectorFields.add(`${item.index}:${field}`);
       }
+      accountCollectorMapLoss(item.result);
+      for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       continue;
     }
     const resultTrustedFields = collectionAuthorized
@@ -3067,6 +3100,8 @@ export async function collectSupportBundle(
         accountCollectorArrayLoss(field, snapshot.length);
         processedCollectorFields.add(`${item.index}:${field}`);
       }
+      accountCollectorMapLoss(item.result);
+      for (const field of COLLECTOR_MAP_FIELDS) processedCollectorFields.add(`${item.index}:${field}`);
       continue;
     }
     if (normalizationInterrupted()) return recoveryBundle(normalizationError());
@@ -3202,6 +3237,12 @@ export async function collectSupportBundle(
           recoveryRequired: true,
           });
         if (key === 'terminalTail') terminalLinesOmitted += (value as readonly unknown[]).length;
+        if (COLLECTOR_MAP_FIELDS.includes(key as typeof COLLECTOR_MAP_FIELDS[number]) && isRecord(value)) {
+          stateFieldsOmitted = boundedCount(
+            stateFieldsOmitted + (limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS)?.length ?? 0),
+          );
+          processedCollectorFields.add(`${item.index}:${key}`);
+        }
         if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField)) {
           processedCollectorFields.add(`${item.index}:${key}`);
         }
@@ -3210,6 +3251,9 @@ export async function collectSupportBundle(
         (merged as Record<string, unknown>)[key] = value;
         if (key === 'provenance' && resultTrustedFields?.has('provenance')) {
           trustedMergedFields.add('provenance');
+        }
+        if (COLLECTOR_MAP_FIELDS.includes(key as typeof COLLECTOR_MAP_FIELDS[number])) {
+          processedCollectorFields.add(`${item.index}:${key}`);
         }
         if (key === 'terminalTail' && Array.isArray(value)) processedCollectorFields.add(`${item.index}:terminalTail`);
       }
@@ -3273,11 +3317,13 @@ export async function collectSupportBundle(
   (merged as Record<string, unknown>).receipts = receipts;
   (merged as Record<string, unknown>).errors = errors;
   (merged as Record<string, unknown>).status = status;
-  if (recordsOmitted > 0 || receiptsOmitted > 0 || errorsOmitted > 0 || terminalLinesOmitted > 0) {
+  if (recordsOmitted > 0 || receiptsOmitted > 0 || errorsOmitted > 0
+    || stateFieldsOmitted > 0 || terminalLinesOmitted > 0) {
     (merged as Record<string, unknown>).truncation = {
       recordsOmitted,
       receiptsOmitted,
       errorsOmitted,
+      stateFieldsOmitted,
       terminalLinesOmitted,
     };
   }
@@ -3285,6 +3331,7 @@ export async function collectSupportBundle(
     recordsOmitted,
     receiptsOmitted,
     errorsOmitted,
+    stateFieldsOmitted,
     terminalLinesOmitted,
   });
   TRUSTED_SUPPORT_FIELDS.set(merged, Object.freeze(new Set(trustedMergedFields)));

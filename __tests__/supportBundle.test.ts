@@ -265,6 +265,49 @@ describe('support bundle v1', () => {
     expect(serializeSupportBundle(bundle)).not.toContain('private');
   });
 
+  it('preserves canonical runtime outcome codes as distinct actionable receipts', () => {
+    const bundle = buildSupportBundle({
+      receipts: [
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'approval-denied-action',
+          state: 'denied',
+          resource: { kind: 'project', id: 'approval-project' },
+          createdAt: '2026-01-01T00:00:00.000Z',
+          completedAt: '2026-01-01T00:00:01.000Z',
+          code: 'approval_denied',
+        },
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'effect-unknown-action',
+          state: 'unknown',
+          resource: { kind: 'project', id: 'effect-project' },
+          createdAt: '2026-01-01T00:00:02.000Z',
+          completedAt: '2026-01-01T00:00:03.000Z',
+          code: 'effect_unknown',
+        },
+        {
+          schema: 'psyche.control.receipt/v1',
+          actionId: 'queue-full-action',
+          state: 'failed',
+          resource: { kind: 'project', id: 'queue-project' },
+          createdAt: '2026-01-01T00:00:04.000Z',
+          completedAt: '2026-01-01T00:00:05.000Z',
+          code: 'queue_full',
+        },
+      ],
+    });
+    const roundTripped = parseSupportBundle(serializeSupportBundle(bundle));
+    const outcomes = roundTripped.receipts.map(({ sourceState, state, code }) => ({ sourceState, state, code }));
+
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes).toEqual(expect.arrayContaining([
+      { sourceState: 'denied', state: 'failed', code: 'approval_denied' },
+      { sourceState: 'unknown', state: 'unknown', code: 'effect_unknown' },
+      { sourceState: 'failed', state: 'failed', code: 'queue_full' },
+    ]));
+  });
+
   it('bounds record count, record size, terminal data, and final payload', () => {
     const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 20 }, (_, sequence) => ({
       sequence,
@@ -714,6 +757,7 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'beta', code: 'collection_conflict', recoveryRequired: true }),
     ]));
+    expect(bundle.truncation.stateFieldsOmitted).toBe(1);
   });
 
   it('retains a singleton conflict when earlier collector errors fill the error bound', async () => {
@@ -736,6 +780,21 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'collection_conflict', recoveryRequired: true }),
     ]));
+  });
+
+  it('accounts for state discarded with duplicate collector ownership', async () => {
+    const bundle = await collectSupportBundle([
+      { name: 'alpha', collect: async () => ({ lifecycle: { state: 'ready' } }) },
+      { name: 'alpha', collect: async () => ({ providers: { tmux: 'available' } }) },
+    ]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(bundle.lifecycle).toEqual({});
+    expect(bundle.providers).toEqual({});
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'duplicate_collector_name', recoveryRequired: true }),
+    ]));
+    expect(bundle.truncation.stateFieldsOmitted).toBe(2);
   });
 
   it('requires unique authoritative receipt ownership across collectors', async () => {
