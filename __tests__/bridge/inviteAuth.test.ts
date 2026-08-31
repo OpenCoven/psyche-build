@@ -192,6 +192,40 @@ describe("invite payloads", () => {
     expect(store.list()).toEqual(recordsBefore);
   });
 
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+  ] as const)("rejects %s from a configured random provider without falling back", (_label, invalidValue) => {
+    let randomCalls = 0;
+    const store = new InviteStore({
+      hostId: HOST_ID,
+      hostFingerprint: HOST_FINGERPRINT,
+      now: () => T0,
+      random: (bytes) => {
+        randomCalls += 1;
+        if (randomCalls === 3) {
+          return invalidValue as unknown as Buffer;
+        }
+        return Buffer.alloc(bytes, randomCalls);
+      },
+    });
+    const first = store.issue({
+      hostName: "Configured Provider Host",
+      endpoints: [{ kind: "tcp", host: "192.0.2.30", port: 47123 }],
+    });
+    if (!first.ok) throw new Error(`issue failed: ${first.code}`);
+    const recordsBefore = store.list();
+
+    expect(() => store.issue({
+      hostName: "Replacement Host",
+      endpoints: [{ kind: "tcp", host: "192.0.2.31", port: 47124 }],
+    })).toThrow(TypeError);
+
+    expect(randomCalls).toBe(3);
+    expect(store.pendingInvite()).toEqual(first.invite.record);
+    expect(store.list()).toEqual(recordsBefore);
+  });
+
   it("round-trip through the deep-link encoding", () => {
     const harness = makeStore();
     const { payload, deepLink } = issue(harness);

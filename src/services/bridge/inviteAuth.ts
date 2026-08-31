@@ -714,7 +714,7 @@ function exactRandomBytes(
   bytes: number,
   purpose: string,
 ): Buffer {
-  const value = random?.(bytes) ?? randomBytes(bytes);
+  const value = random === undefined ? randomBytes(bytes) : random(bytes);
   if (!Buffer.isBuffer(value) || value.length !== bytes) {
     throw new TypeError(`${purpose} randomness must contain exactly ${bytes} bytes`);
   }
