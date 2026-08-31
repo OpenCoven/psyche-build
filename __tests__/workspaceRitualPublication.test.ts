@@ -16,6 +16,7 @@ import {
   readProjectRitualPublication,
 } from '../src/workspace/ritualPublication.js';
 import {
+  MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES,
   MAX_PROJECT_RITUAL_FILES,
   MAX_PROJECT_RITUAL_FILE_BYTES,
   MAX_PROJECT_RITUAL_STORE_BYTES,
@@ -447,6 +448,26 @@ describe('ritual publication', () => {
               name: `Extra ${index}`,
               scope: 'project',
             }))}\n`,
+            'utf-8',
+          );
+        }
+
+        const listing = readProjectRitualStore(root);
+        expect(listing.limitExceeded).toBe(true);
+        expect(listing.rituals).toEqual([]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('bounds directory enumeration across non-JSON entries', () => {
+      const root = tempProjectWithRituals();
+      try {
+        const ritualsDir = path.join(root, '.psyche', 'rituals');
+        for (let index = 0; index < MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES; index += 1) {
+          writeFileSync(
+            path.join(ritualsDir, `ignored-${String(index).padStart(3, '0')}.txt`),
+            'ignored\n',
             'utf-8',
           );
         }

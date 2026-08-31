@@ -11,6 +11,7 @@ import { sameSidebarProjectRoot } from './sidebarProjects.js';
 
 export const RITUAL_VERSION = 1;
 export const MAX_PROJECT_RITUAL_FILES = 100;
+export const MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES = MAX_PROJECT_RITUAL_FILES;
 export const MAX_PROJECT_RITUAL_FILE_BYTES = 64 * 1024;
 export const MAX_PROJECT_RITUAL_STORE_BYTES = 512 * 1024;
 export const MAX_PROJECT_RITUAL_MANIFEST_BYTES = 16 * 1024;
@@ -572,9 +573,16 @@ function readBoundedRitualEntries(directoryChain: RitualDirectoryChain): {
   const openedDirectory = directory;
 
   try {
+    let examinedEntries = 0;
     while (true) {
       const entry = openedDirectory.readSync();
       if (!entry) break;
+      examinedEntries += 1;
+      if (examinedEntries > MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES) {
+        result.entries = [];
+        result.limitExceeded = true;
+        break;
+      }
       if (!entry.name.endsWith('.json')) continue;
       if (result.entries.length >= MAX_PROJECT_RITUAL_FILES) {
         result.entries = [];
