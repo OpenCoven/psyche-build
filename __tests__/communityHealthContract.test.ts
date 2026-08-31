@@ -19,6 +19,7 @@ const requiredFiles = [
   '.github/ISSUE_TEMPLATE/bug.yml',
   '.github/ISSUE_TEMPLATE/feature.yml',
   '.github/ISSUE_TEMPLATE/documentation.yml',
+  'docs/COMMUNITY-HEALTH.md',
 ];
 
 describe('community health contract', () => {
@@ -40,6 +41,26 @@ describe('community health contract', () => {
     expect(config).toMatch(/blank_issues_enabled:\s*false/);
     expect(config).toMatch(/Never disclose vulnerability details in a public issue/i);
     expect(security).toMatch(/Do not open a public issue, pull request, discussion, or Bead/i);
+  });
+
+  it('keeps the bug-form recovery-impact question optional and recovery-focused', () => {
+    const bug = read('.github/ISSUE_TEMPLATE/bug.yml');
+    const start = bug.indexOf('id: recovery_impact');
+    expect(start).toBeGreaterThan(-1);
+    const nextField = bug.indexOf('- type:', start);
+    const field = bug.slice(start, nextField === -1 ? undefined : nextField);
+    expect(field).toMatch(/Recovery impact/i);
+    expect(field).toMatch(/required:\s*false/);
+    expect(field).toMatch(/not applicable/i);
+  });
+
+  it('records the community-health status without weakening intake boundaries', () => {
+    const record = read('docs/COMMUNITY-HEALTH.md');
+    expect(record).toMatch(/private security advisory flow/);
+    expect(record).toMatch(/Blank issues remain disabled/);
+    expect(record).not.toMatch(
+      /(?:paste|attach|upload|provide|include) .{0,80}(?:token|password|private key|raw prompt|terminal output)/i,
+    );
   });
 
   it('routes public reports through bounded forms tied to current support policy', () => {
