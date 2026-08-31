@@ -151,6 +151,7 @@ describe('community health contract', () => {
     expect(contributing).toMatch(/approximately \*\*800 non-generated changed lines\*\*/i);
     expect(contributing).toMatch(/design\/ADR \*\*before implementation\*\*/i);
     expect(contributing).toMatch(/Git 2\.20 or newer/i);
+    expect(contributing).toContain('corepack enable && corepack prepare');
     expect(contributing).toContain('bash ./scripts/agent-bootstrap');
     expect(contributing).toContain('bash ./scripts/agent-check fast');
     expect(contributing).toContain('bash ./scripts/agent-check full');
