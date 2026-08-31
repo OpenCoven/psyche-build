@@ -65,8 +65,7 @@ describe('Tauri semantic browser provider lifecycle', () => {
   });
 
   it('builds and loads the committed PsycheControl bundle', () => {
-    expect(packageJson).toContain('--global-name=PsycheControl');
-    expect(packageJson).toContain('--outfile=web/control.bundle.js');
+    expect(packageJson).toContain('"build:web": "node scripts/build-web.mjs"');
     expect(html).toContain('<script src="./control.bundle.js" defer></script>');
   });
 
