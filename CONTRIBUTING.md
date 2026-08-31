@@ -12,7 +12,7 @@ The repository derives its exact package-manager contract from `package.json`. Y
 
 - Node.js satisfying `package.json#engines.node`;
 - the exact pnpm version in `package.json#packageManager` (Corepack supplies it: `corepack prepare <version from package.json#packageManager> --activate`);
-- Git;
+- Git 2.20 or newer;
 - tmux 3.0+ — required by bootstrap itself, not only by the smoke path: `scripts/agent-bootstrap` exits before installing dependencies if `tmux` is absent;
 - Rust/Cargo for the full desktop gate;
 - macOS with the pinned Xcode/XcodeGen toolchain only when validating the iOS surface.

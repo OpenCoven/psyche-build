@@ -29,27 +29,28 @@ Measured 2026-08-30 via `GET /repos/OpenCoven/psyche-build/community/profile`:
 
 ## Why the percentage is 87 and not 100
 
-GitHub documents YAML issue forms with `name` and `description` as valid
-community-profile intake surfaces. The repository has three such forms, but the
-REST community-profile endpoint still reports `files.issue_template: null`.
-The endpoint therefore does not describe the repository's available YAML issue
-forms, and its percentage is not used as proof that the intake surface is
-missing or unsafe.
+GitHub's Community Standards checklist recognizes the repository's YAML issue
+forms. The remaining unchecked item is **Repository admins accept content
+reports**, a repository moderation setting. The REST response's
+`files.issue_template: null` does not describe the forms shown by the checklist
+and is not the cause of the missing percentage.
 
 ## Resolution
 
-Issue #198 permits either a 100 percent score or a documented platform
-limitation with an explicit safe resolution:
+The repository keeps its bounded YAML forms and does not add a legacy Markdown
+template merely to influence the score. Enabling content reports is a manual
+maintainer action with no public API:
 
-1. **Proven detection limitation.** The missing 13 percent is the endpoint
-   discrepancy described above. The repository's YAML forms are present, valid,
-   and enforced by `__tests__/communityHealthContract.test.ts`.
-2. **Resolution:** accept the reported 87 percent rather than add a legacy
-   Markdown template that would create a free-form public intake path around the
-   YAML forms' required safety acknowledgements. Reporters remain routed through
-   the three bounded YAML forms and [`SUPPORT.md`](../SUPPORT.md). Vulnerability
-   reports retain the private security advisory flow. Blank issues remain disabled via
-   `.github/ISSUE_TEMPLATE/config.yml`.
+1. Open **Settings → Moderation options → Reported content**.
+2. Enable repository content reports for the reviewed audience.
+3. Re-run the measurement below and retain the observed result.
+
+Until that setting is reviewed and enabled, the community-health score remains
+an explicit #198 closure blocker. This document and PR do not claim that #198
+is complete. Reporters remain routed through the three bounded YAML forms and
+[`SUPPORT.md`](../SUPPORT.md). Vulnerability reports retain the private security
+advisory flow. Blank issues remain disabled via
+`.github/ISSUE_TEMPLATE/config.yml`.
 
 ## Verification
 
@@ -59,8 +60,8 @@ After this change merges, re-run:
 gh api repos/OpenCoven/psyche-build/community/profile --jq '{health_percentage, files}'
 ```
 
-The expected result remains 87 percent while the endpoint does not recognize
-the YAML forms. The rest of this contract is verifiable locally at any head:
+GitHub may recompute the profile lazily after the moderation setting changes.
+The rest of this contract is verifiable locally at any head:
 
 ```sh
 corepack pnpm install --frozen-lockfile

@@ -56,8 +56,10 @@ describe('community health contract', () => {
 
   it('records the community-health status without weakening intake boundaries', () => {
     const record = read('docs/COMMUNITY-HEALTH.md');
-    expect(record).toMatch(/private security advisory flow/);
-    expect(record).toMatch(/Blank issues remain disabled/);
+    expect(record).toContain(
+      'gh api repos/OpenCoven/psyche-build/community/profile',
+    );
+    expect(record).toMatch(/Settings.*Moderation options.*Reported content/is);
     expect(record).not.toMatch(
       /(?:paste|attach|upload|provide|include) .{0,80}(?:token|password|private key|raw prompt|terminal output)/i,
     );
@@ -148,6 +150,7 @@ describe('community health contract', () => {
 
     expect(contributing).toMatch(/approximately \*\*800 non-generated changed lines\*\*/i);
     expect(contributing).toMatch(/design\/ADR \*\*before implementation\*\*/i);
+    expect(contributing).toMatch(/Git 2\.20 or newer/i);
     expect(contributing).toContain('bash ./scripts/agent-bootstrap');
     expect(contributing).toContain('bash ./scripts/agent-check fast');
     expect(contributing).toContain('bash ./scripts/agent-check full');

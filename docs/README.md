@@ -36,9 +36,9 @@ not prove that a capability shipped.
 
 ## Development
 
-The docs site is a pnpm workspace member (`pnpm-workspace.yaml` pins it; the
-directory holds `pnpm-lock.yaml`). Run its scripts through pnpm from the
-repository root, matching [CONTRIBUTING.md](../CONTRIBUTING.md):
+The docs site is a pnpm workspace member declared by `pnpm-workspace.yaml`.
+Run its scripts through pnpm from the repository root, matching
+[CONTRIBUTING.md](../CONTRIBUTING.md):
 
 ```bash
 # Install the locked workspace dependency graph (from the repository root)
@@ -55,7 +55,9 @@ pnpm --dir docs preview
 ```
 
 `bash ./scripts/agent-check full` runs `pnpm --dir docs build` as part of the
-repository gate.
+repository gate. The nested `docs/pnpm-lock.yaml` serves the standalone Vercel
+deployment configured by `docs/vercel.json`; root workspace installation uses
+the root lockfile's `docs` importer.
 
 ## Features
 
