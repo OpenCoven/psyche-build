@@ -476,7 +476,7 @@ describe('TerminalPaneController lifecycle', () => {
         adoptRunningPty: async () => false,
         setVisible: async () => false,
         markPtyStarted: async () => false,
-        markPtyExited: () => undefined,
+        markPtyExited: () => false,
         stopPtyDelivery: () => undefined,
         dispose: () => { ptyDisposals.push(options.threadId); },
       };
