@@ -1,0 +1,1413 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  buildStressFocusOrder,
+  buildStressGeometry,
+  buildStressPlan,
+  createDiagnosticBrowserPage,
+  createLargeEditorDocument,
+  runStressPlan,
+  stressFocusId,
+  type StressFixture,
+  type StressHarnessDependencies,
+  type StressLateOperation,
+  type StressPhase,
+  type StressResource,
+} from '../native/desktop/psyche-build-tauri/web/runtime/stress-harness';
+
+function abortError(): Error {
+  const error = new Error('stress run cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function abortableWait(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? abortError());
+  return new Promise((_, reject) => {
+    signal.addEventListener(
+      'abort',
+      () => reject(signal.reason ?? abortError()),
+      { once: true },
+    );
+  });
+}
+
+function createFrameDriver() {
+  let nextHandle = 1;
+  const callbacks = new Map<number, (timestamp: number) => void>();
+  const cancelled: number[] = [];
+  return {
+    request(callback: (timestamp: number) => void) {
+      const handle = nextHandle;
+      nextHandle += 1;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    cancel(handle: number) {
+      cancelled.push(handle);
+      callbacks.delete(handle);
+    },
+    flush(timestamp: number) {
+      const entry = callbacks.entries().next().value as
+        | [number, (frameTimestamp: number) => void]
+        | undefined;
+      if (!entry) return;
+      callbacks.delete(entry[0]);
+      entry[1](timestamp);
+    },
+    cancelled,
+    pending() {
+      return callbacks.size;
+    },
+  };
+}
+
+function createResource(id: string, disposed: string[]): StressResource {
+  return {
+    id,
+    async dispose() {
+      disposed.push(id);
+    },
+    forceDispose() {
+      disposed.push(`force-${id}`);
+    },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('Tauri diagnostics stress harness', () => {
+  it('builds the fixed scenario order, phase durations, and fixture assignments', () => {
+    const plan = buildStressPlan();
+
+    expect(plan.map((scenario) => scenario.paneCount)).toEqual([1, 6, 12, 24]);
+    expect(plan.every((scenario) => (
+      scenario.warmupMs === 10_000
+      && scenario.measureMs === 30_000
+      && scenario.restoreMs === 5_000
+    ))).toBe(true);
+    expect(plan[2]?.fixtures).toEqual([
+      'steady', 'burst', 'rewrite',
+      'steady', 'burst', 'rewrite',
+      'steady', 'burst', 'rewrite',
+      'steady', 'burst', 'rewrite',
+    ]);
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(plan.every(Object.isFrozen)).toBe(true);
+  });
+
+  it('uses deterministic focus and split/sidebar geometry with editor/browser adjacency', () => {
+    const order = buildStressFocusOrder(
+      ['terminal-0', 'terminal-1', 'terminal-2'],
+      'editor',
+      'browser',
+    );
+
+    expect(order).toEqual([
+      'terminal-0',
+      'terminal-1',
+      'terminal-2',
+      'editor',
+      'browser',
+    ]);
+    expect(order.indexOf('browser') - order.indexOf('editor')).toBe(1);
+    expect([0, 1, 2, 3, 4, 5, 6].map((step) => stressFocusId(order, step))).toEqual([
+      'terminal-0',
+      'terminal-1',
+      'terminal-2',
+      'editor',
+      'browser',
+      'terminal-0',
+      'terminal-1',
+    ]);
+
+    expect(buildStressGeometry(1, 6, 0, order)).toEqual({
+      scenarioIndex: 1,
+      paneCount: 6,
+      frameStep: 0,
+      sidebarWidth: 288,
+      splitRatios: [0.45, 0.55, 0.65, 0.35],
+      surfaceOrder: order,
+    });
+    expect(buildStressGeometry(1, 6, 1, order)).toEqual({
+      scenarioIndex: 1,
+      paneCount: 6,
+      frameStep: 1,
+      sidebarWidth: 336,
+      splitRatios: [0.55, 0.65, 0.35, 0.45],
+      surfaceOrder: order,
+    });
+  });
+
+  it('generates a large deterministic editor document and verifies context loss asynchronously', async () => {
+    const document = createLargeEditorDocument(12);
+    const page = createDiagnosticBrowserPage(12);
+    let contextLost = false;
+    let contextLostListener: ((event: { preventDefault(): void }) => void) | undefined;
+    const canvas = {
+      addEventListener(_name: string, listener: (event: { preventDefault(): void }) => void) {
+        contextLostListener = listener;
+      },
+      removeEventListener() {
+        contextLostListener = undefined;
+      },
+      getContext() {
+        return {
+          clearColor() {},
+          clear() {},
+          COLOR_BUFFER_BIT: 0x4000,
+          getExtension() {
+            return {
+              loseContext() {
+                contextLost = true;
+                queueMicrotask(() => contextLostListener?.({ preventDefault() {} }));
+              },
+            };
+          },
+        };
+      },
+    };
+    const browserWindow: { losePsycheDiagnosticsContext?: () => Promise<boolean> } = {};
+    const browserDocument = {
+      title: page.title,
+      getElementById() {
+        return canvas;
+      },
+    };
+    const script = page.html.match(/<script>([\s\S]+)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    Function('window', 'document', 'requestAnimationFrame', script as string)(
+      browserWindow,
+      browserDocument,
+      () => 1,
+    );
+
+    expect(document.name).toBe('psyche-render-stress-12.txt');
+    expect(document.languageId).toBe('text');
+    expect(document.text.length).toBeGreaterThan(1_000_000);
+    expect(document.text).toContain('pane=12 sequence=00000');
+    expect(document.text).toContain('\u001b[36mrender-diagnostics\u001b[0m');
+    expect(page.url).toBe('about:blank');
+    expect(page.title).toBe('Psyche render diagnostics · 12 panes');
+    expect(page.html).toContain('requestAnimationFrame');
+    expect(page.html).toContain('WEBGL_lose_context');
+    expect(page.html).toContain('context-unavailable');
+    expect(page.html).toContain('context-lost');
+    expect(page.html).toContain('webglcontextlost');
+    expect(page.html).not.toContain('browser_report_title');
+    await expect(browserWindow.losePsycheDiagnosticsContext?.()).resolves.toBe(true);
+    expect(contextLost).toBe(true);
+    expect(browserDocument.title).toBe(
+      'Psyche render diagnostics · 12 panes · context-lost',
+    );
+  });
+
+  it('runs fixed scenarios with per-frame geometry, hidden panes, window cycling, and context loss', async () => {
+    const events: string[] = [];
+    const disposed: string[] = [];
+    const visibility: Array<[string, boolean]> = [];
+    const fixtures: StressFixture[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index, fixture) {
+        fixtures.push(fixture);
+        return createResource(`terminal-${fixtures.length - 1}-${index}`, disposed);
+      },
+      async createEditor(document) {
+        events.push(`editor:${document.name}`);
+        return createResource(`editor-${document.paneCount}`, disposed);
+      },
+      async createBrowser(page) {
+        events.push(`browser:${page.url}:${page.paneCount}`);
+        return createResource(`browser-${page.paneCount}`, disposed);
+      },
+      async focus(id) {
+        events.push(`focus:${id}`);
+      },
+      resize(_step, geometry) {
+        events.push(`resize:${geometry.paneCount}:${geometry.frameStep}:${geometry.sidebarWidth}`);
+      },
+      async setVisible(id, visible) {
+        visibility.push([id, visible]);
+      },
+      async cycleWindow() {
+        events.push('window:cycle');
+      },
+      async loseGraphicsContext() {
+        events.push('context:lose');
+        return true;
+      },
+      resetMetrics() {
+        events.push('metrics:reset');
+      },
+      snapshotMetrics() {
+        return { at: now };
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress(progress) {
+        if (progress.elapsedMs === 0) {
+          events.push(`phase:${progress.paneCount}:${progress.phase}`);
+        }
+      },
+    };
+
+    const result = await runStressPlan(dependencies);
+
+    expect(result.scenarios.map((scenario) => scenario.paneCount)).toEqual([1, 6, 12, 24]);
+    expect(result.scenarios.every((scenario) => scenario.contextLossSupported)).toBe(true);
+    expect(fixtures).toHaveLength(43);
+    expect(fixtures.slice(0, 7)).toEqual([
+      'steady',
+      'steady', 'burst', 'rewrite', 'steady', 'burst', 'rewrite',
+    ]);
+    expect(events.filter((event) => event === 'window:cycle')).toHaveLength(4);
+    expect(events.filter((event) => event === 'context:lose')).toHaveLength(4);
+    expect(events.some((event) => event.startsWith('focus:editor-'))).toBe(true);
+    expect(events.some((event) => event.startsWith('focus:browser-'))).toBe(true);
+    expect(events.some((event) => event.startsWith('resize:24:'))).toBe(true);
+
+    const hidden = visibility.filter(([, visible]) => !visible);
+    const restored = visibility.filter(([, visible]) => visible);
+    expect(hidden).toHaveLength(21);
+    expect(restored).toEqual(hidden.map(([id]) => [id, true]));
+    expect(disposed).toHaveLength(51);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it.each(['terminal', 'editor', 'browser'] as const)(
+    'compensates a resource that resolves after cancellation during %s creation',
+    async (creationStage) => {
+      const controller = new AbortController();
+      const disposed: string[] = [];
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const targetStarted = deferred<void>();
+      const createLateResource = () => {
+        targetStarted.resolve();
+        controller.abort(abortError());
+        return late.promise;
+      };
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return creationStage === 'terminal'
+            ? createLateResource()
+            : createResource(`terminal-${index}`, disposed);
+        },
+        async createEditor(document) {
+          return creationStage === 'editor'
+            ? createLateResource()
+            : createResource(`editor-${document.paneCount}`, disposed);
+        },
+        async createBrowser(page) {
+          return creationStage === 'browser'
+            ? createLateResource()
+            : createResource(`browser-${page.paneCount}`, disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const run = runStressPlan(dependencies, { signal: controller.signal });
+      await targetStarted.promise;
+      late.resolve(createResource(`late-${creationStage}`, disposed));
+
+      await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+      expect(disposed).toContain(`late-${creationStage}`);
+      expect(frames.pending()).toBe(0);
+    },
+  );
+
+  it('starts the late-resource grace window when cancellation occurs', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposed: string[] = [];
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(1_999);
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(1_999);
+      late.resolve(createResource('late-terminal', disposed));
+
+      const error = await observed;
+      expect(error).toMatchObject({ name: 'AbortError' });
+      expect(disposed).toContain('late-terminal');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('compensates a resource that resolves after the late cutoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposed: string[] = [];
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(abortError());
+      // The bounded result cutoff is at four seconds; the quarantine remains
+      // open long enough to compensate a resource that arrives after that
+      // cutoff but before scenario finalization.
+      await vi.advanceTimersByTimeAsync(4_001);
+      late.resolve(createResource('late-after-cutoff', disposed));
+      await vi.runAllTimersAsync();
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'AbortError' }),
+        expect.objectContaining({ message: 'stress resource creation did not settle after cancellation' }),
+      ]));
+
+      expect(disposed).toContain('late-after-cutoff');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('force-invalidates a resource after the late-result quarantine closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposed: string[] = [];
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(9_001);
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+
+      late.resolve(createResource('late-after-quarantine', disposed));
+      await vi.runAllTimersAsync();
+      expect(disposed).not.toContain('late-after-quarantine');
+      expect(disposed).toContain('force-late-after-quarantine');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for an in-flight late compensation before finalizing at the cutoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const frames = createFrameDriver();
+      const late = deferred<StressResource>();
+      const started = deferred<void>();
+      const disposalStarted = deferred<void>();
+      const disposal = deferred<void>();
+      const disposed: string[] = [];
+      const lateResource: StressResource = {
+        id: 'late-in-flight',
+        async dispose() {
+          disposalStarted.resolve();
+          await disposal.promise;
+          disposed.push('late-in-flight');
+        },
+        forceDispose() {
+          disposed.push('force-late-in-flight');
+        },
+      };
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal() {
+          started.resolve();
+          return late.promise;
+        },
+        async createEditor() {
+          return createResource('editor', disposed);
+        },
+        async createBrowser() {
+          return createResource('browser', disposed);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => 0,
+        onProgress() {},
+      };
+
+      let settled = false;
+      const observed = runStressPlan(dependencies, { signal: controller.signal }).catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(abortError());
+      await vi.advanceTimersByTimeAsync(3_999);
+      late.resolve(lateResource);
+      await disposalStarted.promise;
+      await vi.advanceTimersByTimeAsync(1);
+      void observed.finally(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(disposed).toContain('force-late-in-flight');
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns after a timed-out disposal and invokes the force path', async () => {
+    vi.useFakeTimers();
+    try {
+      const disposed: string[] = [];
+      const frames = createFrameDriver();
+      const disposal = deferred<void>();
+      const disposeStarted = deferred<void>();
+      let now = 0;
+      const resource = (id: string): StressResource => ({
+        id,
+        async dispose() {
+          if (id === 'browser-1') {
+            disposeStarted.resolve();
+            await disposal.promise;
+          }
+          disposed.push(id);
+        },
+        forceDispose() {
+          disposed.push(`force-${id}`);
+        },
+      });
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return resource(`terminal-${index}`);
+        },
+        async createEditor() {
+          return resource('editor');
+        },
+        async createBrowser() {
+          return resource('browser-1');
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms) {
+          now += ms;
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      let settled = false;
+      const observed = runStressPlan(dependencies).catch((error: unknown) => error);
+      void observed.finally(() => { settled = true; });
+      await disposeStarted.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      expect(disposed).toContain('force-browser-1');
+      disposal.resolve();
+
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ message: 'stress cleanup operation timed out' }),
+      ]));
+      expect(disposed).toContain('browser-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps warmup, measurement, and restore phases on fixed wall-clock budgets', async () => {
+    const frames = createFrameDriver();
+    let now = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        now += 100;
+      },
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {
+        now += 100;
+      },
+      async loseGraphicsContext() {
+        now += 100;
+        return true;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    const result = await runStressPlan(dependencies);
+
+    expect(result.finishedAt - result.startedAt).toBe(4 * 45_000);
+    expect(result.scenarios.map((scenario) => scenario.finishedAt - scenario.startedAt))
+      .toEqual([45_000, 45_000, 45_000, 45_000]);
+  });
+
+  it('does not let synchronous frame work move the phase start past its deadline', async () => {
+    const controller = new AbortController();
+    let now = 0;
+    let frameRequests = 0;
+    let resizeCalls = 0;
+    const focusPhases: StressPhase[] = [];
+    let currentPhase: StressPhase = 'setup';
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusPhases.push(currentPhase);
+        controller.abort(abortError());
+      },
+      resize() {
+        resizeCalls += 1;
+        if (resizeCalls === 1) now = 10_000;
+      },
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+      },
+      requestFrame(callback) {
+        frameRequests += 1;
+        if (frameRequests === 1) callback(0);
+        return frameRequests;
+      },
+      cancelFrame() {},
+      now: () => now,
+      onProgress(progress) {
+        currentPhase = progress.phase;
+      },
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusPhases).toEqual(['measure']);
+  });
+
+  it('settles late phase operations before entering the next phase', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const lateFocus = deferred<void>();
+      const phaseEvents: StressPhase[] = [];
+      const focusEvents: string[] = [];
+      const controller = new AbortController();
+      let focusCalls = 0;
+      let now = 0;
+      let lateOperationStarted = false;
+      let focusWasStarted = false;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus() {
+          focusCalls += 1;
+          if (!lateOperationStarted && now >= 9_500) {
+            lateOperationStarted = true;
+            focusEvents.push('focus-started');
+            focusWasStarted = true;
+            await lateFocus.promise;
+            return;
+          }
+          if (lateOperationStarted) focusEvents.push('focus-compensated');
+        },
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+          now += ms;
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, ms);
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(signal.reason ?? abortError());
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          });
+          frames.flush(now);
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress(progress) {
+          phaseEvents.push(progress.phase);
+          if (progress.phase === 'measure' && !controller.signal.aborted) {
+            controller.abort(abortError());
+          }
+        },
+      };
+
+      const observed = runStressPlan(dependencies, { signal: controller.signal })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(9_500);
+      for (let attempt = 0; attempt < 20 && !focusWasStarted; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(focusWasStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(phaseEvents).not.toContain('measure');
+      await vi.advanceTimersByTimeAsync(1);
+
+      lateFocus.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      const error = await observed;
+      expect(error).toMatchObject({ name: 'AbortError' });
+      expect(focusEvents).toEqual(['focus-started', 'focus-compensated']);
+      expect(phaseEvents.indexOf('measure')).toBeGreaterThan(phaseEvents.indexOf('warmup'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('terminally invalidates a non-resource result after its quarantine closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const lateFocus = deferred<void>();
+      const invalidated: StressLateOperation[] = [];
+      let focusWasStarted = false;
+      let now = 0;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus() {
+          focusWasStarted = true;
+          await lateFocus.promise;
+        },
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        invalidateLateOperation(operation) {
+          invalidated.push(operation);
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(_ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+          now += _ms;
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      const observed = runStressPlan(dependencies).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1);
+      for (let attempt = 0; attempt < 20 && !focusWasStarted; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(focusWasStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(11_001);
+      const error = await observed;
+      expect(error).toBeInstanceOf(AggregateError);
+
+      lateFocus.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invalidated).toContain('focus');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps focus operations on absolute 250 ms boundaries when focusing is slow', async () => {
+    const controller = new AbortController();
+    const focusTimes: number[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusTimes.push(now);
+        now += 100;
+        if (focusTimes.length === 4) controller.abort(abortError());
+      },
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusTimes).toEqual([250, 500, 750, 1_000]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('focuses once per interval despite consistent small timer lateness', async () => {
+    const controller = new AbortController();
+    const focusTimes: number[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    let sleepCount = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusTimes.push(now);
+        if (focusTimes.length === 3) controller.abort(abortError());
+      },
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms + 1;
+        sleepCount += 1;
+        frames.flush(now);
+        if (sleepCount === 4) controller.abort(abortError());
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusTimes).toEqual([251, 501, 751]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('focuses once at wakeup and skips extra missed boundaries after a stall', async () => {
+    const controller = new AbortController();
+    const focusTimes: number[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    let firstSleep = true;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus() {
+        focusTimes.push(now);
+        if (focusTimes.length === 3) controller.abort(abortError());
+      },
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += firstSleep ? 1_100 : ms;
+        firstSleep = false;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(focusTimes).toEqual([1_100, 1_250, 1_500]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('keeps the 250 ms focus cycle on visible resources after hiding panes', async () => {
+    const controller = new AbortController();
+    const hidden = new Set<string>();
+    const focusedWhileHidden: string[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    let measuredFocuses = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, []);
+      },
+      async createEditor() {
+        return createResource('editor', []);
+      },
+      async createBrowser() {
+        return createResource('browser', []);
+      },
+      async focus(id) {
+        if (hidden.size === 0) return;
+        measuredFocuses += 1;
+        if (hidden.has(id)) focusedWhileHidden.push(id);
+        if (focusedWhileHidden.length > 0 || measuredFocuses === 20) {
+          controller.abort(abortError());
+        }
+      },
+      resize() {},
+      async setVisible(id, visible) {
+        if (visible) hidden.delete(id);
+        else hidden.add(id);
+      },
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(measuredFocuses).toBe(20);
+    expect(focusedWhileHidden).toEqual([]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('uses the same complete cleanup path when cancellation occurs during restore', async () => {
+    const controller = new AbortController();
+    const disposed: string[] = [];
+    const visibility: Array<[string, boolean]> = [];
+    const frames = createFrameDriver();
+    let restoreStarted!: () => void;
+    const restoreStart = new Promise<void>((resolve) => {
+      restoreStarted = resolve;
+    });
+    let now = 0;
+    let restoreCount = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, disposed);
+      },
+      async createEditor() {
+        return createResource('editor', disposed);
+      },
+      async createBrowser() {
+        return createResource('browser', disposed);
+      },
+      async focus() {},
+      resize() {},
+      async setVisible(id, visible) {
+        visibility.push([id, visible]);
+      },
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return false;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (ms === 5_000) {
+          restoreCount += 1;
+          if (restoreCount === 1) {
+            now += ms;
+            return;
+          }
+          restoreStarted();
+          await abortableWait(signal);
+          return;
+        }
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    const run = runStressPlan(dependencies, { signal: controller.signal });
+    await restoreStart;
+    controller.abort(abortError());
+
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    expect(visibility).toEqual([
+      ['terminal-3', false],
+      ['terminal-4', false],
+      ['terminal-5', false],
+      ['terminal-3', true],
+      ['terminal-4', true],
+      ['terminal-5', true],
+    ]);
+    expect(disposed.slice(-8)).toEqual([
+      'browser',
+      'editor',
+      'terminal-5',
+      'terminal-4',
+      'terminal-3',
+      'terminal-2',
+      'terminal-1',
+      'terminal-0',
+    ]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('continues restoring and disposing resources after an operational and cleanup failure', async () => {
+    const disposed: string[] = [];
+    const visibility: Array<[string, boolean]> = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    let windowCycles = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, disposed);
+      },
+      async createEditor() {
+        return createResource('editor', disposed);
+      },
+      async createBrowser() {
+        return createResource('browser', disposed);
+      },
+      async focus() {},
+      resize() {},
+      async setVisible(id, visible) {
+        visibility.push([id, visible]);
+        if (visible && id === 'terminal-3') {
+          throw new Error('restore terminal-3 failed');
+        }
+      },
+      async cycleWindow() {
+        windowCycles += 1;
+        if (windowCycles === 2) throw new Error('window cycle failed');
+      },
+      async loseGraphicsContext() {
+        return true;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    const error = await runStressPlan(dependencies).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors[0]).toMatchObject({
+      message: 'window cycle failed',
+    });
+    expect(visibility.filter(([, visible]) => visible)).toEqual([
+      ['terminal-3', true],
+      ['terminal-4', true],
+      ['terminal-5', true],
+    ]);
+    expect(disposed.slice(-8)).toEqual([
+      'browser',
+      'editor',
+      'terminal-5',
+      'terminal-4',
+      'terminal-3',
+      'terminal-2',
+      'terminal-1',
+      'terminal-0',
+    ]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('attempts visibility restoration when hiding a pane fails after changing native state', async () => {
+    const disposed: string[] = [];
+    const visibility: Array<[string, boolean]> = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, disposed);
+      },
+      async createEditor() {
+        return createResource('editor', disposed);
+      },
+      async createBrowser() {
+        return createResource('browser', disposed);
+      },
+      async focus() {},
+      resize() {},
+      async setVisible(id, visible) {
+        visibility.push([id, visible]);
+        if (!visible && id === 'terminal-3') {
+          throw new Error('hide terminal-3 failed after native transition');
+        }
+      },
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return true;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress() {},
+    };
+
+    await expect(runStressPlan(dependencies))
+      .rejects.toThrow('hide terminal-3 failed after native transition');
+    expect(visibility.slice(-2)).toEqual([
+      ['terminal-3', false],
+      ['terminal-3', true],
+    ]);
+    expect(disposed.slice(-8)).toEqual([
+      'browser',
+      'editor',
+      'terminal-5',
+      'terminal-4',
+      'terminal-3',
+      'terminal-2',
+      'terminal-1',
+      'terminal-0',
+    ]);
+  });
+
+  it('still disposes every resource when cleanup progress reporting fails', async () => {
+    const disposed: string[] = [];
+    const frames = createFrameDriver();
+    let now = 0;
+    const dependencies: StressHarnessDependencies = {
+      authorized: true,
+      async createTerminal(index) {
+        return createResource(`terminal-${index}`, disposed);
+      },
+      async createEditor() {
+        return createResource('editor', disposed);
+      },
+      async createBrowser() {
+        return createResource('browser', disposed);
+      },
+      async focus() {},
+      resize() {},
+      async setVisible() {},
+      async cycleWindow() {},
+      async loseGraphicsContext() {
+        return true;
+      },
+      resetMetrics() {},
+      snapshotMetrics() {
+        return {};
+      },
+      async sleep(ms, signal) {
+        if (signal.aborted) throw signal.reason ?? abortError();
+        now += ms;
+        frames.flush(now);
+      },
+      requestFrame: frames.request,
+      cancelFrame: frames.cancel,
+      now: () => now,
+      onProgress(progress) {
+        if (progress.phase === 'cleanup') throw new Error('cleanup progress failed');
+      },
+    };
+
+    const error = await runStressPlan(dependencies).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors[0]).toMatchObject({
+      message: 'cleanup progress failed',
+    });
+    expect(disposed).toEqual(['browser', 'editor', 'terminal-0']);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it('rejects authorization before allocating any resource', async () => {
+    let allocations = 0;
+    const dependencies = {
+      authorized: false,
+      createTerminal: async () => {
+        allocations += 1;
+        return createResource('terminal', []);
+      },
+    } as unknown as StressHarnessDependencies;
+
+    await expect(runStressPlan(dependencies))
+      .rejects.toThrow('render diagnostics are not authorized');
+    expect(allocations).toBe(0);
+  });
+});

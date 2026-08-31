@@ -687,10 +687,7 @@ describe('terminal input bundle wiring', () => {
   const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 
   it('builds and loads PsycheTerminalInput before the application shell', () => {
-    expect(packageJson.scripts['build:web']).toContain(
-      'esbuild web/input/input-entry.js --bundle --minify --format=iife ' +
-        '--global-name=PsycheTerminalInput --outfile=web/input.bundle.js'
-    );
+    expect(packageJson.scripts['build:web']).toBe('node scripts/build-web.mjs');
     const inputScript = '<script src="./input.bundle.js" defer></script>';
     const mainScript = '<script src="./main.js" defer></script>';
     expect(indexHtml).toContain(inputScript);

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-diagnostics-spawn-fixture"
+description = "Enables the diagnostics_spawn_fixture command without any pre-configured scope."
+commands.allow = ["diagnostics_spawn_fixture"]
+
+[[permission]]
+identifier = "deny-diagnostics-spawn-fixture"
+description = "Denies the diagnostics_spawn_fixture command without any pre-configured scope."
+commands.deny = ["diagnostics_spawn_fixture"]

@@ -1307,9 +1307,7 @@ describe('Tauri workspace persistence model', () => {
   });
 
   test('keeps bundle wiring ahead of main.js', () => {
-    expect(packageJson.scripts['build:web']).toContain(
-      'web/workspace/workspace-entry.js --bundle --minify --format=iife --global-name=PsycheWorkspace --outfile=web/workspace.bundle.js',
-    );
+    expect(packageJson.scripts['build:web']).toBe('node scripts/build-web.mjs');
     expect(countOccurrences(indexHtml, 'src="./editor.bundle.js"')).toBe(1);
     expect(countOccurrences(indexHtml, 'src="./sessions.bundle.js"')).toBe(1);
     expect(countOccurrences(indexHtml, 'src="./panes.bundle.js"')).toBe(1);
