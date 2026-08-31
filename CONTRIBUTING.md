@@ -11,7 +11,7 @@ Start with [AGENTS.md](AGENTS.md) and the [repository map](docs/REPOSITORY-MAP.m
 The repository derives its exact package-manager contract from `package.json`. You need:
 
 - Node.js satisfying `package.json#engines.node`;
-- the exact pnpm version in `package.json#packageManager` (Corepack supplies it: `corepack prepare <version from package.json#packageManager> --activate`);
+- the exact pnpm version in `package.json#packageManager` (Corepack supplies it: `corepack prepare "$(node -p "require('./package.json').packageManager")" --activate`);
 - Git 2.20 or newer;
 - tmux 3.0+ — required by bootstrap itself, not only by the smoke path: `scripts/agent-bootstrap` exits before installing dependencies if `tmux` is absent;
 - Rust/Cargo for the full desktop gate;
