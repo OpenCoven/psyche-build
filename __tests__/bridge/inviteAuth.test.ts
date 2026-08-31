@@ -159,6 +159,39 @@ describe("invite payloads", () => {
     })).toThrow(TypeError);
   });
 
+  it.each([
+    ["short invite id", 3, -1],
+    ["overlong invite id", 3, 1],
+    ["short invite secret", 4, -1],
+    ["overlong invite secret", 4, 1],
+  ] as const)("rejects %s random output before superseding the pending invite", (_label, failingCall, lengthDelta) => {
+    let randomCalls = 0;
+    const store = new InviteStore({
+      hostId: HOST_ID,
+      hostFingerprint: HOST_FINGERPRINT,
+      now: () => T0,
+      random: (bytes) => {
+        randomCalls += 1;
+        return Buffer.alloc(randomCalls === failingCall ? bytes + lengthDelta : bytes, randomCalls);
+      },
+    });
+    const first = store.issue({
+      hostName: "Random Provider Host",
+      endpoints: [{ kind: "tcp", host: "192.0.2.20", port: 47123 }],
+    });
+    if (!first.ok) throw new Error(`issue failed: ${first.code}`);
+    const recordsBefore = store.list();
+
+    expect(() => store.issue({
+      hostName: "Replacement Host",
+      endpoints: [{ kind: "tcp", host: "192.0.2.21", port: 47124 }],
+    })).toThrow(TypeError);
+
+    expect(randomCalls).toBe(failingCall);
+    expect(store.pendingInvite()).toEqual(first.invite.record);
+    expect(store.list()).toEqual(recordsBefore);
+  });
+
   it("round-trip through the deep-link encoding", () => {
     const harness = makeStore();
     const { payload, deepLink } = issue(harness);

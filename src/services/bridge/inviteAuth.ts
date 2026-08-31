@@ -399,9 +399,9 @@ export class InviteStore {
   issue(input: IssueInviteInput): IssueInviteResult {
     validateIssueInput(input);
     const now = this.deps.now();
-    const idBytes = this.deps.random?.(INVITE_ID_BYTES) ?? randomBytes(INVITE_ID_BYTES);
+    const idBytes = exactRandomBytes(this.deps.random, INVITE_ID_BYTES, "invite id");
     const inviteId = `i1-${idBytes.toString("base64url")}`;
-    const secret = this.deps.random?.(INVITE_SECRET_BYTES) ?? randomBytes(INVITE_SECRET_BYTES);
+    const secret = exactRandomBytes(this.deps.random, INVITE_SECRET_BYTES, "invite secret");
     const secretText = secret.toString("base64url");
     const expiresMs = now + INVITE_TTL_MS;
     const record: InviteRecord = {
@@ -707,6 +707,18 @@ function validateIssueInput(input: IssueInviteInput): void {
   ) {
     throw new TypeError("issue requires a valid host name and one to four TCP endpoints");
   }
+}
+
+function exactRandomBytes(
+  random: InviteStoreDeps["random"],
+  bytes: number,
+  purpose: string,
+): Buffer {
+  const value = random?.(bytes) ?? randomBytes(bytes);
+  if (!Buffer.isBuffer(value) || value.length !== bytes) {
+    throw new TypeError(`${purpose} randomness must contain exactly ${bytes} bytes`);
+  }
+  return value;
 }
 
 function canonicalInviteEncoding(payload: InvitePayload): {
