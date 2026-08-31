@@ -29,7 +29,10 @@ Measured 2026-08-30 via `GET /repos/OpenCoven/psyche-build/community/profile`:
 
 ## Why the percentage is 87 and not 100
 
-The community-profile score credits only **legacy Markdown** issue templates (`ISSUE_TEMPLATE.md` or `.github/ISSUE_TEMPLATE/*.md`). YAML issue **forms** are valid, supported intake surfaces, but GitHub's detector does not count them, and the REST field `files.issue_template` reports `null` for both cases. Cross-repository comparison measured on 2026-08-30 through the same REST endpoint:
+GitHub documents YAML issue forms with `name` and `description` as valid
+community-profile intake surfaces. The repository has three such forms, but the
+REST community-profile endpoint still reports `files.issue_template: null`.
+Cross-repository comparison measured on 2026-08-30 through the same endpoint:
 
 | Repository | Public intake | Health |
 | --- | --- | --- |
@@ -42,16 +45,25 @@ The community-profile score credits only **legacy Markdown** issue templates (`I
 | facebook/react | Markdown templates | 100 |
 | kubernetes/kubernetes | Markdown templates | 100 |
 
-Every repository above reports `files.issue_template: null`; the field does not track forms. The percentage difference tracks the presence of a Markdown template, not the presence or quality of intake surfaces.
+Every repository above reports `files.issue_template: null`; the field does not
+describe the available YAML forms. The observed percentage difference tracks
+the presence of a legacy Markdown template rather than the presence or quality
+of the bounded intake surfaces.
 
 ## Resolution
 
-Two acceptance paths exist in issue #198: reach 100 percent, or prove each remaining omission is a GitHub detection limitation and resolve it another way. Both are recorded here.
+Issue #198 permits either a 100 percent score or a documented platform
+limitation with an explicit safe resolution:
 
-1. **Proven detection limitation.** The missing 13 percent is the issue-template detector described above; the repository's YAML forms are present, valid, and enforced by `__tests__/communityHealthContract.test.ts`.
-2. **Resolution:** `.github/ISSUE_TEMPLATE/other.md` was added as a redirect-only legacy Markdown template — the one intake surface the detector credits. It solicits no information: it exists to route reporters to the three YAML forms, [`SUPPORT.md`](../SUPPORT.md), and the private security advisory flow. Blank issues remain disabled via `.github/ISSUE_TEMPLATE/config.yml`.
-
-Tradeoff, for the maintainer's record: a legacy Markdown template accepts free-form text without the YAML forms' required safety checkboxes. The chosen mitigation is that the template contains routing instructions only and asks for no evidence, tokens, logs, or paths; the GitHub API has always allowed unstructured issue creation, so the checkbox enforcement boundary is unchanged. The alternative — leaving intake forms-only and accepting 87 percent under the documented-limitation clause — was evaluated and remains available by deleting `.github/ISSUE_TEMPLATE/other.md` alone.
+1. **Proven detection limitation.** The missing 13 percent is the endpoint
+   discrepancy described above. The repository's YAML forms are present, valid,
+   and enforced by `__tests__/communityHealthContract.test.ts`.
+2. **Resolution:** accept the reported 87 percent rather than add a legacy
+   Markdown template that would create a free-form public intake path around the
+   YAML forms' required safety acknowledgements. Reporters remain routed through
+   the three bounded YAML forms and [`SUPPORT.md`](../SUPPORT.md). Vulnerability
+   reports retain the private security advisory flow. Blank issues remain disabled via
+   `.github/ISSUE_TEMPLATE/config.yml`.
 
 ## Verification
 
@@ -61,7 +73,8 @@ After this change merges, re-run:
 gh api repos/OpenCoven/psyche-build/community/profile --jq '{health_percentage, files}'
 ```
 
-GitHub recomputes the profile lazily; the score may not update immediately at merge time. The rest of this contract is verifiable locally at any head:
+The expected result remains 87 percent while the endpoint does not recognize
+the YAML forms. The rest of this contract is verifiable locally at any head:
 
 ```sh
 corepack pnpm install --frozen-lockfile
