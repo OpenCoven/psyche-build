@@ -2,7 +2,7 @@
   "version": "vim/v1",
   "traces": [
     {
-      "id": "chrome-trigger-enter",
+      "id": "chrome-enter-f6",
       "context": "passthrough",
       "sequence": [{ "key": "F6" }],
       "disposition": "action",
@@ -50,7 +50,7 @@
       "actions": [{ "type": "focus.move", "direction": "right" }]
     },
     {
-      "id": "chrome-focus-first-gg",
+      "id": "chrome-focus-first",
       "context": "chrome-normal",
       "sequence": [{ "key": "g" }, { "key": "g" }],
       "disposition": "action",

@@ -116,6 +116,18 @@ describe('Vim v1 fixture conformance against the shared core', () => {
     expect(() => validateVimFixtureSet(parseAll())).not.toThrow();
   });
 
+  it('preserves established chrome trace identifiers', () => {
+    const parsed = parseAll().find((document) => document.kind === 'chrome');
+    expect(parsed?.kind).toBe('chrome');
+    if (parsed?.kind !== 'chrome') return;
+    const traceIds = parsed.document.traces.map((trace) => trace.id);
+
+    expect(traceIds).toEqual(expect.arrayContaining([
+      'chrome-enter-f6',
+      'chrome-focus-first',
+    ]));
+  });
+
   it('replays every chrome-navigation trace through createChromeMachine', () => {
     const parsed = parseAll().find((document) => document.kind === 'chrome');
     expect(parsed?.kind).toBe('chrome');
