@@ -1,8 +1,12 @@
 import {
   getBuiltInRituals,
-  getProjectDefaultRitualId,
+  MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES,
+  MAX_PUBLISHED_RITUAL_ID_BYTES,
+  MAX_PUBLISHED_RITUAL_NAME_BYTES,
+  readProjectRitualManifest,
   readProjectRitualStore,
   type RitualDefinition,
+  type RitualManifestListing,
   type RitualStoreListing,
 } from '../utils/rituals.js';
 import type {
@@ -28,8 +32,8 @@ export interface RitualPublicationDeps {
   builtInRituals?: () => RitualDefinition[];
   /** Classified read of the project's own ritual store. */
   readStore?: (projectRoot: string) => RitualStoreListing;
-  /** The project's recorded default ritual, used to detect a stale listing. */
-  readDefaultRitualId?: (projectRoot: string) => string | undefined;
+  /** Classified read of the project's default ritual manifest. */
+  readManifest?: (projectRoot: string) => RitualManifestListing;
 }
 
 /**
@@ -49,6 +53,8 @@ export interface RitualPublicationDeps {
  *   longer contains, so the listing cannot be trusted as current.
  * - `incompatible` — at least one stored entry does not satisfy the supported
  *   ritual shape; the compatible entries are still listed.
+ * - `limit-exceeded` — the store or a publishable metadata field exceeded a
+ *   bounded resource limit; entries within the limits may still be listed.
  * - `permission-denied` — the host may not read the project's store;
  *   host-owned built-ins are still listed.
  */
@@ -58,12 +64,12 @@ export function readProjectRitualPublication(
 ): RitualPublicationSnapshot {
   const builtInRituals = deps.builtInRituals ?? getBuiltInRituals;
   const readStore = deps.readStore ?? readProjectRitualStore;
-  const readDefaultRitualId = deps.readDefaultRitualId ?? getProjectDefaultRitualId;
+  const readManifest = deps.readManifest ?? readProjectRitualManifest;
 
   return buildRitualPublication({
     builtIns: builtInRituals(),
     store: readStore(projectRoot),
-    defaultRitualId: readDefaultRitualId(projectRoot),
+    manifest: readManifest(projectRoot),
   });
 }
 
@@ -74,7 +80,14 @@ export function readProjectRitualPublication(
  */
 export function buildRitualPublication(input: {
   builtIns: readonly RitualDefinition[];
-  store: Pick<RitualStoreListing, 'rituals' | 'incompatibleCount' | 'denied' | 'failed'>;
+  store: Pick<
+    RitualStoreListing,
+    'rituals' | 'incompatibleCount' | 'denied' | 'failed' | 'limitExceeded'
+  >;
+  manifest?: Pick<
+    RitualManifestListing,
+    'defaultRitualId' | 'denied' | 'failed' | 'incompatible' | 'limitExceeded'
+  >;
   defaultRitualId?: string | undefined;
 }): RitualPublicationSnapshot {
   // A project ritual may shadow a built-in by id — mirror listAvailableRituals
@@ -87,8 +100,17 @@ export function buildRitualPublication(input: {
     ritualsById.set(ritual.id, { ritual, scope: 'project' });
   }
 
-  const rituals = [...ritualsById.values()]
-    .sort(comparePublished)
+  let limitExceeded = input.store.limitExceeded;
+  const publishableRituals = [...ritualsById.values()].filter(({ ritual }) => {
+    const publishable = isBoundedPublishedRitual(ritual);
+    limitExceeded ||= !publishable;
+    return publishable;
+  });
+  const sortedRituals = publishableRituals.sort(comparePublished);
+  if (sortedRituals.length > MAX_PUBLISHED_RITUALS) {
+    limitExceeded = true;
+  }
+  const rituals = sortedRituals
     .slice(0, MAX_PUBLISHED_RITUALS)
     .map(({ ritual, scope }): PublishedRitual => ({
       id: ritual.id,
@@ -98,11 +120,12 @@ export function buildRitualPublication(input: {
     }));
 
   const state = publicationState({
-    denied: input.store.denied,
-    failed: input.store.failed,
-    incompatibleCount: input.store.incompatibleCount,
+    denied: input.store.denied || input.manifest?.denied === true,
+    failed: input.store.failed || input.manifest?.failed === true,
+    limitExceeded: limitExceeded || input.manifest?.limitExceeded === true,
+    incompatible: input.store.incompatibleCount > 0 || input.manifest?.incompatible === true,
     publishedIds: new Set(rituals.map((ritual) => ritual.id)),
-    defaultRitualId: input.defaultRitualId,
+    defaultRitualId: input.manifest?.defaultRitualId ?? input.defaultRitualId,
   });
 
   return { state, rituals };
@@ -116,13 +139,15 @@ export function buildRitualPublication(input: {
 function publicationState(input: {
   denied: boolean;
   failed: boolean;
-  incompatibleCount: number;
+  limitExceeded: boolean;
+  incompatible: boolean;
   publishedIds: ReadonlySet<string>;
   defaultRitualId: string | undefined;
 }): RitualPublicationSnapshot['state'] {
   if (input.denied) return 'permission-denied';
+  if (input.limitExceeded) return 'limit-exceeded';
   if (input.failed) return 'unavailable';
-  if (input.incompatibleCount > 0) return 'incompatible';
+  if (input.incompatible) return 'incompatible';
   if (
     input.defaultRitualId
     && !input.publishedIds.has(input.defaultRitualId)
@@ -130,6 +155,19 @@ function publicationState(input: {
     return 'stale';
   }
   return input.publishedIds.size > 0 ? 'available' : 'empty';
+}
+
+function isBoundedPublishedRitual(ritual: RitualDefinition): boolean {
+  return isBoundedUtf8(ritual.id, MAX_PUBLISHED_RITUAL_ID_BYTES)
+    && isBoundedUtf8(ritual.name, MAX_PUBLISHED_RITUAL_NAME_BYTES)
+    && (
+      ritual.description === undefined
+      || isBoundedUtf8(ritual.description, MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES)
+    );
+}
+
+function isBoundedUtf8(value: string, maxBytes: number): boolean {
+  return Buffer.byteLength(value, 'utf8') <= maxBytes;
 }
 
 function comparePublished(

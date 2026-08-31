@@ -227,6 +227,7 @@ public enum RitualPublicationState: String, Codable, Sendable, Equatable {
     case unavailable
     case stale
     case incompatible
+    case limitExceeded = "limit-exceeded"
     case permissionDenied = "permission-denied"
 }
 

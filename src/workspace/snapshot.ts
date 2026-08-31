@@ -54,6 +54,7 @@ export type RitualPublicationState =
   | 'unavailable'
   | 'stale'
   | 'incompatible'
+  | 'limit-exceeded'
   | 'permission-denied';
 
 /**

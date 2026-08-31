@@ -10,6 +10,13 @@ import { getPaneDisplayName } from './paneTitle.js';
 import { sameSidebarProjectRoot } from './sidebarProjects.js';
 
 export const RITUAL_VERSION = 1;
+export const MAX_PROJECT_RITUAL_FILES = 100;
+export const MAX_PROJECT_RITUAL_FILE_BYTES = 64 * 1024;
+export const MAX_PROJECT_RITUAL_STORE_BYTES = 512 * 1024;
+export const MAX_PROJECT_RITUAL_MANIFEST_BYTES = 16 * 1024;
+export const MAX_PUBLISHED_RITUAL_ID_BYTES = 128;
+export const MAX_PUBLISHED_RITUAL_NAME_BYTES = 256;
+export const MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES = 1024;
 
 export type RitualScope = 'builtin' | 'project';
 export type RitualPaneKind = 'agent' | 'terminal';
@@ -409,6 +416,20 @@ export interface RitualStoreListing {
   denied: boolean;
   /** The read failed for any other reason (unexpected fs or parse failure). */
   failed: boolean;
+  /** The store exceeded its file-count, per-file, or aggregate byte limit. */
+  limitExceeded: boolean;
+}
+
+export interface RitualManifestListing {
+  defaultRitualId?: string;
+  /** The host may not read the manifest. */
+  denied: boolean;
+  /** The manifest read failed for another filesystem reason. */
+  failed: boolean;
+  /** The manifest exists but does not satisfy the supported shape. */
+  incompatible: boolean;
+  /** The manifest exceeds its byte or identifier limit. */
+  limitExceeded: boolean;
 }
 
 export function readProjectRitualStore(projectRoot: string): RitualStoreListing {
@@ -417,41 +438,48 @@ export function readProjectRitualStore(projectRoot: string): RitualStoreListing 
     incompatibleCount: 0,
     denied: false,
     failed: false,
+    limitExceeded: false,
   };
   const dir = getProjectRitualsDir(projectRoot);
 
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(dir)
-      .filter((entry) => entry.endsWith('.json'))
-      .sort();
-  } catch (error) {
-    if (isMissingError(error)) {
-      return listing;
-    }
-    listing.denied = isPermissionError(error);
-    listing.failed = !listing.denied;
+  const directoryRead = readBoundedRitualEntries(dir);
+  if (directoryRead.missing) {
+    return listing;
+  }
+  if (directoryRead.denied || directoryRead.failed || directoryRead.limitExceeded) {
+    listing.denied = directoryRead.denied;
+    listing.failed = directoryRead.failed;
+    listing.limitExceeded = directoryRead.limitExceeded;
     return listing;
   }
 
-  for (const entry of entries) {
-    let content: string;
-    try {
-      content = fs.readFileSync(path.join(dir, entry), 'utf-8');
-    } catch (error) {
-      if (isPermissionError(error)) {
+  let aggregateBytes = 0;
+  for (const entry of directoryRead.entries) {
+    const fileRead = readBoundedUtf8File(
+      path.join(dir, entry),
+      MAX_PROJECT_RITUAL_FILE_BYTES,
+      MAX_PROJECT_RITUAL_STORE_BYTES - aggregateBytes,
+    );
+    aggregateBytes += fileRead.bytes;
+    if (fileRead.content === undefined) {
+      if (fileRead.denied) {
         listing.denied = true;
+      } else if (fileRead.limitExceeded) {
+        listing.limitExceeded = true;
       } else {
         // A single unreadable entry must not mask the rest of the store, but
         // it does mean the listing is not a faithful read.
         listing.failed = true;
+      }
+      if (fileRead.aggregateLimitExceeded) {
+        break;
       }
       continue;
     }
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(fileRead.content);
     } catch {
       // Malformed content is an unsupported entry, not a broken store read.
       listing.incompatibleCount += 1;
@@ -466,6 +494,134 @@ export function readProjectRitualStore(projectRoot: string): RitualStoreListing 
     }
   }
   return listing;
+}
+
+function readBoundedRitualEntries(dirPath: string): {
+  entries: string[];
+  missing: boolean;
+  denied: boolean;
+  failed: boolean;
+  limitExceeded: boolean;
+} {
+  const result = {
+    entries: [] as string[],
+    missing: false,
+    denied: false,
+    failed: false,
+    limitExceeded: false,
+  };
+  let directory: fs.Dir;
+  try {
+    directory = fs.opendirSync(dirPath);
+  } catch (error) {
+    result.missing = isMissingError(error);
+    result.denied = isPermissionError(error);
+    result.failed = !result.missing && !result.denied;
+    return result;
+  }
+
+  try {
+    while (true) {
+      const entry = directory.readSync();
+      if (!entry) break;
+      if (!entry.name.endsWith('.json')) continue;
+      if (result.entries.length >= MAX_PROJECT_RITUAL_FILES) {
+        result.entries = [];
+        result.limitExceeded = true;
+        break;
+      }
+      result.entries.push(entry.name);
+    }
+  } catch (error) {
+    result.denied = isPermissionError(error);
+    result.failed = !result.denied;
+    result.entries = [];
+  } finally {
+    try {
+      directory.closeSync();
+    } catch (error) {
+      result.denied ||= isPermissionError(error);
+      result.failed ||= !result.denied;
+      result.entries = [];
+    }
+  }
+
+  result.entries.sort();
+  return result;
+}
+
+function readBoundedUtf8File(
+  filePath: string,
+  maxFileBytes: number,
+  aggregateBytesRemaining: number,
+): {
+  content?: string;
+  bytes: number;
+  missing: boolean;
+  denied: boolean;
+  failed: boolean;
+  limitExceeded: boolean;
+  aggregateLimitExceeded: boolean;
+} {
+  const result = {
+    bytes: 0,
+    missing: false,
+    denied: false,
+    failed: false,
+    limitExceeded: false,
+    aggregateLimitExceeded: false,
+  } as {
+    content?: string;
+    bytes: number;
+    missing: boolean;
+    denied: boolean;
+    failed: boolean;
+    limitExceeded: boolean;
+    aggregateLimitExceeded: boolean;
+  };
+  let descriptor: number;
+  try {
+    descriptor = fs.openSync(filePath, 'r');
+  } catch (error) {
+    result.missing = isMissingError(error);
+    result.denied = isPermissionError(error);
+    result.failed = !result.missing && !result.denied;
+    return result;
+  }
+
+  const aggregateLimit = Math.max(0, aggregateBytesRemaining);
+  const readLimit = Math.min(maxFileBytes, aggregateLimit);
+  const buffer = Buffer.alloc(readLimit + 1);
+  try {
+    while (result.bytes < buffer.length) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        buffer,
+        result.bytes,
+        buffer.length - result.bytes,
+        null,
+      );
+      if (bytesRead === 0) break;
+      result.bytes += bytesRead;
+    }
+    result.limitExceeded = result.bytes > maxFileBytes || result.bytes > aggregateLimit;
+    result.aggregateLimitExceeded = result.bytes > aggregateLimit;
+    if (!result.limitExceeded) {
+      result.content = buffer.subarray(0, result.bytes).toString('utf8');
+    }
+  } catch (error) {
+    result.denied = isPermissionError(error);
+    result.failed = !result.denied;
+  } finally {
+    try {
+      fs.closeSync(descriptor);
+    } catch (error) {
+      result.denied ||= isPermissionError(error);
+      result.failed ||= !result.denied;
+      result.content = undefined;
+    }
+  }
+  return result;
 }
 
 function isPermissionError(error: unknown): boolean {
@@ -493,23 +649,55 @@ export function loadRitual(projectRoot: string, ritualId: string): RitualDefinit
     .find((ritual) => ritual.id === ritualId) || null;
 }
 
-function readProjectRitualManifest(projectRoot: string): ProjectRitualManifest {
+export function readProjectRitualManifest(projectRoot: string): RitualManifestListing {
   const manifestPath = getProjectRitualManifestPath(projectRoot);
-  if (!fs.existsSync(manifestPath)) {
-    return { version: RITUAL_VERSION };
+  const fileRead = readBoundedUtf8File(
+    manifestPath,
+    MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+    MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+  );
+  const result: RitualManifestListing = {
+    denied: fileRead.denied,
+    failed: fileRead.failed,
+    incompatible: false,
+    limitExceeded: fileRead.limitExceeded,
+  };
+  if (fileRead.missing || fileRead.content === undefined) {
+    return result;
   }
 
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
-    return {
-      version: RITUAL_VERSION,
-      ...(typeof parsed.defaultRitualId === 'string' && parsed.defaultRitualId.trim()
-        ? { defaultRitualId: parsed.defaultRitualId.trim() }
-        : {}),
-    };
+    parsed = JSON.parse(fileRead.content);
   } catch {
-    return { version: RITUAL_VERSION };
+    result.incompatible = true;
+    return result;
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    result.incompatible = true;
+    return result;
+  }
+
+  const manifest = parsed as Record<string, unknown>;
+  if (manifest.version !== RITUAL_VERSION) {
+    result.incompatible = true;
+    return result;
+  }
+  if (manifest.defaultRitualId === undefined) {
+    return result;
+  }
+  if (typeof manifest.defaultRitualId !== 'string' || !manifest.defaultRitualId.trim()) {
+    result.incompatible = true;
+    return result;
+  }
+
+  const defaultRitualId = manifest.defaultRitualId.trim();
+  if (Buffer.byteLength(defaultRitualId, 'utf8') > MAX_PUBLISHED_RITUAL_ID_BYTES) {
+    result.limitExceeded = true;
+    return result;
+  }
+  result.defaultRitualId = defaultRitualId;
+  return result;
 }
 
 export function getProjectDefaultRitualId(projectRoot: string): string | undefined {

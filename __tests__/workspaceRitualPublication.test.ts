@@ -8,7 +8,16 @@ import {
   MAX_PUBLISHED_RITUALS,
   readProjectRitualPublication,
 } from '../src/workspace/ritualPublication.js';
-import { readProjectRitualStore, type RitualDefinition } from '../src/utils/rituals.js';
+import {
+  MAX_PROJECT_RITUAL_FILES,
+  MAX_PROJECT_RITUAL_FILE_BYTES,
+  MAX_PROJECT_RITUAL_STORE_BYTES,
+  MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES,
+  MAX_PUBLISHED_RITUAL_ID_BYTES,
+  MAX_PUBLISHED_RITUAL_NAME_BYTES,
+  readProjectRitualStore,
+  type RitualDefinition,
+} from '../src/utils/rituals.js';
 import type { RitualStoreListing } from '../src/utils/rituals.js';
 
 describe('ritual publication', () => {
@@ -117,6 +126,46 @@ describe('ritual publication', () => {
         store: listing({ failed: true, incompatibleCount: 3 }),
       });
       expect(unavailable.state).toBe('unavailable');
+
+      const limited = buildRitualPublication({
+        builtIns: [],
+        store: listing({ failed: true, limitExceeded: true }),
+      });
+      expect(limited.state).toBe('limit-exceeded');
+    });
+
+    it('reports limit-exceeded and omits rituals with oversized published fields', () => {
+      const publication = buildRitualPublication({
+        builtIns: [],
+        store: listing({
+          rituals: [
+            ritual({ id: 'kept', name: 'Kept', scope: 'project' }),
+            ritual({
+              id: 'i'.repeat(MAX_PUBLISHED_RITUAL_ID_BYTES + 1),
+              name: 'Oversized id',
+              scope: 'project',
+            }),
+            ritual({
+              id: 'oversized-name',
+              name: 'é'.repeat(Math.floor(MAX_PUBLISHED_RITUAL_NAME_BYTES / 2) + 1),
+              scope: 'project',
+            }),
+            ritual({
+              id: 'oversized-description',
+              name: 'Oversized description',
+              description: '🙂'.repeat(Math.floor(MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES / 4) + 1),
+              scope: 'project',
+            }),
+          ],
+        }),
+      });
+
+      expect(publication.state).toBe('limit-exceeded');
+      expect(publication.rituals).toEqual([{
+        id: 'kept',
+        displayName: 'Kept',
+        scope: 'project',
+      }]);
     });
   });
 
@@ -139,6 +188,7 @@ describe('ritual publication', () => {
       });
 
       expect(publication.rituals).toHaveLength(MAX_PUBLISHED_RITUALS);
+      expect(publication.state).toBe('limit-exceeded');
       // built-ins sort before project rituals, then by id — so the cut is
       // stable across reads and clients observe identical listings.
       expect(publication.rituals[0]!.id).toBe('built-in-00');
@@ -191,13 +241,40 @@ describe('ritual publication', () => {
       }
     });
 
+    it('publishes permission-denied when the default ritual manifest is unreadable', () => {
+      const root = tempProjectWithRituals();
+      const manifestPath = path.join(root, '.psyche', 'rituals.json');
+      try {
+        writeFileSync(manifestPath, JSON.stringify({
+          version: 1,
+          defaultRitualId: 'project-standup',
+        }), 'utf-8');
+        chmodSync(manifestPath, 0o000);
+
+        expect(readProjectRitualPublication(root).state).toBe('permission-denied');
+      } finally {
+        chmodSync(manifestPath, 0o644);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('publishes incompatible when the default ritual manifest is malformed', () => {
+      const root = tempProjectWithRituals();
+      try {
+        writeFileSync(path.join(root, '.psyche', 'rituals.json'), '{ not json', 'utf-8');
+        expect(readProjectRitualPublication(root).state).toBe('incompatible');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('propagates reader failures to the provider degradation seam', () => {
       expect(() => readProjectRitualPublication('/repo', {
         builtInRituals: () => [],
         readStore: () => {
           throw new Error('reader exploded');
         },
-        readDefaultRitualId: () => undefined,
+        readManifest: () => manifestListing(),
       })).toThrow('reader exploded');
     });
   });
@@ -205,7 +282,13 @@ describe('ritual publication', () => {
   describe('readProjectRitualStore', () => {
     it('classifies an absent store as an empty faithful read', () => {
       const listing = readProjectRitualStore(path.join(tmpdir(), `psyche-absent-${Date.now()}`));
-      expect(listing).toEqual({ rituals: [], incompatibleCount: 0, denied: false, failed: false });
+      expect(listing).toEqual({
+        rituals: [],
+        incompatibleCount: 0,
+        denied: false,
+        failed: false,
+        limitExceeded: false,
+      });
     });
 
     it('reads valid rituals and counts malformed entries as incompatible', () => {
@@ -217,6 +300,79 @@ describe('ritual publication', () => {
         expect(listing.incompatibleCount).toBe(1);
         expect(listing.denied).toBe(false);
         expect(listing.failed).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('classifies a ritual file-count overflow before parsing the store', () => {
+      const root = tempProjectWithRituals();
+      try {
+        const ritualsDir = path.join(root, '.psyche', 'rituals');
+        for (let index = 1; index <= MAX_PROJECT_RITUAL_FILES; index += 1) {
+          writeFileSync(
+            path.join(ritualsDir, `extra-${String(index).padStart(3, '0')}.json`),
+            `${JSON.stringify(ritual({
+              id: `extra-${index}`,
+              name: `Extra ${index}`,
+              scope: 'project',
+            }))}\n`,
+            'utf-8',
+          );
+        }
+
+        const listing = readProjectRitualStore(root);
+        expect(listing.limitExceeded).toBe(true);
+        expect(listing.rituals).toEqual([]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('classifies an oversized ritual file before parsing it', () => {
+      const root = tempProjectWithRituals();
+      try {
+        writeFileSync(
+          path.join(root, '.psyche', 'rituals', 'oversized.json'),
+          JSON.stringify({
+            ...ritual({ id: 'oversized', name: 'Oversized', scope: 'project' }),
+            padding: 'x'.repeat(MAX_PROJECT_RITUAL_FILE_BYTES),
+          }),
+          'utf-8',
+        );
+
+        const listing = readProjectRitualStore(root);
+        expect(listing.limitExceeded).toBe(true);
+        expect(listing.rituals.map((entry) => entry.id)).toEqual(['project-standup']);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('classifies aggregate ritual bytes before parsing beyond the store budget', () => {
+      const root = tempProjectWithRituals();
+      try {
+        const ritualsDir = path.join(root, '.psyche', 'rituals');
+        const padding = 'x'.repeat(60 * 1024);
+        const fileCount = Math.ceil(MAX_PROJECT_RITUAL_STORE_BYTES / Buffer.byteLength(padding)) + 1;
+        for (let index = 0; index < fileCount; index += 1) {
+          writeFileSync(
+            path.join(ritualsDir, `padded-${String(index).padStart(2, '0')}.json`),
+            JSON.stringify({
+              ...ritual({
+                id: `padded-${index}`,
+                name: `Padded ${index}`,
+                scope: 'project',
+              }),
+              padding,
+            }),
+            'utf-8',
+          );
+        }
+
+        const listing = readProjectRitualStore(root);
+        expect(listing.limitExceeded).toBe(true);
+        expect(listing.rituals.length).toBeLessThan(fileCount + 1);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -264,7 +420,17 @@ function listing(
     incompatibleCount: 0,
     denied: false,
     failed: false,
+    limitExceeded: false,
     ...overrides,
+  };
+}
+
+function manifestListing() {
+  return {
+    denied: false,
+    failed: false,
+    incompatible: false,
+    limitExceeded: false,
   };
 }
 
