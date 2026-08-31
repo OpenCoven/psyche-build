@@ -1,5 +1,4 @@
 {
-  "accountingProof": "7a010ffdeb9b6e988d9d9b30107a59aa0da321adaa368ef2d8c22791fc0c1750",
   "compatibility": {
     "minimumReaderVersion": 1,
     "policy": "readers-reject-unknown-major-and-ignore-unknown-fields-within-major"
@@ -24,7 +23,8 @@
     "architecture": "arm64",
     "platform": "darwin",
     "releaseVersion": "0.0.2",
-    "sourceSha": "0123456789abcdef0123456789abcdef01234567"
+    "sourceSha": "0123456789abcdef0123456789abcdef01234567",
+    "verification": "unverified"
   },
   "providers": {
     "browser": "unavailable",
@@ -43,7 +43,8 @@
       },
       "sourceSchema": "psyche.control.receipt/v1",
       "sourceState": "succeeded",
-      "state": "succeeded"
+      "state": "succeeded",
+      "verification": "unverified"
     }
   ],
   "records": [
@@ -62,7 +63,7 @@
     "version": 1
   },
   "schema": "psyche.diagnostics/v1",
-  "status": "complete",
+  "status": "partial",
   "terminalTail": [],
   "truncation": {
     "bytesOmitted": 0,

@@ -5,6 +5,9 @@ bounded snapshot of safe application state, not a transcript, telemetry stream,
 or authority source. The schema foundation lives in
 `src/diagnostics/supportBundle.ts`; the fixture at
 `protocol-fixtures/support-bundle/v1/safe-bundle.json` contains no user data.
+The checked-in fixture is deliberately unsigned, `partial`, and marked
+`unverified`; it demonstrates shape and redaction only and is never
+authentication evidence.
 
 ## Contract
 
@@ -36,6 +39,13 @@ Serialization re-normalizes the input at the export boundary, sorts object keys
 and deterministic record/receipt collections, and re-applies the payload cap.
 `supportBundleDigest` hashes that stable UTF-8 representation, so two bundles
 with the same safe facts can be compared without depending on insertion order.
+
+An accounting proof is authenticated only when a caller explicitly supplies a
+codec backed by deployment-held key material. Parsing without that codec strips
+any proof and returns an unauthenticated projection, downgrading `complete` to
+`partial`. Supplying a codec for an unsigned bundle fails closed. Published
+fixture keys and test literals are not operational credentials; the legacy
+published fixture key is rejected, and fixture generation never signs data.
 
 ## Bounds
 

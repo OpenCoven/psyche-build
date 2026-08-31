@@ -240,9 +240,7 @@ const NORMALIZED_SOURCE_FINGERPRINTS = new WeakMap<object, string>();
 // control-plane bridge must keep its own private integration point; arbitrary
 // support-bundle callers can only produce unverified/partial metadata.
 const CONTROL_PLANE_AUTHORITY = Object.freeze({}) as SupportBundleAuthority;
-// The fixture is the only in-module serialized control-plane sample. Real
-// integrations supply their own application-held codec at the runtime boundary.
-const CONTROL_PLANE_FIXTURE_CODEC = createSupportBundleCodec('psyche-build-support-fixture-v1');
+const LEGACY_PUBLISHED_FIXTURE_CODEC_KEY = Buffer.from('psyche-build-support-fixture-v1', 'utf8');
 
 const ROOT_FIELDS = new Set([
   'generatedAt',
@@ -394,6 +392,10 @@ export function createSupportBundleCodec(secret: string | Uint8Array): SupportBu
   const key = Buffer.from(secret);
   if (key.length < 16) {
     throw new TypeError('support bundle codec secrets must be at least 16 bytes');
+  }
+  if (key.length === LEGACY_PUBLISHED_FIXTURE_CODEC_KEY.length
+    && timingSafeEqual(key, LEGACY_PUBLISHED_FIXTURE_CODEC_KEY)) {
+    throw new TypeError('published fixture keys cannot be used for support bundle authentication');
   }
   return Object.freeze({
     sign: (canonicalPayload: string): string => createHmac('sha256', key)
@@ -3377,8 +3379,5 @@ export function createSafeSupportBundleFixture(): SupportBundle {
       code: 'fixture_ok',
       durationMs: 10,
     }],
-  }, {
-    authority: CONTROL_PLANE_AUTHORITY,
-    codec: CONTROL_PLANE_FIXTURE_CODEC,
   });
 }

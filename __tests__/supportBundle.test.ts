@@ -18,6 +18,18 @@ import {
   type SupportBundle,
 } from '../src/diagnostics/supportBundle.js';
 
+function sortDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortDeep);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, sortDeep(child)]),
+    );
+  }
+  return value;
+}
+
 describe('support bundle v1', () => {
   it('builds a deterministic versioned bundle and digest', () => {
     const first = buildSupportBundle({
@@ -173,7 +185,15 @@ describe('support bundle v1', () => {
     expect(raw.provenance.verification).toBe('unverified');
     expect(raw.receipts[0]?.verification).toBe('unverified');
 
-    expect(createSafeSupportBundleFixture().status).toBe('complete');
+    const fixture = createSafeSupportBundleFixture();
+    expect(fixture.status).toBe('partial');
+    expect(fixture.accountingProof).toBeUndefined();
+    expect(fixture.provenance.verification).toBe('unverified');
+    expect(fixture.receipts[0]?.verification).toBe('unverified');
+    expect(() => parseSupportBundle(
+      serializeSupportBundle(fixture),
+      createSupportBundleCodec('deployment-held-fixture-check-v1'),
+    )).toThrow(/accounting proof/i);
   });
 
   it('does not accept unverified receipts as a complete normalized bundle', () => {
@@ -197,16 +217,47 @@ describe('support bundle v1', () => {
     expect(forgedOutput.provenance.verification).toBe('unverified');
     expect(forgedOutput.receipts[0]?.verification).toBe('unverified');
 
-    const tampered = JSON.parse(serializeSupportBundle(fixture)) as Record<string, unknown>;
+    const signed = buildSupportBundle({ lifecycle: { state: 'ready' } }, { codec });
+    const tampered = JSON.parse(serializeSupportBundle(signed, codec)) as Record<string, unknown>;
     tampered.lifecycle = { state: 'stale' };
-    expect(() => parseSupportBundle(JSON.stringify(tampered), createSupportBundleCodec('psyche-build-support-fixture-v1')))
+    expect(() => parseSupportBundle(JSON.stringify(tampered), codec))
       .toThrow(/accounting proof/i);
   });
 
+  it('does not allow the published legacy fixture key to authenticate forged bundles', () => {
+    expect(() => {
+      const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
+      const fixture = JSON.parse(serializeSupportBundle(createSafeSupportBundleFixture())) as SupportBundle;
+      const { accountingProof: _proof, ...unsigned } = fixture;
+      const forged = {
+        ...unsigned,
+        lifecycle: { state: 'stale' },
+      };
+      const accountingProof = codec.sign(JSON.stringify(sortDeep(forged)));
+      parseSupportBundle(JSON.stringify({ ...forged, accountingProof }), codec);
+    }).toThrow(/fixture.*authentication/i);
+    expect(() => createSupportBundleCodec(
+      Buffer.from('psyche-build-support-fixture-v1', 'utf8'),
+    )).toThrow(/fixture.*authentication/i);
+  });
+
+  it('requires an explicitly supplied operational codec to verify proof metadata', () => {
+    const codec = createSupportBundleCodec('deployment-held-support-key-v1');
+    const wrongCodec = createSupportBundleCodec('different-deployment-key-v1');
+    const signed = buildSupportBundle({ lifecycle: { state: 'ready' } }, { codec });
+    const serialized = serializeSupportBundle(signed, codec);
+
+    expect(parseSupportBundle(serialized, codec).accountingProof).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => parseSupportBundle(serialized, wrongCodec)).toThrow(/accounting proof/i);
+    const unauthenticated = parseSupportBundle(serialized);
+    expect(unauthenticated.status).toBe('partial');
+    expect(unauthenticated.accountingProof).toBeUndefined();
+  });
+
   it('does not retain mutable public redaction metadata as private audit evidence', () => {
-    const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
+    const codec = createSupportBundleCodec('support-bundle-metadata-test-v1');
     const parsed = parseSupportBundle(
-      serializeSupportBundle(createSafeSupportBundleFixture()),
+      serializeSupportBundle(buildSupportBundle({ lifecycle: { state: 'ready' } }, { codec }), codec),
       codec,
     ) as unknown as {
       redaction: { redactedFields: number; categories: Record<string, number> };
@@ -1047,7 +1098,10 @@ describe('support bundle v1', () => {
   it('produces a safe fixture with no content-heavy fields', () => {
     const fixture = createSafeSupportBundleFixture();
     expect(fixture.schema).toBe(SUPPORT_BUNDLE_SCHEMA);
-    expect(fixture.status).toBe('complete');
+    expect(fixture.status).toBe('partial');
+    expect(fixture.accountingProof).toBeUndefined();
+    expect(fixture.provenance.verification).toBe('unverified');
+    expect(fixture.receipts[0]?.verification).toBe('unverified');
     expect(serializeSupportBundle(fixture)).not.toMatch(/prompt|password|token|transcript|repositoryContents/i);
   });
 
@@ -1431,8 +1485,17 @@ describe('support bundle v1', () => {
   });
 
   it('ignores unknown fields while verifying a supported serialized bundle', () => {
-    const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
-    const fixture = createSafeSupportBundleFixture();
+    const codec = createSupportBundleCodec('support-bundle-compatibility-key-v1');
+    const fixture = buildSupportBundle({
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      lifecycle: { state: 'ready' },
+      records: [{
+        sequence: 1,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'fixture',
+        event: 'ready',
+      }],
+    }, { codec });
     const extended = {
       ...fixture,
       futureRootField: 'ignored',
@@ -1454,8 +1517,18 @@ describe('support bundle v1', () => {
   });
 
   it('rejects noncanonical signed metadata and inconsistent normalized projections', () => {
-    const codec = createSupportBundleCodec('psyche-build-support-fixture-v1');
-    const fixture = createSafeSupportBundleFixture();
+    const codec = createSupportBundleCodec('support-bundle-canonical-key-v1');
+    const fixture = buildSupportBundle({
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      lifecycle: { state: 'ready' },
+      receipts: [{
+        schema: 'psyche.control.receipt/v1',
+        actionId: 'fixture-action',
+        state: 'succeeded',
+        resource: { kind: 'project', id: 'fixture-project' },
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }],
+    }, { codec });
     const duplicateReceipts = {
       ...fixture,
       receipts: [fixture.receipts[0], fixture.receipts[0]],
@@ -1584,10 +1657,7 @@ describe('support bundle v1', () => {
 
   it('keeps the checked-in safe fixture equal to the canonical fixture generator', async () => {
     const fixturePath = new URL('../protocol-fixtures/support-bundle/v1/safe-bundle.json', import.meta.url);
-    const fixture = parseSupportBundle(
-      await readFile(fixturePath, 'utf8'),
-      createSupportBundleCodec('psyche-build-support-fixture-v1'),
-    );
+    const fixture = parseSupportBundle(await readFile(fixturePath, 'utf8'));
     expect(serializeSupportBundle(fixture)).toBe(serializeSupportBundle(createSafeSupportBundleFixture()));
     expect(await readFile(fixturePath, 'utf8')).toBe(serializeProtocolFixture(createSafeSupportBundleFixture()));
   });
