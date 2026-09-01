@@ -169,6 +169,7 @@
   var imageDropScaleFactor = 1;
   var imageDropTarget = null;
   var covenEnsureFlights = new Map();
+  var projectRootsClosing = new Set();
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
   var covenSessionCloseFlights = new Set();
@@ -2332,6 +2333,10 @@
   async function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
+    if (project && project.closing) {
+      setStatus((project.name || "Project") + " is closing; wait before starting a pane", "warn");
+      return null;
+    }
     var sourceLaunch = opts.launch || {
       command: opts.command,
       args: opts.args || [],
@@ -2412,11 +2417,22 @@
       exitCode: null,
     };
     if (isPersistentThread(thread) && !opts.deferStart) {
+      if (project) {
+        project.localSessionCreatesInFlight =
+          (project.localSessionCreatesInFlight || 0) + 1;
+      }
       try {
         await invoke("native_session_create", { request: nativeSessionRequest(thread) });
       } catch (error) {
         setStatus(thread.name + " failed to start: " + String(error), "error");
         return null;
+      } finally {
+        if (project) {
+          project.localSessionCreatesInFlight -= 1;
+          if (project.localSessionCreatesInFlight <= 0) {
+            delete project.localSessionCreatesInFlight;
+          }
+        }
       }
     }
     commitPanePlacement(placement);
@@ -2514,7 +2530,10 @@
 
   async function releaseCovenLaunchReservation(thread) {
     if (!thread) return false;
-    return closeThread(thread.id, { skipNativeSessionStop: true });
+    return closeThread(thread.id, {
+      skipNativeSessionStop: true,
+      protectCovenRecovery: false,
+    });
   }
 
   async function acceptCovenLaunchReservation(thread, options) {
@@ -2566,7 +2585,7 @@
       thread.launch.covenSessionId = options.sessionId;
       thread.launch.promptDigest = options.promptDigest || null;
       thread.launch.metricsProvider = options.harness || "coven";
-      thread.launch.recoveryRequired = false;
+      thread.launch.recoveryRequired = true;
       thread.status = "starting";
       thread.spawning = true;
       thread.finishedAt = null;
@@ -2637,7 +2656,20 @@
         surfaceClosedReservation();
         return thread;
       }
-      await attachThreadClient(thread);
+      var attached = await attachThreadClient(thread);
+      if (!attached) {
+        thread.launch.recoveryRequired = true;
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        try {
+          await saveWorkspaceNow();
+        } catch (recoverySaveError) {
+          surfaceNonDurableRecovery(recoverySaveError);
+        }
+        return thread;
+      }
+      thread.launch.recoveryRequired = false;
       try {
         await saveWorkspaceNow();
       } catch (error) {
@@ -3055,6 +3087,10 @@
       thread.ptyStarted = true;
       thread.status = "running";
       thread.spawning = false;
+      var resolvedCovenRecovery = thread.launch &&
+        thread.launch.launchKind === "coven-attach" &&
+        thread.launch.recoveryRequired === true;
+      if (resolvedCovenRecovery) thread.launch.recoveryRequired = false;
       if (terminalController && typeof terminalController.markPtyStarted === "function") {
         terminalController.markPtyStarted(
           ptyStartAttempt,
@@ -3068,6 +3104,25 @@
       refreshSidebar();
       refreshTabs();
       if (state.activeThreadId === thread.id) setProjectStatus(findProject(thread.projectId), "ok");
+      if (resolvedCovenRecovery) {
+        return saveWorkspaceNow().then(function () {
+          setStatus(thread.name + " Coven recovery resolved after successful reattachment", "ok");
+          return true;
+        }).catch(function (error) {
+          thread.launch.recoveryRequired = true;
+          syncThreadPaneMetadata(thread);
+          refreshSidebar();
+          refreshTabs();
+          setStatus(
+            thread.name +
+              " reattached, but its recovery resolution is not durable; " +
+              "inspect Coven before closing: " + String(error),
+            "error"
+          );
+          saveWorkspaceSoon();
+          return true;
+        });
+      }
       return true;
     }).catch(function (error) {
       thread.startInFlight = false;
@@ -3096,7 +3151,7 @@
 
   async function retryThread(id) {
     var thread = findThread(id);
-    if (!thread || thread.startInFlight || thread.closeStarted) return false;
+    if (!thread || thread.startInFlight || thread.retryInFlight || thread.closeStarted) return false;
     if (thread.status !== "exited" && thread.status !== "failed") return false;
     if (thread.launch.launchKind === "coven-recovery") {
       setStatus(
@@ -3105,29 +3160,53 @@
       );
       return false;
     }
-    if (thread.launch.launchKind === "coven-attach") {
-      var project = findProject(thread.projectId);
-      await refreshCovenSessions();
-      var stillExists = project
-        && covenDiscovery.phase === "ready"
-        && covenSessionsForProject(project).some(function (session) {
-          return session.id === thread.launch.covenSessionId;
-        });
-      if (!stillExists) {
-        setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+    var finishRetry;
+    var retryInFlight = new Promise(function (resolve) {
+      finishRetry = resolve;
+    });
+    thread.retryInFlight = retryInFlight;
+    try {
+      if (thread.launch.launchKind === "coven-attach") {
+        var project = findProject(thread.projectId);
+        await refreshCovenSessions();
+        if (findThread(id) !== thread || thread.closeStarted) return false;
+        var stillExists = project
+          && !project.closing
+          && covenDiscovery.phase === "ready"
+          && covenSessionsForProject(project).some(function (session) {
+            return session.id === thread.launch.covenSessionId;
+          });
+        if (!stillExists) {
+          setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+          return false;
+        }
+      }
+      if (typeof noteStatusActivity === "function") noteStatusActivity();
+      if (!isPersistentThread(thread)) return await spawnPty(thread);
+      if (thread.persistentLive) return await attachThreadClient(thread);
+      try {
+        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+      } catch (error) {
+        setStatus(thread.name + " failed to restart: " + String(error), "error");
         return false;
       }
+      if (findThread(id) !== thread || thread.closeStarted) {
+        try {
+          await invoke("native_session_stop", { id: id });
+        } catch (cleanupError) {
+          setStatus(
+            thread.name + " restarted after local removal and cleanup failed: " +
+              String(cleanupError),
+            "error"
+          );
+        }
+        return false;
+      }
+      return await attachThreadClient(thread);
+    } finally {
+      if (thread.retryInFlight === retryInFlight) thread.retryInFlight = null;
+      finishRetry();
     }
-    if (typeof noteStatusActivity === "function") noteStatusActivity();
-    if (!isPersistentThread(thread)) return spawnPty(thread);
-    if (thread.persistentLive) return attachThreadClient(thread);
-    try {
-      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
-    } catch (error) {
-      setStatus(thread.name + " failed to restart: " + String(error), "error");
-      return false;
-    }
-    return attachThreadClient(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -5573,6 +5652,22 @@
   async function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    var protectCovenRecovery = !options || options.protectCovenRecovery !== false;
+    if (protectCovenRecovery && thread.covenLaunchOutcomeInFlight) {
+      await thread.covenLaunchOutcomeInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
+    if (protectCovenRecovery && thread.covenLaunchAcceptanceInFlight) {
+      await thread.covenLaunchAcceptanceInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
+    if (protectCovenRecovery && thread.retryInFlight) {
+      await thread.retryInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
     var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") {
       suspendGitRequests();
@@ -5583,9 +5678,21 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
-    var covenLaunchAcceptanceInFlight = thread.covenLaunchAcceptanceInFlight;
-    if (covenLaunchAcceptanceInFlight) {
-      await covenLaunchAcceptanceInFlight;
+    if (
+      protectCovenRecovery &&
+      thread.launch &&
+      (thread.launch.launchKind === "coven-recovery" ||
+        thread.launch.recoveryRequired === true)
+    ) {
+      thread.closeStarted = false;
+      thread.closing = false;
+      setStatus(
+        thread.name +
+          " cannot be closed while its Coven launch outcome requires recovery; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
     }
     if (isPersistentThread(thread) && !(options && options.skipNativeSessionStop)) {
       try {
@@ -5824,12 +5931,21 @@
   function sessionCloseLabel(thread) {
     if (thread && thread.kind === "git") return "Close Git pane";
     if (thread && thread.kind === "web") return "Close Web pane";
+    if (thread && thread.launch &&
+        (thread.launch.launchKind === "coven-recovery" ||
+          thread.launch.recoveryRequired === true)) {
+      return "Resolve inspected Coven recovery" +
+        (thread.name ? " for " + thread.name : "");
+    }
     return "Stop and close" + (thread && thread.name ? " " + thread.name : "");
   }
 
   /** Context actions are capability-based: tool panes never receive PTY actions. */
   function localSessionContextActions(thread, memberships, callbacks) {
     var isTool = threadIsToolPane(thread);
+    var resolvesCovenRecovery = thread && thread.launch &&
+      (thread.launch.launchKind === "coven-recovery" ||
+        thread.launch.recoveryRequired === true);
     var actions = [{ label: "Focus", run: callbacks.focus }];
     if (!isTool && memberships.length) {
       actions.push({
@@ -5843,14 +5959,16 @@
     }
     if (!isTool) {
       actions.push({ label: "Rename…", run: callbacks.rename });
-      if (thread.status !== "exited") {
+      if (thread.status !== "exited" && !resolvesCovenRecovery) {
         actions.push({ label: "Duplicate", run: callbacks.duplicate });
         actions.push({ label: "Interrupt", run: callbacks.interrupt });
       }
     }
     actions.push({ label: "Hide", run: callbacks.hide });
     actions.push({
-      label: isTool ? sessionCloseLabel(thread) : "Stop and close",
+      label: isTool || resolvesCovenRecovery
+        ? sessionCloseLabel(thread)
+        : "Stop and close",
       danger: true,
       run: callbacks.close,
     });
@@ -7073,17 +7191,46 @@
     return Promise.resolve(closeThread(thread.id));
   }
 
-  function armSessionClose(host, close, label, onConfirm) {
+  async function resolveCovenLaunchRecovery(thread) {
+    if (!isLiveThread(thread) || !thread.launch ||
+        (thread.launch.launchKind !== "coven-recovery" &&
+          thread.launch.recoveryRequired !== true)) {
+      return false;
+    }
+    if (thread.covenLaunchOutcomeInFlight ||
+        thread.covenLaunchAcceptanceInFlight ||
+        thread.retryInFlight) {
+      setStatus(
+        thread.name + " Coven launch is still settling; wait before resolving recovery",
+        "warn"
+      );
+      return false;
+    }
+    var closed = await closeThread(thread.id, { protectCovenRecovery: false });
+    if (closed) {
+      setStatus(
+        thread.name + " Coven recovery marked resolved after confirmed inspection",
+        "ok"
+      );
+    }
+    return closed;
+  }
+
+  function armSessionClose(host, close, label, onConfirm, actionLabel) {
     disarmSessionClose();
     var expiresAt = Date.now() + SESSION_CLOSE_SECONDS * 1000;
+    var action = actionLabel || "Close";
     var confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "session-close-confirm";
     confirm.title = "Click to confirm — auto-cancels when the timer runs out";
     function paint() {
       var left = Math.ceil(Math.max(0, expiresAt - Date.now()) / 1000);
-      confirm.textContent = "Close · " + left;
-      confirm.setAttribute("aria-label", "Confirm closing " + label);
+      confirm.textContent = action + " · " + left;
+      confirm.setAttribute(
+        "aria-label",
+        "Confirm " + (action === "Close" ? "closing" : action.toLowerCase()) + " " + label
+      );
     }
     paint();
     confirm.addEventListener("click", async function (event) {
@@ -8364,9 +8511,25 @@
               close.setAttribute("tabindex", "-1");
               close.textContent = "×";
               function armLocalClose() {
-                armSessionClose(row, close, thread.name, function () {
-                  return requestThreadClose(thread);
-                });
+                var resolvesCovenRecovery = thread.launch &&
+                  (thread.launch.launchKind === "coven-recovery" ||
+                    thread.launch.recoveryRequired === true);
+                armSessionClose(
+                  row,
+                  close,
+                  resolvesCovenRecovery
+                    ? "inspected Coven recovery for " + thread.name
+                    : thread.name,
+                  function () {
+                    if (thread.launch &&
+                        (thread.launch.launchKind === "coven-recovery" ||
+                          thread.launch.recoveryRequired === true)) {
+                      return resolveCovenLaunchRecovery(thread);
+                    }
+                    return requestThreadClose(thread);
+                  },
+                  resolvesCovenRecovery ? "Resolve" : "Close"
+                );
               }
               close.addEventListener("click", function (event) {
                 event.stopPropagation();
@@ -8731,46 +8894,230 @@
 
   async function removeProject(id) {
     var project = findProject(id);
-    if (!project) return false;
+    if (!project || project.closing) return false;
+    function hasUnresolvedCovenLaunch() {
+      return project.localSessionCreatesInFlight > 0 ||
+        state.threads.some(function (thread) {
+        return thread.projectId === id
+          && thread.launch
+          && (thread.covenLaunchOutcomeInFlight ||
+            thread.covenLaunchAcceptanceInFlight ||
+            thread.retryInFlight ||
+            thread.launch.launchKind === "coven-recovery" ||
+            thread.launch.recoveryRequired === true);
+      });
+    }
+    if (hasUnresolvedCovenLaunch()) {
+      setStatus(
+        project.name +
+          " cannot be closed while a Coven launch outcome is unresolved; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
+    var closingRoot = project.root || null;
+    if (closingRoot) projectRootsClosing.add(closingRoot);
+    project.closing = true;
     var projectOpenFiles = state.openFiles.filter(function (file) {
       return file.projectId === id;
     });
-    if (fileNavigationInFlight || fileDecisionInFlight) return false;
+    if (fileNavigationInFlight || fileDecisionInFlight) {
+      project.closing = false;
+      if (closingRoot) projectRootsClosing.delete(closingRoot);
+      return false;
+    }
     fileNavigationInFlight = true;
     var canRemove;
     try {
       canRemove = await guardDirtyFiles(projectOpenFiles);
+    } catch (error) {
+      project.closing = false;
+      if (closingRoot) projectRootsClosing.delete(closingRoot);
+      throw error;
     } finally {
       fileNavigationInFlight = false;
     }
-    if (!canRemove) return false;
+    if (!canRemove) {
+      project.closing = false;
+      if (closingRoot) projectRootsClosing.delete(closingRoot);
+      return false;
+    }
+    if (hasUnresolvedCovenLaunch()) {
+      project.closing = false;
+      if (closingRoot) projectRootsClosing.delete(closingRoot);
+      setStatus(
+        project.name +
+          " cannot be closed because its Coven launch outcome became unresolved; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
     var projectFilesPanes = [];
     if (typeof filesPanes !== "undefined") {
       filesPanes.forEach(function (filesPane) {
         if (filesPane.projectId === id) projectFilesPanes.push(filesPane);
       });
     }
-    covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
+    var projectIndex = state.projects.indexOf(project);
+    var threadSnapshot = state.threads.slice();
+    var activeThreadIdSnapshot = state.activeThreadId;
+    var lastActiveThreadIdSnapshot = project.lastActiveThreadId;
+    var focusSetSnapshot = [];
+    if (typeof focusSets !== "undefined") {
+      focusSets.forEach(function (set, index) {
+        if (set.key.indexOf(id + "\u0000") !== 0) return;
+        focusSetSnapshot.push({
+          index: index,
+          set: Object.assign({}, set, { threadIds: set.threadIds.slice() }),
+        });
+      });
+    }
+    var paneLayoutSnapshot = [];
+    if (typeof paneLayouts !== "undefined") {
+      paneLayouts.forEach(function (layout, key) {
+        if (key.indexOf(id + "\u0000") === 0) {
+          paneLayoutSnapshot.push([key, Object.assign({}, layout)]);
+        }
+      });
+    }
+    function restoreProjectRemovalState() {
+      if (!state.projects.some(function (candidate) { return candidate.id === id; })) {
+        var restoreIndex = Math.max(0, Math.min(projectIndex, state.projects.length));
+        state.projects.splice(restoreIndex, 0, project);
+      }
+      var currentThreads = new Map(state.threads.map(function (thread) {
+        return [thread.id, thread];
+      }));
+      var originalThreadIds = new Set(threadSnapshot.map(function (thread) {
+        return thread.id;
+      }));
+      state.threads = threadSnapshot.map(function (thread) {
+        var current = currentThreads.get(thread.id);
+        if (current) return current;
+        if (thread.projectId !== id) return thread;
+        thread.closeStarted = false;
+        thread.closing = false;
+        thread.persistentLive = false;
+        thread.spawning = false;
+        thread.status = thread.launch &&
+          (thread.launch.launchKind === "coven-recovery" ||
+            thread.launch.recoveryRequired === true)
+          ? "failed"
+          : "exited";
+        thread.sidebarStatusKey = thread.status === "failed" ? "error" : "done";
+        thread.finishedAt = Date.now();
+        thread.term = null;
+        thread.host = null;
+        thread.pane = null;
+        thread.terminalController = null;
+        thread.ptyStarted = false;
+        thread.ptyGeneration = null;
+        if (typeof createThreadPtyIoQueue === "function") {
+          thread.ptyIoQueue = createThreadPtyIoQueue();
+        }
+        return thread;
+      }).concat(state.threads.filter(function (thread) {
+        return !originalThreadIds.has(thread.id);
+      }));
+      if (typeof paneLayouts !== "undefined") {
+        Array.from(paneLayouts.keys()).forEach(function (key) {
+          if (key.indexOf(id + "\u0000") === 0) paneLayouts.delete(key);
+        });
+        paneLayoutSnapshot.forEach(function (entry) {
+          paneLayouts.set(entry[0], entry[1]);
+        });
+      }
+      if (typeof focusSets !== "undefined") {
+        for (var focusSetIndex = focusSets.length - 1; focusSetIndex >= 0; focusSetIndex -= 1) {
+          if (focusSets[focusSetIndex].key.indexOf(id + "\u0000") === 0) {
+            focusSets.splice(focusSetIndex, 1);
+          }
+        }
+        focusSetSnapshot.forEach(function (entry) {
+          var restoredSet = Object.assign({}, entry.set, {
+            threadIds: entry.set.threadIds.slice(),
+          });
+          focusSets.splice(
+            Math.max(0, Math.min(entry.index, focusSets.length)),
+            0,
+            restoredSet
+          );
+        });
+      }
+      state.activeThreadId = activeThreadIdSnapshot;
+      project.lastActiveThreadId = lastActiveThreadIdSnapshot;
+      project.closing = false;
+      if (closingRoot) projectRootsClosing.delete(closingRoot);
+      renderPaneWorkspace({ preserveTerminalFocus: false });
+      refreshSidebar();
+      refreshTabs();
+    }
+    async function failProjectRemoval(message) {
+      restoreProjectRemovalState();
+      try {
+        await saveWorkspaceNow();
+      } catch (rollbackError) {
+        setStatus(
+          message + " and its workspace rollback is not durable: " +
+            String(rollbackError),
+          "error"
+        );
+        return false;
+      }
+      setStatus(message, "error");
+      return false;
+    }
+    try {
+      covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
+    } catch (error) {
+      return failProjectRemoval(
+        "failed to invalidate Coven discovery while closing " + project.name +
+          ": " + String(error)
+      );
+    }
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    var closeResults = await Promise.all(threadIds.map(function (tid) {
+    var closeResults = await Promise.allSettled(threadIds.map(function (tid) {
       var preserveTerminalFocus = state.activeProjectId !== id;
       return closeThread(tid, {
         focus: false,
         preserveTerminalFocus: preserveTerminalFocus,
+        protectCovenRecovery: true,
       });
     }));
-    if (closeResults.some(function (closed) { return closed === false; })) return false;
+    var closeFailure = closeResults.find(function (result) {
+      return result.status === "rejected" || result.value === false;
+    });
+    if (closeFailure) {
+      return failProjectRemoval(
+        "failed to close every pane for " + project.name +
+          (closeFailure.status === "rejected"
+            ? ": " + String(closeFailure.reason)
+            : "")
+      );
+    }
+    state.projects = state.projects.filter(function (p) { return p.id !== id; });
+    try {
+      await saveWorkspaceNow();
+    } catch (error) {
+      return failProjectRemoval(
+        "failed to save removal of " + project.name + ": " + String(error)
+      );
+    }
     if (project.root) {
       try {
         await invoke("native_project_close", { root: project.root });
       } catch (error) {
-        setStatus("failed to revoke project authority for " + project.name + ": " + String(error), "error");
-        return false;
+        return failProjectRemoval(
+          "failed to revoke project authority for " + project.name + ": " + String(error)
+        );
       }
     }
+    if (closingRoot) projectRootsClosing.delete(closingRoot);
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -8784,8 +9131,6 @@
       if (terminalHost) terminalHost.hidden = false;
       restoredTerminalView = true;
     }
-    // Remove the project from state.
-    state.projects = state.projects.filter(function (p) { return p.id !== id; });
     startCovenPolling();
     var shouldRefreshSidebar = threadIds.length === 0;
     var sidebarRefreshedByActiveProjectHandoff = false;
@@ -12634,7 +12979,7 @@
 
   async function createTerminalPane() {
     var project = activeProject();
-    if (!project || !project.root) {
+    if (!project || !project.root || project.closing) {
       setStatus("Open a project before starting a terminal", "warn");
       return null;
     }
@@ -12644,6 +12989,10 @@
       return null;
     }
     if (!(await showTerminalView())) return null;
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting a terminal", "warn");
+      return null;
+    }
     return spawnShellThread(project);
   }
 
@@ -14225,14 +14574,23 @@
     return reconciled;
   }
 
-  async function addProject(rootPath) {
+  async function addProject(rootPath, operation) {
     if (!rootPath) return null;
     rootPath = await canonicalProjectPath(rootPath);
     if (!rootPath) return null;
+    function blockedByClosingRoot() {
+      if (operation) operation.blockedByClosing = true;
+      setStatus("Project is still closing; wait before reopening " + rootPath, "warn");
+      return null;
+    }
+    if (projectRootsClosing.has(rootPath)) return blockedByClosingRoot();
     var existing = state.projects.find(function (p) { return p.root === rootPath; });
     if (existing) return (await setActiveProject(existing.id)) ? existing : null;
     if (state.projects.length >= settings.maxProjects) { setStatus("project limit reached (" + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ")", "warn"); return null; }
     if (!(await showTerminalView())) return null;
+    if (projectRootsClosing.has(rootPath)) return blockedByClosingRoot();
+    existing = state.projects.find(function (p) { return p.root === rootPath; });
+    if (existing) return (await setActiveProject(existing.id)) ? existing : null;
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
@@ -14253,19 +14611,21 @@
 
   async function openProjectPicker() {
     var selected = null;
+    var addOperation = { blockedByClosing: false };
     try {
       var defaultPath = (state.env && state.env.home) || undefined;
       selected = await invoke("native_project_open", {
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      await addProject(selected);
+      await addProject(selected, addOperation);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     } finally {
       if (
         selected &&
         typeof selected === "string" &&
+        !addOperation.blockedByClosing &&
         !state.projects.some(function (project) { return project.root === selected; })
       ) {
         try {
@@ -14661,6 +15021,10 @@
       setStatus("Open a project before starting an agent", "warn");
       return null;
     }
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting an agent", "warn");
+      return null;
+    }
     var worktree = selectedWorktree(project);
     if (!worktree || !worktree.path) {
       setStatus("Select an available worktree before starting an agent", "warn");
@@ -14702,6 +15066,10 @@
       return null;
     }
     var promptDigest = await covenPromptDigest(userPrompt);
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting an agent", "warn");
+      return null;
+    }
     var reservation;
     try {
       reservation = await reserveCovenLaunchThread({
@@ -14716,47 +15084,64 @@
       return null;
     }
     if (!reservation) return null;
-    // The composer prompt rides the daemon launch request body only. It is
-    // never placed in process argv and never stored on the launch model; the
-    // pane attaches to the canonical Coven session returned by the daemon.
-    var launchResult = await invoke("coven_launch_session", {
-      request: {
-        projectRoot: project.root,
-        cwd: worktree.path,
-        harness: entry.harness,
-        prompt: userPrompt,
-        title: entry.label,
-      },
-    }).catch(function () {
-      return {
-        status: "effect_unknown",
-        message: "Coven launch outcome is unknown; inspect Coven sessions before retrying",
-      };
-    });
-    if (!launchResult) {
-      await markCovenLaunchRecoveryRequired(
-        reservation,
-        "Coven launch outcome is unknown; inspect Coven sessions before retrying"
-      );
-      return reservation;
-    }
-    if (covenLaunchOutcome(launchResult) !== "accepted") {
-      if (launchResult.status === "effect_unknown") {
-        var recoveryMessage = covenLaunchFailureStatus(entry, launchResult);
-        await markCovenLaunchRecoveryRequired(reservation, recoveryMessage);
-        setStatus(recoveryMessage, "error");
-        return reservation;
-      }
+    if (project.closing) {
       await releaseCovenLaunchReservation(reservation);
-      setStatus(covenLaunchFailureStatus(entry, launchResult), "error");
+      setStatus(project.name + " is closing; Coven launch was not submitted", "warn");
       return null;
     }
-    return acceptCovenLaunchReservation(reservation, {
-      name: entry.label,
-      sessionId: launchResult.sessionId,
-      promptDigest: promptDigest,
-      harness: launchResult.harness || entry.harness || "coven",
+    var finishLaunchOutcome;
+    var launchOutcomeInFlight = new Promise(function (resolve) {
+      finishLaunchOutcome = resolve;
     });
+    reservation.covenLaunchOutcomeInFlight = launchOutcomeInFlight;
+    try {
+      // The composer prompt rides the daemon launch request body only. It is
+      // never placed in process argv and never stored on the launch model; the
+      // pane attaches to the canonical Coven session returned by the daemon.
+      var launchResult = await invoke("coven_launch_session", {
+        request: {
+          projectRoot: project.root,
+          cwd: worktree.path,
+          harness: entry.harness,
+          prompt: userPrompt,
+          title: entry.label,
+        },
+      }).catch(function () {
+        return {
+          status: "effect_unknown",
+          message: "Coven launch outcome is unknown; inspect Coven sessions before retrying",
+        };
+      });
+      if (!launchResult) {
+        await markCovenLaunchRecoveryRequired(
+          reservation,
+          "Coven launch outcome is unknown; inspect Coven sessions before retrying"
+        );
+        return reservation;
+      }
+      if (covenLaunchOutcome(launchResult) !== "accepted") {
+        if (launchResult.status === "effect_unknown") {
+          var recoveryMessage = covenLaunchFailureStatus(entry, launchResult);
+          await markCovenLaunchRecoveryRequired(reservation, recoveryMessage);
+          setStatus(recoveryMessage, "error");
+          return reservation;
+        }
+        await releaseCovenLaunchReservation(reservation);
+        setStatus(covenLaunchFailureStatus(entry, launchResult), "error");
+        return null;
+      }
+      return await acceptCovenLaunchReservation(reservation, {
+        name: entry.label,
+        sessionId: launchResult.sessionId,
+        promptDigest: promptDigest,
+        harness: launchResult.harness || entry.harness || "coven",
+      });
+    } finally {
+      if (reservation.covenLaunchOutcomeInFlight === launchOutcomeInFlight) {
+        reservation.covenLaunchOutcomeInFlight = null;
+      }
+      finishLaunchOutcome();
+    }
   }
 
   function covenCliLaunch(project, worktreePath) {
@@ -14774,7 +15159,7 @@
 
   async function spawnCovenThread(project, expectedWorktreePath) {
     project = project || activeProject();
-    if (!project || !project.root) return null;
+    if (!project || !project.root || project.closing) return null;
     if (!state.env || !state.env.coven_path) {
       setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
       return null;
@@ -14789,6 +15174,7 @@
     var currentProject = activeProject();
     var currentWorktree = selectedWorktree(currentProject);
     if (!currentProject || currentProject.id !== intendedProjectId ||
+        currentProject.closing ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
     var launch = covenCliLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
     if (!launch) return null;

@@ -292,6 +292,51 @@ describe('Tauri Coven launch project scope', () => {
     expect(deduplicate).toBeGreaterThan(canonicalize);
   });
 
+  it('blocks project admission when the canonical root starts closing during reveal', async () => {
+    const reveal = deferred<boolean>();
+    const revealStarted = deferred<void>();
+    const projectRootsClosing = new Set<string>();
+    const state = {
+      projects: [] as Array<Record<string, unknown>>,
+    };
+    const operation = { blockedByClosing: false };
+    const statuses: Array<[string, string]> = [];
+    const addProject = compileFunction<(
+      root: string,
+      operation: { blockedByClosing: boolean },
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async (root: string) => root,
+        projectRootsClosing,
+        state,
+        settings: { maxProjects: 8 },
+        HARD_MAX_PROJECTS: 8,
+        setActiveProject: async () => true,
+        showTerminalView: async () => {
+          revealStarted.resolve();
+          return reveal.promise;
+        },
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+      },
+    );
+
+    const admission = addProject('/repo', operation);
+    await revealStarted.promise;
+    projectRootsClosing.add('/repo');
+    reveal.resolve(true);
+
+    await expect(admission).resolves.toBeNull();
+    expect(operation.blockedByClosing).toBe(true);
+    expect(state.projects).toEqual([]);
+    expect(statuses.at(-1)).toEqual([
+      'Project is still closing; wait before reopening /repo',
+      'warn',
+    ]);
+  });
+
   it('canonicalizes saved roots concurrently before restoring projects', () => {
     const boot = functionSource('boot');
     expect(boot).toContain('restoreSavedProjects');
@@ -1230,6 +1275,64 @@ describe('native Coven launch routing', () => {
     expect(thread).toMatchObject({ project, kind: 'coven-code', name: 'Coven CLI' });
   });
 
+  it('tracks project session creation until native session creation settles', async () => {
+    const project: {
+      id: string;
+      root: string;
+      localSessionCreatesInFlight?: number;
+    } = { id: 'project', root: '/repo' };
+    const nativeCreation = deferred<unknown>();
+    const nativeCreationStarted = deferred<void>();
+    const state = {
+      threads: [] as Array<Record<string, unknown>>,
+      activeThreadId: null,
+    };
+    const createThread = compileFunction<(
+      options: Record<string, unknown>,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('createThread'),
+      {
+        state,
+        makeThreadId: () => 'shell-thread',
+        activeProject: () => project,
+        activeWorkspaceRoot: () => '/repo',
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        commitPanePlacement: () => undefined,
+        setStatus: () => undefined,
+        invoke: async (command: string) => {
+          expect(command).toBe('native_session_create');
+          nativeCreationStarted.resolve();
+          return nativeCreation.promise;
+        },
+        mountTerminal: () => undefined,
+        focusThread: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        requestAnimationFrame: () => undefined,
+      },
+    );
+
+    const pending = createThread({
+      project,
+      command: '/bin/zsh',
+      args: [],
+      projectRoot: '/repo',
+      cwd: '/repo',
+      worktreePath: '/repo',
+      launchKind: 'shell',
+    });
+    await nativeCreationStarted.promise;
+    expect(project.localSessionCreatesInFlight).toBe(1);
+    expect(state.threads).toEqual([]);
+
+    nativeCreation.resolve({});
+    await expect(pending).resolves.toMatchObject({
+      id: 'shell-thread',
+      projectId: 'project',
+    });
+    expect(project.localSessionCreatesInFlight).toBeUndefined();
+  });
+
   it('coalesces concurrent explicit ensures through one animation-frame launch', async () => {
     const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
     const state = {
@@ -1462,6 +1565,38 @@ describe('native Coven launch routing', () => {
     expect(invocations).toEqual([
       ['native_project_open', { defaultPath: '/home' }],
       ['native_project_close', { root: '/repo/rejected' }],
+    ]);
+  });
+
+  it('does not revoke a native-picked root whose admission is blocked by teardown', async () => {
+    const state = {
+      env: { home: '/home' },
+      projects: [] as Array<{ root: string }>,
+    };
+    const invocations: Array<[string, Record<string, unknown>]> = [];
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          invocations.push([command, args]);
+          return '/repo/closing';
+        },
+        addProject: async (
+          _root: string,
+          operation: { blockedByClosing: boolean },
+        ) => {
+          operation.blockedByClosing = true;
+          return null;
+        },
+        writeToActive: () => undefined,
+      },
+    );
+
+    await openProjectPicker();
+
+    expect(invocations).toEqual([
+      ['native_project_open', { defaultPath: '/home' }],
     ]);
   });
 
@@ -1786,6 +1921,73 @@ describe('native Coven launch routing', () => {
     expect(statuses).toEqual([[
       'Coven session is no longer available; refresh the rail before retrying', 'warn',
     ]]);
+  });
+
+  it('blocks confirmed recovery resolution for the complete attachment retry', async () => {
+    const refresh = deferred<void>();
+    const thread: Record<string, any> = {
+      id: 'accepted-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      status: 'failed',
+      closeStarted: false,
+      startInFlight: false,
+      persistentLive: false,
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: COVEN_SESSION_ID,
+        recoveryRequired: true,
+      },
+    };
+    const project = { id: 'project', root: '/repo', closing: false };
+    const state = { threads: [thread] };
+    let nativeCreates = 0;
+    let resolutionCloses = 0;
+    const statuses: Array<[string, string]> = [];
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('retryThread'),
+      {
+        findThread: (id: string) => state.threads.find(candidate => candidate.id === id) || null,
+        findProject: () => project,
+        refreshCovenSessions: () => refresh.promise,
+        covenDiscovery: { phase: 'ready' },
+        covenSessionsForProject: () => [{ id: COVEN_SESSION_ID }],
+        noteStatusActivity: () => undefined,
+        invoke: async (command: string) => {
+          if (command === 'native_session_create') nativeCreates += 1;
+          return true;
+        },
+        attachThreadClient: async () => true,
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      },
+    );
+    const resolveCovenLaunchRecovery = compileFunction<(
+      candidate: Record<string, any>,
+    ) => Promise<boolean>>(
+      functionSource('resolveCovenLaunchRecovery'),
+      {
+        isLiveThread: () => true,
+        closeThread: async () => {
+          resolutionCloses += 1;
+          return true;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      },
+    );
+
+    const retry = retryThread(thread.id);
+    expect(thread.retryInFlight).toBeInstanceOf(Promise);
+    await expect(resolveCovenLaunchRecovery(thread)).resolves.toBe(false);
+    expect(resolutionCloses).toBe(0);
+
+    refresh.resolve();
+    await expect(retry).resolves.toBe(true);
+    expect(nativeCreates).toBe(1);
+    expect(thread.retryInFlight).toBeNull();
+    expect(statuses[0]).toEqual([
+      'Codex CLI Coven launch is still settling; wait before resolving recovery',
+      'warn',
+    ]);
   });
 
   it('retries a bare Coven CLI durable session without a stale Coven session id', async () => {
@@ -2309,7 +2511,9 @@ describe('native Coven launch routing', () => {
 
     // The in-flight guard that the old hidden-button logic enforced still lives
     // in retryThread itself, which its own lifecycle tests cover.
-    expect(functionSource('retryThread')).toMatch(/thread\.startInFlight \|\| thread\.closeStarted/);
+    expect(functionSource('retryThread')).toMatch(
+      /thread\.startInFlight \|\| thread\.retryInFlight \|\| thread\.closeStarted/,
+    );
     expect(functionSource('retryThread')).toMatch(
       /thread\.status !== "exited" && thread\.status !== "failed"/
     );

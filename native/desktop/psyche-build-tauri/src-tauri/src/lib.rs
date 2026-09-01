@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -35,7 +35,7 @@ use objc2_foundation::{NSDictionary, NSError, NSString, NSURLRequest, NSURL};
 #[cfg(target_os = "macos")]
 use objc2_web_kit::{WKNavigation, WKWebView};
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -168,11 +168,34 @@ fn ensure_trusted_project_caller(label: &str) -> Result<(), String> {
 }
 
 #[derive(Default)]
+struct NativeProjectRootAuthority {
+    in_flight_submissions: usize,
+    revoking: bool,
+}
+
+#[derive(Default)]
+struct NativeProjectAuthorityInner {
+    roots: Mutex<HashMap<PathBuf, NativeProjectRootAuthority>>,
+    changed: Condvar,
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct NativeProjectAuthority {
-    open_roots: Mutex<HashSet<PathBuf>>,
+    inner: Arc<NativeProjectAuthorityInner>,
+}
+
+struct NativeProjectSubmissionLease {
+    authority: NativeProjectAuthority,
+    root: PathBuf,
 }
 
 const MAX_NATIVE_PROJECTS: usize = 10;
+
+impl Drop for NativeProjectSubmissionLease {
+    fn drop(&mut self) {
+        self.authority.release_submission(&self.root);
+    }
+}
 
 impl NativeProjectAuthority {
     fn from_startup() -> Self {
@@ -182,16 +205,19 @@ impl NativeProjectAuthority {
     fn authorize_native_open(&self, root: &Path) -> Result<String, String> {
         let root = canonical_project_root(&root.to_string_lossy())?;
         let root_text = root.to_string_lossy().into_owned();
-        let mut open_roots = self.open_roots.lock();
-        if open_roots.contains(&root) {
+        let mut roots = self.inner.roots.lock();
+        if let Some(existing) = roots.get(&root) {
+            if existing.revoking {
+                return Err("native project authority is closing".to_string());
+            }
             return Ok(root_text);
         }
-        if open_roots.len() >= MAX_NATIVE_PROJECTS {
+        if roots.len() >= MAX_NATIVE_PROJECTS {
             return Err(format!(
                 "native project authority limit reached ({MAX_NATIVE_PROJECTS})"
             ));
         }
-        open_roots.insert(root);
+        roots.insert(root, NativeProjectRootAuthority::default());
         Ok(root_text)
     }
 
@@ -200,11 +226,53 @@ impl NativeProjectAuthority {
             return Err("native project authority requires an absolute root".to_string());
         }
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        Ok(self.open_roots.lock().remove(&root))
+        let mut roots = self.inner.roots.lock();
+        let Some(authority) = roots.get_mut(&root) else {
+            return Ok(false);
+        };
+        authority.revoking = true;
+        while roots
+            .get(&root)
+            .is_some_and(|authority| authority.in_flight_submissions > 0)
+        {
+            self.inner.changed.wait(&mut roots);
+        }
+        Ok(roots.remove(&root).is_some())
+    }
+
+    fn claim_submission(&self, root: &Path) -> Result<NativeProjectSubmissionLease, String> {
+        let root = canonical_project_root(&root.to_string_lossy())
+            .map_err(|_| "Coven launch project root is unavailable".to_string())?;
+        let mut roots = self.inner.roots.lock();
+        let authority = roots
+            .get_mut(&root)
+            .filter(|authority| !authority.revoking)
+            .ok_or_else(|| "Coven launch project is not open in Psyche".to_string())?;
+        authority.in_flight_submissions += 1;
+        Ok(NativeProjectSubmissionLease {
+            authority: self.clone(),
+            root,
+        })
+    }
+
+    fn release_submission(&self, root: &Path) {
+        let mut roots = self.inner.roots.lock();
+        let Some(authority) = roots.get_mut(root) else {
+            return;
+        };
+        authority.in_flight_submissions = authority.in_flight_submissions.saturating_sub(1);
+        if authority.in_flight_submissions == 0 {
+            self.inner.changed.notify_all();
+        }
     }
 
     pub(crate) fn open_project_roots(&self) -> Vec<PathBuf> {
-        self.open_roots.lock().iter().cloned().collect()
+        self.inner
+            .roots
+            .lock()
+            .iter()
+            .filter_map(|(root, authority)| (!authority.revoking).then_some(root.clone()))
+            .collect()
     }
 }
 
@@ -1868,13 +1936,16 @@ async fn native_project_open(
 }
 
 #[tauri::command]
-fn native_project_close(
+async fn native_project_close(
     webview: tauri::Webview,
     authority: State<'_, NativeProjectAuthority>,
     root: String,
 ) -> Result<bool, String> {
     ensure_trusted_project_caller(webview.label())?;
-    authority.revoke_native_open(Path::new(&root))
+    let authority = authority.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || authority.revoke_native_open(Path::new(&root)))
+        .await
+        .map_err(|error| format!("project authority revocation failed: {error}"))?
 }
 
 #[cfg(mobile)]

@@ -855,12 +855,18 @@ pub(crate) async fn coven_launch_session(
     request: CovenLaunchRequest,
 ) -> Result<CovenLaunchResponse, String> {
     super::ensure_trusted_project_caller(webview.label())?;
-    let open_project_roots = authority.open_project_roots();
+    let authority = authority.inner().clone();
     Ok(
         match tauri::async_runtime::spawn_blocking(
             move || -> Result<CovenLaunchResponse, CovenAdapterError> {
+                let requested_project_root = PathBuf::from(&request.project_root);
+                let open_project_roots = authority.open_project_roots();
                 let request = match validate_launch_request(request, &open_project_roots) {
                     Ok(request) => request,
+                    Err(message) => return Ok(launch_validation_rejection(message)),
+                };
+                let _submission_lease = match authority.claim_submission(&requested_project_root) {
+                    Ok(lease) => lease,
                     Err(message) => return Ok(launch_validation_rejection(message)),
                 };
                 let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
@@ -3588,6 +3594,67 @@ mod tests {
         super::validate_launch_request(request, &[project_root])
     }
 
+    fn launch_with_authority_for_test(
+        authority: &super::super::NativeProjectAuthority,
+        endpoint: &CovenEndpoint,
+        request: CovenLaunchRequest,
+    ) -> Result<CovenLaunchResponse, CovenAdapterError> {
+        let requested_project_root = PathBuf::from(&request.project_root);
+        let roots = authority.open_project_roots();
+        let request = super::validate_launch_request(request, &roots)
+            .map_err(|_| CovenAdapterError::Failed)?;
+        let _submission_lease = authority
+            .claim_submission(&requested_project_root)
+            .map_err(|_| CovenAdapterError::Failed)?;
+        try_launch_coven_session(endpoint, &request)
+    }
+
+    fn revoke_authority_for_test(
+        authority: &super::super::NativeProjectAuthority,
+        root: &Path,
+    ) -> Result<bool, String> {
+        authority.revoke_native_open(root)
+    }
+
+    fn spawn_health_gated_launch_server() -> (
+        CovenEndpoint,
+        Receiver<()>,
+        Sender<()>,
+        Receiver<Vec<u8>>,
+        JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+        let (health_seen_tx, health_seen_rx) = mpsc::channel();
+        let (release_health_tx, release_health_rx) = mpsc::channel();
+        let (post_tx, post_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut health, _) = listener.accept().unwrap();
+            let mut health_request = Vec::new();
+            health.read_to_end(&mut health_request).unwrap();
+            assert_eq!(health_request, expected_request("GET", "/api/v1/health"));
+            health_seen_tx.send(()).unwrap();
+            release_health_rx.recv().unwrap();
+            health
+                .write_all(&http_json(br#"{"apiVersion":"coven.daemon.v1"}"#))
+                .unwrap();
+            health.shutdown(Shutdown::Write).unwrap();
+
+            let (mut post, _) = listener.accept().unwrap();
+            let mut post_request = Vec::new();
+            post.read_to_end(&mut post_request).unwrap();
+            post_tx.send(post_request).unwrap();
+            post.write_all(&http_status_json(
+                201,
+                "Created",
+                br#"{"id":"12345678-1234-4abc-8def-1234567890ab","harness":"codex"}"#,
+            ))
+            .unwrap();
+            post.shutdown(Shutdown::Write).unwrap();
+        });
+        (endpoint, health_seen_rx, release_health_tx, post_rx, handle)
+    }
+
     fn expected_launch_request(body: &[u8]) -> Vec<u8> {
         let mut request = format!(
             "POST /api/v1/sessions HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -3748,6 +3815,61 @@ mod tests {
             result.unwrap_err(),
             "Coven launch project is not open in Psyche"
         );
+    }
+
+    #[test]
+    fn project_revocation_waits_for_an_authorized_submission_through_post() {
+        let tree = TempTree::new("launch-revocation-linearization");
+        let project = tree.directory("project");
+        initialize_git_repo(&project);
+        let authority = Arc::new(super::super::NativeProjectAuthority::default());
+        authority.authorize_native_open(&project).unwrap();
+        let (endpoint, health_seen, release_health, post_requests, server) =
+            spawn_health_gated_launch_server();
+        let mut request = launch_fixture();
+        request.project_root = project.to_string_lossy().into_owned();
+        request.cwd = Some(project.to_string_lossy().into_owned());
+        let launch_authority = Arc::clone(&authority);
+        let launch = thread::spawn(move || {
+            launch_with_authority_for_test(&launch_authority, &endpoint, request)
+        });
+
+        health_seen
+            .recv_timeout(Duration::from_secs(2))
+            .expect("launch did not reach health boundary");
+        let revoke_authority = Arc::clone(&authority);
+        let revoke_root = project.clone();
+        let (revoke_started_tx, revoke_started_rx) = mpsc::channel();
+        let (revoke_done_tx, revoke_done_rx) = mpsc::channel();
+        let revoke = thread::spawn(move || {
+            revoke_started_tx.send(()).unwrap();
+            let result = revoke_authority_for_test(&revoke_authority, &revoke_root);
+            revoke_done_tx.send(result.clone()).unwrap();
+            result
+        });
+        revoke_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("revocation thread did not start");
+        let revoke_returned_before_post = revoke_done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+
+        release_health.send(()).unwrap();
+        let post_request = post_requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("authorized launch never submitted POST");
+        let launch_response = launch.join().unwrap().unwrap();
+        let revoke_result = revoke.join().unwrap().unwrap();
+        server.join().unwrap();
+
+        assert!(
+            !revoke_returned_before_post,
+            "revocation returned while an authorized launch was pending before POST"
+        );
+        assert!(post_request.starts_with(b"POST /api/v1/sessions "));
+        assert_eq!(launch_response.status, "accepted");
+        assert!(revoke_result);
+        assert!(authority.open_project_roots().is_empty());
     }
 
     #[cfg(unix)]
