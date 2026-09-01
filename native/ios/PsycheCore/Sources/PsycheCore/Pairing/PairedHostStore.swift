@@ -460,6 +460,8 @@ public actor PairedHostStore {
             state.pendingReadySelection = nil
             nextData = try JSONEncoder().encode(state)
         } catch {
+            authorization.supersede()
+            readySelectionOwner = nil
             return .indeterminate(reason: error.localizedDescription)
         }
         do {
@@ -467,11 +469,16 @@ public actor PairedHostStore {
             readySelectionOwner = nil
             return .committed
         } catch {
-            return compensateWrite(
+            let result = compensateWrite(
                 to: previousData,
                 after: error,
                 operation: "Ready-host selection completion"
             )
+            if case .indeterminate = result {
+                authorization.supersede()
+                readySelectionOwner = nil
+            }
+            return result
         }
     }
 
