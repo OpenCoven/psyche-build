@@ -946,7 +946,7 @@ function stripRenderHashComment(body, markers) {
  * @param {readonly string[]} markers
  * @returns {string}
  */
-function normalizeCanonicalBody(body, markers) {
+export function normalizeCanonicalBody(body, markers) {
   return stripRenderHashComment(body, markers).replace(/\s+$/u, '');
 }
 
@@ -954,7 +954,7 @@ function normalizeCanonicalBody(body, markers) {
  * @param {string} body
  * @returns {string}
  */
-function hashRenderedBody(body) {
+export function hashRenderedBody(body) {
   return createHash('sha256').update(body).digest('hex');
 }
 
@@ -1037,7 +1037,8 @@ function hasDesiredFieldValues(currentFields, desiredFields) {
  */
 function hasCurrentRenderedBody(issue, desiredBody, desiredRenderHash, issueMarkers) {
   if (issue.body != null) {
-    return normalizeCanonicalBody(issue.body, issueMarkers) === desiredBody;
+    return normalizeCanonicalBody(issue.body, issueMarkers) === desiredBody
+      && (issue.renderHash ?? extractRenderHash(issue.body, issueMarkers)) === desiredRenderHash;
   }
 
   return (issue.renderHash ?? extractRenderHash(issue.body, issueMarkers)) === desiredRenderHash;

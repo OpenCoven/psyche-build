@@ -286,15 +286,17 @@ function managedIssue(
   if (issueNumber == null) {
     throw new Error(`Missing issue number for bead ${bead.id}`);
   }
+  const renderedBody = canonicalIssueBody(bead, inventory, issueNumbers);
+  const renderHash = sha256(renderedBody);
 
   return {
     number: issueNumber,
     title: renderIssueTitle(bead),
-    body: canonicalIssueBody(bead, inventory, issueNumbers),
+    body: `${renderedBody}\n\n${renderHashMarker(DEFAULT_ISSUE_MARKER, renderHash)}`,
     state: bead.status === 'closed' ? 'closed' : 'open',
     assignees: bead.githubAssignee == null ? [] : [bead.githubAssignee],
     labels: desiredLabels(bead),
-    renderHash: null,
+    renderHash,
     projectItem: {
       id: `item-${issueNumber}`,
       archived: bead.status === 'closed',
@@ -834,6 +836,41 @@ describe('Beads project reconciliation', () => {
     expect(plan.operations).toEqual([]);
     expect(plan.summary.updateIssueCount).toBe(0);
     expect(plan.summary.updateReadmeCount).toBe(0);
+  });
+
+  it.each([
+    ['missing', null],
+    ['stale', '0'.repeat(64)],
+  ])('repairs a canonical managed body with a %s render hash', (_label, observedHash) => {
+    const inventory = finalizeInventory([makeBead('pb-hash-repair')]);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 250);
+    const renderedBody = canonicalIssueBody(inventory[0]!, inventory, issueNumbers);
+    const body = observedHash == null
+      ? renderedBody
+      : `${renderedBody}\n\n${renderHashMarker(DEFAULT_ISSUE_MARKER, observedHash)}`;
+
+    const plan = planReconciliation({
+      inventory,
+      existingIssues: [
+        managedIssue(inventory[0]!, inventory, issueNumbers, {
+          body,
+          renderHash: observedHash,
+        }),
+      ],
+      readme: {
+        body: canonicalReadmeBody(inventory),
+      },
+      renderContext: baseContext,
+    });
+
+    expect(plan.summary.updateIssueCount).toBe(1);
+    expect(plan.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'updateIssue',
+        beadId: 'pb-hash-repair',
+        renderHash: sha256(renderedBody),
+      }),
+    ]));
   });
 
   it('plans one canonical README update for external outcome metadata and converges on the second run', () => {

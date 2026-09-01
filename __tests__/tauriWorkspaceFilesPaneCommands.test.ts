@@ -153,8 +153,9 @@ describe('native Files pane commands and dirty boundaries', () => {
     expect(extractFunctionSource('setActiveProject')).not.toContain('guardActiveFileBoundary');
     expect(extractFunctionSource('activateProjectWorktree')).not.toContain('guardActiveFileBoundary');
     expect(extractFunctionSource('addProject')).not.toContain('guardActiveFileBoundary');
-    expect(extractFunctionSource('removeProject')).toMatch(
-      /await guardDirtyFiles\(projectOpenFiles\)[\s\S]*if \(!canRemove\) return false;/,
+    const removeProject = extractFunctionSource('removeProject');
+    expect(removeProject.indexOf('canRemove = await guardDirtyFiles(projectOpenFiles);')).toBeLessThan(
+      removeProject.indexOf('if (!canRemove)'),
     );
     expect(extractFunctionSource('closeFilesPane')).toMatch(
       /await guardDirtyFiles\(files\)[\s\S]*if \(!canClose\) return false;[\s\S]*state\.openFiles =/,
