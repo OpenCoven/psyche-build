@@ -1149,7 +1149,12 @@ describe('support bundle v1', () => {
 
   it('retains captured array lengths when a later snapshot field exhausts the budget', async () => {
     let recordGetterReads = 0;
-    const result: Record<string, unknown> = {};
+    const result: Record<string, unknown> = {
+      lifecycle: Object.fromEntries(Array.from({ length: 12 }, (_, section) => [
+        `section-${section}`,
+        Array.from({ length: 1_000 }, () => 'ready'),
+      ])),
+    };
     Object.defineProperty(result, 'records', {
       enumerable: true,
       get() {
@@ -1163,10 +1168,6 @@ describe('support bundle v1', () => {
         }));
       },
     });
-    result.lifecycle = Object.fromEntries(Array.from({ length: 12 }, (_, section) => [
-      `section-${section}`,
-      Array.from({ length: 1_000 }, () => 'ready'),
-    ]));
 
     const bundle = await collectSupportBundle([{
       name: 'partial-snapshot',

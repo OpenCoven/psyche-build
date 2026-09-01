@@ -619,6 +619,8 @@ function snapshotCollectorResult(
         arrayLengths.set(key as CollectorPayloadField, length);
       }
     }
+  }
+  for (const [key, childValue] of entries) {
     const childSnapshot = snapshotBoundedInputValue(childValue, 1, new Set<object>(), budget);
     if (childSnapshot === undefined) return { arrayLengths };
     snapshot[key] = childSnapshot;
