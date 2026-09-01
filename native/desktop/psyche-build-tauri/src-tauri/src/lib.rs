@@ -199,7 +199,35 @@ impl Drop for NativeProjectSubmissionLease {
 
 impl NativeProjectAuthority {
     fn from_startup() -> Self {
-        Self::default()
+        let authority = native_workspace::workspace_default_path()
+            .and_then(|path| Self::from_workspace_path(&path));
+        match authority {
+            Ok(authority) => authority,
+            Err(error) => {
+                log::warn!("native project authority startup rehydration failed closed: {error}");
+                Self::default()
+            }
+        }
+    }
+
+    fn from_workspace_path(path: &Path) -> Result<Self, String> {
+        let Some(workspace) = native_workspace::load_workspace_from(path)? else {
+            return Ok(Self::default());
+        };
+        native_workspace::validate_workspace(&workspace)?;
+        let projects = workspace
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "persisted workspace projects are unavailable".to_string())?;
+        let authority = Self::default();
+        for project in projects {
+            let root = project
+                .get("root")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "persisted workspace project root must be a string".to_string())?;
+            authority.authorize_native_open(Path::new(root))?;
+        }
+        Ok(authority)
     }
 
     fn authorize_native_open(&self, root: &Path) -> Result<String, String> {
@@ -222,6 +250,15 @@ impl NativeProjectAuthority {
     }
 
     fn revoke_native_open(&self, root: &Path) -> Result<bool, String> {
+        self.revoke_native_open_with(root, |roots, canonical_root| {
+            Ok(roots.remove(canonical_root).is_some())
+        })
+    }
+
+    fn revoke_native_open_with<F>(&self, root: &Path, remove: F) -> Result<bool, String>
+    where
+        F: FnOnce(&mut HashMap<PathBuf, NativeProjectRootAuthority>, &Path) -> Result<bool, String>,
+    {
         if !root.is_absolute() {
             return Err("native project authority requires an absolute root".to_string());
         }
@@ -237,7 +274,14 @@ impl NativeProjectAuthority {
         {
             self.inner.changed.wait(&mut roots);
         }
-        Ok(roots.remove(&root).is_some())
+        let result = remove(&mut roots, &root);
+        if !matches!(&result, Ok(true)) {
+            if let Some(authority) = roots.get_mut(&root) {
+                authority.revoking = false;
+            }
+            self.inner.changed.notify_all();
+        }
+        result
     }
 
     fn claim_submission(&self, root: &Path) -> Result<NativeProjectSubmissionLease, String> {
@@ -9297,9 +9341,13 @@ mod native_project_authority_tests {
 
     #[test]
     fn native_project_authority_starts_fail_closed() {
-        assert!(NativeProjectAuthority::from_startup()
-            .open_project_roots()
-            .is_empty());
+        let tree = tempfile::TempDir::new().unwrap();
+        assert!(NativeProjectAuthority::from_workspace_path(
+            &tree.path().join("missing-workspace.json")
+        )
+        .unwrap()
+        .open_project_roots()
+        .is_empty());
     }
 
     #[test]
@@ -9337,6 +9385,151 @@ mod native_project_authority_tests {
         revoke_project_for_test(&authority, &root);
 
         assert!(authority.open_project_roots().is_empty());
+    }
+
+    #[test]
+    fn failed_project_revocation_restores_open_authority() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let root = tree.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let authority = NativeProjectAuthority::default();
+        authority.authorize_native_open(&root).unwrap();
+
+        let result = authority
+            .revoke_native_open_with(&root, |_, _| Err("injected revocation failure".to_string()));
+
+        assert_eq!(result.unwrap_err(), "injected revocation failure");
+        assert_eq!(
+            authority.open_project_roots(),
+            vec![root.canonicalize().unwrap()]
+        );
+        assert!(authority.claim_submission(&root).is_ok());
+    }
+
+    #[test]
+    fn non_removing_project_revocation_restores_open_authority() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let root = tree.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let authority = NativeProjectAuthority::default();
+        authority.authorize_native_open(&root).unwrap();
+
+        assert!(!authority
+            .revoke_native_open_with(&root, |_, _| Ok(false))
+            .unwrap());
+
+        assert_eq!(
+            authority.open_project_roots(),
+            vec![root.canonicalize().unwrap()]
+        );
+        assert!(authority.claim_submission(&root).is_ok());
+    }
+
+    #[test]
+    fn project_revocation_waits_for_native_session_submission_leases() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let root = tree.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let authority = NativeProjectAuthority::default();
+        authority.authorize_native_open(&root).unwrap();
+        let lease = authority.claim_submission(&root).unwrap();
+        let revoking_authority = authority.clone();
+        let revoking_root = root.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let revoke = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            revoking_authority.revoke_native_open(&revoking_root)
+        });
+        started_rx.recv().unwrap();
+
+        while authority.open_project_roots().len() == 1 {
+            std::thread::yield_now();
+        }
+        assert!(authority.claim_submission(&root).is_err());
+        assert!(!revoke.is_finished());
+
+        drop(lease);
+        assert!(revoke.join().unwrap().unwrap());
+        assert!(authority.open_project_roots().is_empty());
+    }
+
+    #[test]
+    fn startup_project_authority_rehydrates_preexisting_persisted_roots() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let workspace_path = tree.path().join("workspace.json");
+        let saved_root = tree.path().join("saved");
+        std::fs::create_dir_all(&saved_root).unwrap();
+        let workspace = serde_json::json!({
+            "version": 3,
+            "activeProjectId": "saved",
+            "activeThreadId": null,
+            "projects": [{
+                "id": "saved",
+                "name": "Saved",
+                "root": saved_root.to_string_lossy(),
+            }],
+            "sessions": [],
+            "paneLayouts": [],
+        });
+        native_workspace::save_workspace_to(&workspace_path, &workspace).unwrap();
+
+        let authority = NativeProjectAuthority::from_workspace_path(&workspace_path).unwrap();
+
+        assert!(authority.claim_submission(&saved_root).is_ok());
+    }
+
+    #[test]
+    fn startup_project_authority_snapshot_cannot_be_mutated_by_later_workspace_saves() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let workspace_path = tree.path().join("workspace.json");
+        let saved_root = tree.path().join("saved");
+        let later_root = tree.path().join("later");
+        std::fs::create_dir_all(&saved_root).unwrap();
+        std::fs::create_dir_all(&later_root).unwrap();
+        let workspace = |root: &Path| {
+            serde_json::json!({
+                "version": 3,
+                "activeProjectId": "project",
+                "activeThreadId": null,
+                "projects": [{
+                    "id": "project",
+                    "name": "Project",
+                    "root": root.to_string_lossy(),
+                }],
+                "sessions": [],
+                "paneLayouts": [],
+            })
+        };
+        native_workspace::save_workspace_to(&workspace_path, &workspace(&saved_root)).unwrap();
+        let authority = NativeProjectAuthority::from_workspace_path(&workspace_path).unwrap();
+
+        native_workspace::save_workspace_to(&workspace_path, &workspace(&later_root)).unwrap();
+
+        assert!(authority.claim_submission(&saved_root).is_ok());
+        assert!(authority.claim_submission(&later_root).is_err());
+        assert!(authority.authorize_native_open(&later_root).is_ok());
+        assert!(authority.claim_submission(&later_root).is_ok());
+    }
+
+    #[test]
+    fn startup_project_authority_rejects_malformed_or_arbitrary_roots() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let workspace_path = tree.path().join("workspace.json");
+        let workspace = serde_json::json!({
+            "version": 3,
+            "activeProjectId": "project",
+            "activeThreadId": null,
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "root": "relative/arbitrary",
+            }],
+            "sessions": [],
+            "paneLayouts": [],
+        });
+        native_workspace::save_workspace_to(&workspace_path, &workspace).unwrap();
+
+        assert!(NativeProjectAuthority::from_workspace_path(&workspace_path).is_err());
     }
 
     #[test]

@@ -48,6 +48,74 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function createWorkspaceSaveRuntime(options: {
+  invoke: (command: string, args: Record<string, any>) => Promise<unknown>;
+}) {
+  let frame: (() => void) | null = null;
+  let value = 'initial';
+  const sources = [
+    'queueWorkspaceSave',
+    'saveWorkspaceNow',
+    'saveWorkspaceSoon',
+    'beginWorkspaceSaveCriticalSection',
+    'flushWorkspaceSaveCriticalSection',
+    'finishWorkspaceSaveCriticalSection',
+  ].map(functionSource).join('\n');
+  const runtime = Function(
+    'invoke',
+    'workspaceModel',
+    'buildPersistedWorkspace',
+    'setStatus',
+    'requestAnimationFrame',
+    'cancelAnimationFrame',
+    `"use strict";
+    var isRestoringWorkspace = false;
+    var saveWorkspaceTimer = 0;
+    var workspaceSaveQueue = Promise.resolve();
+    var workspaceSaveCriticalSection = null;
+    ${sources}
+    return {
+      saveWorkspaceNow,
+      saveWorkspaceSoon,
+      beginWorkspaceSaveCriticalSection,
+      flushWorkspaceSaveCriticalSection,
+      finishWorkspaceSaveCriticalSection,
+    };`,
+  )(
+    options.invoke,
+    () => ({ sanitizeWorkspaceV3: (workspace: unknown) => workspace }),
+    () => ({ value }),
+    () => undefined,
+    (callback: () => void) => {
+      frame = callback;
+      return 1;
+    },
+    () => {
+      frame = null;
+    },
+  ) as {
+    saveWorkspaceNow: () => Promise<boolean>;
+    saveWorkspaceSoon: () => Promise<boolean> | undefined;
+    beginWorkspaceSaveCriticalSection: () => Promise<Record<string, unknown>>;
+    flushWorkspaceSaveCriticalSection: (
+      section: Record<string, unknown>,
+    ) => Promise<boolean>;
+    finishWorkspaceSaveCriticalSection: (
+      section: Record<string, unknown>,
+    ) => Promise<boolean>;
+  };
+  return {
+    runtime,
+    setValue: (next: string) => { value = next; },
+    runFrame: () => {
+      const callback = frame;
+      frame = null;
+      callback?.();
+    },
+    hasFrame: () => frame !== null,
+  };
+}
+
 describe('Tauri workspace persistence model', () => {
   test('imports v2 state without inventing sessions or layouts', () => {
     expect(
@@ -1394,6 +1462,96 @@ describe('Tauri workspace persistence model', () => {
     expect(mainSource).toContain('await saveWorkspaceNow();');
   });
 
+  test('defers saves during project removal and flushes the final state exactly once', async () => {
+    const saved: string[] = [];
+    const { runtime, setValue, hasFrame } = createWorkspaceSaveRuntime({
+      invoke: async (command, args) => {
+        expect(command).toBe('workspace_save');
+        saved.push(args.workspace.value);
+      },
+    });
+
+    runtime.saveWorkspaceSoon();
+    expect(hasFrame()).toBe(true);
+    const section = await runtime.beginWorkspaceSaveCriticalSection();
+    expect(hasFrame()).toBe(false);
+
+    setValue('provisional');
+    let durable = false;
+    const durability = runtime.saveWorkspaceNow().then(() => {
+      durable = true;
+    });
+    await Promise.resolve();
+    expect(durable).toBe(false);
+
+    setValue('final');
+    await runtime.finishWorkspaceSaveCriticalSection(section);
+    await durability;
+
+    expect(saved).toEqual(['final']);
+    expect(durable).toBe(true);
+  });
+
+  test('rechecks the save version before atomically closing the critical section', async () => {
+    const saved: string[] = [];
+    const { runtime, setValue } = createWorkspaceSaveRuntime({
+      invoke: async (_command, args) => {
+        saved.push(args.workspace.value);
+      },
+    });
+    const section = await runtime.beginWorkspaceSaveCriticalSection();
+    const mutableSection = section as {
+      hasFlushed: boolean;
+    };
+    let hasFlushed = false;
+    let lateSave: Promise<boolean> | undefined;
+    Object.defineProperty(mutableSection, 'hasFlushed', {
+      configurable: true,
+      get: () => hasFlushed,
+      set: (value: boolean) => {
+        hasFlushed = value;
+        if (value && !lateSave) {
+          queueMicrotask(() => {
+            setValue('late');
+            lateSave = runtime.saveWorkspaceNow();
+          });
+        }
+      },
+    });
+
+    setValue('final');
+    await runtime.finishWorkspaceSaveCriticalSection(section);
+    await lateSave;
+
+    expect(saved).toEqual(['final', 'late']);
+  });
+
+  test('takes queued workspace snapshots lazily after earlier saves settle', async () => {
+    let releaseFirst: (() => void) | undefined;
+    const saved: string[] = [];
+    const { runtime, setValue } = createWorkspaceSaveRuntime({
+      invoke: async (_command, args) => {
+        saved.push(args.workspace.value);
+        if (saved.length === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+      },
+    });
+
+    setValue('first');
+    const first = runtime.saveWorkspaceNow();
+    while (!releaseFirst) await Promise.resolve();
+    setValue('second');
+    const second = runtime.saveWorkspaceNow();
+    setValue('final');
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    expect(saved).toEqual(['first', 'final']);
+  });
+
   test('serializes sessions, Files panes, and pane layouts into workspace v3', () => {
     expect(functionSource('persistableSession')).not.toMatch(/term|host|pane|fit/);
     expect(functionSource('persistableFilesPanes')).toContain('filesPanes.forEach');
@@ -1405,7 +1563,7 @@ describe('Tauri workspace persistence model', () => {
   });
 
   test('loads and saves the complete native workspace document', () => {
-    expect(functionSource('saveWorkspaceNow')).toContain('invoke("workspace_save"');
+    expect(functionSource('queueWorkspaceSave')).toContain('invoke("workspace_save"');
     expect(functionSource('readSavedWorkspace')).toContain('invoke("workspace_load"');
     expect(functionSource('readSavedWorkspace')).toContain('sanitizeWorkspaceV3');
     expect(functionSource('handleWindowCloseRequested')).toContain('await saveWorkspaceNow()');
@@ -1436,11 +1594,16 @@ describe('Tauri workspace persistence model', () => {
 
   test('creates the durable session before mutating webview thread state', () => {
     const create = functionSource('createThread');
-    expect(create).toContain('invoke("native_session_create"');
-    expect(create.indexOf('invoke("native_session_create"')).toBeLessThan(
+    const preAdmission = 'createNativeSessionForThread(thread, { mode: "pre-admission" })';
+    expect(create).toContain(preAdmission);
+    expect(create.indexOf(preAdmission)).toBeLessThan(
       create.indexOf('state.threads.push(thread)'),
     );
-    expect(create).toContain('attachThreadClient(thread)');
+    expect(create).toContain('attachThreadClientAndResolveRecovery(thread)');
+    const nativeCreate = functionSource('createNativeSessionForThread');
+    expect(nativeCreate).toContain('nativeSessionCreatesByProject.set');
+    expect(nativeCreate).toContain('invoke("native_session_create"');
+    expect(nativeCreate).toContain('finally');
   });
 
   test('attaches disposable PTYs with the Rust sessionId contract', () => {
@@ -1461,8 +1624,8 @@ describe('Tauri workspace persistence model', () => {
 
   test('explicit retry recreates and attaches an exited durable session', () => {
     const retry = functionSource('retryThread');
-    expect(retry).toContain('invoke("native_session_create"');
-    expect(retry).toContain('attachThreadClient(thread)');
+    expect(retry).toContain('createNativeSessionForThread(thread)');
+    expect(retry).toContain('attachThreadClientAndResolveRecovery(thread)');
   });
 
   test('distinguishes a dropped client from a stopped durable session', () => {
@@ -1479,7 +1642,7 @@ describe('Tauri workspace persistence model', () => {
     const restore = functionSource('restorePersistedSessions');
     expect(restore).toContain('PsycheWorkspace.reconcileSessions');
     expect(restore).toContain('invoke("native_session_capture"');
-    expect(restore).toContain('attachThreadClient(thread)');
+    expect(restore).toContain('attachThreadClientAndResolveRecovery(thread)');
     expect(restore).not.toContain('native_session_create');
   });
 
