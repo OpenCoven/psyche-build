@@ -119,6 +119,7 @@ public actor PairedHostStore {
     func publishReadinessHost(
         _ host: PairedHost,
         policy: HostIdentityPublicationPolicy,
+        claimedBy claim: HostReadinessHostPublicationClaim,
         authorizedBy authorization: HostReadinessFlowAuthorization
     ) -> HostReadinessTransactionResult {
         let previousData: Data?
@@ -140,7 +141,7 @@ public actor PairedHostStore {
             return .notCommitted(reason: error.localizedDescription)
         }
 
-        return authorization.publishHost(host) {
+        return authorization.publishHost(claimedBy: claim) {
             do {
                 try Task.checkCancellation()
                 try secureStore.set(nextData, forKey: key)

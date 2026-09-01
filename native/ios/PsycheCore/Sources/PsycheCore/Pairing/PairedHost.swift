@@ -332,15 +332,40 @@ enum HostReadinessHostPublicationOutcome: Equatable, Sendable {
     case indeterminate(reason: String)
 }
 
+struct HostReadinessHostPublicationClaim: Equatable, Sendable {
+    let id: UUID
+    let host: PairedHost
+}
+
 final class HostReadinessFlowAuthorization: @unchecked Sendable {
     private let lock = NSLock()
     private var isAuthorized = true
     private var hostPublication: HostReadinessHostPublicationOutcome = .pending
+    private var hostPublicationClaim: HostReadinessHostPublicationClaim?
+    private var hostPublicationStarted = false
+
+    func claimHostPublication(_ host: PairedHost) -> HostReadinessHostPublicationClaim? {
+        lock.withLock {
+            guard isAuthorized,
+                  hostPublication == .pending,
+                  hostPublicationClaim == nil else {
+                return nil
+            }
+            let claim = HostReadinessHostPublicationClaim(id: UUID(), host: host)
+            hostPublicationClaim = claim
+            return claim
+        }
+    }
 
     @discardableResult
     func revoke() -> HostReadinessHostPublicationOutcome {
         lock.withLock {
             isAuthorized = false
+            if hostPublicationClaim != nil,
+               !hostPublicationStarted,
+               hostPublication == .pending {
+                hostPublication = .notCommitted
+            }
             return hostPublication
         }
     }
@@ -353,20 +378,24 @@ final class HostReadinessFlowAuthorization: @unchecked Sendable {
     }
 
     func publishHost(
-        _ host: PairedHost,
+        claimedBy claim: HostReadinessHostPublicationClaim,
         operation: () -> HostReadinessTransactionResult
     ) -> HostReadinessTransactionResult {
         lock.withLock {
-            guard isAuthorized else {
+            guard isAuthorized,
+                  hostPublication == .pending,
+                  hostPublicationClaim == claim,
+                  !hostPublicationStarted else {
                 return .notCommitted(reason: nil)
             }
+            hostPublicationStarted = true
             let result = operation()
             // Record the durable outcome before releasing the same lock that
             // revocation acquires. A waiter can therefore reconcile machine
             // authority before it discards this flow.
             switch result {
             case .committed:
-                hostPublication = .committed(host)
+                hostPublication = .committed(claim.host)
             case .notCommitted:
                 hostPublication = .notCommitted
             case .indeterminate(let reason):
@@ -481,7 +510,7 @@ public final class HostReadinessMachine {
     ) async throws -> HostReadinessTransactionResult {
         try requireActive(flow)
         if let expected = flow.expectedServerID, host.serverID != expected {
-            failClosed(.revocation, reason: HostReadinessError
+            try failClosed(.revocation, reason: HostReadinessError
                 .wrongHostIdentity(expected: expected, actual: host.serverID)
                 .localizedDescription)
             throw HostReadinessError.wrongHostIdentity(
@@ -491,6 +520,9 @@ public final class HostReadinessMachine {
         }
         guard let authorization = activeAuthorization else {
             throw HostReadinessError.supersededFlow
+        }
+        guard let publicationClaim = authorization.claimHostPublication(host) else {
+            return .notCommitted(reason: nil)
         }
         let policy: HostIdentityPublicationPolicy
         switch flow.kind {
@@ -502,6 +534,7 @@ public final class HostReadinessMachine {
         let result = await pairedHostStore.publishReadinessHost(
             host,
             policy: policy,
+            claimedBy: publicationClaim,
             authorizedBy: authorization
         )
         switch result {
@@ -525,7 +558,7 @@ public final class HostReadinessMachine {
             guard activeFlow == flow, state == .authenticating else {
                 return result
             }
-            failIndeterminate(.secureStore, reason: reason)
+            try failIndeterminate(.secureStore, reason: reason, for: flow)
         }
         return result
     }
@@ -570,9 +603,11 @@ public final class HostReadinessMachine {
             guard activeFlow == flow, state == .synchronizing else {
                 return result
             }
+            guard try revokeActiveAuthorization(for: flow) else {
+                return result
+            }
             _ = try apply(.workspaceAccepted)
             lastFailure = nil
-            authorization.revoke()
             activeFlow = nil
             activeAuthorization = nil
             presentation = .live(
@@ -593,7 +628,7 @@ public final class HostReadinessMachine {
             guard activeFlow == flow, state == .synchronizing else {
                 return result
             }
-            failIndeterminate(.workspaceApply, reason: reason)
+            try failIndeterminate(.workspaceApply, reason: reason, for: flow)
         }
         return result
     }
@@ -628,9 +663,8 @@ public final class HostReadinessMachine {
     /// committed identity survives on disk for the explicit re-pair path.
     @discardableResult
     public func revoke(reason: String? = nil) throws -> HostReadinessState {
-        if let flow = activeFlow, let authorization = activeAuthorization {
-            let publication = authorization.revoke()
-            guard try reconcileHostPublication(publication, for: flow) else {
+        if let flow = activeFlow {
+            guard try revokeActiveAuthorization(for: flow) else {
                 return state
             }
         }
@@ -660,10 +694,18 @@ public final class HostReadinessMachine {
         return flow
     }
 
-    /// Fails closed without touching committed authority — used when a flow
-    /// contradicts the identity it committed to.
-    private func failClosed(_ boundary: HostReadinessFailureBoundary, reason: String?) {
-        activeAuthorization?.revoke()
+    /// Fails closed when a flow contradicts its expected identity. If another
+    /// call already crossed the host-publication boundary, reconcile that
+    /// durable outcome before discarding the flow.
+    private func failClosed(
+        _ boundary: HostReadinessFailureBoundary,
+        reason: String?
+    ) throws {
+        if let flow = activeFlow {
+            guard try revokeActiveAuthorization(for: flow) else {
+                return
+            }
+        }
         lastFailure = HostReadinessFailure(
             boundary: boundary,
             reason: reason,
@@ -677,10 +719,20 @@ public final class HostReadinessMachine {
 
     private func failIndeterminate(
         _ boundary: HostReadinessFailureBoundary,
+        reason: String,
+        for flow: HostReadinessFlow
+    ) throws {
+        guard try revokeActiveAuthorization(for: flow) else {
+            return
+        }
+        recordIndeterminateFailure(boundary, reason: reason)
+    }
+
+    private func recordIndeterminateFailure(
+        _ boundary: HostReadinessFailureBoundary,
         reason: String
     ) {
         let from = state
-        activeAuthorization?.revoke()
         lastFailure = HostReadinessFailure(
             boundary: boundary,
             reason: reason,
@@ -709,6 +761,14 @@ public final class HostReadinessMachine {
         }
     }
 
+    private func revokeActiveAuthorization(for flow: HostReadinessFlow) throws -> Bool {
+        try requireActive(flow)
+        guard let authorization = activeAuthorization else {
+            return true
+        }
+        return try reconcileHostPublication(authorization.revoke(), for: flow)
+    }
+
     private func reconcileHostPublication(
         _ publication: HostReadinessHostPublicationOutcome,
         for flow: HostReadinessFlow
@@ -724,7 +784,7 @@ public final class HostReadinessMachine {
             }
             return true
         case .indeterminate(let reason):
-            failIndeterminate(.secureStore, reason: reason)
+            recordIndeterminateFailure(.secureStore, reason: reason)
             return false
         }
     }
@@ -752,11 +812,8 @@ public final class HostReadinessMachine {
         guard activeFlow == flow else {
             throw HostReadinessError.supersededFlow
         }
-        if let authorization = activeAuthorization {
-            let publication = authorization.revoke()
-            guard try reconcileHostPublication(publication, for: flow) else {
-                return state
-            }
+        guard try revokeActiveAuthorization(for: flow) else {
+            return state
         }
         let from = state
         guard let destination = HostReadinessTransitions.destination(

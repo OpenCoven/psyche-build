@@ -123,12 +123,14 @@ final class PairedHostStoreTests: XCTestCase {
         let store = PairedHostStore(secureStore: secureStore)
         let authorization = HostReadinessFlowAuthorization()
         let host = makeHost()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(host))
 
         secureStore.blockNextRead()
         let publication = Task {
             await store.publishReadinessHost(
                 host,
                 policy: .replace,
+                claimedBy: claim,
                 authorizedBy: authorization
             )
         }
@@ -148,11 +150,15 @@ final class PairedHostStoreTests: XCTestCase {
         let original = makeHost()
         try await store.save(original)
         secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        let replacement = makeHost(fingerprint: otherFingerprint, token: "token-2")
+        let authorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(replacement))
 
         let result = await store.publishReadinessHost(
-            makeHost(fingerprint: otherFingerprint, token: "token-2"),
+            replacement,
             policy: .replace,
-            authorizedBy: HostReadinessFlowAuthorization()
+            claimedBy: claim,
+            authorizedBy: authorization
         )
 
         guard case .notCommitted = result else {
@@ -168,11 +174,15 @@ final class PairedHostStoreTests: XCTestCase {
         try await store.save(makeHost())
         secureStore.enqueue(.mutateThenThrow(.writeFailed))
         secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+        let replacement = makeHost(fingerprint: otherFingerprint, token: "token-2")
+        let authorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(replacement))
 
         let result = await store.publishReadinessHost(
-            makeHost(fingerprint: otherFingerprint, token: "token-2"),
+            replacement,
             policy: .replace,
-            authorizedBy: HostReadinessFlowAuthorization()
+            claimedBy: claim,
+            authorizedBy: authorization
         )
 
         guard case .indeterminate = result else {
@@ -418,6 +428,11 @@ private final class SuccessfulWriteBoundarySecureStore: SecureStore, @unchecked 
     private var storage: [String: Data] = [:]
     private var shouldBlockNextWrite = false
     private var writeReleased = false
+    private var writes = 0
+
+    var writeCount: Int {
+        condition.withLock { writes }
+    }
 
     func blockNextWrite() {
         writeBeganSignal.reset()
@@ -448,6 +463,7 @@ private final class SuccessfulWriteBoundarySecureStore: SecureStore, @unchecked 
     func set(_ data: Data, forKey key: String) throws {
         condition.lock()
         storage[key] = data
+        writes += 1
         if shouldBlockNextWrite {
             shouldBlockNextWrite = false
             condition.unlock()
@@ -1311,6 +1327,109 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .revoked)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
+    }
+
+    func testWrongHostFailureReconcilesAConcurrentSuccessfulHostWrite() async throws {
+        let secureStore = SuccessfulWriteBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let machine = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let host = makeHost(serverID: "new-host")
+        let flow = try machine.beginPairing(expectedServerID: host.serverID)
+        _ = try machine.markAuthenticated(for: flow)
+
+        secureStore.blockNextWrite()
+        let commit = Task {
+            try await machine.commitHostIdentity(host, for: flow)
+        }
+        try await secureStore.waitUntilWriteBegins()
+
+        let failureStarted = BoundedAsyncSignal()
+        let release = Task.detached {
+            try await failureStarted.wait(
+                for: "wrong-host failure to begin",
+                timeout: .seconds(1)
+            )
+            secureStore.releaseWrite()
+        }
+        let wrongHost = Task { @MainActor in
+            failureStarted.signal()
+            return try await machine.commitHostIdentity(
+                makeHost(serverID: "rogue-host", clientID: "client-rogue"),
+                for: flow
+            )
+        }
+
+        do {
+            _ = try await wrongHost.value
+            XCTFail("A wrong-host identity must fail closed")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(
+                error,
+                .wrongHostIdentity(expected: host.serverID, actual: "rogue-host")
+            )
+        }
+        let commitResult = try await commit.value
+        try await release.value
+        let persistedHost = try await pairedHostStore.host(withServerID: host.serverID)
+
+        XCTAssertEqual(commitResult, .committed)
+        XCTAssertEqual(secureStore.writeCount, 1)
+        XCTAssertEqual(persistedHost, host)
+        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertEqual(machine.state, .revoked)
+        XCTAssertNil(machine.activeFlow)
+        XCTAssertEqual(machine.lastFailure?.boundary, .revocation)
+        XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
+    }
+
+    func testConcurrentValidHostPublicationsCommitExactlyOnce() async throws {
+        let secureStore = SuccessfulWriteBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let machine = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let firstHost = makeHost(serverID: "new-host", clientID: "client-first")
+        let secondHost = makeHost(serverID: "new-host", clientID: "client-second")
+        let flow = try machine.beginPairing(expectedServerID: firstHost.serverID)
+        _ = try machine.markAuthenticated(for: flow)
+
+        secureStore.blockNextWrite()
+        let firstCommit = Task {
+            try await machine.commitHostIdentity(firstHost, for: flow)
+        }
+        try await secureStore.waitUntilWriteBegins()
+
+        let secondStarted = BoundedAsyncSignal()
+        let release = Task.detached {
+            try await secondStarted.wait(
+                for: "second host publication to begin",
+                timeout: .seconds(1)
+            )
+            secureStore.releaseWrite()
+        }
+        let secondCommit = Task { @MainActor in
+            secondStarted.signal()
+            return try await machine.commitHostIdentity(secondHost, for: flow)
+        }
+
+        let firstResult = try await firstCommit.value
+        let secondResult = try await secondCommit.value
+        try await release.value
+        let persistedHost = try await pairedHostStore.host(withServerID: firstHost.serverID)
+
+        XCTAssertEqual(firstResult, .committed)
+        XCTAssertEqual(secondResult, .notCommitted(reason: nil))
+        XCTAssertEqual(secureStore.writeCount, 1)
+        XCTAssertEqual(persistedHost, firstHost)
+        XCTAssertEqual(machine.committedHost, firstHost)
+        XCTAssertEqual(machine.state, .hostCommitted)
+        XCTAssertEqual(machine.activeFlow, flow)
     }
 
     func testSuccessfulHostWriteLinearizesBeforeConcurrentFailure() async throws {
