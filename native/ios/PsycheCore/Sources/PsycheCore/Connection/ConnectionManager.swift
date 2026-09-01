@@ -1097,50 +1097,51 @@ public actor ConnectionManager {
             )
             switch selection.result {
             case .committed:
-                if let transaction = selection.transaction {
-                    let completion = await pairedHostStore.completeReadyHostSelection(
-                        transaction,
-                        selectedBy: generation
+                guard let authorization = selection.authorization else {
+                    return ConnectionManagerError.readinessUnavailable(
+                        "Ready-host selection has no publication authorization."
                     )
-                    switch completion {
-                    case .committed:
-                        break
-                    case .notCommitted(let reason):
-                        await compensateRetiredReadyHostSelection(
-                            transaction,
-                            selectedBy: generation
-                        )
-                        guard isActive(session: session, generation: generation) else {
-                            return nil
-                        }
-                        return ConnectionManagerError.hostIdentityNotCommitted(
-                            reason ?? "Ready-host selection completion was superseded."
-                        )
-                    case .indeterminate(let reason):
-                        let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
-                        await MainActor.run {
-                            _ = try? machine.revoke(reason: error.localizedDescription)
-                        }
-                        return error
-                    }
                 }
                 guard isActive(session: session, generation: generation) else {
                     if let transaction = selection.transaction {
                         await compensateRetiredReadyHostSelection(
                             transaction,
+                            authorizedBy: authorization,
+                            selectedBy: generation
+                        )
+                    } else {
+                        await pairedHostStore.cancelReadyHostSelection(
+                            authorizedBy: authorization,
                             selectedBy: generation
                         )
                     }
                     return nil
                 }
                 do {
-                    try await MainActor.run {
-                        try machine.finalizeReadyHostSelection(serverID: readyHostID)
+                    let finalized = try await MainActor.run {
+                        try generation.withValidity {
+                            try authorization.finalize {
+                                try machine.finalizeReadyHostSelection(
+                                    serverID: readyHostID
+                                )
+                            }
+                        } ?? false
+                    }
+                    guard finalized else {
+                        return ConnectionManagerError.hostIdentityNotCommitted(
+                            "Ready-host selection was superseded before workspace publication."
+                        )
                     }
                 } catch {
                     if let transaction = selection.transaction {
                         await compensateRetiredReadyHostSelection(
                             transaction,
+                            authorizedBy: authorization,
+                            selectedBy: generation
+                        )
+                    } else {
+                        await pairedHostStore.cancelReadyHostSelection(
+                            authorizedBy: authorization,
                             selectedBy: generation
                         )
                     }
@@ -1150,8 +1151,14 @@ public actor ConnectionManager {
                     return error
                 }
                 if let transaction = selection.transaction {
-                    await pairedHostStore.acknowledgeReadyHostSelection(
+                    _ = await pairedHostStore.completeReadyHostSelection(
                         transaction,
+                        authorizedBy: authorization,
+                        selectedBy: generation
+                    )
+                } else {
+                    await pairedHostStore.acknowledgeReadyHostSelection(
+                        authorizedBy: authorization,
                         selectedBy: generation
                     )
                 }
@@ -1177,10 +1184,12 @@ public actor ConnectionManager {
 
     private func compensateRetiredReadyHostSelection(
         _ transaction: PairedHostStore.ReadyHostSelectionTransaction,
+        authorizedBy authorization: ReadyHostSelectionAuthorization,
         selectedBy generation: ConnectionGeneration
     ) async {
         let result = await pairedHostStore.compensateReadyHostSelection(
             transaction,
+            authorizedBy: authorization,
             selectedBy: generation
         )
         guard case .indeterminate(let reason) = result else { return }
