@@ -7167,7 +7167,10 @@
     function paint() {
       var left = Math.ceil(Math.max(0, expiresAt - Date.now()) / 1000);
       confirm.textContent = action + " · " + left;
-      confirm.setAttribute("aria-label", "Confirm " + action.toLowerCase() + " " + label);
+      confirm.setAttribute(
+        "aria-label",
+        "Confirm " + (action === "Close" ? "closing" : action.toLowerCase()) + " " + label
+      );
     }
     paint();
     confirm.addEventListener("click", async function (event) {
