@@ -1745,6 +1745,7 @@ describe('Tauri agent picker', () => {
     const events: string[] = [];
     const thread = {
       id: 'reserved-thread',
+      projectId: 'project',
       name: 'Codex CLI',
       kind: 'coven-recovery',
       launch: {
@@ -1755,13 +1756,17 @@ describe('Tauri agent picker', () => {
       status: 'starting',
       spawning: true,
     };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
     const acceptCovenLaunchReservation = compileFunction<(
       thread: Record<string, any>,
       options: Record<string, any>,
     ) => Promise<Record<string, any>>>(
       functionSource('acceptCovenLaunchReservation'),
       {
-        state: { env: { coven_path: '/bin/coven' } },
+        state,
         saveWorkspaceNow: async () => { events.push('persist'); },
         invoke: async (command: string, args: Record<string, unknown>) => {
           events.push(command);
@@ -1805,12 +1810,85 @@ describe('Tauri agent picker', () => {
     });
   });
 
+  it('does not create a native attachment after an accepted reservation starts closing', async () => {
+    const statuses: Array<[string, string]> = [];
+    let finishFirstSave: (() => void) | undefined;
+    let nativeAttachmentAttempts = 0;
+    const thread: Record<string, any> = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      closeStarted: false,
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any> | null>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: () => new Promise<void>((resolve) => {
+          finishFirstSave = resolve;
+        }),
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          throw new Error('closing reservation must not attach');
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    const acceptance = acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    });
+    expect(thread.covenLaunchAcceptanceInFlight).toBeInstanceOf(Promise);
+    thread.closeStarted = true;
+    if (!finishFirstSave) throw new Error('accepted-session save did not start');
+    finishFirstSave();
+
+    await expect(acceptance).resolves.toBe(thread);
+    expect(nativeAttachmentAttempts).toBe(0);
+    expect(thread.covenLaunchAcceptanceInFlight).toBeNull();
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI was accepted by Coven after its local reservation was closed; no local attachment was created. Inspect Coven session session-accepted.',
+      'error',
+    ]);
+  });
+
+  it('waits for accepted-session conversion before stopping a closing native session', () => {
+    const closeThread = functionSource('closeThread');
+    expect(closeThread.indexOf('await covenLaunchAcceptanceInFlight')).toBeLessThan(
+      closeThread.indexOf('invoke("native_session_stop"'),
+    );
+  });
+
   it('quarantines an accepted session when its first persistence attempt fails', async () => {
     const statuses: Array<[string, string]> = [];
     const writes: string[] = [];
     let saveAttempts = 0;
     const thread = {
       id: 'reserved-thread',
+      projectId: 'project',
       name: 'Codex CLI',
       kind: 'coven-recovery',
       launch: {
@@ -1824,13 +1902,17 @@ describe('Tauri agent picker', () => {
         write: (value: string) => { writes.push(value); },
       },
     };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
     const acceptCovenLaunchReservation = compileFunction<(
       thread: Record<string, any>,
       options: Record<string, any>,
     ) => Promise<Record<string, any>>>(
       functionSource('acceptCovenLaunchReservation'),
       {
-        state: { env: { coven_path: '/bin/coven' } },
+        state,
         saveWorkspaceNow: async () => {
           saveAttempts += 1;
           if (saveAttempts === 1) throw new Error('disk full');
@@ -1890,6 +1972,7 @@ describe('Tauri agent picker', () => {
     let nativeAttachmentAttempts = 0;
     const thread = {
       id: 'reserved-thread',
+      projectId: 'project',
       name: 'Codex CLI',
       kind: 'coven-recovery',
       launch: {
@@ -1903,13 +1986,17 @@ describe('Tauri agent picker', () => {
         write: (value: string) => { writes.push(value); },
       },
     };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
     const acceptCovenLaunchReservation = compileFunction<(
       thread: Record<string, any>,
       options: Record<string, any>,
     ) => Promise<Record<string, any>>>(
       functionSource('acceptCovenLaunchReservation'),
       {
-        state: { env: { coven_path: '/bin/coven' } },
+        state,
         saveWorkspaceNow: async () => {
           saveAttempts += 1;
           throw new Error(saveAttempts === 1 ? 'disk full' : 'disk still full');

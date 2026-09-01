@@ -2518,6 +2518,20 @@
   }
 
   async function acceptCovenLaunchReservation(thread, options) {
+    function reservationIsCurrent() {
+      return !thread.closeStarted && state.threads.indexOf(thread) !== -1;
+    }
+
+    function surfaceClosedReservation() {
+      setStatus(
+        (options.name || thread.name || "Coven launch") +
+          " was accepted by Coven after its local reservation was closed; " +
+          "no local attachment was created. Inspect Coven session " +
+          options.sessionId + ".",
+        "error"
+      );
+    }
+
     function surfaceNonDurableRecovery(error) {
       if (thread.terminalController) {
         thread.terminalController.write(
@@ -2533,105 +2547,130 @@
       );
     }
 
-    thread.name = options.name || thread.name;
-    thread.kind = "coven-attach";
-    thread.launch.command = state.env.coven_path;
-    thread.launch.args = ["attach", options.sessionId];
-    thread.launch.launchKind = "coven-attach";
-    thread.launch.covenSessionId = options.sessionId;
-    thread.launch.promptDigest = options.promptDigest || null;
-    thread.launch.metricsProvider = options.harness || "coven";
-    thread.launch.recoveryRequired = false;
-    thread.status = "starting";
-    thread.spawning = true;
-    thread.finishedAt = null;
-    syncThreadPaneMetadata(thread);
-    refreshSidebar();
-    refreshTabs();
+    if (!reservationIsCurrent()) {
+      surfaceClosedReservation();
+      return null;
+    }
+
+    var finishAcceptance;
+    var acceptanceInFlight = new Promise(function (resolve) {
+      finishAcceptance = resolve;
+    });
+    thread.covenLaunchAcceptanceInFlight = acceptanceInFlight;
     try {
-      await saveWorkspaceNow();
-    } catch (error) {
-      thread.launch.recoveryRequired = true;
-      thread.status = "failed";
-      thread.spawning = false;
-      thread.finishedAt = Date.now();
-      thread.sidebarStatusKey = "error";
-      if (thread.terminalController) {
-        thread.terminalController.write(
-          "\r\n\x1b[31m[Coven session accepted; local recovery required]\x1b[0m " +
-            String(error) + "\r\n"
-        );
-      }
-      setStatus(
-        thread.name + " was accepted by Coven but local recovery is required: " + String(error),
-        "error"
-      );
+      thread.name = options.name || thread.name;
+      thread.kind = "coven-attach";
+      thread.launch.command = state.env.coven_path;
+      thread.launch.args = ["attach", options.sessionId];
+      thread.launch.launchKind = "coven-attach";
+      thread.launch.covenSessionId = options.sessionId;
+      thread.launch.promptDigest = options.promptDigest || null;
+      thread.launch.metricsProvider = options.harness || "coven";
+      thread.launch.recoveryRequired = false;
+      thread.status = "starting";
+      thread.spawning = true;
+      thread.finishedAt = null;
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
       try {
         await saveWorkspaceNow();
-      } catch (recoverySaveError) {
-        surfaceNonDurableRecovery(recoverySaveError);
+      } catch (error) {
+        thread.launch.recoveryRequired = true;
+        thread.status = "failed";
+        thread.spawning = false;
+        thread.finishedAt = Date.now();
+        thread.sidebarStatusKey = "error";
+        if (thread.terminalController) {
+          thread.terminalController.write(
+            "\r\n\x1b[31m[Coven session accepted; local recovery required]\x1b[0m " +
+              String(error) + "\r\n"
+          );
+        }
+        setStatus(
+          thread.name + " was accepted by Coven but local recovery is required: " + String(error),
+          "error"
+        );
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        try {
+          await saveWorkspaceNow();
+        } catch (recoverySaveError) {
+          surfaceNonDurableRecovery(recoverySaveError);
+        }
+        return thread;
+      }
+      if (!reservationIsCurrent()) {
+        surfaceClosedReservation();
+        return thread;
+      }
+      try {
+        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+        thread.persistentLive = true;
+      } catch (error) {
+        thread.launch.recoveryRequired = true;
+        thread.status = "failed";
+        thread.spawning = false;
+        thread.finishedAt = Date.now();
+        if (thread.terminalController) {
+          thread.terminalController.write(
+            "\r\n\x1b[31m[Coven session accepted; local attachment unavailable]\x1b[0m " +
+              String(error) + "\r\n"
+          );
+        }
+        setStatus(
+          thread.name + " was accepted by Coven but could not be attached: " + String(error),
+          "error"
+        );
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        try {
+          await saveWorkspaceNow();
+        } catch (recoverySaveError) {
+          surfaceNonDurableRecovery(recoverySaveError);
+        }
+        return thread;
+      }
+      if (!reservationIsCurrent()) {
+        surfaceClosedReservation();
+        return thread;
+      }
+      await attachThreadClient(thread);
+      try {
+        await saveWorkspaceNow();
+      } catch (error) {
+        thread.launch.recoveryRequired = true;
+        thread.sidebarStatusKey = "error";
+        if (thread.terminalController) {
+          thread.terminalController.write(
+            "\r\n\x1b[31m[Coven session accepted; attachment persistence failed]\x1b[0m " +
+              String(error) + "\r\n"
+          );
+        }
+        setStatus(
+          thread.name +
+            " was accepted by Coven but final attachment persistence failed; " +
+            "local recovery is required: " + String(error),
+          "error"
+        );
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        try {
+          await saveWorkspaceNow();
+        } catch (recoverySaveError) {
+          surfaceNonDurableRecovery(recoverySaveError);
+        }
       }
       return thread;
+    } finally {
+      if (thread.covenLaunchAcceptanceInFlight === acceptanceInFlight) {
+        thread.covenLaunchAcceptanceInFlight = null;
+      }
+      finishAcceptance();
     }
-    try {
-      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
-      thread.persistentLive = true;
-    } catch (error) {
-      thread.launch.recoveryRequired = true;
-      thread.status = "failed";
-      thread.spawning = false;
-      thread.finishedAt = Date.now();
-      if (thread.terminalController) {
-        thread.terminalController.write(
-          "\r\n\x1b[31m[Coven session accepted; local attachment unavailable]\x1b[0m " +
-            String(error) + "\r\n"
-        );
-      }
-      setStatus(
-        thread.name + " was accepted by Coven but could not be attached: " + String(error),
-        "error"
-      );
-      syncThreadPaneMetadata(thread);
-      refreshSidebar();
-      refreshTabs();
-      try {
-        await saveWorkspaceNow();
-      } catch (recoverySaveError) {
-        surfaceNonDurableRecovery(recoverySaveError);
-      }
-      return thread;
-    }
-    await attachThreadClient(thread);
-    try {
-      await saveWorkspaceNow();
-    } catch (error) {
-      thread.launch.recoveryRequired = true;
-      thread.sidebarStatusKey = "error";
-      if (thread.terminalController) {
-        thread.terminalController.write(
-          "\r\n\x1b[31m[Coven session accepted; attachment persistence failed]\x1b[0m " +
-            String(error) + "\r\n"
-        );
-      }
-      setStatus(
-        thread.name +
-          " was accepted by Coven but final attachment persistence failed; " +
-          "local recovery is required: " + String(error),
-        "error"
-      );
-      syncThreadPaneMetadata(thread);
-      refreshSidebar();
-      refreshTabs();
-      try {
-        await saveWorkspaceNow();
-      } catch (recoverySaveError) {
-        surfaceNonDurableRecovery(recoverySaveError);
-      }
-    }
-    return thread;
   }
 
   async function createBrowserPane(project) {
@@ -5544,6 +5583,10 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    var covenLaunchAcceptanceInFlight = thread.covenLaunchAcceptanceInFlight;
+    if (covenLaunchAcceptanceInFlight) {
+      await covenLaunchAcceptanceInFlight;
+    }
     if (isPersistentThread(thread) && !(options && options.skipNativeSessionStop)) {
       try {
         await invoke("native_session_stop", { id: thread.id });
