@@ -949,6 +949,16 @@ final class ConnectionManagerTests: XCTestCase {
 
         let selected = try await composition.pairedHostStore.selectedHost()
         XCTAssertEqual(selected, previouslyReady)
+
+        await composition.manager.disconnect()
+        let fallback = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake, occurrence: 2)
+        let attempts = await fake.connectionAttempts
+        XCTAssertEqual(attempts, [candidateEndpoint, previouslyReady.endpoint])
+        await fake.emit(.legacy(.welcome(
+            makeWelcome(serverID: previouslyReady.serverID)
+        )))
+        await fallback.value
     }
 
     func testSameManagerReturnsToPreviouslyReadyHostAfterCandidateDisconnects() async throws {
@@ -1649,6 +1659,84 @@ final class ConnectionManagerTests: XCTestCase {
 
         let disconnectCount = await fake.disconnectCount
         XCTAssertEqual(disconnectCount, 1)
+    }
+
+    func testInvalidTokenAfterWelcomeRevokesAndRetiresStoredCredential() async throws {
+        let secureStore = InMemorySecureStore()
+        let stored = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(stored)
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        let connect = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await composition.manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(
+            makeWelcome(serverID: stored.serverID)
+        )))
+        await connect.value
+        await fake.emit(.legacy(.error(ProtocolError(
+            code: "invalid_token",
+            message: "token rejected"
+        ))))
+
+        await composition.manager.waitForState(.failed("token rejected"))
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        let retained = try await composition.pairedHostStore.host(
+            withServerID: stored.serverID
+        )
+        XCTAssertEqual(retained?.endpoint, stored.endpoint)
+        XCTAssertEqual(retained?.clientID, stored.clientID)
+        XCTAssertNil(retained?.token)
+
+        let restartedTransport = FakeTransport()
+        let restarted = makeComposition(
+            transport: restartedTransport,
+            secureStore: secureStore
+        )
+        let reconnect = Task { await restarted.manager.connectToStoredHost() }
+        try await waitForHello(on: restartedTransport)
+        let hello = await restartedTransport.sentMessages.compactMap {
+            message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }.last
+        XCTAssertEqual(hello?.clientID, stored.clientID)
+        XCTAssertNil(hello?.token)
+        await restartedTransport.emit(.legacy(.welcome(
+            makeWelcome(serverID: stored.serverID)
+        )))
+        await reconnect.value
+    }
+
+    func testInvalidTokenBeforeWelcomeRetiresStoredCredential() async throws {
+        let secureStore = InMemorySecureStore()
+        let stored = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(stored)
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        let connect = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await composition.manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.error(ProtocolError(
+            code: "invalid_token",
+            message: "token rejected"
+        ))))
+
+        await connect.value
+        await composition.manager.waitForState(.failed("token rejected"))
+        let retained = try await composition.pairedHostStore.host(
+            withServerID: stored.serverID
+        )
+        XCTAssertNil(retained?.token)
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
     }
 
     private func makePane(id: String) -> PaneSnapshot {

@@ -55,10 +55,14 @@ public actor PairedHostStore {
     }
 
     public func selectedHost() throws -> PairedHost? {
-        let state = try state()
+        let snapshot = try stateSnapshot()
+        let state = snapshot.state
         guard let selectedServerID = state.selectedServerID else { return nil }
         guard let host = state.records[selectedServerID] else {
             throw PairedHostStoreError.corruptedRecord
+        }
+        if snapshot.currentData == nil, fallbackKey != nil {
+            try write(state)
         }
         return host
     }
@@ -270,6 +274,48 @@ public actor PairedHostStore {
         } ?? .notCommitted(reason: nil)
     }
 
+    /// Removes a server-rejected credential without discarding the pinned host
+    /// identity. The generation lock prevents a retired connection from
+    /// clearing credentials written by a newer one.
+    func revokeToken(
+        forServerID serverID: String,
+        for generation: ConnectionGeneration
+    ) -> HostReadinessTransactionResult {
+        let previousData: Data?
+        let nextData: Data
+        do {
+            let snapshot = try stateSnapshot()
+            previousData = snapshot.currentData
+            var state = snapshot.state
+            guard let existing = state.records[serverID] else {
+                return .notCommitted(
+                    reason: "The rejected credential has no persisted host record."
+                )
+            }
+            guard existing.token != nil else {
+                return generation.withValidity { .committed }
+                    ?? .notCommitted(reason: nil)
+            }
+            state.records[serverID] = existing.withToken(nil)
+            nextData = try JSONEncoder().encode(state)
+        } catch {
+            return .notCommitted(reason: error.localizedDescription)
+        }
+
+        return generation.withValidity {
+            do {
+                try secureStore.set(nextData, forKey: key)
+                return .committed
+            } catch {
+                return compensateWrite(
+                    to: previousData,
+                    after: error,
+                    operation: "Credential revocation"
+                )
+            }
+        } ?? .notCommitted(reason: nil)
+    }
+
     /// Restores the previous reconnect selection when a generation retires
     /// after selection committed but before readiness could promote the host.
     /// The expected-current check avoids overwriting a later selection.
@@ -394,7 +440,7 @@ public actor PairedHostStore {
             let records = try decoder.decode([String: PairedHost].self, from: data)
             return try validate(PersistedState(
                 records: records,
-                selectedServerID: records.count == 1 ? records.keys.first : nil
+                selectedServerID: records.keys.sorted().first
             ))
         } catch {
             if let error = error as? PairedHostStoreError {

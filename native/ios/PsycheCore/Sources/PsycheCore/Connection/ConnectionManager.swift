@@ -680,6 +680,14 @@ public actor ConnectionManager {
             guard hasNegotiatedV3 else { return .ignored }
             latestOutputByPane[output.paneID] = output
         case .error(let error):
+            if error.code == "invalid_token" {
+                await handleCredentialRevocation(
+                    error,
+                    for: session,
+                    generation: generation
+                )
+                return .ignored
+            }
             return .failed(error.message)
         case .pairAccepted(let payload):
             guard let pairingWaiter,
@@ -1179,6 +1187,61 @@ public actor ConnectionManager {
             generation: generation,
             readinessError: error,
             finalState: .failed(error.localizedDescription)
+        )
+    }
+
+    private func handleCredentialRevocation(
+        _ error: ProtocolError,
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) async {
+        guard isActive(session: session, generation: generation) else { return }
+
+        let persistedServerID: String?
+        if let serverID = welcomeIdentity?.serverID {
+            persistedServerID = serverID
+        } else if case .reconnection(let host) = activeConnection?.readinessIntent {
+            persistedServerID = host.serverID
+        } else {
+            persistedServerID = nil
+        }
+
+        let persistence: HostReadinessTransactionResult
+        if let persistedServerID {
+            persistence = await pairedHostStore.revokeToken(
+                forServerID: persistedServerID,
+                for: generation
+            )
+        } else {
+            persistence = .notCommitted(
+                reason: "The rejected credential has no persisted host identity."
+            )
+        }
+        guard isActive(session: session, generation: generation) else { return }
+
+        let reason: String
+        switch persistence {
+        case .committed:
+            reason = error.message
+        case .notCommitted(let detail):
+            reason = detail.map {
+                "\(error.message) The rejected credential could not be cleared: \($0)"
+            } ?? error.message
+        case .indeterminate(let detail):
+            reason = """
+            \(error.message) Local credential revocation is indeterminate: \(detail)
+            """
+        }
+
+        let machine = hostReadiness
+        await MainActor.run {
+            _ = try? machine.revoke(reason: reason)
+        }
+        clearReadinessFlow()
+        await tearDownActiveConnection(
+            generation: generation,
+            readinessError: error,
+            finalState: .failed(reason)
         )
     }
 

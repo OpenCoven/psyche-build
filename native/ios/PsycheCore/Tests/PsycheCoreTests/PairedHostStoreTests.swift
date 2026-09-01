@@ -69,6 +69,26 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(selected, host)
     }
 
+    func testLegacyMultiHostRecordMigratesThePreviousDeterministicSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let first = makeHost(serverID: "server-a")
+        let second = makeHost(serverID: "server-z")
+        try secureStore.set(
+            JSONEncoder().encode([
+                second.serverID: second,
+                first.serverID: first,
+            ]),
+            forKey: PairedHostStore.legacyKey
+        )
+
+        let migrated = PairedHostStore(secureStore: secureStore)
+        XCTAssertEqual(try await migrated.selectedHost(), first)
+
+        try secureStore.removeValue(forKey: PairedHostStore.legacyKey)
+        let reopened = PairedHostStore(secureStore: secureStore)
+        XCTAssertEqual(try await reopened.selectedHost(), first)
+    }
+
     func testSelectedHostFailsClosedWhenSelectionDoesNotNameARecord() async throws {
         let secureStore = InMemorySecureStore()
         let host = makeHost()
