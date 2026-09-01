@@ -426,6 +426,76 @@ describe('Tauri Coven launch project scope', () => {
     ]);
   });
 
+  it('deduplicates concurrent picker opens after reveal without revoking authority', async () => {
+    const reveal = deferred<boolean>();
+    const state = {
+      env: { home: '/home' },
+      projects: [] as Array<Record<string, any>>,
+      activeProjectId: null as string | null,
+      activeThreadId: null as string | null,
+    };
+    const invocations: string[] = [];
+    let nextId = 0;
+    let pickerOpens = 0;
+    const addProject = compileFunction<(
+      root: string,
+      options: Record<string, unknown>,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async () => '/repo',
+        state,
+        settings: { maxProjects: 8 },
+        HARD_MAX_PROJECTS: 8,
+        showTerminalView: () => reveal.promise,
+        makeProjectId: () => `project-${nextId += 1}`,
+        assignActiveProjectId: (id: string) => { state.activeProjectId = id; },
+        setActiveProject: async (id: string) => {
+          state.activeProjectId = id;
+          return true;
+        },
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshProjectWorktrees: async () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+        startCovenPolling: () => undefined,
+        installAgentControlUi: () => undefined,
+        setStatus: () => undefined,
+      },
+    );
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        invoke: async (command: string) => {
+          invocations.push(command);
+          if (command === 'native_project_open') {
+            pickerOpens += 1;
+            return pickerOpens === 1 ? '/alias/repo' : '/repo';
+          }
+          return true;
+        },
+        addProject,
+        writeToActive: () => undefined,
+      },
+    );
+
+    const first = openProjectPicker();
+    const second = openProjectPicker();
+    await flushPromises();
+    reveal.resolve(true);
+    await Promise.all([first, second]);
+
+    expect(state.projects).toHaveLength(1);
+    expect(state.projects[0]).toMatchObject({
+      id: 'project-1',
+      root: '/repo',
+      nativeAuthorityReady: true,
+    });
+    expect(invocations).toEqual(['native_project_open', 'native_project_open']);
+  });
+
   it('canonicalizes saved roots concurrently before restoring projects', () => {
     const boot = functionSource('boot');
     expect(boot).toContain('restoreSavedProjects');

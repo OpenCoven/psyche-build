@@ -225,13 +225,29 @@ impl NativeProjectAuthority {
                 .get("root")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "persisted workspace project root must be a string".to_string())?;
-            authority.authorize_native_open(Path::new(root))?;
+            if !Path::new(root).is_absolute() {
+                return Err("persisted workspace project root must be absolute".to_string());
+            }
+            let canonical_root = match canonical_project_root(root) {
+                Ok(root) => root,
+                Err(error) => {
+                    log::warn!(
+                        "skipping unavailable persisted project root during startup: {error}"
+                    );
+                    continue;
+                }
+            };
+            authority.authorize_canonical_native_open(canonical_root)?;
         }
         Ok(authority)
     }
 
     fn authorize_native_open(&self, root: &Path) -> Result<String, String> {
         let root = canonical_project_root(&root.to_string_lossy())?;
+        self.authorize_canonical_native_open(root)
+    }
+
+    fn authorize_canonical_native_open(&self, root: PathBuf) -> Result<String, String> {
         let root_text = root.to_string_lossy().into_owned();
         let mut roots = self.inner.roots.lock();
         if let Some(existing) = roots.get(&root) {
@@ -9479,6 +9495,44 @@ mod native_project_authority_tests {
     }
 
     #[test]
+    fn startup_project_authority_keeps_valid_roots_when_an_absolute_root_is_missing() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let workspace_path = tree.path().join("workspace.json");
+        let saved_root = tree.path().join("saved");
+        let missing_root = tree.path().join("missing");
+        std::fs::create_dir_all(&saved_root).unwrap();
+        let workspace = serde_json::json!({
+            "version": 3,
+            "activeProjectId": "saved",
+            "activeThreadId": null,
+            "projects": [
+                {
+                    "id": "saved",
+                    "name": "Saved",
+                    "root": saved_root.to_string_lossy(),
+                },
+                {
+                    "id": "missing",
+                    "name": "Missing",
+                    "root": missing_root.to_string_lossy(),
+                }
+            ],
+            "sessions": [],
+            "paneLayouts": [],
+        });
+        native_workspace::save_workspace_to(&workspace_path, &workspace).unwrap();
+
+        let authority = NativeProjectAuthority::from_workspace_path(&workspace_path).unwrap();
+
+        assert!(authority.claim_submission(&saved_root).is_ok());
+        assert!(authority.claim_submission(&missing_root).is_err());
+        assert_eq!(
+            authority.open_project_roots(),
+            vec![saved_root.canonicalize().unwrap()]
+        );
+    }
+
+    #[test]
     fn startup_project_authority_snapshot_cannot_be_mutated_by_later_workspace_saves() {
         let tree = tempfile::TempDir::new().unwrap();
         let workspace_path = tree.path().join("workspace.json");
@@ -9515,15 +9569,24 @@ mod native_project_authority_tests {
     fn startup_project_authority_rejects_malformed_or_arbitrary_roots() {
         let tree = tempfile::TempDir::new().unwrap();
         let workspace_path = tree.path().join("workspace.json");
+        let saved_root = tree.path().join("saved");
+        std::fs::create_dir_all(&saved_root).unwrap();
         let workspace = serde_json::json!({
             "version": 3,
             "activeProjectId": "project",
             "activeThreadId": null,
-            "projects": [{
-                "id": "project",
-                "name": "Project",
-                "root": "relative/arbitrary",
-            }],
+            "projects": [
+                {
+                    "id": "saved",
+                    "name": "Saved",
+                    "root": saved_root.to_string_lossy(),
+                },
+                {
+                    "id": "project",
+                    "name": "Project",
+                    "root": "relative/arbitrary",
+                }
+            ],
             "sessions": [],
             "paneLayouts": [],
         });

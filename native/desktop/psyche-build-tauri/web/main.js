@@ -9868,7 +9868,7 @@
 
   async function openFileTab(path, project) {
     project = project || activeProject();
-    if (!project) return;
+    if (!project || project.closing) return false;
     var workspaceRoot = activeWorkspaceRoot(project);
     var existing = state.openFiles.filter(function (f) {
       return f.path === path && f.projectId === project.id &&
@@ -9878,6 +9878,7 @@
     if (fileNavigationInFlight || fileDecisionInFlight) return false;
 
     var filesPane = ensureFilesPane(project, workspaceRoot);
+    if (!filesPane) return false;
     fileCounter += 1;
     var rel = relativeToRoot(workspaceRoot, path);
     var file = {
@@ -14907,6 +14908,7 @@
     if (!rootPath) return null;
     rootPath = await canonicalProjectPath(rootPath);
     if (!rootPath) return null;
+    if (options) options.canonicalRoot = rootPath;
     function blockedByNativeProjectRevocation() {
       if (closingNativeProjectRoots.has(rootPath)) {
         if (options) options.blockedByClosing = true;
@@ -14939,6 +14941,20 @@
     if (state.projects.length >= settings.maxProjects) { setStatus("project limit reached (" + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ")", "warn"); return null; }
     if (!(await showTerminalView())) return null;
     if (blockedByNativeProjectRevocation()) return null;
+    existing = state.projects.find(function (p) { return p.root === rootPath; });
+    if (existing) {
+      if (options && options.nativeAuthorityReady === true) {
+        existing.nativeAuthorityReady = true;
+      }
+      return (await setActiveProject(existing.id)) ? existing : null;
+    }
+    if (state.projects.length >= settings.maxProjects) {
+      setStatus(
+        "project limit reached (" + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ")",
+        "warn"
+      );
+      return null;
+    }
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {}, nativeAuthorityReady: !!(options && options.nativeAuthorityReady === true) };
@@ -14978,7 +14994,9 @@
         typeof selected === "string" &&
         !admission.blockedByClosing &&
         !closingNativeProjectRoots.has(selected) &&
-        !state.projects.some(function (project) { return project.root === selected; })
+        !state.projects.some(function (project) {
+          return project.root === (admission.canonicalRoot || selected);
+        })
       ) {
         try {
           await invoke("native_project_close", { root: selected });
