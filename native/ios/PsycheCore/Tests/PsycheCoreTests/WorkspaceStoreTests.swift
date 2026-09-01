@@ -184,6 +184,68 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertFalse(store.needsFullSnapshot)
     }
 
+    func testReadinessPublicationCommitsOnTheWorkspaceMainActor() {
+        let store = WorkspaceStore()
+        let candidate = HostReadinessSnapshotCandidate(
+            workspace: Fixtures.workspace(revision: 8),
+            sequence: 8
+        )
+
+        let result = store.publishReadinessSnapshot(
+            candidate,
+            authorizedBy: HostReadinessFlowAuthorization()
+        )
+
+        XCTAssertEqual(result, .committed)
+        XCTAssertEqual(store.workspace?.revision, 8)
+        XCTAssertEqual(store.sequence, 8)
+        XCTAssertFalse(store.isStale)
+    }
+
+    func testReadinessPublicationRejectsARevokedFlowBeforeMutation() {
+        let store = WorkspaceStore()
+        store.applySnapshot(workspace: Fixtures.workspace(revision: 5), sequence: 5)
+        store.markDisconnected()
+        let authorization = HostReadinessFlowAuthorization()
+        authorization.revoke()
+
+        let result = store.publishReadinessSnapshot(
+            HostReadinessSnapshotCandidate(
+                workspace: Fixtures.workspace(revision: 8),
+                sequence: 8
+            ),
+            authorizedBy: authorization
+        )
+
+        XCTAssertEqual(result, .notCommitted(reason: nil))
+        XCTAssertEqual(store.workspace?.revision, 5)
+        XCTAssertEqual(store.sequence, 5)
+        XCTAssertTrue(store.isStale)
+    }
+
+    func testReadinessPublicationPreservesTheActiveConnectionGeneration() {
+        let store = WorkspaceStore()
+        let generation = ConnectionGeneration(id: 1)
+        store.beginConnection(for: generation)
+
+        let result = store.publishReadinessSnapshot(
+            HostReadinessSnapshotCandidate(
+                workspace: Fixtures.workspace(revision: 8),
+                sequence: 8
+            ),
+            authorizedBy: HostReadinessFlowAuthorization()
+        )
+        store.applyEvent(
+            workspace: Fixtures.workspace(revision: 9),
+            sequence: 9,
+            for: generation
+        )
+
+        XCTAssertEqual(result, .committed)
+        XCTAssertEqual(store.workspace?.revision, 9)
+        XCTAssertEqual(store.sequence, 9)
+    }
+
     func testActiveGenerationRecoversGapWithAuthoritativeSnapshot() {
         let store = WorkspaceStore()
         let generation = ConnectionGeneration(id: 1)
