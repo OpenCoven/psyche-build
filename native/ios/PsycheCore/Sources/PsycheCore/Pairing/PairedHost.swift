@@ -441,8 +441,9 @@ public final class HostReadinessMachine {
     /// What the workspace surface may show. `stale` is semantically distinct
     /// from `live`: it is previously authoritative state, never current.
     public private(set) var presentation: HostWorkspacePresentation
-    /// The host identity durably committed and currently authoritative.
-    /// Updated only after the secure-store commit succeeds.
+    /// The last host whose workspace and reconnect selection both committed.
+    /// A newly authenticated host remains provisional until both boundaries
+    /// succeed.
     public private(set) var committedHost: PairedHost?
     public private(set) var lastFailure: HostReadinessFailure?
     public private(set) var activeFlow: HostReadinessFlow?
@@ -452,6 +453,11 @@ public final class HostReadinessMachine {
     private let validateSnapshot: @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
     private let now: @Sendable () -> Date
     private var activeAuthorization: HostReadinessFlowAuthorization?
+    private var provisionalHost: PairedHost?
+
+    var authenticatedHost: PairedHost? {
+        provisionalHost ?? committedHost
+    }
 
     public init(
         committedHost: PairedHost? = nil,
@@ -491,9 +497,7 @@ public final class HostReadinessMachine {
     ///
     /// This adopts durable state; it never creates authority. It is refused
     /// while a flow owns the machine, and refused outright when it contradicts
-    /// an identity already committed in this session — a durable record naming
-    /// a different host than the one currently authoritative is exactly the
-    /// wrong-host case, and it fails closed rather than silently retargeting.
+    /// an identity already committed in this session.
     public func adoptPersistedHost(_ host: PairedHost) throws {
         try requireIdle()
         if let committedHost, committedHost.serverID != host.serverID {
@@ -593,7 +597,7 @@ public final class HostReadinessMachine {
             guard activeFlow == flow, state == .authenticating else {
                 return result
             }
-            committedHost = host
+            provisionalHost = host
             _ = try apply(.hostCommitSucceeded)
         case .notCommitted(let reason):
             guard activeFlow == flow, state == .authenticating else {
@@ -661,10 +665,6 @@ public final class HostReadinessMachine {
             lastFailure = nil
             activeFlow = nil
             activeAuthorization = nil
-            presentation = .live(
-                hostID: committedHost?.serverID ?? "",
-                confirmedAt: now()
-            )
         case .notCommitted(let reason):
             guard activeFlow == flow, state == .synchronizing else {
                 return result
@@ -682,6 +682,29 @@ public final class HostReadinessMachine {
             try failIndeterminate(.workspaceApply, reason: reason, for: flow)
         }
         return result
+    }
+
+    /// Promotes the provisional host only after its workspace is applied and
+    /// reconnect selection is durable. The readiness flow is already closed,
+    /// so teardown can safely turn a pending success into connection loss.
+    func finalizeReadyHostSelection(serverID: String) throws {
+        guard activeFlow == nil,
+              state == .ready,
+              let provisionalHost else {
+            throw HostReadinessError.supersededFlow
+        }
+        guard provisionalHost.serverID == serverID else {
+            throw HostReadinessError.wrongHostIdentity(
+                expected: provisionalHost.serverID,
+                actual: serverID
+            )
+        }
+        committedHost = provisionalHost
+        self.provisionalHost = nil
+        presentation = .live(
+            hostID: serverID,
+            confirmedAt: now()
+        )
     }
 
     /// The active flow failed at one boundary. Rolls the machine back
@@ -703,7 +726,14 @@ public final class HostReadinessMachine {
     /// the stored host again.
     @discardableResult
     public func noteConnectionLost() throws -> HostReadinessState {
+        if state == .ready, provisionalHost != nil {
+            provisionalHost = nil
+            state = committedHost == nil ? .unknown : .reconnecting
+            relabelForFlowStart()
+            return state
+        }
         let destination = try apply(.connectionLost)
+        provisionalHost = nil
         relabelForFlowStart()
         return destination
     }
@@ -727,6 +757,7 @@ public final class HostReadinessMachine {
             reason: reason,
             stateAtFailure: from
         )
+        provisionalHost = nil
         activeFlow = nil
         activeAuthorization = nil
         return destination
@@ -762,6 +793,7 @@ public final class HostReadinessMachine {
             reason: reason,
             stateAtFailure: state
         )
+        provisionalHost = nil
         activeFlow = nil
         activeAuthorization = nil
         state = .revoked
@@ -790,6 +822,7 @@ public final class HostReadinessMachine {
             stateAtFailure: from,
             recovery: .indeterminate
         )
+        provisionalHost = nil
         activeFlow = nil
         activeAuthorization = nil
         state = .revoked
@@ -829,7 +862,7 @@ public final class HostReadinessMachine {
         case .pending, .notCommitted:
             return true
         case .committed(let host):
-            committedHost = host
+            provisionalHost = host
             if state == .authenticating {
                 _ = try apply(.hostCommitSucceeded)
             }
@@ -883,6 +916,7 @@ public final class HostReadinessMachine {
             stateAtFailure: from,
             recovery: recovery
         )
+        provisionalHost = nil
         activeFlow = nil
         activeAuthorization = nil
         state = destination

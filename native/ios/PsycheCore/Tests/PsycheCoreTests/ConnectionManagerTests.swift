@@ -951,6 +951,106 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(selected, previouslyReady)
     }
 
+    func testSameManagerReturnsToPreviouslyReadyHostAfterCandidateDisconnects() async throws {
+        let secureStore = InMemorySecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        await composition.manager.disconnect()
+
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        XCTAssertEqual(composition.hostReadiness.state, .hostCommitted)
+
+        await composition.manager.disconnect()
+        let fallback = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake, occurrence: 3)
+        let attempts = await fake.connectionAttempts
+        XCTAssertEqual(
+            attempts,
+            [previouslyReady.endpoint, candidateEndpoint, previouslyReady.endpoint]
+        )
+        await fake.emit(.legacy(.welcome(
+            makeWelcome(serverID: previouslyReady.serverID)
+        )))
+        await fallback.value
+    }
+
+    func testDisconnectDuringReadyHostSelectionCannotLeaveReadinessLive() async throws {
+        let secureStore = BlockingReadSecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        await composition.manager.disconnect()
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+
+        secureStore.blockNextRead()
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        try await secureStore.waitUntilReadBegins(timeout: .seconds(2))
+
+        await composition.manager.disconnect()
+        secureStore.releaseRead()
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        XCTAssertNotEqual(composition.hostReadiness.state, .ready)
+        if case .live = composition.hostReadiness.presentation {
+            XCTFail("Transport teardown must not leave the provisional workspace live")
+        }
+        let selected = try await composition.pairedHostStore.selectedHost()
+        XCTAssertEqual(selected?.serverID, previouslyReady.serverID)
+        XCTAssertEqual(selected?.endpoint, previouslyReady.endpoint)
+    }
+
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(

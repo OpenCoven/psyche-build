@@ -312,6 +312,39 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(selected, previouslyReady)
     }
 
+    func testRetiredSelectionCompensationCannotUndoANewerOwner() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let retired = ConnectionGeneration(id: 1)
+        let current = ConnectionGeneration(id: 2)
+
+        let retiredSelection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: retired
+        )
+        XCTAssertEqual(retiredSelection, .committed)
+        retired.invalidate()
+        let currentSelection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: current
+        )
+        XCTAssertEqual(currentSelection, .committed)
+
+        let compensation = await store.compensateReadyHostSelection(
+            expectedServerID: candidate.serverID,
+            restoringServerID: previouslyReady.serverID,
+            selectedBy: retired
+        )
+
+        XCTAssertEqual(compensation, .notCommitted(reason: nil))
+        let selected = try await store.selectedHost()
+        XCTAssertEqual(selected, candidate)
+    }
+
     func testReadinessPublicationRollsBackSelectedHostWithTheHostRecords() async throws {
         let secureStore = FaultingTransactionSecureStore()
         let store = PairedHostStore(secureStore: secureStore)
@@ -1190,6 +1223,7 @@ final class HostReadinessMachineTests: XCTestCase {
             makeCandidate(sequence: sequence),
             for: flow
         )
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
         return flow
     }
 
@@ -1293,6 +1327,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(host, for: flow)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: flow)
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
 
         let state = await machine.state
         XCTAssertEqual(state, .ready)
@@ -1415,7 +1450,11 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(state, .degraded)
         XCTAssertEqual(presentation, .stale(hostID: "old-host", confirmedAt: fixedDate))
         let committed = await machine.committedHost
-        XCTAssertEqual(committed?.serverID, "new-host", "the commit succeeded, so authority moved")
+        XCTAssertEqual(
+            committed?.serverID,
+            "old-host",
+            "a pre-ready candidate must not replace the last ready authority"
+        )
         XCTAssertEqual(recorder.calls, ["validate:5", "validate:4"])
         XCTAssertEqual(recorder.workspaceStore.sequence, 5)
     }
@@ -1595,6 +1634,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(staleResult, .notCommitted(reason: nil))
         XCTAssertEqual(freshResult, .committed)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
+        try machine.finalizeReadyHostSelection(serverID: freshHost.serverID)
 
         let state = await machine.state
         let committedHost = await machine.committedHost
@@ -1834,6 +1874,7 @@ final class HostReadinessMachineTests: XCTestCase {
             for: freshFlow
         )
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
+        try machine.finalizeReadyHostSelection(serverID: "fresh-host")
 
         await staleApplyGate.release()
         do {
@@ -2000,6 +2041,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(host, for: flow)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: flow)
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
         recorder.workspaceStore.applyEvent(
             workspace: WorkspaceSnapshot(revision: 9, projects: []),
             sequence: 9,
@@ -2054,6 +2096,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(makeHost(serverID: "new-host"), for: flow)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: flow)
+        try machine.finalizeReadyHostSelection(serverID: "new-host")
 
         state = await machine.state
         presentation = await machine.presentation
@@ -2078,19 +2121,20 @@ final class HostReadinessMachineTests: XCTestCase {
         let degradedState = await machine.state
         XCTAssertEqual(degradedState, .degraded)
 
-        // Recovery runs the same spine against the committed authority, with
+        // Recovery runs the same spine against the last ready authority, with
         // the workspace boundary healthy again.
         let retry = try await machine.beginReconnection()
         _ = try await machine.markAuthenticated(for: retry)
         try await machine.commitHostIdentity(
-            makeHost(serverID: "new-host", clientID: "client-new"),
+            host,
             for: retry
         )
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: retry)
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
 
         let state = await machine.state
         XCTAssertEqual(state, .ready)
         let presentation = await machine.presentation
-        XCTAssertEqual(presentation, .live(hostID: "new-host", confirmedAt: fixedDate))
+        XCTAssertEqual(presentation, .live(hostID: "old-host", confirmedAt: fixedDate))
     }
 }

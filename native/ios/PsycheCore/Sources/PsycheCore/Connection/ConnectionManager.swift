@@ -950,7 +950,7 @@ public actor ConnectionManager {
     ) async throws -> Bool {
         let machine = hostReadiness
         let disposition = await MainActor.run {
-            (state: machine.state, committedServerID: machine.committedHost?.serverID)
+            (state: machine.state, authenticatedServerID: machine.authenticatedHost?.serverID)
         }
         guard isActive(session: session, generation: generation) else { return false }
         guard disposition.state != .authenticating else {
@@ -960,9 +960,9 @@ public actor ConnectionManager {
                 generation: generation
             )
         }
-        guard disposition.committedServerID == host.serverID else {
+        guard disposition.authenticatedServerID == host.serverID else {
             throw HostReadinessError.wrongHostIdentity(
-                expected: disposition.committedServerID ?? "",
+                expected: disposition.authenticatedServerID ?? "",
                 actual: host.serverID
             )
         }
@@ -1060,6 +1060,7 @@ public actor ConnectionManager {
             workspace: result.workspace,
             sequence: result.sequence
         )
+        let previousReadyHostID = await machine.committedHost?.serverID
         let outcome: HostReadinessTransactionResult
         do {
             outcome = try await machine.synchronizeWorkspace(candidate, for: flow)
@@ -1074,9 +1075,11 @@ public actor ConnectionManager {
         guard isActive(session: session, generation: generation) else { return nil }
         switch outcome {
         case .committed:
-            // Readiness ends the flow itself once the workspace is live.
-            guard let readyHostID = await machine.committedHost?.serverID else {
-                clearReadinessFlow()
+            // The machine has closed the flow synchronously. Clear our mirror
+            // before the store actor hop so teardown observes connection loss
+            // instead of trying to fail a flow that no longer exists.
+            clearReadinessFlow()
+            guard let readyHostID = welcomeIdentity?.serverID else {
                 return ConnectionManagerError.readinessUnavailable(
                     "Ready workspace has no committed host identity."
                 )
@@ -1085,10 +1088,31 @@ public actor ConnectionManager {
                 serverID: readyHostID,
                 for: generation
             )
-            guard isActive(session: session, generation: generation) else { return nil }
-            clearReadinessFlow()
             switch selection {
             case .committed:
+                guard isActive(session: session, generation: generation) else {
+                    await compensateRetiredReadyHostSelection(
+                        selectedServerID: readyHostID,
+                        restoringServerID: previousReadyHostID,
+                        selectedBy: generation
+                    )
+                    return nil
+                }
+                do {
+                    try await MainActor.run {
+                        try machine.finalizeReadyHostSelection(serverID: readyHostID)
+                    }
+                } catch {
+                    await compensateRetiredReadyHostSelection(
+                        selectedServerID: readyHostID,
+                        restoringServerID: previousReadyHostID,
+                        selectedBy: generation
+                    )
+                    guard isActive(session: session, generation: generation) else {
+                        return nil
+                    }
+                    return error
+                }
                 return nil
             case .notCommitted(let reason):
                 guard let reason else { return nil }
@@ -1106,6 +1130,23 @@ public actor ConnectionManager {
         case .indeterminate(let reason):
             clearReadinessFlow()
             return ConnectionManagerError.workspaceApplyIndeterminate(reason)
+        }
+    }
+
+    private func compensateRetiredReadyHostSelection(
+        selectedServerID: String,
+        restoringServerID: String?,
+        selectedBy generation: ConnectionGeneration
+    ) async {
+        let result = await pairedHostStore.compensateReadyHostSelection(
+            expectedServerID: selectedServerID,
+            restoringServerID: restoringServerID,
+            selectedBy: generation
+        )
+        guard case .indeterminate(let reason) = result else { return }
+        let machine = hostReadiness
+        await MainActor.run {
+            _ = try? machine.revoke(reason: reason)
         }
     }
 

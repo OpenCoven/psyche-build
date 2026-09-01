@@ -36,6 +36,7 @@ public actor PairedHostStore {
     private let secureStore: any SecureStore
     private let key: String
     private let fallbackKey: String?
+    private var readySelectionOwner: ObjectIdentifier?
 
     public init(secureStore: any SecureStore, key: String = defaultKey) {
         self.secureStore = secureStore
@@ -242,7 +243,10 @@ public actor PairedHostStore {
                 )
             }
             guard state.selectedServerID != serverID else {
-                return generation.withValidity { .committed }
+                return generation.withValidity {
+                    readySelectionOwner = ObjectIdentifier(generation)
+                    return .committed
+                }
                     ?? .notCommitted(reason: nil)
             }
             state.selectedServerID = serverID
@@ -254,6 +258,7 @@ public actor PairedHostStore {
         return generation.withValidity {
             do {
                 try secureStore.set(nextData, forKey: key)
+                readySelectionOwner = ObjectIdentifier(generation)
                 return .committed
             } catch {
                 return compensateWrite(
@@ -263,6 +268,65 @@ public actor PairedHostStore {
                 )
             }
         } ?? .notCommitted(reason: nil)
+    }
+
+    /// Restores the previous reconnect selection when a generation retires
+    /// after selection committed but before readiness could promote the host.
+    /// The expected-current check avoids overwriting a later selection.
+    func compensateReadyHostSelection(
+        expectedServerID: String,
+        restoringServerID: String?,
+        selectedBy generation: ConnectionGeneration
+    ) -> HostReadinessTransactionResult {
+        guard readySelectionOwner == ObjectIdentifier(generation) else {
+            return .notCommitted(reason: nil)
+        }
+        let previousData: Data?
+        let nextData: Data
+        do {
+            let snapshot = try stateSnapshot()
+            previousData = snapshot.currentData
+            var state = snapshot.state
+            guard state.selectedServerID == expectedServerID else {
+                return .notCommitted(reason: nil)
+            }
+            if let restoringServerID,
+               state.records[restoringServerID] == nil {
+                return .indeterminate(
+                    reason: "The previous ready host record is missing."
+                )
+            }
+            state.selectedServerID = restoringServerID
+            nextData = try JSONEncoder().encode(state)
+        } catch {
+            return .indeterminate(reason: error.localizedDescription)
+        }
+
+        do {
+            try secureStore.set(nextData, forKey: key)
+            readySelectionOwner = nil
+            return .committed
+        } catch {
+            let compensation = compensateWrite(
+                to: previousData,
+                after: error,
+                operation: "Ready-host selection compensation"
+            )
+            switch compensation {
+            case .committed:
+                return .indeterminate(
+                    reason: "Ready-host selection compensation returned an invalid result."
+                )
+            case .notCommitted(let reason):
+                return .indeterminate(
+                    reason: reason.map {
+                        "The previous ready-host selection could not be restored: \($0)"
+                    } ?? "The previous ready-host selection could not be restored."
+                )
+            case .indeterminate:
+                return compensation
+            }
+        }
     }
 
     /// Tokens are reissued without the host identity changing, so this skips
