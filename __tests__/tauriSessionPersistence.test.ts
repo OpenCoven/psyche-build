@@ -1569,6 +1569,48 @@ describe('Tauri workspace persistence model', () => {
     expect(functionSource('handleWindowCloseRequested')).toContain('await saveWorkspaceNow()');
   });
 
+  test('preserves legacy project records without returning them as trusted workspace state', async () => {
+    const legacy = JSON.stringify({
+      version: 2,
+      activeProjectId: 'legacy-project',
+      projects: [{ id: 'legacy-project', root: '/legacy/repo' }],
+    });
+    const storage = new Map([['legacy-workspace', legacy]]);
+    const statuses: Array<[string, string]> = [];
+    const legacyWorkspaceMigration = { projectsPreserved: false };
+    const readSavedWorkspace = compileFunction<() => Promise<unknown>>(
+      functionSource('readSavedWorkspace'),
+      {
+        workspaceModel: () => ({
+          sanitizeWorkspaceV3: (value: unknown) => value,
+          importWorkspaceV2: () => {
+            throw new Error('legacy project roots must not become workspace authority');
+          },
+        }),
+        invoke: async (command: string) => {
+          expect(command).toBe('workspace_load');
+          return null;
+        },
+        localStorage: {
+          getItem: (key: string) => storage.get(key) || null,
+        },
+        LEGACY_WORKSPACE_STATE_KEY: 'legacy-workspace',
+        legacyWorkspaceMigration,
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+      },
+    );
+
+    await expect(readSavedWorkspace()).resolves.toBeNull();
+    expect(storage.get('legacy-workspace')).toBe(legacy);
+    expect(legacyWorkspaceMigration.projectsPreserved).toBe(true);
+    expect(statuses).toEqual([[
+      'Legacy projects were preserved but cannot be opened automatically; reopen them with the folder picker.',
+      'warn',
+    ]]);
+  });
+
   test('contains best-effort beforeunload save failures', () => {
     expect(functionSource('handleWindowBeforeUnload')).toContain(
       'saveWorkspaceNow().catch(function () {})',

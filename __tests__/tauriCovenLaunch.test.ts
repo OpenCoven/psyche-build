@@ -181,6 +181,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     saveWorkspaceSoon: () => undefined,
     closingNativeProjectRoots: new Set<string>(),
     pendingNativeProjectRevocations: new Map<string, unknown>(),
+    legacyWorkspaceMigration: { projectsPreserved: false },
     readSavedWorkspace: dependencies.loadSavedWorkspace || (async () => null),
     restorePersistedSessions: async () => ({ sessions: [], unknownLiveIds: [] }),
     renderPaneWorkspace: () => undefined,
@@ -770,6 +771,151 @@ describe('Tauri Coven launch project scope', () => {
       'refreshVisiblePaneMetrics',
     ]);
     expect(functionSource('boot')).not.toContain('addProject(bootRoot)');
+  });
+
+  it('quarantines legacy projects until the native picker reopens one', async () => {
+    const legacy = JSON.stringify({
+      version: 2,
+      activeProjectId: 'legacy-project',
+      projects: [{ id: 'legacy-project', root: '/legacy/repo' }],
+    });
+    const storage = new Map([['legacy-workspace', legacy]]);
+    const statuses: Array<[string, string]> = [];
+    const commands: string[] = [];
+    const legacyWorkspaceMigration = { projectsPreserved: false };
+    const state = {
+      env: {},
+      projects: [] as Array<Record<string, any>>,
+      threads: [] as Array<Record<string, any>>,
+      activeProjectId: null as string | null,
+      activeThreadId: null as string | null,
+    };
+    const invoke = async (command: string) => {
+      commands.push(command);
+      if (command === 'workspace_load') return null;
+      if (command === 'native_project_open') return '/legacy/repo';
+      if (command === 'native_session_list' || command === 'native_session_create') {
+        throw new Error(`legacy boot must not call ${command}`);
+      }
+      return true;
+    };
+    const readSavedWorkspace = compileFunction<() => Promise<null>>(
+      functionSource('readSavedWorkspace'),
+      {
+        workspaceModel: () => ({
+          importWorkspaceV2: () => {
+            throw new Error('legacy projects must not be imported');
+          },
+        }),
+        invoke,
+        localStorage: {
+          getItem: (key: string) => storage.get(key) || null,
+        },
+        LEGACY_WORKSPACE_STATE_KEY: 'legacy-workspace',
+        legacyWorkspaceMigration,
+        setStatus: (message: string, level: string) => statuses.push([message, level]),
+      },
+    );
+    const boot = compileFunction<(env: Record<string, string>) => Promise<void>>(
+      functionSource('boot'),
+      {
+        state,
+        installTerminalImageDrop: async () => undefined,
+        statusController: null,
+        readSavedWorkspace,
+        legacyWorkspaceMigration,
+        settings: { maxProjects: 5 },
+        HARD_MAX_PROJECTS: 10,
+        isRestoringWorkspace: false,
+        restoreSavedProjects: async () => {
+          throw new Error('legacy projects must not restore');
+        },
+        activeProject: () => null,
+        refreshProjectWorktrees: async () => undefined,
+        restorePersistedSessions: async () => {
+          throw new Error('legacy sessions must not restore');
+        },
+        invoke,
+        currentBrowserTab: () => null,
+        navigateBrowser: () => undefined,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        renderBrowserTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        loadAgentSkills: () => undefined,
+        saveWorkspaceNow: async () => {
+          commands.push('workspace_save');
+          return true;
+        },
+        startCovenPolling: () => undefined,
+        installAgentControlUi: () => undefined,
+        paneMetricsPollTimer: 0,
+        clearInterval: () => undefined,
+        setInterval: () => 1,
+        refreshVisiblePaneMetrics: () => undefined,
+        refreshStatusController: null,
+        flushDeferredStatusMessages: () => undefined,
+      },
+    );
+
+    await boot({ home: '/home/tester' });
+
+    expect(state.projects).toEqual([]);
+    expect(state.activeProjectId).toBeNull();
+    expect(storage.get('legacy-workspace')).toBe(legacy);
+    expect(commands).toEqual(['workspace_load']);
+    expect(statuses.at(-1)).toEqual([
+      'Legacy projects were preserved but cannot be opened automatically; reopen them with the folder picker.',
+      'warn',
+    ]);
+
+    let nextId = 0;
+    const addProject = compileFunction<(
+      root: string,
+      options: Record<string, unknown>,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async (root: string) => root,
+        state,
+        settings: { maxProjects: 5 },
+        HARD_MAX_PROJECTS: 10,
+        showTerminalView: async () => true,
+        makeProjectId: () => `project-${nextId += 1}`,
+        assignActiveProjectId: (id: string) => { state.activeProjectId = id; },
+        setActiveProject: async () => true,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshProjectWorktrees: async () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+        startCovenPolling: () => undefined,
+        installAgentControlUi: () => undefined,
+        setStatus: () => undefined,
+      },
+    );
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        invoke,
+        addProject,
+        writeToActive: () => undefined,
+      },
+    );
+
+    await openProjectPicker();
+
+    expect(state.projects).toEqual([
+      expect.objectContaining({
+        id: 'project-1',
+        root: '/legacy/repo',
+        nativeAuthorityReady: true,
+      }),
+    ]);
+    expect(commands).toEqual(['workspace_load', 'native_project_open']);
+    expect(storage.get('legacy-workspace')).toBe(legacy);
   });
 
   it('keeps protected launch kinds limited to Coven-only launches across the JS/Rust contract', () => {

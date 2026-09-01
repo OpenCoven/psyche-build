@@ -1059,6 +1059,7 @@
   var settings = loadSettings();
   var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
+  var legacyWorkspaceMigration = { projectsPreserved: false };
   var saveWorkspaceTimer = 0;
 
   function terminalTheme() {
@@ -1355,6 +1356,7 @@
   async function readSavedWorkspace() {
     var model = workspaceModel();
     if (!model) return null;
+    legacyWorkspaceMigration.projectsPreserved = false;
     try {
       var saved = await invoke("workspace_load");
       if (saved) {
@@ -1368,7 +1370,15 @@
     }
     try {
       var legacy = JSON.parse(localStorage.getItem(LEGACY_WORKSPACE_STATE_KEY) || "null");
-      return legacy && Array.isArray(legacy.projects) ? model.importWorkspaceV2(legacy) : null;
+      if (legacy && Array.isArray(legacy.projects) && legacy.projects.length > 0) {
+        legacyWorkspaceMigration.projectsPreserved = true;
+        setStatus(
+          "Legacy projects were preserved but cannot be opened automatically; " +
+            "reopen them with the folder picker.",
+          "warn"
+        );
+      }
+      return null;
     } catch (_) {
       return null;
     }
@@ -15677,10 +15687,12 @@
         }));
       }
       var liveSessionIds = [];
-      try {
-        liveSessionIds = await invoke("native_session_list");
-      } catch (error) {
-        setStatus("native session discovery failed: " + String(error), "error");
+      if (!legacyWorkspaceMigration.projectsPreserved) {
+        try {
+          liveSessionIds = await invoke("native_session_list");
+        } catch (error) {
+          setStatus("native session discovery failed: " + String(error), "error");
+        }
       }
       if (saved) await restorePersistedSessions(saved, liveSessionIds);
     } finally {
@@ -15692,7 +15704,7 @@
     }
     renderPaneWorkspace({ preserveTerminalFocus: false });
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills();
-    await saveWorkspaceNow();
+    if (!legacyWorkspaceMigration.projectsPreserved) await saveWorkspaceNow();
     startCovenPolling();
     installAgentControlUi();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
