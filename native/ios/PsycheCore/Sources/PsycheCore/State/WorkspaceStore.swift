@@ -140,6 +140,35 @@ public final class WorkspaceStore: ObservableObject {
         } ?? .notCommitted(reason: nil)
     }
 
+    /// Validates a candidate against the current workspace while readiness
+    /// still owns publication authority, without exposing it before reconnect
+    /// selection is durable.
+    func stageReadinessSnapshot(
+        _ candidate: HostReadinessSnapshotCandidate,
+        authorizedBy authorization: HostReadinessFlowAuthorization
+    ) -> HostReadinessTransactionResult {
+        authorization.withAuthorization {
+            guard candidate.sequence >= sequence else {
+                return .notCommitted(
+                    reason: "The readiness snapshot is older than the visible workspace."
+                )
+            }
+            return .committed
+        } ?? .notCommitted(reason: nil)
+    }
+
+    /// Publishes a previously staged candidate. The connection manager calls
+    /// this synchronously with host promotion after selected-host persistence
+    /// succeeds, so no UI turn can observe one without the other.
+    func publishStagedReadinessSnapshot(
+        _ candidate: HostReadinessSnapshotCandidate
+    ) {
+        applySnapshotUnscoped(
+            workspace: candidate.workspace,
+            sequence: candidate.sequence
+        )
+    }
+
     private func applySnapshotUnscoped(
         workspace: WorkspaceSnapshot,
         sequence nextSequence: UInt64
