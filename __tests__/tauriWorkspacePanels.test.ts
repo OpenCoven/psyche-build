@@ -422,7 +422,7 @@ describe('Tauri workspace panels', () => {
       const close = functionSource('closeThread');
       expect(close.indexOf('stageGitSurface();')).toBeGreaterThan(-1);
       expect(close.indexOf('stageGitSurface();')).toBeLessThan(
-        close.indexOf('detachThreadPane(thread)'),
+        close.indexOf('detachThreadPane(thread,'),
       );
     });
 
