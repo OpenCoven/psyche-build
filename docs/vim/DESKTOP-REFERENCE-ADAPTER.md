@@ -5,7 +5,7 @@
 **Canonical outcome:** [#246 — Deliver post-release cross-platform Vim and keyboard-mode parity](https://github.com/OpenCoven/psyche-build/issues/246)
 **Parent:** [#222 — Comprehensive opt-in Vim support across Psyche](https://github.com/OpenCoven/psyche-build/issues/222) (Bead `psyche-no8`)
 **Design:** [Comprehensive Vim Support Design](../superpowers/specs/2026-08-12-comprehensive-vim-support-design.md)
-**Acceptance contract:** [`docs/vim/ACCEPTANCE-MATRIX.md`](ACCEPTANCE-MATRIX.md) and `src/vim/acceptanceManifest.ts` (Vim Slice 5, #227 — these files land on `main` with that slice; the item ids below are aligned with them)
+**Acceptance contract:** `docs/vim/ACCEPTANCE-MATRIX.md` and `src/vim/acceptanceManifest.ts` (Vim Slice 5, #227 — these files land on `main` with that slice; the item ids below are aligned with them)
 
 ## Purpose and current state
 

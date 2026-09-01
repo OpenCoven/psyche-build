@@ -90,6 +90,17 @@ describe('Vim v1 fixture set (protocol-fixtures/vim/v1)', () => {
     expect(() => parseVimFixtureDocument(source, 'future.json')).toThrow(/unsupported version/i);
   });
 
+  it('requires the editor validator to receive the exact version and kind', () => {
+    const { document } = firstEditorDocument();
+    const { version: _version, ...withoutVersion } = document;
+    const { kind: _kind, ...withoutKind } = document;
+
+    expect(() => validateEditorFixtures(withoutVersion)).toThrow(/document version/i);
+    expect(() => validateEditorFixtures({ ...document, version: 'vim/v2' })).toThrow(/unsupported version/i);
+    expect(() => validateEditorFixtures(withoutKind)).toThrow(/document kind/i);
+    expect(() => validateEditorFixtures({ ...document, kind: 'chrome' })).toThrow(/document kind/i);
+  });
+
   it('fails closed on unknown kind values', () => {
     const source = JSON.stringify({ version: 'vim/v1', kind: 'macro', traces: [] });
     expect(() => parseVimFixtureDocument(source, 'macro.json')).toThrow(/unsupported kind/i);

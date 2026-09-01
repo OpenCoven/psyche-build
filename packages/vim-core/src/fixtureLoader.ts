@@ -172,7 +172,7 @@ function expectString(
   options: { allowEmpty?: boolean; maxLength: number },
 ): string {
   if (typeof value !== 'string' || (!options.allowEmpty && value.length === 0) || value.length > options.maxLength) {
-    invalid(origin, `${label} must be a string of 1..${options.maxLength} characters`);
+    invalid(origin, `${label} must be a string of ${options.allowEmpty ? 0 : 1}..${options.maxLength} characters`);
   }
   return value;
 }
@@ -396,6 +396,11 @@ function validateExpected(origin: string, value: unknown, textLength: number): V
 
 function validateEditorDocument(document: Record<string, unknown>, origin: string): VimEditorFixtureDocument {
   rejectUnknownFields(document, new Set(['version', 'kind', 'traces']), origin, 'document');
+  const version = expectString(origin, document.version, 'document version', { maxLength: 32 });
+  if (version !== VIM_FIXTURE_VERSION) {
+    invalid(origin, `document declares unsupported version ${version}; expected ${VIM_FIXTURE_VERSION}`);
+  }
+  if (document.kind !== 'editor') invalid(origin, 'document kind must be editor');
   const tracesValue = document.traces;
   if (!Array.isArray(tracesValue) || tracesValue.length === 0 || tracesValue.length > MAX_EDITOR_TRACES) {
     invalid(origin, `document must contain 1..${MAX_EDITOR_TRACES} traces`);
