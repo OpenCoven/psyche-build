@@ -873,6 +873,89 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(restartedSelection, candidate)
     }
 
+    func testFailedCompletionAndCompensationRecognizeUnchangedPendingSelection() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.throwBeforeMutation(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restarted = try await PairedHostStore(
+            secureStore: secureStore
+        ).selectedHost()
+
+        guard case .notCommitted = completion else {
+            return XCTFail("Unchanged durable bytes should prove the completion did not commit")
+        }
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restarted, previouslyReady)
+    }
+
+    func testRetiringSuccessorSelectionPreservesFinalizedProcessAuthority() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let retirement = ReadySelectionGenerationRetirementTrigger()
+        let store = PairedHostStore(
+            secureStore: secureStore,
+            readyHostSelectionCommitStart: {
+                retirement.retireIfArmed()
+            }
+        )
+        let previouslyReady = makeHost(serverID: "server-a")
+        let finalized = makeHost(serverID: "server-b")
+        let successor = makeHost(serverID: "server-c")
+        try await store.save(previouslyReady)
+        try await store.save(finalized)
+        try await store.save(successor)
+        try await store.save(previouslyReady)
+
+        let finalizedGeneration = ConnectionGeneration(id: 1)
+        let finalizedPreparation = await store.selectReadyHost(
+            serverID: finalized.serverID,
+            for: finalizedGeneration
+        )
+        let finalizedTransaction = try XCTUnwrap(finalizedPreparation.transaction)
+        let finalizedAuthorization = try XCTUnwrap(finalizedPreparation.authorization)
+        XCTAssertTrue(finalizedAuthorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        let completion = await store.completeReadyHostSelection(
+            finalizedTransaction,
+            authorizedBy: finalizedAuthorization,
+            selectedBy: finalizedGeneration
+        )
+        guard case .notCommitted = completion else {
+            return XCTFail("Completion should retain finalized process authority")
+        }
+
+        let successorGeneration = ConnectionGeneration(id: 2)
+        retirement.arm(successorGeneration)
+        let preparation = await store.selectReadyHost(
+            serverID: successor.serverID,
+            for: successorGeneration
+        )
+        let selected = try await store.selectedHost()
+
+        XCTAssertEqual(preparation.result, .notCommitted(reason: nil))
+        XCTAssertEqual(selected, finalized)
+    }
+
     func testReadySelectionCompletionReadbackRejectsInconsistentState() async throws {
         let secureStore = FaultingTransactionSecureStore()
         let store = PairedHostStore(secureStore: secureStore)
@@ -1435,6 +1518,25 @@ private final class SuccessfulWriteBoundarySecureStore: SecureStore, @unchecked 
 private enum FaultingTransactionSecureStoreError: Error, Equatable {
     case writeFailed
     case compensationFailed
+}
+
+private final class ReadySelectionGenerationRetirementTrigger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: ConnectionGeneration?
+
+    func arm(_ generation: ConnectionGeneration) {
+        lock.withLock {
+            self.generation = generation
+        }
+    }
+
+    func retireIfArmed() {
+        let armed = lock.withLock {
+            defer { generation = nil }
+            return generation
+        }
+        armed?.invalidate()
+    }
 }
 
 private struct PersistedPairedHostStateFixture: Codable {
@@ -2043,7 +2145,6 @@ final class HostReadinessMachineTests: XCTestCase {
         let finalizationID = try machine.finalizeReadyHostSelection(
             serverID: "new-host"
         )
-
         _ = try machine.noteConnectionLost()
         do {
             _ = try machine.beginDiscovery()

@@ -103,6 +103,7 @@ public actor PairedHostStore {
     private let secureStore: any SecureStore
     private let key: String
     private let fallbackKey: String?
+    private let readyHostSelectionCommitStart: @Sendable () -> Void
     private var readySelectionOwner: (
         generation: ObjectIdentifier,
         transactionID: UUID?,
@@ -113,6 +114,18 @@ public actor PairedHostStore {
         self.secureStore = secureStore
         self.key = key
         fallbackKey = key == Self.defaultKey ? Self.legacyKey : nil
+        readyHostSelectionCommitStart = {}
+    }
+
+    init(
+        secureStore: any SecureStore,
+        key: String = defaultKey,
+        readyHostSelectionCommitStart: @escaping @Sendable () -> Void
+    ) {
+        self.secureStore = secureStore
+        self.key = key
+        fallbackKey = key == Self.defaultKey ? Self.legacyKey : nil
+        self.readyHostSelectionCommitStart = readyHostSelectionCommitStart
     }
 
     /// Sorted by server ID so a list rendered from this never reorders itself
@@ -338,8 +351,9 @@ public actor PairedHostStore {
     }
 
     /// Advances automatic reconnect authority only after the connection's
-    /// first workspace snapshot has completed readiness. The generation lock
-    /// makes teardown and selection mutually exclusive at the write boundary.
+    /// first workspace snapshot has completed readiness. Generation validity
+    /// fences owner replacement and the write without holding its lock across
+    /// the secure-store read.
     func selectReadyHost(
         serverID: String,
         for generation: ConnectionGeneration
@@ -363,8 +377,9 @@ public actor PairedHostStore {
             guard generation.withValidity({
                 if readySelectionOwner?.authorization.finalized == true {
                     finalizedTransactionID = readySelectionOwner?.transactionID
+                } else {
+                    supersedeReadySelection()
                 }
-                supersedeReadySelection()
                 return true
             }) == true else {
                 return ReadyHostSelectionPreparation(
@@ -409,9 +424,11 @@ public actor PairedHostStore {
         }
 
         let authorization = ReadyHostSelectionAuthorization()
+        readyHostSelectionCommitStart()
         let result: HostReadinessTransactionResult = generation.withValidity {
             do {
                 try secureStore.set(nextData, forKey: key)
+                supersedeReadySelection()
                 readySelectionOwner = (
                     generation: ObjectIdentifier(generation),
                     transactionID: transaction?.id,
@@ -419,11 +436,15 @@ public actor PairedHostStore {
                 )
                 return .committed
             } catch {
-                return compensateWrite(
+                let compensation = compensateWrite(
                     to: previousData,
                     after: error,
                     operation: "Ready-host selection"
                 )
+                if case .indeterminate = compensation {
+                    supersedeReadySelection()
+                }
+                return compensation
             }
         } ?? .notCommitted(reason: nil)
         return ReadyHostSelectionPreparation(

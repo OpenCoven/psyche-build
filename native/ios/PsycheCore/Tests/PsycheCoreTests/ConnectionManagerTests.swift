@@ -1048,8 +1048,11 @@ final class ConnectionManagerTests: XCTestCase {
 
         XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
         XCTAssertTrue(composition.workspaceStore.isStale)
-        await composition.manager.disconnect()
+        let disconnecting = Task {
+            await composition.manager.disconnect()
+        }
         secureStore.releaseRead()
+        await disconnecting.value
         for _ in 0..<100 {
             await Task.yield()
         }
@@ -1197,7 +1200,7 @@ final class ConnectionManagerTests: XCTestCase {
         let expectedPrimaryPaneID = composition.workspaceStore.primaryPaneID
         let expectedSecondaryPaneID = composition.workspaceStore.secondaryPaneID
         let expectedDrafts = composition.workspaceStore.drafts
-        secureStore.setBehavior(.succeedOnceThenMutateAndCorruptCompensation)
+        secureStore.setBehavior(.succeedOnceThenFailCompletionCompensationAndReadback)
 
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: snapshotID,
@@ -3687,7 +3690,7 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
         case failWriteAndCompensation
         case mutateThenFailWrite
         case mutateThenFailWriteAndCompensation
-        case succeedOnceThenMutateAndCorruptCompensation
+        case succeedOnceThenFailCompletionCompensationAndReadback
     }
 
     enum StoreError: Error {
@@ -3699,20 +3702,30 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
     private var behavior: Behavior = .succeed
     private var hasRefusedWrite = false
     private var successfulWritesRemaining = 0
+    private var failedWrites = 0
+    private var shouldFailReadback = false
 
     func setBehavior(_ behavior: Behavior) {
         lock.withLock {
             self.behavior = behavior
             hasRefusedWrite = false
             successfulWritesRemaining =
-                behavior == .succeedOnceThenMutateAndCorruptCompensation
+                behavior == .succeedOnceThenFailCompletionCompensationAndReadback
                 ? 1
                 : 0
+            failedWrites = 0
+            shouldFailReadback = false
         }
     }
 
     func data(forKey key: String) throws -> Data? {
-        lock.withLock { storage[key] }
+        try lock.withLock {
+            if shouldFailReadback {
+                shouldFailReadback = false
+                throw StoreError.denied
+            }
+            return storage[key]
+        }
     }
 
     func set(_ data: Data, forKey key: String) throws {
@@ -3743,18 +3756,14 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
                     storage[key] = data
                 }
                 throw StoreError.denied
-            case .succeedOnceThenMutateAndCorruptCompensation:
+            case .succeedOnceThenFailCompletionCompensationAndReadback:
                 guard successfulWritesRemaining == 0 else {
                     successfulWritesRemaining -= 1
                     storage[key] = data
                     return
                 }
-                if !hasRefusedWrite {
-                    hasRefusedWrite = true
-                    storage[key] = data
-                } else {
-                    storage[key] = Data("inconsistent".utf8)
-                }
+                failedWrites += 1
+                shouldFailReadback = failedWrites >= 2
                 throw StoreError.denied
             }
         }
@@ -3768,7 +3777,7 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
             if case .mutateThenFailWriteAndCompensation = behavior {
                 throw StoreError.denied
             }
-            if case .succeedOnceThenMutateAndCorruptCompensation = behavior {
+            if case .succeedOnceThenFailCompletionCompensationAndReadback = behavior {
                 throw StoreError.denied
             }
             storage.removeValue(forKey: key)
