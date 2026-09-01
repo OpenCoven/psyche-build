@@ -461,7 +461,6 @@ public final class HostReadinessMachine: ObservableObject {
     private struct ReadyHostSelectionFinalization {
         let id: UUID
         let candidateServerID: String
-        let previousWorkspaceState: WorkspaceStore.ReadyHostPublicationState
     }
 
     var authenticatedHost: PairedHost? {
@@ -728,8 +727,7 @@ public final class HostReadinessMachine: ObservableObject {
         )
         let finalization = ReadyHostSelectionFinalization(
             id: UUID(),
-            candidateServerID: serverID,
-            previousWorkspaceState: previousWorkspaceState
+            candidateServerID: serverID
         )
         readyHostSelectionFinalization = finalization
         return finalization.id
@@ -750,10 +748,7 @@ public final class HostReadinessMachine: ObservableObject {
             return false
         }
         readyHostSelectionFinalization = nil
-        workspaceStore.restoreReadyHostPublication(
-            finalization.previousWorkspaceState
-        )
-        workspaceStore.markReadinessStale()
+        workspaceStore.quarantineReadyHostPublication()
         let from = state
         committedHost = nil
         presentation = .noState
