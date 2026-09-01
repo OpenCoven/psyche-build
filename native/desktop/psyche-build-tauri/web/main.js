@@ -1198,7 +1198,7 @@
   }
   function persistableSession(thread) {
     if (!thread || !thread.launch ||
-        ["shell", "psyche", "coven-code", "coven-attach"].indexOf(thread.launch.launchKind) === -1) {
+        ["shell", "psyche", "coven-code", "coven-attach", "coven-recovery"].indexOf(thread.launch.launchKind) === -1) {
       return null;
     }
     var persisted = {
@@ -1212,6 +1212,7 @@
     };
     if (thread.launch.launchKind === "coven-attach") {
       persisted.covenSessionId = thread.launch.covenSessionId || null;
+      if (thread.launch.recoveryRequired === true) persisted.recoveryRequired = true;
     }
     return persisted;
   }
@@ -2447,8 +2448,8 @@
     return thread;
   }
 
-  function reserveCovenLaunchThread(opts) {
-    return createThread({
+  async function reserveCovenLaunchThread(opts) {
+    var thread = await createThread({
       project: opts.project,
       worktreePath: opts.worktreePath,
       name: opts.name + " launch recovery",
@@ -2460,6 +2461,28 @@
       deferStart: true,
       focusTerminal: false,
     });
+    if (!thread) return null;
+    try {
+      await saveWorkspaceNow();
+    } catch (persistenceError) {
+      var cleanupError = null;
+      try {
+        var released = await releaseCovenLaunchReservation(thread);
+        if (released !== true) {
+          cleanupError = new Error("reservation cleanup was not confirmed");
+        }
+      } catch (error) {
+        cleanupError = error;
+      }
+      var message =
+        "Coven launch was not submitted because its recovery reservation could not be saved: " +
+        String(persistenceError);
+      if (cleanupError) {
+        message += "; reservation cleanup also failed: " + String(cleanupError);
+      }
+      throw new Error(message);
+    }
+    return thread;
   }
 
   function hasCovenLaunchRecovery(projectId, worktreePath) {
@@ -2467,7 +2490,8 @@
       return thread.projectId === projectId
         && thread.worktreePath === worktreePath
         && thread.launch
-        && thread.launch.launchKind === "coven-recovery";
+        && (thread.launch.launchKind === "coven-recovery" ||
+          thread.launch.recoveryRequired === true);
     });
   }
 
@@ -2503,13 +2527,52 @@
     thread.launch.covenSessionId = options.sessionId;
     thread.launch.promptDigest = options.promptDigest || null;
     thread.launch.metricsProvider = options.harness || "coven";
+    thread.launch.recoveryRequired = false;
     thread.status = "starting";
     thread.spawning = true;
     thread.finishedAt = null;
     syncThreadPaneMetadata(thread);
     refreshSidebar();
     refreshTabs();
-    await saveWorkspaceNow();
+    try {
+      await saveWorkspaceNow();
+    } catch (error) {
+      thread.launch.recoveryRequired = true;
+      thread.status = "failed";
+      thread.spawning = false;
+      thread.finishedAt = Date.now();
+      thread.sidebarStatusKey = "error";
+      if (thread.terminalController) {
+        thread.terminalController.write(
+          "\r\n\x1b[31m[Coven session accepted; local recovery required]\x1b[0m " +
+            String(error) + "\r\n"
+        );
+      }
+      setStatus(
+        thread.name + " was accepted by Coven but local recovery is required: " + String(error),
+        "error"
+      );
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      try {
+        await saveWorkspaceNow();
+      } catch (recoverySaveError) {
+        if (thread.terminalController) {
+          thread.terminalController.write(
+            "\r\n\x1b[31m[Coven recovery state is not durable]\x1b[0m " +
+              "inspect Coven before closing: " + String(recoverySaveError) + "\r\n"
+          );
+        }
+        setStatus(
+          thread.name +
+            " was accepted by Coven, but its recovery state is not durable; " +
+            "inspect Coven before closing: " + String(recoverySaveError),
+          "error"
+        );
+      }
+      return thread;
+    }
     try {
       await invoke("native_session_create", { request: nativeSessionRequest(thread) });
       thread.persistentLive = true;
@@ -13938,6 +14001,7 @@
     if (launchKind === "coven-attach") {
       launch.covenSessionId = descriptor.covenSessionId || null;
       launch.metricsProvider = launch.covenSessionId ? "coven" : null;
+      launch.recoveryRequired = descriptor.recoveryRequired === true;
     } else {
       launch.metricsProvider = null;
     }
@@ -13946,6 +14010,8 @@
 
   function restoredSessionThread(descriptor, project) {
     var launch = restoredSessionLaunch(descriptor, project);
+    var isCovenRecovery = launch.launchKind === "coven-recovery" ||
+      launch.recoveryRequired === true;
     return {
       id: descriptor.id,
       projectId: project.id,
@@ -13954,9 +14020,9 @@
       kind: descriptor.kind || descriptor.launchKind,
       launch: launch,
       hidden: descriptor.hidden === true,
-      status: descriptor.status,
+      status: isCovenRecovery ? "failed" : descriptor.status,
       persistentLive: descriptor.persistentLive === true,
-      spawning: descriptor.persistentLive === true,
+      spawning: isCovenRecovery ? false : descriptor.persistentLive === true,
       term: null,
       fit: null,
       host: null,
@@ -13976,9 +14042,9 @@
       metricsRefreshTimer: 0,
       lastOutputAt: 0,
       isWorking: false,
-      sidebarStatusKey: descriptor.persistentLive ? "busy" : "done",
+      sidebarStatusKey: isCovenRecovery ? "error" : descriptor.persistentLive ? "busy" : "done",
       startedAt: Date.now(),
-      finishedAt: descriptor.persistentLive ? null : Date.now(),
+      finishedAt: isCovenRecovery || !descriptor.persistentLive ? Date.now() : null,
       exitCode: null,
     };
   }
@@ -14545,13 +14611,19 @@
       return null;
     }
     var promptDigest = await covenPromptDigest(userPrompt);
-    var reservation = await reserveCovenLaunchThread({
-      project: project,
-      projectRoot: project.root,
-      worktreePath: worktree.path,
-      name: entry.label,
-      promptDigest: promptDigest,
-    });
+    var reservation;
+    try {
+      reservation = await reserveCovenLaunchThread({
+        project: project,
+        projectRoot: project.root,
+        worktreePath: worktree.path,
+        name: entry.label,
+        promptDigest: promptDigest,
+      });
+    } catch (error) {
+      setStatus(entry.label + " launch was not submitted: " + String(error), "error");
+      return null;
+    }
     if (!reservation) return null;
     // The composer prompt rides the daemon launch request body only. It is
     // never placed in process argv and never stored on the launch model; the

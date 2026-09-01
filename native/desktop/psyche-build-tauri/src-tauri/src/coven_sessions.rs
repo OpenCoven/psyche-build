@@ -46,7 +46,6 @@ const ERROR_MESSAGE: &str = "Coven sessions could not be loaded";
 #[cfg(unix)]
 const LAUNCH_REJECTED_MESSAGE: &str = "Coven rejected the launch request";
 const LAUNCH_FAILED_MESSAGE: &str = "Coven launch could not be completed";
-#[cfg(unix)]
 const LAUNCH_EFFECT_UNKNOWN_MESSAGE: &str =
     "Coven launch outcome is unknown; inspect Coven sessions before retrying";
 #[cfg(unix)]
@@ -474,7 +473,10 @@ fn is_bounded_launch_path(path: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn validate_launch_request(mut request: CovenLaunchRequest) -> Result<CovenLaunchRequest, String> {
+fn validate_launch_request(
+    mut request: CovenLaunchRequest,
+    open_project_roots: &[PathBuf],
+) -> Result<CovenLaunchRequest, String> {
     if !is_bounded_launch_path(&request.project_root) {
         return Err("Coven launch requires a bounded project root".to_string());
     }
@@ -504,19 +506,28 @@ fn validate_launch_request(mut request: CovenLaunchRequest) -> Result<CovenLaunc
         }
     }
 
-    super::canonical_project_root(&request.project_root)
+    let requested_project_root = super::canonical_project_root(&request.project_root)
         .map_err(|_| "Coven launch project root is unavailable".to_string())?;
-    let requested_cwd = request.cwd.as_deref().unwrap_or(&request.project_root);
-    let opened_cwd = super::open_pty_cwd(&request.project_root, requested_cwd).map_err(|_| {
-        "Coven launch working directory is outside the project or its linked worktrees".to_string()
-    })?;
-
-    let canonical_cwd = opened_cwd.canonical_path.clone();
-    let daemon_project_root = super::verified_worktree_root(&request.project_root, &canonical_cwd)
-        .map_err(|_| {
+    let open_project_root = open_project_roots
+        .iter()
+        .find(|root| **root == requested_project_root)
+        .ok_or_else(|| "Coven launch project is not open in Psyche".to_string())?;
+    let open_project_root = open_project_root.to_string_lossy();
+    let requested_cwd = request.cwd.as_deref().unwrap_or(open_project_root.as_ref());
+    let opened_cwd =
+        super::open_pty_cwd(open_project_root.as_ref(), requested_cwd).map_err(|_| {
             "Coven launch working directory is outside the project or its linked worktrees"
                 .to_string()
         })?;
+
+    let canonical_cwd = opened_cwd.canonical_path.clone();
+    let daemon_project_root = super::verified_worktree_root(
+        open_project_root.as_ref(),
+        &canonical_cwd,
+    )
+    .map_err(|_| {
+        "Coven launch working directory is outside the project or its linked worktrees".to_string()
+    })?;
 
     request.project_root = daemon_project_root.to_string_lossy().into_owned();
     if request.cwd.is_some() {
@@ -620,6 +631,9 @@ fn try_launch_coven_session(
     .map_err(|_| CovenAdapterError::EffectUnknown)?;
     if response.status == 400 || response.status == 403 || response.status == 404 {
         return Ok(rejected_launch_response(&response.body));
+    }
+    if response.status >= 500 {
+        return Err(CovenAdapterError::EffectUnknown);
     }
     if !(200..=299).contains(&response.status) {
         return Err(CovenAdapterError::Failed);
@@ -838,7 +852,15 @@ fn launch_validation_rejection(message: String) -> CovenLaunchResponse {
 pub(crate) async fn coven_launch_session(request: CovenLaunchRequest) -> CovenLaunchResponse {
     match tauri::async_runtime::spawn_blocking(
         move || -> Result<CovenLaunchResponse, CovenAdapterError> {
-            let request = match validate_launch_request(request) {
+            let open_project_roots = match super::native_workspace::open_project_roots() {
+                Ok(roots) => roots,
+                Err(_) => {
+                    return Ok(launch_validation_rejection(
+                        "Coven launch project authority is unavailable".to_string(),
+                    ))
+                }
+            };
+            let request = match validate_launch_request(request, &open_project_roots) {
                 Ok(request) => request,
                 Err(message) => return Ok(launch_validation_rejection(message)),
             };
@@ -3549,6 +3571,18 @@ mod tests {
         }
     }
 
+    fn validate_launch_request_with_project_roots(
+        request: CovenLaunchRequest,
+        project_roots: &[PathBuf],
+    ) -> Result<CovenLaunchRequest, String> {
+        super::validate_launch_request(request, project_roots)
+    }
+
+    fn validate_launch_request(request: CovenLaunchRequest) -> Result<CovenLaunchRequest, String> {
+        let project_root = super::super::canonical_project_root(&request.project_root)?;
+        super::validate_launch_request(request, &[project_root])
+    }
+
     fn expected_launch_request(body: &[u8]) -> Vec<u8> {
         let mut request = format!(
             "POST /api/v1/sessions HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -3638,6 +3672,23 @@ mod tests {
         request.cwd = Some(sibling_prefix.to_string_lossy().into_owned());
 
         assert!(validate_launch_request(request).is_err());
+    }
+
+    #[test]
+    fn launch_request_validation_rejects_a_caller_supplied_unopened_project() {
+        let tree = TempTree::new("launch-native-project-authority");
+        let open_project = tree.directory("open-project");
+        let caller_project = tree.directory("caller-project");
+        let mut request = launch_fixture();
+        request.project_root = caller_project.to_string_lossy().into_owned();
+        request.cwd = Some(caller_project.to_string_lossy().into_owned());
+
+        let result = validate_launch_request_with_project_roots(request, &[open_project]);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Coven launch project is not open in Psyche"
+        );
     }
 
     #[cfg(unix)]
@@ -3818,6 +3869,25 @@ mod tests {
                 message: Some(LAUNCH_EFFECT_UNKNOWN_MESSAGE.to_string()),
             }
         );
+    }
+
+    #[test]
+    fn launch_session_marks_server_errors_after_post_as_effect_unknown() {
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            http_status_json(
+                503,
+                "Service Unavailable",
+                br#"{"error":{"code":"temporarily_unavailable","message":"try later"}}"#,
+            ),
+        ]);
+
+        let response = try_launch_coven_session(&endpoint, &launch_fixture());
+        assert_server_requests(&server, &["/api/v1/health"]);
+        assert!(server.recv_request().starts_with(b"POST /api/v1/sessions "));
+        server.finish();
+
+        assert_eq!(response.unwrap_err(), CovenAdapterError::EffectUnknown);
     }
 
     #[test]

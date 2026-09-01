@@ -2,7 +2,13 @@ const SAFE_WORKSPACE_SESSION_ID = /^[A-Za-z0-9._:-]{1,96}$/;
 const SAFE_COVEN_ATTACHMENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const CANONICAL_COVEN_KIND = 'coven-code';
 const LEGACY_COVEN_KIND = 'coven-chat';
-const ALLOWED_KINDS = new Set(['shell', 'psyche', CANONICAL_COVEN_KIND, 'coven-attach']);
+const ALLOWED_KINDS = new Set([
+  'shell',
+  'psyche',
+  CANONICAL_COVEN_KIND,
+  'coven-attach',
+  'coven-recovery',
+]);
 const COLUMN = 'column';
 const ROW = 'row';
 
@@ -215,6 +221,7 @@ export function sanitizeSessionDescriptor(saved) {
     const covenSessionId = safeCovenAttachmentId(saved.covenSessionId);
     if (!covenSessionId) return null;
     descriptor.covenSessionId = covenSessionId;
+    if (saved.recoveryRequired === true) descriptor.recoveryRequired = true;
   }
 
   return descriptor;
