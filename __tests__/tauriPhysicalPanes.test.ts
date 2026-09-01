@@ -3266,6 +3266,75 @@ describe('Tauri physical terminal panes', () => {
     ]);
   });
 
+  it('preserves newer Files focus when project removal persistence rolls back', async () => {
+    const project = { id: 'project', root: '/repo', name: 'Repo' };
+    const otherProject = { id: 'other-project', root: '/other', name: 'Other' };
+    const removedFile = {
+      id: 'removed-file',
+      projectId: project.id,
+      workspaceRoot: project.root,
+    };
+    const selectedFile = {
+      id: 'selected-file',
+      projectId: otherProject.id,
+      workspaceRoot: otherProject.root,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: removedFile.id as string | null,
+      projects: [project, otherProject],
+      threads: [],
+      openFiles: [removedFile, selectedFile],
+    };
+    const fileViewEl = { hidden: false };
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (id: string) => state.projects.find((item) => item.id === id) || null,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => true,
+      projectNativeSessionCreateCount: () => 0,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => {
+        state.activeFileId = selectedFile.id;
+        fileViewEl.hidden = false;
+        throw new Error('disk full');
+      },
+      finishWorkspaceSaveCriticalSection: async () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async (id: string) => {
+        state.activeProjectId = id;
+        state.activeThreadId = null;
+        state.activeFileId = null;
+        return true;
+      },
+      setStatus: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl,
+      renderFileView: () => undefined,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(state.projects).toEqual([project, otherProject]);
+    expect(state.activeProjectId).toBe(otherProject.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(state.activeFileId).toBe(selectedFile.id);
+    expect(fileViewEl.hidden).toBe(false);
+  });
+
   it('refuses project removal while a Coven launch outcome is unresolved', async () => {
     const project = { id: 'project', root: '/repo', name: 'Repo' };
     const recovery = {

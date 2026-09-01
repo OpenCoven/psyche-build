@@ -2188,6 +2188,50 @@ describe('native Coven launch routing', () => {
     ]);
   });
 
+  it('quarantines a native-picked root when rejected admission cannot revoke authority', async () => {
+    const state = {
+      env: { home: '/home' },
+      projects: [] as Array<{ root: string }>,
+    };
+    const closingNativeProjectRoots = new Set<string>();
+    const pendingNativeProjectRevocations = new Map<string, Record<string, unknown>>();
+    const schedules: number[] = [];
+    const quarantineNativeProjectRevocation = compileFunction<
+      (project: { root: string; name: string }, error: unknown) => void
+    >(functionSource('quarantineNativeProjectRevocation'), {
+      closingNativeProjectRoots,
+      pendingNativeProjectRevocations,
+      schedulePendingNativeProjectRevocations: (delay: number) => {
+        schedules.push(delay);
+      },
+    });
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        closingNativeProjectRoots,
+        invoke: async (command: string) => {
+          if (command === 'native_project_open') return '/repo/rejected';
+          throw new Error('native bridge unavailable');
+        },
+        addProject: async () => null,
+        quarantineNativeProjectRevocation,
+        writeToActive: () => undefined,
+      },
+    );
+
+    await openProjectPicker();
+
+    expect(closingNativeProjectRoots).toEqual(new Set(['/repo/rejected']));
+    expect(pendingNativeProjectRevocations.get('/repo/rejected')).toEqual({
+      root: '/repo/rejected',
+      name: '/repo/rejected',
+      attempts: 3,
+      lastError: 'Error: native bridge unavailable',
+    });
+    expect(schedules).toEqual([1000]);
+  });
+
   it('does not revoke a native-picked root whose admission is blocked by teardown', async () => {
     const state = {
       env: { home: '/home' },

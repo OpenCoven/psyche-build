@@ -9301,7 +9301,8 @@
       var selectionStillOwnedByRemoval = state.activeProjectId === id ||
         (transactionSelection &&
           state.activeProjectId === transactionSelection.projectId &&
-          state.activeThreadId === transactionSelection.threadId);
+          state.activeThreadId === transactionSelection.threadId &&
+          state.activeFileId === transactionSelection.fileId);
       if (selectionStillOwnedByRemoval && activeProjectIdSnapshot === id) {
         if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
         else Object.assign(state, { activeProjectId: id });
@@ -9405,6 +9406,7 @@
       transactionSelection = {
         projectId: state.activeProjectId,
         threadId: state.activeThreadId,
+        fileId: state.activeFileId,
       };
     }
     if (!sidebarRefreshedByActiveProjectHandoff) refreshSidebar();
@@ -15008,18 +15010,23 @@
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     } finally {
+      var cleanupRoot = admission.canonicalRoot || selected;
       if (
         selected &&
         typeof selected === "string" &&
         !admission.blockedByClosing &&
-        !closingNativeProjectRoots.has(selected) &&
+        !closingNativeProjectRoots.has(cleanupRoot) &&
         !state.projects.some(function (project) {
-          return project.root === (admission.canonicalRoot || selected);
+          return project.root === cleanupRoot;
         })
       ) {
         try {
-          await invoke("native_project_close", { root: selected });
+          await invoke("native_project_close", { root: cleanupRoot });
         } catch (cleanupError) {
+          quarantineNativeProjectRevocation(
+            { root: cleanupRoot, name: cleanupRoot },
+            cleanupError
+          );
           writeToActive(
             "\r\n\x1b[31m[open-project cleanup]\x1b[0m failed to revoke native project authority: " +
               cleanupError + "\r\n"
