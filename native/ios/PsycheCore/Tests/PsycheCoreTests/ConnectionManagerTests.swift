@@ -1156,7 +1156,7 @@ final class ConnectionManagerTests: XCTestCase {
         }
     }
 
-    func testIndeterminateSelectionCompletionRestoresPreviousAuthorityExactly() async throws {
+    func testIndeterminateSelectionCompletionQuarantinesUnknownAuthority() async throws {
         let secureStore = FailableWriteSecureStore()
         let previouslyReady = makeStoredHost()
         try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
@@ -1172,8 +1172,6 @@ final class ConnectionManagerTests: XCTestCase {
         )
 
         try await reachReadyStoredHost(composition: composition, transport: fake)
-        let expectedCommittedHost = composition.hostReadiness.committedHost
-        let expectedSelectedHost = try await composition.pairedHostStore.selectedHost()
         await composition.manager.disconnect()
         let candidateConnect = Task {
             await composition.manager.connect(to: candidateEndpoint)
@@ -1195,12 +1193,11 @@ final class ConnectionManagerTests: XCTestCase {
         let expectedWorkspace = composition.workspaceStore.workspace
         let expectedSequence = composition.workspaceStore.sequence
         let expectedConfirmedAt = composition.workspaceStore.lastConfirmedAt
-        let expectedPresentation = composition.hostReadiness.presentation
         let expectedSelectedProjectID = composition.workspaceStore.selectedProjectID
         let expectedPrimaryPaneID = composition.workspaceStore.primaryPaneID
         let expectedSecondaryPaneID = composition.workspaceStore.secondaryPaneID
         let expectedDrafts = composition.workspaceStore.drafts
-        secureStore.setBehavior(.succeedOnceThenFailWriteAndCompensation)
+        secureStore.setBehavior(.succeedOnceThenMutateAndCorruptCompensation)
 
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: snapshotID,
@@ -1227,18 +1224,13 @@ final class ConnectionManagerTests: XCTestCase {
             expectedSecondaryPaneID
         )
         XCTAssertEqual(composition.workspaceStore.drafts, expectedDrafts)
-        XCTAssertEqual(composition.hostReadiness.presentation, expectedPresentation)
+        XCTAssertEqual(composition.hostReadiness.presentation, .noState)
         XCTAssertEqual(composition.hostReadiness.state, .revoked)
         XCTAssertEqual(
             composition.hostReadiness.lastFailure?.recovery,
             .indeterminate
         )
-        XCTAssertEqual(
-            composition.hostReadiness.committedHost,
-            expectedCommittedHost
-        )
-        let selected = try await composition.pairedHostStore.selectedHost()
-        XCTAssertEqual(selected, expectedSelectedHost)
+        XCTAssertNil(composition.hostReadiness.committedHost)
     }
 
     func testGenerationRetirementAfterSelectionCancelsPendingAuthority() async throws {
@@ -3695,7 +3687,7 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
         case failWriteAndCompensation
         case mutateThenFailWrite
         case mutateThenFailWriteAndCompensation
-        case succeedOnceThenFailWriteAndCompensation
+        case succeedOnceThenMutateAndCorruptCompensation
     }
 
     enum StoreError: Error {
@@ -3712,7 +3704,8 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
         lock.withLock {
             self.behavior = behavior
             hasRefusedWrite = false
-            successfulWritesRemaining = behavior == .succeedOnceThenFailWriteAndCompensation
+            successfulWritesRemaining =
+                behavior == .succeedOnceThenMutateAndCorruptCompensation
                 ? 1
                 : 0
         }
@@ -3750,11 +3743,17 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
                     storage[key] = data
                 }
                 throw StoreError.denied
-            case .succeedOnceThenFailWriteAndCompensation:
+            case .succeedOnceThenMutateAndCorruptCompensation:
                 guard successfulWritesRemaining == 0 else {
                     successfulWritesRemaining -= 1
                     storage[key] = data
                     return
+                }
+                if !hasRefusedWrite {
+                    hasRefusedWrite = true
+                    storage[key] = data
+                } else {
+                    storage[key] = Data("inconsistent".utf8)
                 }
                 throw StoreError.denied
             }
@@ -3769,7 +3768,7 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
             if case .mutateThenFailWriteAndCompensation = behavior {
                 throw StoreError.denied
             }
-            if case .succeedOnceThenFailWriteAndCompensation = behavior {
+            if case .succeedOnceThenMutateAndCorruptCompensation = behavior {
                 throw StoreError.denied
             }
             storage.removeValue(forKey: key)

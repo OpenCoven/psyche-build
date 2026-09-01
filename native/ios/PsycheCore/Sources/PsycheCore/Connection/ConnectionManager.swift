@@ -1199,12 +1199,16 @@ public actor ConnectionManager {
                             )
                         }
                     case .notCommitted:
-                        break
+                        await MainActor.run {
+                            machine.acknowledgeReadyHostSelectionFinalization(
+                                finalizationID
+                            )
+                        }
                     case .indeterminate(let reason):
                         let error = ConnectionManagerError
                             .hostIdentityIndeterminate(reason)
                         await MainActor.run {
-                            _ = try? machine.rollbackReadyHostSelectionFinalization(
+                            _ = try? machine.quarantineReadyHostSelectionFinalization(
                                 finalizationID,
                                 reason: error.localizedDescription
                             )

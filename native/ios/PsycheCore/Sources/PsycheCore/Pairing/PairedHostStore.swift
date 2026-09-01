@@ -445,7 +445,9 @@ public actor PairedHostStore {
               readySelectionOwner?.transactionID == transaction.id,
               readySelectionOwner?.authorization === authorization,
               authorization.finalized else {
-            return .notCommitted(reason: nil)
+            return .indeterminate(
+                reason: "Ready-host selection completion ownership was superseded before durable state could be verified."
+            )
         }
         let previousData: Data?
         let nextData: Data
@@ -455,7 +457,11 @@ public actor PairedHostStore {
             var state = snapshot.state
             guard state.selectedServerID == transaction.candidateServerID,
                   state.pendingReadySelection == transaction else {
-                return .notCommitted(reason: nil)
+                authorization.supersede()
+                readySelectionOwner = nil
+                return .indeterminate(
+                    reason: "Ready-host selection completion found unexpected durable state."
+                )
             }
             state.pendingReadySelection = nil
             nextData = try JSONEncoder().encode(state)
@@ -469,13 +475,21 @@ public actor PairedHostStore {
             readySelectionOwner = nil
             return .committed
         } catch {
-            let result = compensateWrite(
+            let compensation = compensateWrite(
                 to: previousData,
                 after: error,
                 operation: "Ready-host selection completion"
             )
+            let result = resolveReadyHostSelectionCompletion(
+                compensation,
+                previousData: previousData,
+                committedData: nextData
+            )
             if case .indeterminate = result {
                 authorization.supersede()
+                readySelectionOwner = nil
+            }
+            if case .committed = result {
                 readySelectionOwner = nil
             }
             return result
@@ -844,6 +858,32 @@ public actor PairedHostStore {
         }
 
         return .notCommitted(reason: writeError.localizedDescription)
+    }
+
+    private func resolveReadyHostSelectionCompletion(
+        _ compensation: HostReadinessTransactionResult,
+        previousData: Data?,
+        committedData: Data
+    ) -> HostReadinessTransactionResult {
+        guard case .indeterminate(let reason) = compensation else {
+            return compensation
+        }
+        do {
+            let persistedData = try secureStore.data(forKey: key)
+            if persistedData == committedData {
+                return .committed
+            }
+            if persistedData == previousData {
+                return .notCommitted(reason: reason)
+            }
+            return .indeterminate(
+                reason: "\(reason) Durable read-back did not match either valid state."
+            )
+        } catch {
+            return .indeterminate(
+                reason: "\(reason) Durable read-back failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     /// Store fingerprints in one canonical form so a record saved from a
