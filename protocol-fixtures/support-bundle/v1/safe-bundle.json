@@ -1,0 +1,83 @@
+{
+  "compatibility": {
+    "minimumReaderVersion": 1,
+    "policy": "readers-reject-unknown-major-and-ignore-unknown-fields-within-major"
+  },
+  "errors": [],
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "lifecycle": {
+    "panes": 2,
+    "state": "ready"
+  },
+  "ownerEpoch": 7,
+  "persistence": {
+    "recoveryRequired": false,
+    "state": "healthy"
+  },
+  "project": {
+    "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035",
+    "relativePath": "sample-project"
+  },
+  "provenance": {
+    "application": "psyche-build",
+    "architecture": "arm64",
+    "platform": "darwin",
+    "releaseVersion": "0.0.2",
+    "sourceSha": "0123456789abcdef0123456789abcdef01234567",
+    "verification": "unverified"
+  },
+  "providers": {
+    "browser": "unavailable",
+    "tmux": "available"
+  },
+  "receipts": [
+    {
+      "actionId": "4c672c2c878c56962dde682b401440b465896f20102c86d5c54d3943d8b020f8",
+      "code": "fixture_ok",
+      "completedAt": "2026-01-01T00:00:00.010Z",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "durationMs": 10,
+      "resource": {
+        "idDigest": "9ccc8bf50bc687b4d30f557f1ee40ab5c5b9d4a3112725e686e54abe58555035",
+        "kind": "project"
+      },
+      "sourceSchema": "psyche.control.receipt/v1",
+      "sourceState": "succeeded",
+      "state": "succeeded",
+      "verification": "unverified"
+    }
+  ],
+  "records": [
+    {
+      "at": "2026-01-01T00:00:00.000Z",
+      "component": "fixture",
+      "event": "ready",
+      "outcome": "succeeded",
+      "sequence": 1
+    }
+  ],
+  "redaction": {
+    "categories": {},
+    "omittedFields": 0,
+    "redactedFields": 0,
+    "version": 1
+  },
+  "schema": "psyche.diagnostics/v1",
+  "status": "partial",
+  "terminalTail": [],
+  "truncation": {
+    "bytesOmitted": 0,
+    "errorsOmitted": 0,
+    "fieldsTruncated": 0,
+    "receiptsOmitted": 0,
+    "recordsOmitted": 0,
+    "stateFieldsOmitted": 0,
+    "terminalLinesOmitted": 0,
+    "totalPayloadBounded": true
+  },
+  "updater": {
+    "state": "current",
+    "version": "0.0.2"
+  },
+  "version": 1
+}
