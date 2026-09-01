@@ -103,6 +103,7 @@ public actor PairedHostStore {
     private let secureStore: any SecureStore
     private let key: String
     private let fallbackKey: String?
+    private let readyHostSelectionCommitStart: @Sendable () -> Void
     private var readySelectionOwner: (
         generation: ObjectIdentifier,
         transactionID: UUID?,
@@ -113,6 +114,18 @@ public actor PairedHostStore {
         self.secureStore = secureStore
         self.key = key
         fallbackKey = key == Self.defaultKey ? Self.legacyKey : nil
+        readyHostSelectionCommitStart = {}
+    }
+
+    init(
+        secureStore: any SecureStore,
+        key: String = defaultKey,
+        readyHostSelectionCommitStart: @escaping @Sendable () -> Void
+    ) {
+        self.secureStore = secureStore
+        self.key = key
+        fallbackKey = key == Self.defaultKey ? Self.legacyKey : nil
+        self.readyHostSelectionCommitStart = readyHostSelectionCommitStart
     }
 
     /// Sorted by server ID so a list rendered from this never reorders itself
@@ -339,77 +352,72 @@ public actor PairedHostStore {
 
     /// Advances automatic reconnect authority only after the connection's
     /// first workspace snapshot has completed readiness. The generation lock
-    /// makes teardown and selection mutually exclusive at the write boundary.
+    /// makes teardown and the complete selection transaction mutually exclusive.
     func selectReadyHost(
         serverID: String,
         for generation: ConnectionGeneration
     ) -> ReadyHostSelectionPreparation {
-        let previousData: Data?
-        let nextData: Data
-        let transaction: ReadyHostSelectionTransaction?
-        do {
-            let snapshot = try stateSnapshot()
-            var state = snapshot.state
-            guard state.records[serverID] != nil else {
-                return ReadyHostSelectionPreparation(
-                    result: .notCommitted(
-                        reason: "The ready host has no persisted pairing record."
-                    ),
-                    transaction: nil,
-                    authorization: nil
-                )
-            }
-            var finalizedTransactionID: UUID?
-            guard generation.withValidity({
-                if readySelectionOwner?.authorization.finalized == true {
-                    finalizedTransactionID = readySelectionOwner?.transactionID
+        readyHostSelectionCommitStart()
+        return generation.withValidity {
+            let previousData: Data?
+            let nextData: Data
+            let transaction: ReadyHostSelectionTransaction?
+            do {
+                let snapshot = try stateSnapshot()
+                var state = snapshot.state
+                guard state.records[serverID] != nil else {
+                    return ReadyHostSelectionPreparation(
+                        result: .notCommitted(
+                            reason: "The ready host has no persisted pairing record."
+                        ),
+                        transaction: nil,
+                        authorization: nil
+                    )
                 }
-                supersedeReadySelection()
-                return true
-            }) == true else {
+                let finalizedTransactionID: UUID? = if readySelectionOwner?
+                    .authorization.finalized == true {
+                    readySelectionOwner?.transactionID
+                } else {
+                    nil
+                }
+                if let pending = state.pendingReadySelection,
+                   finalizedTransactionID == pending.id {
+                    state.pendingReadySelection = nil
+                    previousData = try JSONEncoder().encode(state)
+                } else {
+                    previousData = snapshot.currentData
+                }
+                let previousServerID = if let pending = state.pendingReadySelection {
+                    pending.previousServerID
+                } else {
+                    state.selectedServerID
+                }
+                if previousServerID == serverID {
+                    state.selectedServerID = serverID
+                    state.pendingReadySelection = nil
+                    transaction = nil
+                } else {
+                    let pending = ReadyHostSelectionTransaction(
+                        id: UUID(),
+                        candidateServerID: serverID,
+                        previousServerID: previousServerID
+                    )
+                    state.selectedServerID = serverID
+                    state.pendingReadySelection = pending
+                    transaction = pending
+                }
+                nextData = try JSONEncoder().encode(state)
+            } catch {
                 return ReadyHostSelectionPreparation(
-                    result: .notCommitted(reason: nil),
+                    result: .notCommitted(reason: error.localizedDescription),
                     transaction: nil,
                     authorization: nil
                 )
             }
-            if let pending = state.pendingReadySelection,
-               finalizedTransactionID == pending.id {
-                state.pendingReadySelection = nil
-                previousData = try JSONEncoder().encode(state)
-            } else {
-                previousData = snapshot.currentData
-            }
-            let previousServerID = if let pending = state.pendingReadySelection {
-                pending.previousServerID
-            } else {
-                state.selectedServerID
-            }
-            if previousServerID == serverID {
-                state.selectedServerID = serverID
-                state.pendingReadySelection = nil
-                transaction = nil
-            } else {
-                let pending = ReadyHostSelectionTransaction(
-                    id: UUID(),
-                    candidateServerID: serverID,
-                    previousServerID: previousServerID
-                )
-                state.selectedServerID = serverID
-                state.pendingReadySelection = pending
-                transaction = pending
-            }
-            nextData = try JSONEncoder().encode(state)
-        } catch {
-            return ReadyHostSelectionPreparation(
-                result: .notCommitted(reason: error.localizedDescription),
-                transaction: nil,
-                authorization: nil
-            )
-        }
 
-        let authorization = ReadyHostSelectionAuthorization()
-        let result: HostReadinessTransactionResult = generation.withValidity {
+            let authorization = ReadyHostSelectionAuthorization()
+            supersedeReadySelection()
+            let result: HostReadinessTransactionResult
             do {
                 try secureStore.set(nextData, forKey: key)
                 readySelectionOwner = (
@@ -417,19 +425,23 @@ public actor PairedHostStore {
                     transactionID: transaction?.id,
                     authorization: authorization
                 )
-                return .committed
+                result = .committed
             } catch {
-                return compensateWrite(
+                result = compensateWrite(
                     to: previousData,
                     after: error,
                     operation: "Ready-host selection"
                 )
             }
-        } ?? .notCommitted(reason: nil)
-        return ReadyHostSelectionPreparation(
-            result: result,
-            transaction: result == .committed ? transaction : nil,
-            authorization: result == .committed ? authorization : nil
+            return ReadyHostSelectionPreparation(
+                result: result,
+                transaction: result == .committed ? transaction : nil,
+                authorization: result == .committed ? authorization : nil
+            )
+        } ?? ReadyHostSelectionPreparation(
+            result: .notCommitted(reason: nil),
+            transaction: nil,
+            authorization: nil
         )
     }
 

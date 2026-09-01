@@ -1048,8 +1048,11 @@ final class ConnectionManagerTests: XCTestCase {
 
         XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
         XCTAssertTrue(composition.workspaceStore.isStale)
-        await composition.manager.disconnect()
+        let disconnecting = Task {
+            await composition.manager.disconnect()
+        }
         secureStore.releaseRead()
+        await disconnecting.value
         for _ in 0..<100 {
             await Task.yield()
         }
