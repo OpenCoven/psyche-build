@@ -1,0 +1,216 @@
+{
+  "version": "vim/v1",
+  "kind": "editor",
+  "traces": [
+    {
+      "id": "edit-delete-word-dw",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["d", "w"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "beta gamma",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { "\"": { "text": "alpha ", "linewise": false } },
+        "marks": { "[": 0, "]": 0 }
+      }
+    },
+    {
+      "id": "edit-change-inner-word-ciw",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["c", "i", "w"],
+      "expected": {
+        "mode": "insert",
+        "pending": "",
+        "text": " beta",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "insert" }]
+      }
+    },
+    {
+      "id": "edit-yank-line-yy",
+      "document": { "text": "alpha\nbeta", "cursor": 0 },
+      "inputs": ["y", "y"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha\nbeta",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { "\"": { "text": "alpha\n", "linewise": true } }
+      }
+    },
+    {
+      "id": "edit-yank-word-then-put",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["y", "w", "p"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "aalpha lpha beta",
+        "cursor": 7,
+        "actions": [],
+        "registers": { "\"": { "text": "alpha ", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-open-line-below-o",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": ["o"],
+      "expected": {
+        "mode": "insert",
+        "pending": "",
+        "text": "alpha\n",
+        "cursor": 6,
+        "actions": [{ "type": "mode", "mode": "insert" }]
+      }
+    },
+    {
+      "id": "edit-insert-then-escape",
+      "document": { "text": "hi", "cursor": 0 },
+      "inputs": ["i", "x", "y", "Escape"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "xyhi",
+        "cursor": 1,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { ".": { "text": "xy", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-counted-insert-3i",
+      "document": { "text": "hi", "cursor": 0 },
+      "inputs": ["3", "i", "x", "Escape"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "xxxhi",
+        "cursor": 2,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { ".": { "text": "x", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-replace-mode-RXY",
+      "document": { "text": "abc", "cursor": 0 },
+      "inputs": ["R", "X", "Y", "Escape"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "XYc",
+        "cursor": 1,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { ".": { "text": "XY", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-visual-character-delete",
+      "document": { "text": "hi", "cursor": 0 },
+      "inputs": ["v", "d"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "i",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { "\"": { "text": "h", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-visual-line-delete",
+      "document": { "text": "alpha\nbeta", "cursor": 0 },
+      "inputs": ["V", "d"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "beta",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { "\"": { "text": "alpha\n", "linewise": true } }
+      }
+    },
+    {
+      "id": "edit-visual-block-delete",
+      "document": { "text": "ab\ncd", "cursor": 0 },
+      "inputs": [{ "key": "v", "ctrlKey": true }, "j", "d"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "b\nd",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { "\"": { "text": "a\nc", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-join-lines-J",
+      "document": { "text": "alpha\nbeta", "cursor": 0 },
+      "inputs": ["J"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "edit-indent-line-greater-greater",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [">", ">"],
+      "expected": { "mode": "normal", "pending": "", "text": "  alpha", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "edit-toggle-case-tilde-word",
+      "document": { "text": "Alpha Beta", "cursor": 0 },
+      "inputs": ["g", "~", "w"],
+      "expected": { "mode": "normal", "pending": "", "text": "aLPHA Beta", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "edit-undo-restores-via-port",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["d", "w", "u"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta",
+        "cursor": 0,
+        "actions": [{ "type": "command", "command": "undo", "success": true }]
+      }
+    },
+    {
+      "id": "edit-repeat-last-change-dot",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["d", "w", "."],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "gamma",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }]
+      }
+    },
+    {
+      "id": "edit-unicode-committed-text",
+      "document": { "text": "hi", "cursor": 0 },
+      "inputs": ["i", { "kind": "text", "text": "œ", "source": "composition" }, "Escape"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "œhi",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { ".": { "text": "œ", "linewise": false } }
+      }
+    },
+    {
+      "id": "edit-delete-char-via-operator-dl",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": ["d", "l"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "lpha",
+        "cursor": 0,
+        "actions": [{ "type": "mode", "mode": "normal" }],
+        "registers": { "\"": { "text": "a", "linewise": false } }
+      }
+    }
+  ]
+}
