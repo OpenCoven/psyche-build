@@ -18,6 +18,7 @@ import {
   SERVER_FIXTURES,
   WORKSPACE_SNAPSHOT_FIXTURE,
 } from '../protocol-fixtures/fixtures.js';
+import { createSafeSupportBundleFixture } from '../src/diagnostics/supportBundle.js';
 
 const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../protocol-fixtures');
 
@@ -47,6 +48,7 @@ export const OUTPUTS = [
   ['invite-auth/v1/denials.json', INVITE_AUTH_DENIAL_FIXTURE],
   ['invite-auth/v1/expiry.json', INVITE_AUTH_EXPIRY_FIXTURE],
   ['invite-auth/v1/replay.json', INVITE_AUTH_REPLAY_FIXTURE],
+  ['support-bundle/v1/safe-bundle.json', createSafeSupportBundleFixture()],
 ] as const;
 
 if (import.meta.url === `file://${process.argv[1]}`) {

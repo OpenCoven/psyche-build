@@ -39,6 +39,7 @@ import {
   type JournalSnapshotFile,
 } from './journal.js';
 import { canonicalizeBoundedJson } from './boundedJson.js';
+import { isStableSurfaceEffectCode } from './effectCodes.js';
 import { isActionReceipt, isJournalActionReceipt } from './types.js';
 import type {
   ActionReceipt,
@@ -52,29 +53,6 @@ import type {
   PromptEnvelope,
 } from './types.js';
 import { deriveOrchestrationOperationId } from '../orchestration/operationIdentity.js';
-
-const STABLE_SURFACE_EFFECT_CODES = new Set([
-  'action_timeout',
-  'args_too_large',
-  'automation_failed',
-  'backend_unavailable',
-  'element_missing',
-  'provider_busy',
-  'provider_unavailable',
-  'resource_missing',
-  'resource_replaced',
-  'mutation_not_allowed',
-  'mutation_plan_invalid',
-  'mutation_target_stale',
-  'result_too_large',
-  'script_source_too_large',
-  'script_args_invalid',
-  'script_args_too_large',
-  'serialization_failed',
-  'snapshot_too_large',
-  'snapshot_stale',
-  'target_unavailable',
-]);
 
 export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
 export type OrchestrationEffectGuard = () => Promise<void>;
@@ -2336,7 +2314,7 @@ function stableSurfaceEffectCode(error: unknown): string {
   const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
     ? (error as { code: string }).code
     : '';
-  return STABLE_SURFACE_EFFECT_CODES.has(code) ? code : 'effect_failed';
+  return isStableSurfaceEffectCode(code) ? code : 'effect_failed';
 }
 
 function paneIdForCommand(command: ControlCommand): string | undefined {

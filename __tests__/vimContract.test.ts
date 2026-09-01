@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   createChromeMachine,
   normalizeKeyboardEvent,
+  parseVimFixtureDocument,
   validateVimFixtures,
   type VimFixtureDocument,
   type VimInputResult,
@@ -11,7 +12,9 @@ import {
 import { describe, expect, it } from 'vitest';
 
 const fixturePath = join(process.cwd(), 'protocol-fixtures/vim/v1/chrome.json');
-const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8')) as VimFixtureDocument;
+const parsedFixtures = parseVimFixtureDocument(readFileSync(fixturePath, 'utf8'), 'protocol-fixtures/vim/v1/chrome.json');
+if (parsedFixtures.kind !== 'chrome') throw new TypeError('canonical chrome fixture must use the chrome schema');
+const fixtures = parsedFixtures.document;
 const rootPackage = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
@@ -37,21 +40,30 @@ function prepareTraceMachine(context: VimFixtureDocument['traces'][number]['cont
 describe('Vim v1 chrome contract', () => {
   it('validates the versioned chrome traces', () => {
     expect(() => validateVimFixtures(fixtures)).not.toThrow();
+    expect(fixtures.traces.map((trace) => trace.id)).toEqual(expect.arrayContaining([
+      'chrome-disabled-passthrough',
+      'chrome-escape-exit',
+      'chrome-unsupported-consumed',
+    ]));
   });
 
   it.each(fixtures.traces)('replays fixture $id through the chrome machine', (trace) => {
     const machine = prepareTraceMachine(trace.context);
-    const result = trace.sequence.reduce(
-      (_previous, token) => machine.handle(key(token.key!, token)),
-      machine.snapshot(),
-    );
+    let result = machine.snapshot() as VimInputResult;
+    for (const token of trace.sequence) result = machine.handle(key(token.key!, token));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       disposition: trace.disposition,
       context: trace.expected.context,
       pending: trace.expected.pending,
       actions: trace.actions,
     });
+    if (result.disposition === 'passthrough') {
+      expect(result.event, `${trace.id} passthrough event`).toBeDefined();
+      expect(result.event.key, `${trace.id} passthrough key`).toBe(trace.sequence.at(-1)?.key);
+    } else {
+      expect(result.event, `${trace.id} consumed event`).toBeUndefined();
+    }
   });
 
   it('keeps the private core out of production dependencies', () => {

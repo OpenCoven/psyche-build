@@ -119,6 +119,27 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// Revalidates readiness authorization and applies the complete snapshot
+    /// synchronously on the main actor, preserving connection-generation
+    /// ownership for subsequent events.
+    func publishReadinessSnapshot(
+        _ candidate: HostReadinessSnapshotCandidate,
+        authorizedBy authorization: HostReadinessFlowAuthorization
+    ) -> HostReadinessTransactionResult {
+        authorization.withAuthorization {
+            guard candidate.sequence >= sequence else {
+                return .notCommitted(
+                    reason: "The readiness snapshot is older than the visible workspace."
+                )
+            }
+            applySnapshotUnscoped(
+                workspace: candidate.workspace,
+                sequence: candidate.sequence
+            )
+            return .committed
+        } ?? .notCommitted(reason: nil)
+    }
+
     private func applySnapshotUnscoped(
         workspace: WorkspaceSnapshot,
         sequence nextSequence: UInt64
@@ -340,6 +361,10 @@ public final class WorkspaceStore: ObservableObject {
     /// is rather than blanking out.
     public func markDisconnected() {
         activeConnectionGeneration = nil
+        isStale = true
+    }
+
+    func markReadinessStale() {
         isStale = true
     }
 
