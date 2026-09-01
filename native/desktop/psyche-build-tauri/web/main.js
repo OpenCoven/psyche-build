@@ -15681,10 +15681,18 @@
         } else {
           Object.assign(state, { activeProjectId: restored.activeProjectId });
         }
+        await invoke("native_project_reconcile", {
+          roots: state.projects.map(function (savedProject) { return savedProject.root; }),
+        });
+        state.projects.forEach(function (savedProject) {
+          savedProject.nativeAuthorityReady = true;
+        });
         project = activeProject();
         await Promise.all(state.projects.map(function (savedProject) {
           return refreshProjectWorktrees(savedProject);
         }));
+      } else {
+        await invoke("native_project_reconcile", { roots: [] });
       }
       var liveSessionIds = [];
       if (!legacyWorkspaceMigration.projectsPreserved) {

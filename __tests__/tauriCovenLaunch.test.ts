@@ -258,6 +258,8 @@ describe('Tauri Coven launch project scope', () => {
     expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*canonical_project_path\s*,/);
     expect(libRs).toMatch(/async fn native_project_open\s*\(/);
     expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*native_project_open\s*,/);
+    expect(libRs).toMatch(/async fn native_project_reconcile\s*\(/);
+    expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*native_project_reconcile\s*,/);
     expect(libRs).not.toMatch(/fn native_project_restore_authority\s*\(/);
     expect(libRs).not.toContain('native_project_restore_authority,');
     expect(tauriBuildRs).not.toContain('"native_project_restore_authority"');
@@ -359,6 +361,9 @@ describe('Tauri Coven launch project scope', () => {
 
     const boot = functionSource('boot');
     expect(boot.indexOf('await restoreSavedProjects(')).toBeLessThan(
+      boot.indexOf('invoke("native_project_reconcile"'),
+    );
+    expect(boot.indexOf('invoke("native_project_reconcile"')).toBeLessThan(
       boot.indexOf('invoke("native_session_list")'),
     );
     expect(boot).not.toContain('authorizeRestoredProject');
@@ -557,6 +562,14 @@ describe('Tauri Coven launch project scope', () => {
       projects: [] as Array<Record<string, any>>,
       activeProjectId: null as string | null,
     };
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_project_reconcile') {
+        calls.push(`native_project_reconcile:${(args?.roots as string[]).join(',')}`);
+        return true;
+      }
+      if (command === 'native_session_list') return [];
+      throw new Error(`unexpected command ${command}`);
+    };
     let addProjectRoot: string | null = null;
     let ensureProjectCovenCalls = 0;
     const boot = compileFunction<(env: Record<string, string>) => Promise<void>>(
@@ -577,6 +590,7 @@ describe('Tauri Coven launch project scope', () => {
           calls.push(`restoreSavedProjects:${projects.length}:${activeProjectId}:${limit}`);
           return { projects: restoredProjects, activeProjectId: 'restored-a' };
         },
+        invoke,
         activeProject: () => {
           calls.push('activeProject');
           return state.projects.find((project) => project.id === state.activeProjectId) || null;
@@ -624,7 +638,7 @@ describe('Tauri Coven launch project scope', () => {
     let bootSettled = false;
     const bootPromise = boot({ repo_root: '/boot/root', home: '/home/tester' })
       .finally(() => { bootSettled = true; });
-    await flushPromises();
+    await flushPromises(3);
 
     expect(ensureProjectCovenCalls).toBe(0);
     expect(addProjectRoot).toBeNull();
@@ -634,6 +648,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(calls).toEqual([
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
+      'native_project_reconcile:/repo/a,/repo/b',
       'activeProject',
       'refreshProjectWorktrees:restored-a',
       'refreshProjectWorktrees:restored-b',
@@ -654,6 +669,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(calls).toEqual([
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
+      'native_project_reconcile:/repo/a,/repo/b',
       'activeProject',
       'refreshProjectWorktrees:restored-a',
       'refreshProjectWorktrees:restored-b',
@@ -674,6 +690,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(calls).toEqual([
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
+      'native_project_reconcile:/repo/a,/repo/b',
       'activeProject',
       'refreshProjectWorktrees:restored-a',
       'refreshProjectWorktrees:restored-b',
@@ -701,6 +718,14 @@ describe('Tauri Coven launch project scope', () => {
       projects: [] as Array<Record<string, any>>,
       activeProjectId: null as string | null,
     };
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_project_reconcile') {
+        calls.push(`native_project_reconcile:${(args?.roots as string[]).join(',')}`);
+        return true;
+      }
+      if (command === 'native_session_list') return [];
+      throw new Error(`unexpected command ${command}`);
+    };
     let ensureProjectCovenCalls = 0;
     const boot = compileFunction<(env: Record<string, string>) => Promise<void>>(
       functionSource('boot'),
@@ -715,6 +740,7 @@ describe('Tauri Coven launch project scope', () => {
         restoreSavedProjects: async () => {
           throw new Error('restoreSavedProjects should not run without saved projects');
         },
+        invoke,
         activeProject: () => {
           throw new Error('activeProject should not run without saved projects');
         },
@@ -760,6 +786,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(state.activeProjectId).toBeNull();
     expect(calls).toEqual([
       'installTerminalImageDrop',
+      'native_project_reconcile:',
       'refreshSidebar',
       'refreshTabs',
       'renderBrowserTabs',
@@ -793,6 +820,7 @@ describe('Tauri Coven launch project scope', () => {
     const invoke = async (command: string) => {
       commands.push(command);
       if (command === 'workspace_load') return null;
+      if (command === 'native_project_reconcile') return true;
       if (command === 'native_project_open') return '/legacy/repo';
       if (command === 'native_session_list' || command === 'native_session_create') {
         throw new Error(`legacy boot must not call ${command}`);
@@ -864,7 +892,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(state.projects).toEqual([]);
     expect(state.activeProjectId).toBeNull();
     expect(storage.get('legacy-workspace')).toBe(legacy);
-    expect(commands).toEqual(['workspace_load']);
+    expect(commands).toEqual(['workspace_load', 'native_project_reconcile']);
     expect(statuses.at(-1)).toEqual([
       'Legacy projects were preserved but cannot be opened automatically; reopen them with the folder picker.',
       'warn',
@@ -914,7 +942,11 @@ describe('Tauri Coven launch project scope', () => {
         nativeAuthorityReady: true,
       }),
     ]);
-    expect(commands).toEqual(['workspace_load', 'native_project_open']);
+    expect(commands).toEqual([
+      'workspace_load',
+      'native_project_reconcile',
+      'native_project_open',
+    ]);
     expect(storage.get('legacy-workspace')).toBe(legacy);
   });
 

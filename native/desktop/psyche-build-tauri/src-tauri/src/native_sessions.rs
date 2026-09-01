@@ -325,6 +325,7 @@ mod tests {
         let root = tree.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
         let authority = crate::NativeProjectAuthority::default();
+        authority.reconcile_startup_roots(&[]).unwrap();
         authority.authorize_native_open(&root).unwrap();
         let mut request = request(NativeLaunchKind::Shell);
         request.project_root = root.to_string_lossy().into_owned();
