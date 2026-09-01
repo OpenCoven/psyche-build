@@ -1156,6 +1156,63 @@ final class ConnectionManagerTests: XCTestCase {
         }
     }
 
+    func testGenerationRetirementAfterSelectionCancelsPendingAuthority() async throws {
+        let secureStore = FailableWriteSecureStore()
+        try await PairedHostStore(secureStore: secureStore).save(makeStoredHost())
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let retirementTrigger = ReadyHostSelectionRetirementTrigger()
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore,
+            readyHostSelectionFinalizationStart: {
+                await retirementTrigger.retireIfArmed()
+            }
+        )
+        await retirementTrigger.configure(manager: composition.manager)
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        let previousSelection = try await composition.pairedHostStore.selectedHost()
+        let previouslyReady = try XCTUnwrap(previousSelection)
+        await composition.manager.disconnect()
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        await retirementTrigger.arm()
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        await retirementTrigger.waitUntilRetired()
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        XCTAssertFalse(try secureStore.hasPendingReadySelection())
+        let selected = try await composition.pairedHostStore.selectedHost()
+        XCTAssertEqual(selected, previouslyReady)
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        if case .live(let hostID, _) = composition.hostReadiness.presentation {
+            XCTFail("Retired generation must not leave \(hostID) live")
+        }
+    }
+
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(
@@ -2957,6 +3014,7 @@ final class ConnectionManagerTests: XCTestCase {
         messageProcessorStart: @escaping @Sendable () async -> Void = {},
         snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {},
         readinessFlowPublicationStart: @escaping @Sendable () async -> Void = {},
+        readyHostSelectionFinalizationStart: @escaping @Sendable () async -> Void = {},
         validateSnapshot: @escaping @Sendable (
             HostReadinessSnapshotCandidate
         ) async throws -> Void = { _ in }
@@ -2980,7 +3038,8 @@ final class ConnectionManagerTests: XCTestCase {
             token: token,
             messageProcessorStart: messageProcessorStart,
             snapshotRequestFailureStart: snapshotRequestFailureStart,
-            readinessFlowPublicationStart: readinessFlowPublicationStart
+            readinessFlowPublicationStart: readinessFlowPublicationStart,
+            readyHostSelectionFinalizationStart: readyHostSelectionFinalizationStart
         )
         XCTAssertTrue(manager.requestClient === requestClient)
         return TestComposition(
@@ -3263,6 +3322,41 @@ private actor AsyncGate {
     }
 }
 
+private actor ReadyHostSelectionRetirementTrigger {
+    private var manager: ConnectionManager?
+    private var isArmed = false
+    private var didRetire = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func configure(manager: ConnectionManager) {
+        self.manager = manager
+    }
+
+    func arm() {
+        isArmed = true
+        didRetire = false
+    }
+
+    func retireIfArmed() async {
+        guard isArmed else { return }
+        isArmed = false
+        await manager?.disconnect()
+        didRetire = true
+        let waiting = waiters
+        waiters.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+
+    func waitUntilRetired() async {
+        guard didRetire else {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+            return
+        }
+    }
+}
+
 private actor HelloCompletionGateTransport: PsycheTransport {
     private let base: FakeTransport
     private let gate: AsyncGate
@@ -3502,6 +3596,7 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
             storage.removeValue(forKey: key)
         }
     }
+
 }
 
 /// A secure store whose next write can be refused, with control over whether the
@@ -3579,6 +3674,15 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
             }
             storage.removeValue(forKey: key)
         }
+    }
+
+    func hasPendingReadySelection() throws -> Bool {
+        guard let data = try data(forKey: PairedHostStore.defaultKey),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pending = object["pendingReadySelection"] else {
+            return false
+        }
+        return !(pending is NSNull)
     }
 }
 

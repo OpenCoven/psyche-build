@@ -139,6 +139,7 @@ public actor ConnectionManager {
     private let messageProcessorStart: @Sendable () async -> Void
     private let snapshotRequestFailureStart: @Sendable () async -> Void
     private let readinessFlowPublicationStart: @Sendable () async -> Void
+    private let readyHostSelectionFinalizationStart: @Sendable () async -> Void
     private let manualCredentials: ConnectionCredentials
     private var activeConnection: ConnectionConfiguration?
     private var readinessFlow: HostReadinessFlow?
@@ -184,7 +185,8 @@ public actor ConnectionManager {
         token: String? = nil,
         messageProcessorStart: @escaping @Sendable () async -> Void = {},
         snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {},
-        readinessFlowPublicationStart: @escaping @Sendable () async -> Void = {}
+        readinessFlowPublicationStart: @escaping @Sendable () async -> Void = {},
+        readyHostSelectionFinalizationStart: @escaping @Sendable () async -> Void = {}
     ) {
         self.transport = transport
         self.workspaceStore = workspaceStore
@@ -199,6 +201,7 @@ public actor ConnectionManager {
         self.messageProcessorStart = messageProcessorStart
         self.snapshotRequestFailureStart = snapshotRequestFailureStart
         self.readinessFlowPublicationStart = readinessFlowPublicationStart
+        self.readyHostSelectionFinalizationStart = readyHostSelectionFinalizationStart
     }
 
     deinit {
@@ -1117,6 +1120,7 @@ public actor ConnectionManager {
                     }
                     return nil
                 }
+                await readyHostSelectionFinalizationStart()
                 do {
                     let finalized = try await MainActor.run {
                         try generation.withValidity {
@@ -1125,7 +1129,22 @@ public actor ConnectionManager {
                                     serverID: readyHostID
                                 )
                             }
-                        } ?? false
+                        }
+                    }
+                    guard let finalized else {
+                        if let transaction = selection.transaction {
+                            await compensateRetiredReadyHostSelection(
+                                transaction,
+                                authorizedBy: authorization,
+                                selectedBy: generation
+                            )
+                        } else {
+                            await pairedHostStore.cancelReadyHostSelection(
+                                authorizedBy: authorization,
+                                selectedBy: generation
+                            )
+                        }
+                        return nil
                     }
                     guard finalized else {
                         return ConnectionManagerError.hostIdentityNotCommitted(
