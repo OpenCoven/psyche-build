@@ -9316,6 +9316,15 @@
       project.closing = false;
       if (project.root) closingNativeProjectRoots.delete(project.root);
       renderPaneWorkspace({ preserveTerminalFocus: false });
+      var restoredActiveFile = state.activeProjectId === id
+        ? state.openFiles.find(function (file) {
+          return file.id === state.activeFileId && file.projectId === id;
+        })
+        : null;
+      if (restoredActiveFile && fileViewEl) {
+        fileViewEl.hidden = false;
+        if (typeof renderFileView === "function") renderFileView();
+      }
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();

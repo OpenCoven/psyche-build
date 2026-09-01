@@ -6314,17 +6314,24 @@ describe('Tauri physical terminal panes', () => {
       root: '/repo',
       name: 'Repo',
     };
+    const file = {
+      id: 'file',
+      projectId: project.id,
+      workspaceRoot: project.root,
+    };
     const state = {
       activeProjectId: project.id,
       activeThreadId: null,
-      activeFileId: null,
+      activeFileId: file.id,
       projects: [project],
       threads: [],
-      openFiles: [],
+      openFiles: [file],
     };
+    const fileViewEl = { hidden: false };
     const statuses: Array<[string, string]> = [];
     let saveAttempts = 0;
     let revokeAttempts = 0;
+    let fileRenderCount = 0;
     const removeProject = compileFunction<(
       id: string,
     ) => Promise<boolean>>(functionSource('removeProject'), {
@@ -6357,7 +6364,8 @@ describe('Tauri physical terminal panes', () => {
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => undefined,
-      fileViewEl: null,
+      fileViewEl,
+      renderFileView: () => { fileRenderCount += 1; },
       terminalHost: null,
     });
 
@@ -6367,6 +6375,10 @@ describe('Tauri physical terminal panes', () => {
     expect(revokeAttempts).toBe(0);
     expect(project.closing).toBe(false);
     expect(state.projects).toEqual([project]);
+    expect(state.openFiles).toEqual([file]);
+    expect(state.activeFileId).toBe(file.id);
+    expect(fileViewEl.hidden).toBe(false);
+    expect(fileRenderCount).toBe(1);
     expect(statuses.at(-1)).toEqual([
       'failed to save removal of Repo; the project was restored: Error: disk full',
       'error',
