@@ -20,6 +20,54 @@ public enum PairedHostStoreError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+final class ReadyHostSelectionAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isAuthorized = true
+    private var isFinalized = false
+
+    func finalize(_ operation: () throws -> Void) rethrows -> Bool {
+        try lock.withLock {
+            guard isAuthorized, !isFinalized else { return false }
+            try operation()
+            isFinalized = true
+            isAuthorized = false
+            return true
+        }
+    }
+
+    func supersede() {
+        lock.withLock {
+            isAuthorized = false
+        }
+    }
+
+    func withSupersession<T>(
+        _ operation: () -> (value: T, restoreAuthorization: Bool)
+    ) -> T {
+        lock.withLock {
+            let wasAuthorized = isAuthorized
+            isAuthorized = false
+            let result = operation()
+            if result.restoreAuthorization {
+                isAuthorized = wasAuthorized
+            }
+            return result.value
+        }
+    }
+
+    func revokeBeforeFinalization() -> Bool {
+        lock.withLock {
+            guard isAuthorized, !isFinalized else { return false }
+            isAuthorized = false
+            return true
+        }
+    }
+
+    var finalized: Bool {
+        lock.withLock { isFinalized }
+    }
+}
+
 /// Owns the paired-host records and the one rule that matters: a server ID
 /// already on file cannot quietly start using a different certificate.
 /// `save` refuses that; only `replace`, which the user reaches by re-pairing,
@@ -34,9 +82,10 @@ public actor PairedHostStore {
         let previousServerID: String?
     }
 
-    struct ReadyHostSelectionPreparation: Equatable, Sendable {
+    struct ReadyHostSelectionPreparation: Sendable {
         let result: HostReadinessTransactionResult
         let transaction: ReadyHostSelectionTransaction?
+        let authorization: ReadyHostSelectionAuthorization?
     }
 
     private struct PersistedState: Codable {
@@ -45,12 +94,19 @@ public actor PairedHostStore {
         var pendingReadySelection: ReadyHostSelectionTransaction? = nil
     }
 
+    private enum SupersedingMutationResult {
+        case committed
+        case unchanged(any Error)
+        case indeterminate(any Error)
+    }
+
     private let secureStore: any SecureStore
     private let key: String
     private let fallbackKey: String?
     private var readySelectionOwner: (
         generation: ObjectIdentifier,
-        transactionID: UUID
+        transactionID: UUID?,
+        authorization: ReadyHostSelectionAuthorization
     )?
 
     public init(secureStore: any SecureStore, key: String = defaultKey) {
@@ -73,7 +129,12 @@ public actor PairedHostStore {
         let snapshot = try stateSnapshot()
         let state = snapshot.state
         let selectedServerID = if let pending = state.pendingReadySelection {
-            pending.previousServerID
+            if readySelectionOwner?.transactionID == pending.id,
+               readySelectionOwner?.authorization.finalized == true {
+                state.selectedServerID
+            } else {
+                pending.previousServerID
+            }
         } else {
             state.selectedServerID
         }
@@ -93,7 +154,8 @@ public actor PairedHostStore {
     public func save(_ host: PairedHost) throws {
         try Task.checkCancellation()
         let normalized = try normalize(host)
-        var state = try state()
+        let snapshot = try stateSnapshot()
+        var state = snapshot.state
 
         if let existing = state.records[normalized.serverID],
            existing.certificateFingerprint != normalized.certificateFingerprint {
@@ -104,7 +166,12 @@ public actor PairedHostStore {
         state.selectedServerID = normalized.serverID
         state.pendingReadySelection = nil
         try Task.checkCancellation()
-        try write(state)
+        let nextData = try JSONEncoder().encode(state)
+        try mutateSupersedingReadySelection(
+            previousData: snapshot.currentData
+        ) {
+            try secureStore.set(nextData, forKey: key)
+        }
     }
 
     func save(
@@ -112,7 +179,8 @@ public actor PairedHostStore {
         for generation: ConnectionGeneration
     ) throws -> Bool {
         let normalized = try normalize(host)
-        var state = try state()
+        let snapshot = try stateSnapshot()
+        var state = snapshot.state
 
         if let existing = state.records[normalized.serverID],
            existing.certificateFingerprint != normalized.certificateFingerprint {
@@ -122,8 +190,13 @@ public actor PairedHostStore {
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
         state.pendingReadySelection = nil
+        let nextData = try JSONEncoder().encode(state)
         return try generation.withValidity {
-            try write(state)
+            try mutateSupersedingReadySelection(
+                previousData: snapshot.currentData
+            ) {
+                try secureStore.set(nextData, forKey: key)
+            }
             return true
         } ?? false
     }
@@ -132,11 +205,17 @@ public actor PairedHostStore {
     /// ID, so only call this once the user has confirmed the new certificate.
     public func replace(_ host: PairedHost) throws {
         let normalized = try normalize(host)
-        var state = try state()
+        let snapshot = try stateSnapshot()
+        var state = snapshot.state
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
         state.pendingReadySelection = nil
-        try write(state)
+        let nextData = try JSONEncoder().encode(state)
+        try mutateSupersedingReadySelection(
+            previousData: snapshot.currentData
+        ) {
+            try secureStore.set(nextData, forKey: key)
+        }
     }
 
     /// The generation- and attempt-bound explicit re-pair path. Either a
@@ -148,13 +227,19 @@ public actor PairedHostStore {
         authorizedBy authorization: PairingPersistenceAuthorization
     ) throws -> Bool {
         let normalized = try normalize(host)
-        var state = try state()
+        let snapshot = try stateSnapshot()
+        var state = snapshot.state
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
         state.pendingReadySelection = nil
+        let nextData = try JSONEncoder().encode(state)
         guard let committed = try generation.withValidity({
             try authorization.withAuthorization {
-                try write(state)
+                try mutateSupersedingReadySelection(
+                    previousData: snapshot.currentData
+                ) {
+                    try secureStore.set(nextData, forKey: key)
+                }
                 return true
             } ?? false
         }) else {
@@ -264,15 +349,36 @@ public actor PairedHostStore {
         let transaction: ReadyHostSelectionTransaction?
         do {
             let snapshot = try stateSnapshot()
-            previousData = snapshot.currentData
             var state = snapshot.state
             guard state.records[serverID] != nil else {
                 return ReadyHostSelectionPreparation(
                     result: .notCommitted(
                         reason: "The ready host has no persisted pairing record."
                     ),
-                    transaction: nil
+                    transaction: nil,
+                    authorization: nil
                 )
+            }
+            var finalizedTransactionID: UUID?
+            guard generation.withValidity({
+                if readySelectionOwner?.authorization.finalized == true {
+                    finalizedTransactionID = readySelectionOwner?.transactionID
+                }
+                supersedeReadySelection()
+                return true
+            }) == true else {
+                return ReadyHostSelectionPreparation(
+                    result: .notCommitted(reason: nil),
+                    transaction: nil,
+                    authorization: nil
+                )
+            }
+            if let pending = state.pendingReadySelection,
+               finalizedTransactionID == pending.id {
+                state.pendingReadySelection = nil
+                previousData = try JSONEncoder().encode(state)
+            } else {
+                previousData = snapshot.currentData
             }
             let previousServerID = if let pending = state.pendingReadySelection {
                 pending.previousServerID
@@ -297,21 +403,20 @@ public actor PairedHostStore {
         } catch {
             return ReadyHostSelectionPreparation(
                 result: .notCommitted(reason: error.localizedDescription),
-                transaction: nil
+                transaction: nil,
+                authorization: nil
             )
         }
 
+        let authorization = ReadyHostSelectionAuthorization()
         let result: HostReadinessTransactionResult = generation.withValidity {
             do {
                 try secureStore.set(nextData, forKey: key)
-                if let transaction {
-                    readySelectionOwner = (
-                        generation: ObjectIdentifier(generation),
-                        transactionID: transaction.id
-                    )
-                } else {
-                    readySelectionOwner = nil
-                }
+                readySelectionOwner = (
+                    generation: ObjectIdentifier(generation),
+                    transactionID: transaction?.id,
+                    authorization: authorization
+                )
                 return .committed
             } catch {
                 return compensateWrite(
@@ -323,19 +428,23 @@ public actor PairedHostStore {
         } ?? .notCommitted(reason: nil)
         return ReadyHostSelectionPreparation(
             result: result,
-            transaction: result == .committed ? transaction : nil
+            transaction: result == .committed ? transaction : nil,
+            authorization: result == .committed ? authorization : nil
         )
     }
 
-    /// Commits a prepared ready-host promotion before the workspace becomes
-    /// live. Ownership remains until the caller acknowledges synchronous
-    /// in-memory finalization, allowing in-process teardown to compensate.
+    /// Clears the provisional marker after the workspace and host became live
+    /// together. If this cleanup cannot be proven, restart still falls back to
+    /// the previously confirmed host rather than inventing durable readiness.
     func completeReadyHostSelection(
         _ transaction: ReadyHostSelectionTransaction,
+        authorizedBy authorization: ReadyHostSelectionAuthorization,
         selectedBy generation: ConnectionGeneration
     ) -> HostReadinessTransactionResult {
         guard readySelectionOwner?.generation == ObjectIdentifier(generation),
-              readySelectionOwner?.transactionID == transaction.id else {
+              readySelectionOwner?.transactionID == transaction.id,
+              readySelectionOwner?.authorization === authorization,
+              authorization.finalized else {
             return .notCommitted(reason: nil)
         }
         let previousData: Data?
@@ -353,26 +462,40 @@ public actor PairedHostStore {
         } catch {
             return .indeterminate(reason: error.localizedDescription)
         }
-        return generation.withValidity {
-            do {
-                try secureStore.set(nextData, forKey: key)
-                return .committed
-            } catch {
-                return compensateWrite(
-                    to: previousData,
-                    after: error,
-                    operation: "Ready-host selection completion"
-                )
-            }
-        } ?? .notCommitted(reason: nil)
+        do {
+            try secureStore.set(nextData, forKey: key)
+            readySelectionOwner = nil
+            return .committed
+        } catch {
+            return compensateWrite(
+                to: previousData,
+                after: error,
+                operation: "Ready-host selection completion"
+            )
+        }
     }
 
     func acknowledgeReadyHostSelection(
-        _ transaction: ReadyHostSelectionTransaction,
+        authorizedBy authorization: ReadyHostSelectionAuthorization,
         selectedBy generation: ConnectionGeneration
     ) {
         guard readySelectionOwner?.generation == ObjectIdentifier(generation),
-              readySelectionOwner?.transactionID == transaction.id else {
+              readySelectionOwner?.transactionID == nil,
+              readySelectionOwner?.authorization === authorization,
+              authorization.finalized else {
+            return
+        }
+        readySelectionOwner = nil
+    }
+
+    func cancelReadyHostSelection(
+        authorizedBy authorization: ReadyHostSelectionAuthorization,
+        selectedBy generation: ConnectionGeneration
+    ) {
+        guard readySelectionOwner?.generation == ObjectIdentifier(generation),
+              readySelectionOwner?.transactionID == nil,
+              readySelectionOwner?.authorization === authorization,
+              authorization.revokeBeforeFinalization() else {
             return
         }
         readySelectionOwner = nil
@@ -427,10 +550,13 @@ public actor PairedHostStore {
     /// The expected-current check avoids overwriting a later selection.
     func compensateReadyHostSelection(
         _ transaction: ReadyHostSelectionTransaction,
+        authorizedBy authorization: ReadyHostSelectionAuthorization,
         selectedBy generation: ConnectionGeneration
     ) -> HostReadinessTransactionResult {
         guard readySelectionOwner?.generation == ObjectIdentifier(generation),
-              readySelectionOwner?.transactionID == transaction.id else {
+              readySelectionOwner?.transactionID == transaction.id,
+              readySelectionOwner?.authorization === authorization,
+              authorization.revokeBeforeFinalization() else {
             return .notCommitted(reason: nil)
         }
         let previousData: Data?
@@ -439,11 +565,8 @@ public actor PairedHostStore {
             let snapshot = try stateSnapshot()
             previousData = snapshot.currentData
             var state = snapshot.state
-            let isPrepared = state.selectedServerID == transaction.candidateServerID
-                && state.pendingReadySelection == transaction
-            let isCompleted = state.selectedServerID == transaction.candidateServerID
-                && state.pendingReadySelection == nil
-            guard isPrepared || isCompleted else {
+            guard state.selectedServerID == transaction.candidateServerID,
+                  state.pendingReadySelection == transaction else {
                 return .notCommitted(reason: nil)
             }
             if let previousServerID = transaction.previousServerID,
@@ -508,27 +631,48 @@ public actor PairedHostStore {
     }
 
     public func remove(serverID: String) throws {
-        var state = try state()
+        let snapshot = try stateSnapshot()
+        var state = snapshot.state
         guard state.records.removeValue(forKey: serverID) != nil else { return }
-        if let pending = state.pendingReadySelection,
-           pending.candidateServerID == serverID {
-            state.selectedServerID = pending.previousServerID
-            state.pendingReadySelection = nil
-        } else if let pending = state.pendingReadySelection,
-                  pending.previousServerID == serverID {
-            state.selectedServerID = nil
-            state.pendingReadySelection = nil
+        var supersedesSelection = false
+        if let pending = state.pendingReadySelection {
+            let finalized = readySelectionOwner?.transactionID == pending.id
+                && readySelectionOwner?.authorization.finalized == true
+            if pending.candidateServerID == serverID {
+                supersedesSelection = true
+                state.selectedServerID = pending.previousServerID
+                state.pendingReadySelection = nil
+            } else if pending.previousServerID == serverID {
+                supersedesSelection = true
+                state.selectedServerID = finalized
+                    ? pending.candidateServerID
+                    : nil
+                state.pendingReadySelection = nil
+            }
         } else if state.selectedServerID == serverID {
+            supersedesSelection = true
             state.selectedServerID = nil
         }
-        try write(state)
+        let nextData = try JSONEncoder().encode(state)
+        if supersedesSelection {
+            try mutateSupersedingReadySelection(
+                previousData: snapshot.currentData
+            ) {
+                try secureStore.set(nextData, forKey: key)
+            }
+        } else {
+            try secureStore.set(nextData, forKey: key)
+        }
     }
 
     public func removeAll() throws {
-        if let fallbackKey {
-            try secureStore.removeValue(forKey: fallbackKey)
+        let previousData = try secureStore.data(forKey: key)
+        try mutateSupersedingReadySelection(previousData: previousData) {
+            if let fallbackKey {
+                try secureStore.removeValue(forKey: fallbackKey)
+            }
+            try secureStore.removeValue(forKey: key)
         }
-        try secureStore.removeValue(forKey: key)
     }
 
     private func state() throws -> PersistedState {
@@ -605,6 +749,59 @@ public actor PairedHostStore {
 
     private func write(_ state: PersistedState) throws {
         try secureStore.set(try JSONEncoder().encode(state), forKey: key)
+    }
+
+    private func supersedeReadySelection() {
+        readySelectionOwner?.authorization.supersede()
+        readySelectionOwner = nil
+    }
+
+    private func mutateSupersedingReadySelection(
+        previousData: Data?,
+        _ mutation: () throws -> Void
+    ) throws {
+        guard let owner = readySelectionOwner else {
+            try mutation()
+            return
+        }
+        let result = owner.authorization.withSupersession {
+            do {
+                try mutation()
+                return (
+                    value: SupersedingMutationResult.committed,
+                    restoreAuthorization: false
+                )
+            } catch {
+                do {
+                    let currentData = try secureStore.data(forKey: key)
+                    if currentData == previousData {
+                        return (
+                            value: SupersedingMutationResult.unchanged(error),
+                            restoreAuthorization: true
+                        )
+                    }
+                } catch {
+                    return (
+                        value: SupersedingMutationResult.indeterminate(error),
+                        restoreAuthorization: false
+                    )
+                }
+                return (
+                    value: SupersedingMutationResult.indeterminate(error),
+                    restoreAuthorization: false
+                )
+            }
+        }
+
+        switch result {
+        case .committed:
+            readySelectionOwner = nil
+        case .unchanged(let error):
+            throw error
+        case .indeterminate(let error):
+            readySelectionOwner = nil
+            throw error
+        }
     }
 
     private func compensateWrite(
