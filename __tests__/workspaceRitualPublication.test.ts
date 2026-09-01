@@ -14,6 +14,7 @@ import {
   buildRitualPublication,
   MAX_PUBLISHED_RITUALS,
   readProjectRitualPublication,
+  resolvePublishedRitual,
 } from '../src/workspace/ritualPublication.js';
 import {
   MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES,
@@ -27,7 +28,10 @@ import {
   readProjectRitualStore,
   type RitualDefinition,
 } from '../src/utils/rituals.js';
-import type { RitualStoreListing } from '../src/utils/rituals.js';
+import type {
+  RitualManifestListing,
+  RitualStoreListing,
+} from '../src/utils/rituals.js';
 
 describe('ritual publication', () => {
   describe('buildRitualPublication state classification', () => {
@@ -219,6 +223,50 @@ describe('ritual publication', () => {
         displayName: 'Project override',
         scope: 'project',
       }]);
+    });
+  });
+
+  describe('execution-bound resolution', () => {
+    it('returns the exact project definition represented by the publication', () => {
+      const builtIn = ritual({
+        id: 'shared',
+        name: 'Built in',
+        scope: 'builtin',
+        panes: [{ kind: 'terminal', command: 'echo built-in' }],
+      });
+      const project = ritual({
+        id: 'shared',
+        name: 'Project override',
+        scope: 'project',
+        panes: [{ kind: 'terminal', command: 'echo project' }],
+      });
+
+      expect(resolvePublishedRitual('/repo', 'shared', {
+        builtInRituals: () => [builtIn],
+        readStore: () => listing({ rituals: [project] }),
+        readManifest: () => manifestListing(),
+      })).toBe(project);
+    });
+
+    it('does not resolve an omitted or stale ritual', () => {
+      const oversized = ritual({
+        id: 'oversized',
+        name: 'Oversized',
+        description: 'x'.repeat(MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES + 1),
+        scope: 'project',
+      });
+      const current = ritual({ id: 'current', name: 'Current', scope: 'project' });
+
+      expect(resolvePublishedRitual('/repo', 'oversized', {
+        builtInRituals: () => [],
+        readStore: () => listing({ rituals: [oversized] }),
+        readManifest: () => manifestListing(),
+      })).toBeNull();
+      expect(resolvePublishedRitual('/repo', 'current', {
+        builtInRituals: () => [],
+        readStore: () => listing({ rituals: [current] }),
+        readManifest: () => manifestListing({ defaultRitualId: 'deleted' }),
+      })).toBeNull();
     });
   });
 
@@ -590,13 +638,16 @@ function listing(
   };
 }
 
-function manifestListing() {
+function manifestListing(
+  overrides: Partial<RitualManifestListing> = {},
+): RitualManifestListing {
   return {
     denied: false,
     failed: false,
     incompatible: false,
     limitExceeded: false,
     bytesRead: 0,
+    ...overrides,
   };
 }
 

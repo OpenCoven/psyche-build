@@ -125,6 +125,17 @@ export function hasPublishedTmuxBackedPane(
       worktree.panes.some((pane) => pane.id === paneId && isTmuxBackedWorkspacePane(pane))));
 }
 
+export function hasPublishedRitual(
+  workspace: ReadonlyWorkspaceSnapshot,
+  projectId: string,
+  ritualId: string,
+): boolean {
+  return workspace.projects.some((project) =>
+    project.id === projectId
+    && project.rituals.state !== 'stale'
+    && project.rituals.rituals.some((ritual) => ritual.id === ritualId));
+}
+
 export interface WorkspaceProjectInput {
   id: string;
   root: string;

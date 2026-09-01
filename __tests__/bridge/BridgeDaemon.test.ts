@@ -832,6 +832,78 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
+  it("serves legacy ritual lists from the canonical workspace publication", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "canonical-ritual-list-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace),
+      ritualProvider: () => [{
+        id: "private-ritual",
+        displayName: "Private ritual",
+        description: "Not published by the canonical workspace snapshot",
+        scope: "project",
+        projectId: "project-1",
+      }],
+      launchRitual: async () => {},
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const ritualList = await new Promise<any>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({
+          type: "listRituals",
+          payload: { projectId: null },
+        }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "ritualList") resolve(message);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(ritualList.payload).toEqual({
+      projectId: null,
+      rituals: [{
+        id: "review-stack",
+        displayName: "Review Stack",
+        description: "Open implementation, review, and checks panes.",
+        scope: "builtIn",
+        projectId: null,
+      }, {
+        id: "release-checklist",
+        displayName: "Release checklist",
+        description: null,
+        scope: "project",
+        projectId: "project-1",
+      }],
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
   it("broadcasts refreshed panes and projects after launchRitual succeeds", async () => {
     const tokenStore = new FakeTokenStore() as any;
     const knownToken = "ritual-launch-token";
@@ -864,7 +936,13 @@ describe("BridgeDaemon", () => {
       hubFactory: noopHubFactory,
       paneProvider: () => panes,
       projectProvider: () => projects,
-      ritualProvider: () => [],
+      ritualProvider: () => [{
+        id: "ritual.solo",
+        displayName: "Solo",
+        description: "One pane",
+        scope: "builtIn",
+        projectId: null,
+      }],
       launchRitual: async (projectId, ritualId, params) => {
         launchCalls.push({ projectId, ritualId, params });
         panes = [...panes, {
@@ -915,6 +993,67 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
+  it("refuses a legacy ritual launch that the host did not publish", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "ritual-scope-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    let launched = false;
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [{ id: "project-1", displayName: "psyche", attentionCount: 0 }],
+      workspaceProvider: () => structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace),
+      ritualProvider: () => [{
+        id: "private-ritual",
+        displayName: "Private ritual",
+        description: "Not published by the canonical workspace snapshot",
+        scope: "project",
+        projectId: "project-1",
+      }],
+      launchRitual: async () => {
+        launched = true;
+      },
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received = await new Promise<any>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({
+          type: "launchRitual",
+          payload: { projectId: "project-1", ritualId: "private-ritual", params: {} },
+        }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "error") resolve(message);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received.payload?.code).toBe("ritual_failed");
+    expect(launched).toBe(false);
+
+    client.close();
+    await daemon.stop();
+  });
+
   it("does not report ritual_failed when post-launch state broadcast fails", async () => {
     const tokenStore = new FakeTokenStore() as any;
     const knownToken = "ritual-broadcast-failure-token";
@@ -937,7 +1076,13 @@ describe("BridgeDaemon", () => {
         throw new Error("pane provider failed");
       },
       projectProvider: () => [],
-      ritualProvider: () => [],
+      ritualProvider: () => [{
+        id: "ritual.solo",
+        displayName: "Solo",
+        description: "One pane",
+        scope: "builtIn",
+        projectId: null,
+      }],
       launchRitual: async () => {
         launched = true;
       },

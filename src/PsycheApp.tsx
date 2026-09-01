@@ -139,9 +139,9 @@ import {
 } from "./utils/startupPrimer.js"
 import {
   resolveRitualProjectRoot,
-  loadRitual,
   type RitualDefinition,
 } from "./utils/rituals.js"
+import { resolvePublishedRitual } from "./workspace/ritualPublication.js"
 import {
   createShellPane,
   getNextPsycheId,
@@ -1343,8 +1343,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   useEffect(() => {
     if (!bridgeDaemon) return;
     bridgeDaemon.setRitualLauncher(async (projectId: string, ritualId: string, _params: Record<string, string>) => {
-      const ritual = loadRitual(projectId, ritualId);
-      if (!ritual) throw new Error(`ritual not found: ${ritualId}`);
+      const ritual = resolvePublishedRitual(projectId, ritualId);
+      if (!ritual) throw new Error(`ritual is not currently published: ${ritualId}`);
       await openRitualRef.current(ritual, projectId);
     });
     return () => bridgeDaemon.setRitualLauncher(null);

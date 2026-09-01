@@ -44,6 +44,13 @@ export interface RitualPublicationReadResult {
   readBytes: number;
 }
 
+interface RitualPublicationInputs {
+  builtIns: RitualDefinition[];
+  store: RitualStoreListing;
+  manifest: RitualManifestListing;
+  readBytes: number;
+}
+
 /**
  * Compose the bounded, sanitized ritual publication for one canonical project.
  *
@@ -78,6 +85,48 @@ export function readProjectRitualPublicationWithUsage(
   deps: RitualPublicationDeps = {},
   maxReadBytes: number = MAX_PROJECT_RITUAL_READ_BYTES,
 ): RitualPublicationReadResult {
+  const inputs = readProjectRitualPublicationInputs(projectRoot, deps, maxReadBytes);
+  return {
+    publication: buildRitualPublication(inputs),
+    readBytes: inputs.readBytes,
+  };
+}
+
+/**
+ * Resolve the exact host-side definition represented by the current bounded
+ * publication. The definition and membership decision come from the same
+ * store read so execution cannot reload a different on-disk ritual afterward.
+ */
+export function resolvePublishedRitual(
+  projectRoot: string,
+  ritualId: string,
+  deps: RitualPublicationDeps = {},
+): RitualDefinition | null {
+  const inputs = readProjectRitualPublicationInputs(
+    projectRoot,
+    deps,
+    MAX_PROJECT_RITUAL_READ_BYTES,
+  );
+  const publication = buildRitualPublication(inputs);
+  if (
+    publication.state === 'stale'
+    || !publication.rituals.some((ritual) => ritual.id === ritualId)
+  ) {
+    return null;
+  }
+
+  const ritualsById = new Map(inputs.builtIns.map((ritual) => [ritual.id, ritual]));
+  for (const ritual of inputs.store.rituals) {
+    ritualsById.set(ritual.id, ritual);
+  }
+  return ritualsById.get(ritualId) ?? null;
+}
+
+function readProjectRitualPublicationInputs(
+  projectRoot: string,
+  deps: RitualPublicationDeps,
+  maxReadBytes: number,
+): RitualPublicationInputs {
   const builtInRituals = deps.builtInRituals ?? getBuiltInRituals;
   const readStore = deps.readStore ?? readProjectRitualStore;
   const readManifest = deps.readManifest ?? readProjectRitualManifest;
@@ -95,11 +144,9 @@ export function readProjectRitualPublicationWithUsage(
   );
 
   return {
-    publication: buildRitualPublication({
-      builtIns: builtInRituals(),
-      store,
-      manifest,
-    }),
+    builtIns: builtInRituals(),
+    store,
+    manifest,
     readBytes: store.bytesRead + manifest.bytesRead,
   };
 }
