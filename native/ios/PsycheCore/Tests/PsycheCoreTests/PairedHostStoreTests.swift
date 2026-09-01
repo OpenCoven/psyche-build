@@ -434,6 +434,12 @@ private final class SuccessfulWriteBoundarySecureStore: SecureStore, @unchecked 
         condition.withLock { writes }
     }
 
+    func resetWriteCount() {
+        condition.withLock {
+            writes = 0
+        }
+    }
+
     func blockNextWrite() {
         writeBeganSignal.reset()
         condition.withLock {
@@ -958,6 +964,70 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(presentation, .live(hostID: "new-host", confirmedAt: fixedDate))
         XCTAssertEqual(committed, host)
         XCTAssertNil(failure)
+    }
+
+    func testPairingCannotCommitHostBeforeAuthentication() async throws {
+        let secureStore = SuccessfulWriteBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let machine = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let host = makeHost(serverID: "new-host")
+        let flow = try machine.beginPairing(expectedServerID: host.serverID)
+
+        do {
+            _ = try await machine.commitHostIdentity(host, for: flow)
+            XCTFail("Pairing must authenticate before publishing host authority")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(
+                error,
+                .transitionRejected(from: .pairing, event: "hostCommitStarted")
+            )
+        }
+
+        let persistedHosts = try await pairedHostStore.hosts()
+        XCTAssertEqual(secureStore.writeCount, 0)
+        XCTAssertEqual(persistedHosts, [])
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.state, .pairing)
+        XCTAssertEqual(machine.activeFlow, flow)
+    }
+
+    func testReconnectionCannotCommitHostBeforeAuthentication() async throws {
+        let secureStore = SuccessfulWriteBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let committedHost = makeHost(serverID: "old-host", clientID: "client-old")
+        try await pairedHostStore.save(committedHost)
+        secureStore.resetWriteCount()
+        let machine = HostReadinessMachine(
+            committedHost: committedHost,
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let flow = try machine.beginReconnection()
+        let refreshedHost = makeHost(serverID: "old-host", clientID: "client-refreshed")
+
+        do {
+            _ = try await machine.commitHostIdentity(refreshedHost, for: flow)
+            XCTFail("Reconnection must authenticate before publishing host authority")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(
+                error,
+                .transitionRejected(from: .reconnecting, event: "hostCommitStarted")
+            )
+        }
+
+        let persistedHost = try await pairedHostStore.host(
+            withServerID: committedHost.serverID
+        )
+        XCTAssertEqual(secureStore.writeCount, 0)
+        XCTAssertEqual(persistedHost, committedHost)
+        XCTAssertEqual(machine.committedHost, committedHost)
+        XCTAssertEqual(machine.state, .reconnecting)
+        XCTAssertEqual(machine.activeFlow, flow)
     }
 
     func testReconnectionFromAStoredHostReachesReadyThroughTheSameSpine() async throws {

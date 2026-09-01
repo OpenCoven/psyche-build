@@ -509,6 +509,12 @@ public final class HostReadinessMachine {
         for flow: HostReadinessFlow
     ) async throws -> HostReadinessTransactionResult {
         try requireActive(flow)
+        guard state == .authenticating else {
+            throw HostReadinessError.transitionRejected(
+                from: state,
+                event: "hostCommitStarted"
+            )
+        }
         if let expected = flow.expectedServerID, host.serverID != expected {
             try failClosed(.revocation, reason: HostReadinessError
                 .wrongHostIdentity(expected: expected, actual: host.serverID)
