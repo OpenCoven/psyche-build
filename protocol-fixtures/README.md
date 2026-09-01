@@ -1,7 +1,18 @@
-# Wire protocol fixtures
+# Protocol fixtures
 
-Shared JSON examples of every message on the Psyche bridge protocol, decoded by
-**both** implementations:
+This directory is the canonical cross-language fixture root. Each versioned
+subdirectory owns one protocol contract; consumers must load fixtures from
+here rather than copying them into a package or platform tree.
+
+- `vim/v1/` contains the hand-authored, versioned Vim semantic conformance
+  corpus consumed by TypeScript and future platform adapters.
+- The top-level bridge JSON files are generated wire-protocol examples decoded
+  by both current implementations.
+
+## Bridge wire fixtures
+
+The top-level JSON files contain examples of every message on the Psyche bridge
+protocol, decoded by **both** implementations:
 
 - TypeScript host — `src/services/bridge/wireProtocol.ts`
   (`__tests__/bridge/wireProtocolContract.test.ts`)
@@ -25,7 +36,7 @@ These fixtures are the link. Each suite asserts three things:
     fixtures.ts          typed source, compile-checked against the TS unions
       │  pnpm run fixtures:generate
       ▼
-    *-messages.json      what the Swift suite reads
+    top-level *.json     what the Swift suite reads
 
 `fixtures.ts` types every payload through a `Complete<>` mapped type that
 strips optionality, so a fixture must spell out **every** field. That is what
@@ -43,8 +54,10 @@ the source emits, so the two cannot silently diverge.
 
 ## Changing the protocol
 
-Edit `fixtures.ts`, run `pnpm run fixtures:generate`, and commit both. If only
-one implementation is updated:
+For bridge messages, edit `fixtures.ts`, run `pnpm run fixtures:generate`, and
+commit both. The generator owns only its explicit top-level bridge outputs; it
+does not generate or rewrite versioned subdirectories such as `vim/v1/`. If
+only one bridge implementation is updated:
 
 - a **new message type** fails the completeness test on the side that has it
 - a **new or renamed field** fails the compile of `fixtures.ts`

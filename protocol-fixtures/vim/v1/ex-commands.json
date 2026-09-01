@@ -1,0 +1,181 @@
+{
+  "version": "vim/v1",
+  "kind": "editor",
+  "traces": [
+    {
+      "id": "ex-write-invokes-save",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "w", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "command", "command": "save", "success": true }]
+      }
+    },
+    {
+      "id": "ex-write-quit-saves-then-closes",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "w", "q", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [
+          { "type": "command", "command": "save", "success": true },
+          { "type": "command", "command": "close", "success": true }
+        ]
+      }
+    },
+    {
+      "id": "ex-quit-invokes-close",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "q", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "command", "command": "close", "success": true }]
+      }
+    },
+    {
+      "id": "ex-substitute-percent-global",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": [":", "%", "s", "/", "a", "l", "p", "h", "a", "/", "o", "m", "e", "g", "a", "/", "g", "Enter"],
+      "expected": { "mode": "normal", "pending": "", "text": "omega beta omega", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "ex-substitute-first-match-per-line",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": [":", "s", "/", "a", "l", "p", "h", "a", "/", "o", "m", "e", "g", "a", "/", "Enter"],
+      "expected": { "mode": "normal", "pending": "", "text": "omega beta alpha", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "ex-substitute-confirmed-through-port",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "%", "s", "/", "a", "/", "o", "/", "g", "c", "Enter"],
+      "expected": { "mode": "normal", "pending": "", "text": "olpho", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "ex-set-option-number",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "s", "e", "t", " ", "n", "u", "m", "b", "e", "r", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [
+          { "type": "option", "name": "number", "enabled": true },
+          { "type": "command", "command": "set-option", "success": true }
+        ]
+      }
+    },
+    {
+      "id": "ex-buffer-switch-through-port",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "b", " ", "m", "a", "i", "n", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "command", "command": "select-buffer", "success": true }]
+      }
+    },
+    {
+      "id": "ex-line-number-goto",
+      "document": { "text": "alpha\nbeta", "cursor": 0 },
+      "inputs": [":", "2", "Enter"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta", "cursor": 6, "actions": [] }
+    },
+    {
+      "id": "ex-nohlsearch-clears-highlight",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": ["/", "a", "l", "p", "h", "a", "Enter", ":", "n", "o", "h", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 11,
+        "actions": [{ "type": "search", "query": "alpha", "direction": "forward", "active": false }],
+        "search": { "pattern": "alpha", "direction": "forward", "highlight": false }
+      }
+    },
+    {
+      "id": "ex-shell-command-rejected",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "!", "l", "s", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Shell commands are not allowed" }]
+      }
+    },
+    {
+      "id": "ex-pipe-rejected",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "w", " ", "|", " ", "q", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Pipes are not allowed" }]
+      }
+    },
+    {
+      "id": "ex-global-command-rejected",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "g", "/", "x", "/", "d", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Global commands are not supported" }]
+      }
+    },
+    {
+      "id": "ex-filesystem-argument-rejected",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "w", " ", "/", "e", "t", "c", "/", "x", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Filesystem arguments are not allowed" }]
+      }
+    },
+    {
+      "id": "ex-source-command-rejected",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "s", "o", "u", "r", "c", "e", " ", "x", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Source commands are not allowed" }]
+      }
+    },
+    {
+      "id": "ex-unknown-command-rejected",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": [":", "f", "o", "o", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Unknown Ex command: foo" }]
+      }
+    }
+  ]
+}

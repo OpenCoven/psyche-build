@@ -1,0 +1,216 @@
+{
+  "version": "vim/v1",
+  "kind": "editor",
+  "traces": [
+    {
+      "id": "motion-h-left",
+      "document": { "text": "alpha beta gamma", "cursor": 6 },
+      "inputs": ["h"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 5, "actions": [] }
+    },
+    {
+      "id": "motion-h-clamped-at-start",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["h"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "motion-l-right",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["l"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 1, "actions": [] }
+    },
+    {
+      "id": "motion-l-clamped-at-end",
+      "document": { "text": "alpha beta gamma", "cursor": 15 },
+      "inputs": ["l"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 16, "actions": [] }
+    },
+    {
+      "id": "motion-count-3l",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["3", "l"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 3, "actions": [] }
+    },
+    {
+      "id": "motion-w-forward-word",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["w"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 6, "actions": [] }
+    },
+    {
+      "id": "motion-count-2w",
+      "document": { "text": "alpha beta gamma", "cursor": 0 },
+      "inputs": ["2", "w"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 11, "actions": [] }
+    },
+    {
+      "id": "motion-w-wraps-lines",
+      "document": { "text": "one two\nthree", "cursor": 2 },
+      "inputs": ["w", "w"],
+      "expected": { "mode": "normal", "pending": "", "text": "one two\nthree", "cursor": 8, "actions": [] }
+    },
+    {
+      "id": "motion-b-backward-word",
+      "document": { "text": "alpha beta gamma", "cursor": 11 },
+      "inputs": ["b"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta gamma", "cursor": 6, "actions": [] }
+    },
+    {
+      "id": "motion-e-end-of-word",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["e"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 4, "actions": [] }
+    },
+    {
+      "id": "motion-zero-line-start",
+      "document": { "text": "  alpha", "cursor": 5 },
+      "inputs": ["0"],
+      "expected": { "mode": "normal", "pending": "", "text": "  alpha", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "motion-caret-first-nonblank",
+      "document": { "text": "  alpha\n  beta", "cursor": 9 },
+      "inputs": ["^"],
+      "expected": { "mode": "normal", "pending": "", "text": "  alpha\n  beta", "cursor": 10, "actions": [] }
+    },
+    {
+      "id": "motion-dollar-end-of-line",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["$"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 9, "actions": [] }
+    },
+    {
+      "id": "motion-dollar-multi-line",
+      "document": { "text": "alpha\nbeta", "cursor": 1 },
+      "inputs": ["$"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta", "cursor": 4, "actions": [] }
+    },
+    {
+      "id": "motion-j-down",
+      "document": { "text": "alpha\nbeta", "cursor": 1 },
+      "inputs": ["j"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta", "cursor": 7, "actions": [] }
+    },
+    {
+      "id": "motion-j-clamps-column-at-line-end",
+      "document": { "text": "alpha\nb", "cursor": 1 },
+      "inputs": ["j"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nb", "cursor": 7, "actions": [] }
+    },
+    {
+      "id": "motion-k-up",
+      "document": { "text": "alpha\nbeta", "cursor": 7 },
+      "inputs": ["k"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta", "cursor": 1, "actions": [] }
+    },
+    {
+      "id": "motion-gg-first-line",
+      "document": { "text": "alpha\nbeta\ngamma", "cursor": 12 },
+      "inputs": ["g", "g"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta\ngamma", "cursor": 0, "actions": [] }
+    },
+    {
+      "id": "motion-count-3gg-third-line",
+      "document": { "text": "alpha\nbeta\ngamma", "cursor": 12 },
+      "inputs": ["3", "g", "g"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta\ngamma", "cursor": 11, "actions": [] }
+    },
+    {
+      "id": "motion-g-last-line",
+      "document": { "text": "alpha\nbeta\ngamma", "cursor": 0 },
+      "inputs": ["G"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta\ngamma", "cursor": 11, "actions": [] }
+    },
+    {
+      "id": "motion-count-2G-second-line",
+      "document": { "text": "alpha\nbeta\ngamma", "cursor": 0 },
+      "inputs": ["2", "G"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha\nbeta\ngamma", "cursor": 6, "actions": [] }
+    },
+    {
+      "id": "motion-f-character-forward",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["f", "b"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 6, "actions": [] }
+    },
+    {
+      "id": "motion-t-character-forward",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["t", "b"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 5, "actions": [] }
+    },
+    {
+      "id": "motion-F-character-backward",
+      "document": { "text": "alpha beta", "cursor": 9 },
+      "inputs": ["F", "b"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 6, "actions": [] }
+    },
+    {
+      "id": "motion-T-character-backward",
+      "document": { "text": "alpha beta", "cursor": 9 },
+      "inputs": ["T", "b"],
+      "expected": { "mode": "normal", "pending": "", "text": "alpha beta", "cursor": 7, "actions": [] }
+    },
+    {
+      "id": "motion-f-not-found-consumed",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": ["f", "z"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Motion f found no target" }]
+      }
+    },
+    {
+      "id": "motion-percent-open-to-close",
+      "document": { "text": "call(x, (y))", "cursor": 4 },
+      "inputs": ["%"],
+      "expected": { "mode": "normal", "pending": "", "text": "call(x, (y))", "cursor": 11, "actions": [] }
+    },
+    {
+      "id": "motion-percent-close-to-open",
+      "document": { "text": "call(x, (y))", "cursor": 11 },
+      "inputs": ["%"],
+      "expected": { "mode": "normal", "pending": "", "text": "call(x, (y))", "cursor": 4, "actions": [] }
+    },
+    {
+      "id": "motion-percent-no-match-consumed",
+      "document": { "text": "alpha", "cursor": 0 },
+      "inputs": ["%"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "No matching delimiter" }]
+      }
+    },
+    {
+      "id": "motion-brace-next-paragraph",
+      "document": { "text": "one\n\ntwo", "cursor": 0 },
+      "inputs": ["}"],
+      "expected": { "mode": "normal", "pending": "", "text": "one\n\ntwo", "cursor": 4, "actions": [] }
+    },
+    {
+      "id": "motion-brace-previous-paragraph",
+      "document": { "text": "one\n\ntwo", "cursor": 6 },
+      "inputs": ["{"],
+      "expected": { "mode": "normal", "pending": "", "text": "one\n\ntwo", "cursor": 5, "actions": [] }
+    },
+    {
+      "id": "motion-modified-key-consumed",
+      "document": { "text": "alpha beta", "cursor": 0 },
+      "inputs": [{ "key": "d", "ctrlKey": true }],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Unsupported modified key Ctrl-d" }]
+      }
+    }
+  ]
+}
