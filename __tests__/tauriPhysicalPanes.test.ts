@@ -2789,6 +2789,7 @@ describe('Tauri physical terminal panes', () => {
     };
     const closeOptions: Array<Record<string, unknown> | undefined> = [];
     const nativeProjectCloseCalls: Array<Record<string, unknown>> = [];
+    const teardownEvents: string[] = [];
     const removeProject = compileFunction<(
       id: string,
     ) => Promise<boolean>>(functionSource('removeProject'), {
@@ -2807,11 +2808,13 @@ describe('Tauri physical terminal panes', () => {
         _id: string,
         options?: Record<string, unknown>,
       ) => {
+        teardownEvents.push('close-thread');
         closeOptions.push(options);
         return true;
       },
       invoke: async (command: string, args: Record<string, unknown>) => {
         expect(command).toBe('native_project_close');
+        teardownEvents.push('revoke-authority');
         nativeProjectCloseCalls.push(args);
       },
       fileViewEl: null,
@@ -2833,9 +2836,69 @@ describe('Tauri physical terminal panes', () => {
       preserveTerminalFocus: true,
       protectCovenRecovery: true,
     }]);
+    expect(teardownEvents).toEqual(['close-thread', 'revoke-authority']);
     expect(nativeProjectCloseCalls).toEqual([{ root: '/repo/removed' }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('keeps native authority when project thread teardown aborts', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      closing?: boolean;
+    } = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+    };
+    const thread = {
+      id: 'thread',
+      projectId: project.id,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: thread.id,
+      activeFileId: null,
+      projects: [project],
+      threads: [thread],
+      openFiles: [],
+    };
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => false,
+      invoke: async () => {
+        revokeAttempts += 1;
+      },
+      setStatus: () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(revokeAttempts).toBe(0);
+    expect(project.closing).toBe(false);
+    expect(state.projects).toEqual([project]);
+    expect(state.threads).toEqual([thread]);
   });
 
   it('refuses project removal while a Coven launch outcome is unresolved', async () => {
@@ -2844,7 +2907,12 @@ describe('Tauri physical terminal panes', () => {
       id: 'recovery',
       projectId: project.id,
       worktreePath: '/repo',
-      launch: { launchKind: 'coven-recovery', recoveryRequired: false },
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: false,
+      },
+      covenLaunchOutcomeInFlight: Promise.resolve(),
     };
     const state = {
       activeProjectId: project.id,
@@ -2948,7 +3016,7 @@ describe('Tauri physical terminal panes', () => {
     ]);
   });
 
-  it('retains an accepted unattached session when ordinary close races acceptance', async () => {
+  it('allows an ordinary exited Coven attachment to close', async () => {
     const thread = {
       id: 'accepted-thread',
       projectId: 'project',
@@ -2965,7 +3033,6 @@ describe('Tauri physical terminal panes', () => {
       closing: false,
       startInFlight: false,
       metricsGeneration: 0,
-      covenLaunchAcceptanceInFlight: Promise.resolve(),
     };
     const state = {
       activeThreadId: 'other',
@@ -2996,14 +3063,12 @@ describe('Tauri physical terminal panes', () => {
       setStatus: (message: string, level: string) => { statuses.push([message, level]); },
     });
 
-    await expect(closeThread(thread.id)).resolves.toBe(false);
+    await expect(closeThread(thread.id)).resolves.toBe(true);
 
-    expect(state.threads).toEqual([thread]);
-    expect(thread.closeStarted).toBe(false);
-    expect(thread.closing).toBe(false);
-    expect(thread.launch.recoveryRequired).toBe(true);
+    expect(state.threads).toEqual([]);
     expect(saves).toBe(1);
-    expect(statuses.at(-1)?.[0]).toContain('inspect Coven before closing');
+    expect(thread.launch.recoveryRequired).toBe(false);
+    expect(statuses).toEqual([]);
   });
 
   it('refreshes the siderail after removing an inactive project with no local threads', async () => {
