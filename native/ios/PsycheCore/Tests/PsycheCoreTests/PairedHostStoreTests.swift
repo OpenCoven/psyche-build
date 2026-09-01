@@ -800,6 +800,42 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(restartedSelection, previouslyReady)
     }
 
+    func testFailedCompletionAndCompensationRecognizeUnchangedPendingSelection() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.throwBeforeMutation(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restarted = try await PairedHostStore(
+            secureStore: secureStore
+        ).selectedHost()
+
+        guard case .notCommitted = completion else {
+            return XCTFail("Unchanged durable bytes should prove the completion did not commit")
+        }
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restarted, previouslyReady)
+    }
+
     func testRetiringSuccessorSelectionPreservesFinalizedProcessAuthority() async throws {
         let secureStore = FaultingTransactionSecureStore()
         let retirement = ReadySelectionGenerationRetirementTrigger()
@@ -876,6 +912,40 @@ final class PairedHostStoreTests: XCTestCase {
             return XCTFail("Completion read failure must be indeterminate")
         }
         XCTAssertEqual(selected, previouslyReady)
+    }
+
+    func testMutatingCompletionWriteIsRecognizedBeforeFailedCompensation() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restarted = try await PairedHostStore(
+            secureStore: secureStore
+        ).selectedHost()
+
+        XCTAssertEqual(completion, .committed)
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restarted, candidate)
     }
 
     func testSuccessorCompensationRestoresFinalizedInProcessAuthority() async throws {

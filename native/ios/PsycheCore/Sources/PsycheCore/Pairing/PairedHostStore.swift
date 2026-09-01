@@ -480,16 +480,28 @@ public actor PairedHostStore {
             try secureStore.set(nextData, forKey: key)
             readySelectionOwner = nil
             return .committed
-        } catch {
+        } catch let writeError {
             let result = compensateWrite(
                 to: previousData,
-                after: error,
+                after: writeError,
                 operation: "Ready-host selection completion"
             )
-            if case .indeterminate = result {
-                authorization.supersede()
-                readySelectionOwner = nil
+            guard case .indeterminate = result else {
+                return result
             }
+            if case .success(let currentData) = Result(
+                catching: { try secureStore.data(forKey: key) }
+            ) {
+                if currentData == nextData {
+                    readySelectionOwner = nil
+                    return .committed
+                }
+                if currentData == previousData {
+                    return .notCommitted(reason: writeError.localizedDescription)
+                }
+            }
+            authorization.supersede()
+            readySelectionOwner = nil
             return result
         }
     }
