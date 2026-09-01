@@ -62,6 +62,8 @@ export interface InventorySummary<
   typeCounts: Partial<Record<TType, number>>;
 }
 
+export const MALFORMED_CANONICAL_OUTCOME_REF: 'malformed-canonical-outcome-ref';
+
 export const BEAD_ID_PATTERN: RegExp;
 export const PUBLIC_BEAD_TYPES: readonly BeadType[];
 

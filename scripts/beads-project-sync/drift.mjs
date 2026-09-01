@@ -14,6 +14,7 @@ import {
   hashRenderedBody,
   normalizeCanonicalBody,
 } from './reconcile.mjs';
+import { MALFORMED_CANONICAL_OUTCOME_REF } from './model.mjs';
 
 export const TRACKER_DRIFT_REPORT_SCHEMA_VERSION = 1;
 export const TRACKER_DRIFT_FINDING_LIMIT = 100;
@@ -227,6 +228,19 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets, opt
           ),
         });
       }
+    }
+  }
+  for (const bead of beads) {
+    if (
+      bead.status === 'closed'
+      && bead.externalRef === MALFORMED_CANONICAL_OUTCOME_REF
+    ) {
+      findings.push({
+        kind: 'canonical_mapping_malformed',
+        beadId: bead.id,
+        sourceStatus: bead.status,
+        sourcePriority: bead.priority,
+      });
     }
   }
   const mirrorsByBeadId = new Map();

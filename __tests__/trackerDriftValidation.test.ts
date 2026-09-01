@@ -371,14 +371,23 @@ describe('tracker drift validation', () => {
     expect(stderr.value()).toBe('');
     expect(JSON.parse(stdout.value())).toMatchObject({
       result: 'fail',
-      findings: [{
+    });
+    expect(JSON.parse(stdout.value()).findings).toEqual(expect.arrayContaining([
+      {
         kind: 'canonical_mapping_malformed',
         beadId: 'tracker-open',
         sourceStatus: 'open',
         sourcePriority: 1,
-      }],
-    });
+      },
+      {
+        kind: 'canonical_mapping_malformed',
+        beadId: 'tracker-closed',
+        sourceStatus: 'closed',
+        sourcePriority: 0,
+      },
+    ]));
     expect(stdout.value()).not.toContain('issue-PRIVATE-TARGET');
+    expect(stdout.value()).not.toContain('issue-PRIVATE-CLOSED-TARGET');
   });
 
   it('returns exit 2 when inventory evidence cannot be established', async () => {

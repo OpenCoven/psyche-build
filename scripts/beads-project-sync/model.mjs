@@ -91,6 +91,7 @@ const DATE_TIME_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/u;
 
 export const BEAD_ID_PATTERN = new RegExp(`^${BEAD_ID_SOURCE}$`, 'u');
+export const MALFORMED_CANONICAL_OUTCOME_REF = 'malformed-canonical-outcome-ref';
 
 /**
  * @param {string} message
@@ -187,7 +188,7 @@ function normalizeExternalRef(value, context, deferValidation) {
     if (!deferValidation) {
       throw error;
     }
-    return 'malformed-canonical-outcome-ref';
+    return MALFORMED_CANONICAL_OUTCOME_REF;
   }
 }
 
