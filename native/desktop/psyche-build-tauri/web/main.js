@@ -9240,7 +9240,6 @@
         thread.sidebarStatusKey = thread.status === "failed" ? "error" : "done";
         thread.finishedAt = Date.now();
         thread.term = null;
-        thread.fit = null;
         thread.host = null;
         thread.pane = null;
         thread.terminalController = null;
@@ -9304,7 +9303,8 @@
           state.activeProjectId === transactionSelection.projectId &&
           state.activeThreadId === transactionSelection.threadId);
       if (selectionStillOwnedByRemoval && activeProjectIdSnapshot === id) {
-        state.activeProjectId = id;
+        if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
+        else Object.assign(state, { activeProjectId: id });
         state.activeThreadId = originalThreadIds.has(activeThreadIdSnapshot)
           ? activeThreadIdSnapshot
           : null;
@@ -9382,7 +9382,7 @@
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(null);
-      else state.activeProjectId = null;
+      else Object.assign(state, { activeProjectId: null });
       state.activeThreadId = null;
       if (next) {
         sidebarRefreshedByActiveProjectHandoff = await setActiveProject(next.id);
