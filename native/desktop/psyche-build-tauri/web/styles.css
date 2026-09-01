@@ -4601,6 +4601,25 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-family: var(--font-mono);
   font-size: 11px;
 }
+.agent-picker-option.is-unavailable {
+  color: var(--muted);
+}
+.agent-picker-option.is-unavailable:hover,
+.agent-picker-option.is-unavailable.is-selected {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted);
+}
+.agent-picker-option-unavailable {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 @media (prefers-reduced-motion: reduce) {
   .agent-picker-overlay { animation: none; }
 }

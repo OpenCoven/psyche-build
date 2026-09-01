@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-coven-launch-session"
+description = "Enables the coven_launch_session command without any pre-configured scope."
+commands.allow = ["coven_launch_session"]
+
+[[permission]]
+identifier = "deny-coven-launch-session"
+description = "Denies the coven_launch_session command without any pre-configured scope."
+commands.deny = ["coven_launch_session"]

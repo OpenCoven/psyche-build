@@ -484,6 +484,65 @@ describe('Tauri workspace persistence model', () => {
     expect(persisted).not.toHaveProperty('covenSessionId');
   });
 
+  test('round-trips bounded Coven launch recovery quarantine across restart', () => {
+    const persistableSession = compileFunction<(
+      thread: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(functionSource('persistableSession'));
+    const restoredSessionThread = compileFunction<(
+      saved: Record<string, unknown>,
+      project: { id: string; root: string },
+    ) => Record<string, any>>(functionSource('restoredSessionThread'), {
+      restoredSessionLaunch: compileFunction(functionSource('restoredSessionLaunch'), {}),
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      loadingPaneMetrics: () => {
+        throw new Error('launch recovery must not load attachment metrics');
+      },
+    });
+    const thread = {
+      id: 'recovery-1',
+      projectId: 'project-a',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI launch recovery',
+      kind: 'coven-recovery',
+      hidden: false,
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+        promptDigest: 'sha256:must-not-persist',
+        covenSessionId: 'must-not-persist',
+      },
+    };
+
+    const persisted = persistableSession(thread);
+    expect(persisted).toEqual({
+      id: 'recovery-1',
+      projectId: 'project-a',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI launch recovery',
+      kind: 'coven-recovery',
+      launchKind: 'coven-recovery',
+      hidden: false,
+    });
+
+    const sanitized = workspaceModel.sanitizeSessionDescriptor(persisted);
+    expect(sanitized).toEqual(persisted);
+    const restored = restoredSessionThread(sanitized, { id: 'project-a', root: '/repo' });
+    expect(restored).toMatchObject({
+      kind: 'coven-recovery',
+      status: 'failed',
+      spawning: false,
+      sidebarStatusKey: 'error',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+    });
+    expect(restored.launch).not.toHaveProperty('promptDigest');
+    expect(restored.launch).not.toHaveProperty('covenSessionId');
+  });
+
   test('collapses malformed, unknown, and duplicate pane leaves', () => {
     expect(
       workspaceModel.sanitizePaneTree(
