@@ -69,6 +69,17 @@ describe('support bundle v1', () => {
     expect(first.records.map((record) => record.sequence)).toEqual([1, 2]);
   });
 
+  it('falls back from non-finite custom clocks', async () => {
+    const built = buildSupportBundle({}, { now: () => Number.NaN });
+    const collected = await collectSupportBundle([{
+      name: 'clock-fallback',
+      collect: async () => ({ lifecycle: { state: 'ready' } }),
+    }], { now: () => Number.POSITIVE_INFINITY });
+
+    expect(Number.isNaN(Date.parse(built.generatedAt))).toBe(false);
+    expect(Number.isNaN(Date.parse(collected.generatedAt))).toBe(false);
+  });
+
   it('redacts secrets, unsafe content, infrastructure URLs, and absolute paths', () => {
     const bundle = buildSupportBundle({
       provenance: {
@@ -762,6 +773,27 @@ describe('support bundle v1', () => {
     expect(first.errors.map(({ collector, code }) => `${collector}:${code}`))
       .toEqual(second.errors.map(({ collector, code }) => `${collector}:${code}`));
     expect(first.truncation.errorsOmitted).toBe(second.truncation.errorsOmitted);
+  });
+
+  it('does not read unbounded collector error messages', async () => {
+    let messageReads = 0;
+    const error = new Error();
+    Object.defineProperty(error, 'message', {
+      get() {
+        messageReads += 1;
+        return 'x'.repeat(1_000_000);
+      },
+    });
+
+    const bundle = await collectSupportBundle([{
+      name: 'alpha',
+      collect: async () => { throw error; },
+    }]);
+
+    expect(messageReads).toBe(0);
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collector: 'alpha', code: 'collection_failed' }),
+    ]));
   });
 
   it('fails closed when a collector returns an invalid shape', async () => {

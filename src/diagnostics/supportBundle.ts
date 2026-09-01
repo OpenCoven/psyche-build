@@ -963,6 +963,11 @@ function optionElapsedLimit(value: number | undefined): number {
   return Math.max(0, Math.min(SUPPORT_BUNDLE_LIMITS.maxElapsedMs, Math.floor(value)));
 }
 
+function optionNow(now: SupportBundleOptions['now']): number {
+  const value = now?.();
+  return typeof value === 'number' && Number.isFinite(value) ? value : Date.now();
+}
+
 function suppliedCount(value: unknown): number {
   return boundedMetadataCount(value) ?? 0;
 }
@@ -2578,7 +2583,8 @@ function buildSupportBundleWithReceiptMode(
     }
   }
 
-  const generatedAt = safeTimestamp(input.generatedAt, audit, 'generatedAt') ?? new Date(options.now?.() ?? Date.now()).toISOString();
+  const generatedAt = safeTimestamp(input.generatedAt, audit, 'generatedAt')
+    ?? new Date(optionNow(options.now)).toISOString();
   if (duplicateReceiptActionId) {
     errorCandidates.push({
       collector: 'support-bundle',
@@ -2807,7 +2813,7 @@ export async function collectSupportBundle(
   collectors: readonly SupportCollector[],
   options: SupportBundleOptions & { readonly signal?: AbortSignal } = {},
 ): Promise<SupportBundle> {
-  const startedAt = options.now?.() ?? new Date().getTime();
+  const startedAt = optionNow(options.now);
   const wallStartedAt = Date.now();
   const deadlineAt = wallStartedAt + optionElapsedLimit(options.maxElapsedMs);
   const collectionAt = new Date(startedAt).toISOString();
@@ -3008,7 +3014,6 @@ export async function collectSupportBundle(
               ? 'collection_timeout_or_cancelled'
               : invalidCollector ? 'collection_invalid_output' : 'collection_failed',
             at: collectionAt,
-            ...(error instanceof Error ? { message: error.message } : {}),
             ...((timedOut || invalidCollector) ? { recoveryRequired: true } : {}),
           },
         });
