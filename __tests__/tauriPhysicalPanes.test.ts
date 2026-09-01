@@ -2894,7 +2894,61 @@ describe('Tauri physical terminal panes', () => {
     ]);
   });
 
-  it('retains an accepted unattached session when protected close races acceptance', async () => {
+  it('refuses ordinary pane close while a Coven submission is unresolved', async () => {
+    const thread = {
+      id: 'recovery-thread',
+      projectId: 'project',
+      worktreePath: '/repo',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        recoveryRequired: false,
+      },
+      closeStarted: false,
+      closing: false,
+    };
+    const state = {
+      activeThreadId: thread.id,
+      threads: [thread],
+    };
+    const statuses: Array<[string, string]> = [];
+    let stopAttempts = 0;
+    const closeThread = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('closeThread'), {
+      findThread: () => thread,
+      state,
+      suspendGitRequests: () => undefined,
+      stageGitSurface: () => undefined,
+      markActiveSurface: () => undefined,
+      isPersistentThread: () => false,
+      noteStatusActivity: () => undefined,
+      forgetThreadInSets: () => undefined,
+      detachThreadPane: () => null,
+      stopThreadPty: async () => { stopAttempts += 1; return true; },
+      retainFileFocusAfterThreadRemoval: () => false,
+      syncThreadPaneMetadata: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      saveWorkspaceNow: async () => true,
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+    });
+
+    await expect(closeThread(thread.id)).resolves.toBe(false);
+
+    expect(state.threads).toEqual([thread]);
+    expect(thread.closeStarted).toBe(false);
+    expect(thread.closing).toBe(false);
+    expect(stopAttempts).toBe(0);
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI cannot be closed while its Coven launch outcome requires recovery; inspect Coven before closing',
+      'error',
+    ]);
+  });
+
+  it('retains an accepted unattached session when ordinary close races acceptance', async () => {
     const thread = {
       id: 'accepted-thread',
       projectId: 'project',
@@ -2921,7 +2975,7 @@ describe('Tauri physical terminal panes', () => {
     const statuses: Array<[string, string]> = [];
     const closeThread = compileFunction<(
       id: string,
-      options: Record<string, unknown>,
+      options?: Record<string, unknown>,
     ) => Promise<boolean>>(functionSource('closeThread'), {
       findThread: () => thread,
       state,
@@ -2942,9 +2996,7 @@ describe('Tauri physical terminal panes', () => {
       setStatus: (message: string, level: string) => { statuses.push([message, level]); },
     });
 
-    await expect(closeThread(thread.id, {
-      protectCovenRecovery: true,
-    })).resolves.toBe(false);
+    await expect(closeThread(thread.id)).resolves.toBe(false);
 
     expect(state.threads).toEqual([thread]);
     expect(thread.closeStarted).toBe(false);

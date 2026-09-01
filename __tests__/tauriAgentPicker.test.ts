@@ -1641,6 +1641,31 @@ describe('Tauri agent picker', () => {
     expect(events).toEqual(['reserve', 'persist']);
   });
 
+  it('only releases a recovery reservation after a definitive pre-effect rejection', async () => {
+    const options: Array<Record<string, unknown>> = [];
+    const releaseCovenLaunchReservation = compileFunction<(
+      thread: Record<string, unknown>,
+    ) => Promise<boolean>>(
+      functionSource('releaseCovenLaunchReservation'),
+      {
+        closeThread: async (_id: string, closeOptions: Record<string, unknown>) => {
+          options.push(closeOptions);
+          return true;
+        },
+      },
+    );
+
+    await expect(releaseCovenLaunchReservation({
+      id: 'reserved-thread',
+      launch: { launchKind: 'coven-recovery' },
+    })).resolves.toBe(true);
+
+    expect(options).toEqual([{
+      skipNativeSessionStop: true,
+      protectCovenRecovery: false,
+    }]);
+  });
+
   it('releases an unsubmitted reservation when pre-POST persistence fails', async () => {
     const state = { threads: [] as Array<Record<string, any>> };
     let persistenceFails = true;

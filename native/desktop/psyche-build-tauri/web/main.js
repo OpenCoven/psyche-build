@@ -2514,7 +2514,10 @@
 
   async function releaseCovenLaunchReservation(thread) {
     if (!thread) return false;
-    return closeThread(thread.id, { skipNativeSessionStop: true });
+    return closeThread(thread.id, {
+      skipNativeSessionStop: true,
+      protectCovenRecovery: false,
+    });
   }
 
   async function acceptCovenLaunchReservation(thread, options) {
@@ -5591,8 +5594,7 @@
       thread.launch.launchKind === "coven-attach" &&
       thread.persistentLive !== true;
     if (
-      options &&
-      options.protectCovenRecovery &&
+      (!options || options.protectCovenRecovery !== false) &&
       thread.launch &&
       (thread.launch.launchKind === "coven-recovery" ||
         thread.launch.recoveryRequired === true ||
