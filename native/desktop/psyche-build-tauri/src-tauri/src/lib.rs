@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -42,6 +42,8 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
+#[cfg(desktop)]
+use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "linux")]
 use webkit2gtk::{
     glib::{self, translate::ToGlibPtr},
@@ -154,6 +156,37 @@ fn ensure_trusted_pty_caller(label: &str) -> Result<(), String> {
     Err(format!(
         "PTY authority is only available to trusted webview 'main'; rejected caller '{label}'"
     ))
+}
+
+fn ensure_trusted_project_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "project authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
+#[derive(Default)]
+pub(crate) struct NativeProjectAuthority {
+    open_roots: Mutex<HashSet<PathBuf>>,
+}
+
+impl NativeProjectAuthority {
+    fn from_startup() -> Self {
+        Self::default()
+    }
+
+    fn authorize_native_open(&self, root: &Path) -> Result<String, String> {
+        let root = canonical_project_root(&root.to_string_lossy())?;
+        let root_text = root.to_string_lossy().into_owned();
+        self.open_roots.lock().insert(root);
+        Ok(root_text)
+    }
+
+    pub(crate) fn open_project_roots(&self) -> Vec<PathBuf> {
+        self.open_roots.lock().iter().cloned().collect()
+    }
 }
 
 fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), String> {
@@ -1783,6 +1816,48 @@ fn apply_launch_env(
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn native_project_open(
+    app: AppHandle,
+    webview: tauri::Webview,
+    authority: State<'_, NativeProjectAuthority>,
+    default_path: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_trusted_project_caller(webview.label())?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app.dialog().file().set_title("Open project");
+        if let Some(default_path) = default_path {
+            let default_path = PathBuf::from(default_path);
+            if default_path.is_dir() {
+                dialog = dialog.set_directory(default_path);
+            }
+        }
+        dialog.blocking_pick_folder()
+    })
+    .await
+    .map_err(|error| format!("project picker failed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|error| format!("project picker returned an unavailable path: {error}"))?;
+    authority.authorize_native_open(&selected).map(Some)
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn native_project_open(
+    _app: AppHandle,
+    webview: tauri::Webview,
+    _authority: State<'_, NativeProjectAuthority>,
+    _default_path: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_trusted_project_caller(webview.label())?;
+    Err("native project selection is unavailable on this platform".to_string())
 }
 
 #[tauri::command]
@@ -9020,6 +9095,7 @@ pub fn run() {
     env_logger::init();
 
     let runtime_diagnostics_state = RuntimeDiagnosticsState::from_startup();
+    let native_project_authority = NativeProjectAuthority::from_startup();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -9032,6 +9108,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(runtime_diagnostics_state)
+        .manage(native_project_authority)
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
         .manage(BrowserShortcutAuthorizations::default())
@@ -9041,6 +9118,7 @@ pub fn run() {
             pty_attach,
             pane_session_metrics,
             canonical_project_path,
+            native_project_open,
             pty_write,
             pty_resize,
             pty_ack,
@@ -9106,6 +9184,18 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod native_project_authority_tests {
+    use super::*;
+
+    #[test]
+    fn native_project_authority_starts_fail_closed() {
+        assert!(NativeProjectAuthority::from_startup()
+            .open_project_roots()
+            .is_empty());
+    }
 }
 
 #[cfg(test)]

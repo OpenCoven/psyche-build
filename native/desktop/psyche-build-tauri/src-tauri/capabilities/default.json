@@ -16,6 +16,7 @@
     "allow-pty-attach",
     "allow-pane-session-metrics",
     "allow-canonical-project-path",
+    "allow-native-project-open",
     "allow-pty-write",
     "allow-pty-resize",
     "allow-pty-ack",

@@ -1950,6 +1950,159 @@ describe('Tauri agent picker', () => {
     ]);
   });
 
+  it('quarantines an accepted session when attachment-failure persistence fails', async () => {
+    const statuses: Array<[string, string]> = [];
+    const writes: string[] = [];
+    let saveAttempts = 0;
+    let nativeAttachmentAttempts = 0;
+    let clientAttachmentAttempts = 0;
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      terminalController: {
+        write: (value: string) => { writes.push(value); },
+      },
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          saveAttempts += 1;
+          if (saveAttempts === 2) throw new Error('attachment recovery save failed');
+          return true;
+        },
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+          throw new Error('tmux unavailable');
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          clientAttachmentAttempts += 1;
+          return false;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+    const hasCovenLaunchRecovery = compileFunction<(
+      projectId: string,
+      worktreePath: string,
+    ) => boolean>(functionSource('hasCovenLaunchRecovery'), { state });
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saveAttempts).toBe(2);
+    expect(nativeAttachmentAttempts).toBe(1);
+    expect(clientAttachmentAttempts).toBe(0);
+    expect(thread.launch).toMatchObject({
+      covenSessionId: 'session-accepted',
+      recoveryRequired: true,
+    });
+    expect(hasCovenLaunchRecovery('project', '/repo/worktree')).toBe(true);
+    expect(writes.join('')).toContain('recovery state is not durable');
+    expect(statuses.at(-1)?.[0]).toContain('inspect Coven before closing');
+  });
+
+  it('quarantines an accepted session when final attachment persistence fails', async () => {
+    const statuses: Array<[string, string]> = [];
+    let saveAttempts = 0;
+    let nativeAttachmentAttempts = 0;
+    let clientAttachmentAttempts = 0;
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      terminalController: { write: () => undefined },
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          saveAttempts += 1;
+          if (saveAttempts === 2) throw new Error('final attachment save failed');
+          return true;
+        },
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          clientAttachmentAttempts += 1;
+          thread.status = 'running';
+          thread.spawning = false;
+          return true;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+    const hasCovenLaunchRecovery = compileFunction<(
+      projectId: string,
+      worktreePath: string,
+    ) => boolean>(functionSource('hasCovenLaunchRecovery'), { state });
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saveAttempts).toBe(3);
+    expect(nativeAttachmentAttempts).toBe(1);
+    expect(clientAttachmentAttempts).toBe(1);
+    expect(thread.launch).toMatchObject({
+      covenSessionId: 'session-accepted',
+      recoveryRequired: true,
+    });
+    expect(hasCovenLaunchRecovery('project', '/repo/worktree')).toBe(true);
+    expect(statuses.at(-1)?.[0]).toContain(
+      'was accepted by Coven but final attachment persistence failed',
+    );
+  });
+
   it('does not persist an agent preference and always reselects Coven CLI', () => {
     expect(mainJs).not.toMatch(/localStorage\.(?:getItem|setItem)\([^)]*agent/i);
     expect(functionSource('openAgentPicker')).toContain('agentPickerIndex = 0;');

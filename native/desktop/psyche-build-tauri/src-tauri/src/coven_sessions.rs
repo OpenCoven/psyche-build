@@ -849,37 +849,38 @@ fn launch_validation_rejection(message: String) -> CovenLaunchResponse {
 
 #[cfg(unix)]
 #[tauri::command]
-pub(crate) async fn coven_launch_session(request: CovenLaunchRequest) -> CovenLaunchResponse {
-    match tauri::async_runtime::spawn_blocking(
-        move || -> Result<CovenLaunchResponse, CovenAdapterError> {
-            let open_project_roots = match super::native_workspace::open_project_roots() {
-                Ok(roots) => roots,
-                Err(_) => {
-                    return Ok(launch_validation_rejection(
-                        "Coven launch project authority is unavailable".to_string(),
-                    ))
-                }
-            };
-            let request = match validate_launch_request(request, &open_project_roots) {
-                Ok(request) => request,
-                Err(message) => return Ok(launch_validation_rejection(message)),
-            };
-            let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
-            try_launch_coven_session(&endpoint, &request)
+pub(crate) async fn coven_launch_session(
+    authority: tauri::State<'_, super::NativeProjectAuthority>,
+    request: CovenLaunchRequest,
+) -> Result<CovenLaunchResponse, String> {
+    let open_project_roots = authority.open_project_roots();
+    Ok(
+        match tauri::async_runtime::spawn_blocking(
+            move || -> Result<CovenLaunchResponse, CovenAdapterError> {
+                let request = match validate_launch_request(request, &open_project_roots) {
+                    Ok(request) => request,
+                    Err(message) => return Ok(launch_validation_rejection(message)),
+                };
+                let endpoint = coven_launch_environment().map_err(|_| CovenAdapterError::Failed)?;
+                try_launch_coven_session(&endpoint, &request)
+            },
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => launch_failure_response(error),
+            Err(_) => launch_failure_response(CovenAdapterError::Failed),
         },
     )
-    .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => launch_failure_response(error),
-        Err(_) => launch_failure_response(CovenAdapterError::Failed),
-    }
 }
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-pub(crate) async fn coven_launch_session(_request: CovenLaunchRequest) -> CovenLaunchResponse {
-    launch_failure_response(CovenAdapterError::Unavailable)
+pub(crate) async fn coven_launch_session(
+    _authority: tauri::State<'_, super::NativeProjectAuthority>,
+    _request: CovenLaunchRequest,
+) -> Result<CovenLaunchResponse, String> {
+    Ok(launch_failure_response(CovenAdapterError::Unavailable))
 }
 
 #[cfg(unix)]
@@ -3691,6 +3692,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn caller_saved_workspace_root_does_not_establish_launch_authority() {
+        let tree = TempTree::new("launch-workspace-injection");
+        let injected_project = tree.directory("injected-project");
+        initialize_git_repo(&injected_project);
+        let fake_home = tree.directory("home");
+        let workspace_path = fake_home.join(".psyche/macos-app/workspace-v3.json");
+        super::super::native_workspace::save_workspace_to(
+            &workspace_path,
+            &serde_json::json!({
+                "version": 3,
+                "projects": [{
+                    "id": "injected",
+                    "root": injected_project.to_string_lossy()
+                }],
+                "sessions": [],
+                "paneLayouts": []
+            }),
+        )
+        .unwrap();
+
+        let authority = super::super::NativeProjectAuthority::default();
+        let roots = authority.open_project_roots();
+        let mut request = launch_fixture();
+        request.project_root = injected_project.to_string_lossy().into_owned();
+        request.cwd = Some(injected_project.to_string_lossy().into_owned());
+        let result = super::validate_launch_request(request, &roots);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Coven launch project is not open in Psyche"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn launch_request_validation_rejects_symlink_cwd_escapes() {
@@ -3760,7 +3795,10 @@ mod tests {
         request.project_root = project.to_string_lossy().into_owned();
         request.cwd = Some(linked_cwd.to_string_lossy().into_owned());
 
-        let canonical = validate_launch_request(request).unwrap();
+        let authority = super::super::NativeProjectAuthority::default();
+        authority.authorize_native_open(&project).unwrap();
+        let canonical =
+            super::validate_launch_request(request, &authority.open_project_roots()).unwrap();
 
         assert_eq!(
             canonical.cwd.as_deref(),

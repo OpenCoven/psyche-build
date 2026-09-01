@@ -203,6 +203,8 @@ describe('Tauri Coven launch project scope', () => {
   it('registers the canonical project path command and requires validated PTY roots', () => {
     expect(libRs).toMatch(/fn canonical_project_path\s*\(\s*root\s*:\s*String\s*\)/);
     expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*canonical_project_path\s*,/);
+    expect(libRs).toMatch(/async fn native_project_open\s*\(/);
+    expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*native_project_open\s*,/);
     expect(libRs).toMatch(/pub cwd:\s*Option<String>/);
     expect(libRs).toMatch(/pub launch_kind:\s*Option<String>/);
     expect(libRs).toMatch(/pub coven_session_id:\s*Option<String>/);
@@ -1364,11 +1366,15 @@ describe('native Coven launch routing', () => {
   it('does not launch Coven when the project picker adds a project', async () => {
     const project = { id: 'project', root: '/repo', name: 'repo' };
     let pickerLaunches = 0;
+    const invocations: Array<[string, Record<string, unknown>]> = [];
     const openProjectPicker = compileFunction<() => Promise<void>>(
       functionSource('openProjectPicker'),
       {
-        dialogOpen: async () => '/repo',
         state: { env: { home: '/home' } },
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          invocations.push([command, args]);
+          return '/repo';
+        },
         addProject: async () => project,
         ensureProjectCoven: async () => { pickerLaunches += 1; return null; },
         setProjectStatus: () => { throw new Error('setProjectStatus should not be called'); },
@@ -1376,6 +1382,9 @@ describe('native Coven launch routing', () => {
       },
     );
     await openProjectPicker();
+    expect(invocations).toEqual([
+      ['native_project_open', { defaultPath: '/home' }],
+    ]);
     expect(pickerLaunches).toBe(0);
   });
 

@@ -100,7 +100,6 @@
   var opener = window.__TAURI__.opener || null;
   var clipboardManager = window.__TAURI__.clipboardManager || null;
   var openUrl = (opener && opener.openUrl) || null;
-  var dialogOpen = (window.__TAURI__.dialog && window.__TAURI__.dialog.open) || null;
   var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
     ? window.__TAURI__.window.getCurrentWindow()
     : null;
@@ -2519,6 +2518,21 @@
   }
 
   async function acceptCovenLaunchReservation(thread, options) {
+    function surfaceNonDurableRecovery(error) {
+      if (thread.terminalController) {
+        thread.terminalController.write(
+          "\r\n\x1b[31m[Coven recovery state is not durable]\x1b[0m " +
+            "inspect Coven before closing: " + String(error) + "\r\n"
+        );
+      }
+      setStatus(
+        thread.name +
+          " was accepted by Coven, but its recovery state is not durable; " +
+          "inspect Coven before closing: " + String(error),
+        "error"
+      );
+    }
+
     thread.name = options.name || thread.name;
     thread.kind = "coven-attach";
     thread.launch.command = state.env.coven_path;
@@ -2558,18 +2572,7 @@
       try {
         await saveWorkspaceNow();
       } catch (recoverySaveError) {
-        if (thread.terminalController) {
-          thread.terminalController.write(
-            "\r\n\x1b[31m[Coven recovery state is not durable]\x1b[0m " +
-              "inspect Coven before closing: " + String(recoverySaveError) + "\r\n"
-          );
-        }
-        setStatus(
-          thread.name +
-            " was accepted by Coven, but its recovery state is not durable; " +
-            "inspect Coven before closing: " + String(recoverySaveError),
-          "error"
-        );
+        surfaceNonDurableRecovery(recoverySaveError);
       }
       return thread;
     }
@@ -2577,6 +2580,7 @@
       await invoke("native_session_create", { request: nativeSessionRequest(thread) });
       thread.persistentLive = true;
     } catch (error) {
+      thread.launch.recoveryRequired = true;
       thread.status = "failed";
       thread.spawning = false;
       thread.finishedAt = Date.now();
@@ -2593,11 +2597,40 @@
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
-      await saveWorkspaceNow();
+      try {
+        await saveWorkspaceNow();
+      } catch (recoverySaveError) {
+        surfaceNonDurableRecovery(recoverySaveError);
+      }
       return thread;
     }
     await attachThreadClient(thread);
-    await saveWorkspaceNow();
+    try {
+      await saveWorkspaceNow();
+    } catch (error) {
+      thread.launch.recoveryRequired = true;
+      thread.sidebarStatusKey = "error";
+      if (thread.terminalController) {
+        thread.terminalController.write(
+          "\r\n\x1b[31m[Coven session accepted; attachment persistence failed]\x1b[0m " +
+            String(error) + "\r\n"
+        );
+      }
+      setStatus(
+        thread.name +
+          " was accepted by Coven but final attachment persistence failed; " +
+          "local recovery is required: " + String(error),
+        "error"
+      );
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      try {
+        await saveWorkspaceNow();
+      } catch (recoverySaveError) {
+        surfaceNonDurableRecovery(recoverySaveError);
+      }
+    }
     return thread;
   }
 
@@ -14168,18 +14201,9 @@
   }
 
   async function openProjectPicker() {
-    if (!dialogOpen) {
-      writeToActive(
-        "\r\n\x1b[33m[/open-project]\x1b[0m dialog plugin missing — rebuild required.\r\n"
-      );
-      return;
-    }
     try {
       var defaultPath = (state.env && state.env.home) || undefined;
-      var selected = await dialogOpen({
-        directory: true,
-        multiple: false,
-        title: "Open project",
+      var selected = await invoke("native_project_open", {
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled

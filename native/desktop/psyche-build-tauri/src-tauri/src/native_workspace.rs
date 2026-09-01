@@ -5474,22 +5474,6 @@ pub(crate) fn workspace_default_path() -> Result<PathBuf, String> {
     workspace_path_from_home()
 }
 
-pub(crate) fn open_project_roots() -> Result<Vec<PathBuf>, String> {
-    ensure_workspace_storage_supported()?;
-    let Some(workspace) = load_workspace_from(&workspace_default_path()?)? else {
-        return Ok(Vec::new());
-    };
-    let projects = workspace
-        .get("projects")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "workspace projects are unavailable".to_string())?;
-    Ok(projects
-        .iter()
-        .filter_map(|project| project.get("root").and_then(Value::as_str))
-        .filter_map(|root| crate::canonical_project_root(root).ok())
-        .collect())
-}
-
 #[cfg(unix)]
 fn ensure_workspace_storage_supported() -> Result<(), String> {
     Ok(())

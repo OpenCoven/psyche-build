@@ -4,6 +4,7 @@ const APP_COMMANDS: &[&str] = &[
     "pty_attach",
     "pane_session_metrics",
     "canonical_project_path",
+    "native_project_open",
     "pty_write",
     "pty_resize",
     "pty_ack",
