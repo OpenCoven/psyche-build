@@ -3803,6 +3803,7 @@ mod tests {
         let project = tree.directory("project");
         initialize_git_repo(&project);
         let authority = super::super::NativeProjectAuthority::default();
+        authority.reconcile_startup_roots(&[]).unwrap();
         authority.authorize_native_open(&project).unwrap();
         authority.revoke_native_open(&project).unwrap();
         let mut request = launch_fixture();
@@ -3823,6 +3824,7 @@ mod tests {
         let project = tree.directory("project");
         initialize_git_repo(&project);
         let authority = Arc::new(super::super::NativeProjectAuthority::default());
+        authority.reconcile_startup_roots(&[]).unwrap();
         authority.authorize_native_open(&project).unwrap();
         let (endpoint, health_seen, release_health, post_requests, server) =
             spawn_health_gated_launch_server();
@@ -3942,6 +3944,7 @@ mod tests {
         request.cwd = Some(linked_cwd.to_string_lossy().into_owned());
 
         let authority = super::super::NativeProjectAuthority::default();
+        authority.reconcile_startup_roots(&[]).unwrap();
         authority.authorize_native_open(&project).unwrap();
         let canonical =
             super::validate_launch_request(request, &authority.open_project_roots()).unwrap();

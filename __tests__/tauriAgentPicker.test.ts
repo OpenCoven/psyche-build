@@ -37,8 +37,25 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+  const invoke = dependencies.invoke as
+    | ((command: string, args: Record<string, unknown>) => Promise<unknown>)
+    | undefined;
+  const resolvedDependencies = {
+    createNativeSessionForThread: (thread: Record<string, any>) => (
+      invoke
+        ? invoke('native_session_create', {
+          request: {
+            id: thread.id,
+            launchKind: thread.launch?.launchKind,
+            covenSessionId: thread.launch?.covenSessionId,
+          },
+        })
+        : Promise.resolve()
+    ),
+    ...dependencies,
+  };
+  const names = Object.keys(resolvedDependencies);
+  const values = Object.values(resolvedDependencies);
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
@@ -1824,6 +1841,7 @@ describe('Tauri agent picker', () => {
 
   it('clears and persists recovery quarantine after canonical reattachment', async () => {
     const statuses: Array<[string, string]> = [];
+    const events: string[] = [];
     let saves = 0;
     const thread: Record<string, any> = {
       id: 'accepted-thread',
@@ -1834,37 +1852,31 @@ describe('Tauri agent picker', () => {
         covenSessionId: 'session-accepted',
         recoveryRequired: true,
       },
-      startInFlight: false,
-      closeStarted: false,
-      ptyStarted: false,
-      term: null,
     };
-    const attachThreadClient = compileFunction<(
+    const attachThreadClientAndResolveRecovery = compileFunction<(
       candidate: Record<string, any>,
-    ) => Promise<boolean>>(functionSource('attachThreadClient'), {
-      isLiveThread: () => true,
-      ensureThreadPtyController: () => ({
-        prepareForPtyStart: () => null,
-        markPtyStarted: async () => undefined,
-        restoreAfterFailedPtyStart: () => undefined,
-      }),
-      attentionTracker: { forget: () => undefined },
+    ) => Promise<boolean>>(functionSource('attachThreadClientAndResolveRecovery'), {
+      attachThreadClient: async () => {
+        events.push('attach');
+        expect(thread.launch.recoveryRequired).toBe(true);
+        return true;
+      },
       syncThreadAttentionChrome: () => undefined,
       syncThreadPaneMetadata: () => undefined,
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
-      invoke: async () => ({ generation: 1 }),
-      stopThreadPty: async () => true,
-      state: { activeThreadId: null },
-      setProjectStatus: () => undefined,
-      findProject: () => ({ id: 'project' }),
-      saveWorkspaceNow: async () => { saves += 1; return true; },
+      saveWorkspaceNow: async () => {
+        events.push('persist');
+        saves += 1;
+        return true;
+      },
       saveWorkspaceSoon: () => undefined,
       setStatus: (message: string, level: string) => { statuses.push([message, level]); },
     });
 
-    await expect(attachThreadClient(thread)).resolves.toBe(true);
+    await expect(attachThreadClientAndResolveRecovery(thread)).resolves.toBe(true);
 
+    expect(events).toEqual(['attach', 'persist']);
     expect(thread.launch.recoveryRequired).toBe(false);
     expect(saves).toBe(1);
     expect(statuses.at(-1)).toEqual([
@@ -2031,7 +2043,7 @@ describe('Tauri agent picker', () => {
   it('persists an accepted session identity before creating its native attachment', async () => {
     const events: string[] = [];
     const persistedRecoveryStates: boolean[] = [];
-    const thread = {
+    const thread: Record<string, any> = {
       id: 'reserved-thread',
       projectId: 'project',
       name: 'Codex CLI',
@@ -2040,7 +2052,6 @@ describe('Tauri agent picker', () => {
         launchKind: 'coven-recovery',
         projectRoot: '/repo',
         cwd: '/repo/worktree',
-        recoveryRequired: false,
       },
       status: 'starting',
       spawning: true,
@@ -2077,7 +2088,8 @@ describe('Tauri agent picker', () => {
         }),
         attachThreadClient: async () => {
           events.push('attach');
-          return false;
+          expect(thread.launch.recoveryRequired).toBe(true);
+          return true;
         },
         setStatus: () => undefined,
         syncThreadPaneMetadata: () => undefined,
@@ -2093,15 +2105,148 @@ describe('Tauri agent picker', () => {
     });
 
     expect(events).toEqual(['persist', 'native_session_create', 'attach', 'persist']);
-    expect(persistedRecoveryStates).toEqual([true, true]);
+    expect(persistedRecoveryStates).toEqual([true, false]);
     expect(accepted).toBe(thread);
     expect(thread.launch).toMatchObject({
       launchKind: 'coven-attach',
       covenSessionId: 'session-1',
       promptDigest: 'sha256:abc',
       metricsProvider: 'codex',
-      recoveryRequired: true,
+      recoveryRequired: false,
     });
+  });
+
+  it('keeps an accepted session quarantined when the local client does not attach', async () => {
+    const statuses: Array<[string, string]> = [];
+    let saves = 0;
+    const thread: Record<string, any> = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => { saves += 1; },
+        invoke: async () => undefined,
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => false,
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saves).toBe(1);
+    expect(thread).toMatchObject({
+      persistentLive: true,
+      status: 'failed',
+      spawning: false,
+      sidebarStatusKey: 'error',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: true,
+      },
+    });
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI was accepted by Coven but its local attachment did not start; inspect Coven before closing',
+      'error',
+    ]);
+  });
+
+  it('keeps an accepted session quarantined when the local client attachment throws', async () => {
+    const statuses: Array<[string, string]> = [];
+    const persistedRecoveryStates: boolean[] = [];
+    const thread: Record<string, any> = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          persistedRecoveryStates.push(thread.launch.recoveryRequired === true);
+        },
+        invoke: async () => undefined,
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          expect(thread.launch.recoveryRequired).toBe(true);
+          throw new Error('pty attach unavailable');
+        },
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(persistedRecoveryStates).toEqual([true]);
+    expect(thread).toMatchObject({
+      persistentLive: true,
+      status: 'failed',
+      spawning: false,
+      sidebarStatusKey: 'error',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: true,
+      },
+    });
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI was accepted by Coven but its local attachment did not start: Error: pty attach unavailable; inspect Coven before closing',
+      'error',
+    ]);
   });
 
   it('does not create a native attachment after an accepted reservation starts closing', async () => {

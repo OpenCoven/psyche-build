@@ -184,12 +184,23 @@ fn tmux_error(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
 }
 
+fn claim_native_session_submission(
+    authority: &crate::NativeProjectAuthority,
+    request: &NativeSessionCreate,
+) -> Result<crate::NativeProjectSubmissionLease, String> {
+    authority
+        .claim_submission(Path::new(&request.project_root))
+        .map_err(|error| format!("native session project authority is unavailable: {error}"))
+}
+
 #[tauri::command]
 pub(crate) fn native_session_create(
     webview: tauri::Webview,
+    authority: tauri::State<'_, crate::NativeProjectAuthority>,
     request: NativeSessionCreate,
 ) -> Result<(), String> {
     ensure_trusted_caller(webview.label())?;
+    let _submission_lease = claim_native_session_submission(authority.inner(), &request)?;
     let opened_cwd = crate::open_pty_cwd(&request.project_root, &request.cwd)?;
     let mut canonical_request = request;
     canonical_request.cwd = opened_cwd.canonical_path.to_string_lossy().into_owned();
@@ -261,7 +272,8 @@ pub(crate) fn native_session_capture(
 mod tests {
     use super::{
         build_attach_args, build_capture_args, build_create_args, build_list_args, build_stop_args,
-        session_name, shell_quote, NativeLaunchKind, NativeSessionCreate,
+        claim_native_session_submission, session_name, shell_quote, NativeLaunchKind,
+        NativeSessionCreate,
     };
     use std::path::Path;
 
@@ -305,6 +317,28 @@ mod tests {
         );
         assert!(session_name("bad id").is_err());
         assert!(session_name(&"x".repeat(97)).is_err());
+    }
+
+    #[test]
+    fn native_session_create_claims_open_project_authority() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let root = tree.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let authority = crate::NativeProjectAuthority::default();
+        authority.reconcile_startup_roots(&[]).unwrap();
+        authority.authorize_native_open(&root).unwrap();
+        let mut request = request(NativeLaunchKind::Shell);
+        request.project_root = root.to_string_lossy().into_owned();
+        request.cwd = request.project_root.clone();
+
+        let lease = claim_native_session_submission(&authority, &request).unwrap();
+        assert!(authority
+            .open_project_roots()
+            .contains(&root.canonicalize().unwrap()));
+        drop(lease);
+
+        authority.revoke_native_open(&root).unwrap();
+        assert!(claim_native_session_submission(&authority, &request).is_err());
     }
 
     #[test]

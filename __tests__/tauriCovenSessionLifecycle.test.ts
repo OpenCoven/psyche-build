@@ -773,6 +773,7 @@ describe('macOS Coven session lifecycle boundary', () => {
         focusThread: () => undefined,
         requestAnimationFrame: () => undefined,
         isLiveThread: () => true,
+        createNativeSessionForThread: async () => ({ id: 'native-session' }),
         spawnPty: () => undefined,
       },
     );
