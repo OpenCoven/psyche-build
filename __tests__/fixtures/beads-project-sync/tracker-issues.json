@@ -3,7 +3,7 @@
     "number": 301,
     "state": "open",
     "title": "[tracker-open] Tracked active outcome",
-    "body": "<!-- psyche-bead-sync:v1 bead-id=tracker-open -->\n\n## Source metadata\n- Source status: open\n- Source priority: P1\n\n<!-- psyche-bead-sync:v1 render-hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+    "body": "<!-- psyche-bead-sync:v1 bead-id=tracker-open -->\n\n## Source metadata\n- Source status: open\n- Source priority: P1\n\n<!-- psyche-bead-sync:v1 render-hash=dcc2a6c3aa85739c5d59c85d46995daa547c2d64cba1b98987dea1c1cbcbc08c -->",
     "user": { "login": "BunsDev" },
     "labels": [
       { "name": "bead" },
@@ -15,7 +15,7 @@
     "number": 302,
     "state": "closed",
     "title": "[tracker-closed] Tracked completed task",
-    "body": "<!-- psyche-bead-sync:v1 bead-id=tracker-closed -->\n\n## Source metadata\n- Source status: closed\n- Source priority: P0\n\n<!-- psyche-bead-sync:v1 render-hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->",
+    "body": "<!-- psyche-bead-sync:v1 bead-id=tracker-closed -->\n\n## Source metadata\n- Source status: closed\n- Source priority: P0\n\n<!-- psyche-bead-sync:v1 render-hash=1b660450af871786a9d4525583bd1396d9bfb99d9a2a86c40e8e7366bdd78bdd -->",
     "user": { "login": "BunsDev" },
     "labels": [
       { "name": "bead" },

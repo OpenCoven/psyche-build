@@ -51,13 +51,26 @@ The validator composes two contracts rather than replacing the synchronizer:
    - missing mirrors;
    - orphan mirrors;
    - duplicate managed Bead IDs;
-   - duplicate, empty, or malformed managed Bead markers;
+   - missing, duplicate, empty, or malformed managed Bead markers;
    - duplicate, empty, or malformed render-hash markers;
    - open/closed state disagreement;
-   - `priority:Pn` label disagreement;
+   - missing, extra, or noncanonical labels in the managed `priority:`
+     namespace;
+   - obsolete `release-blocker` metadata;
    - generated `Source status` disagreement;
    - generated `Source priority` disagreement;
-   - missing render-hash evidence.
+   - missing render-hash evidence;
+   - valid-looking render hashes that do not match the canonical managed body.
+
+Generated issue and render-hash comments use the exact lowercase marker and
+field spelling emitted by the synchronizer. Case variants and other
+marker-like HTML comments are malformed; ordinary prose is not interpreted as
+managed metadata. A render-hash comment without a valid Bead marker remains a
+managed malformed issue rather than disappearing from validation.
+
+Malformed active `external_ref` values are retained only long enough for the
+canonical-outcome validator to classify them as bounded
+`canonical_mapping_malformed` drift. They are never treated as valid mappings.
 
 The command exits:
 
@@ -66,7 +79,14 @@ The command exits:
   canonical source mapping failures and malformed managed issue markers;
 - `2` when evidence cannot be established, including network, authentication or
   rate-limit failures, unreadable or invalid inventory input, invalid
-  configuration, or Beads bootstrap/tool execution failures.
+  configuration, Beads bootstrap/tool execution failures, and invalid command
+  options.
+
+Option errors and evidence-loading failures are handled inside the command.
+They produce one bounded stderr line without a stack trace. Filesystem failures
+identify only the input role (for example, inventory input), never the supplied
+path or raw exception. Environment tokens and credential values are never
+included.
 
 Managed issue authors are compared case-insensitively against
 `trustedIssueAuthors`, matching GitHub login semantics. A malformed managed

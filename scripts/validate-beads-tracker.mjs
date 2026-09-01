@@ -6,14 +6,20 @@ import { pathToFileURL } from 'node:url';
 
 import { readSyncConfig } from './beads-project-sync/config.mjs';
 import { validateTrackerDrift } from './beads-project-sync/drift.mjs';
+import {
+  LEGACY_ISSUE_MARKERS,
+  recognizedMarkers,
+} from './beads-project-sync/markers.mjs';
 import { BEAD_ID_PATTERN, parseBeadExport } from './beads-project-sync/model.mjs';
 import { loadBeadsSource } from './beads-project-sync/source.mjs';
 
 const DEFAULT_MAX_GITHUB_ISSUE_PAGES = 1_000;
 const GITHUB_ISSUE_PAGE_SIZE = 100;
 
+class TrackerDriftCliError extends Error {}
+
 function fail(message) {
-  throw new Error(message);
+  throw new TrackerDriftCliError(message);
 }
 
 function parseOptions(argv) {
@@ -24,7 +30,7 @@ function parseOptions(argv) {
     const argument = argv[index];
     if (argument === '--inventory-file' || argument === '--issues-file') {
       const value = argv[index + 1];
-      if (!value || value.startsWith('--')) fail(`${argument} requires a path`);
+      if (!value || value.startsWith('--')) fail('invalid command-line options');
       if (argument === '--inventory-file') inventoryFile = value;
       else issuesFile = value;
       index += 1;
@@ -32,15 +38,15 @@ function parseOptions(argv) {
     }
     if (argument === '--max-issue-pages') {
       const value = argv[index + 1];
-      if (!value || value.startsWith('--')) fail(`${argument} requires a positive integer`);
+      if (!value || value.startsWith('--')) fail('invalid command-line options');
       maxIssuePages = Number(value);
       if (!Number.isSafeInteger(maxIssuePages) || maxIssuePages <= 0) {
-        fail(`${argument} requires a positive integer`);
+        fail('invalid command-line options');
       }
       index += 1;
       continue;
     }
-    fail(`Unknown argument: ${argument}`);
+    fail('invalid command-line options');
   }
   return { inventoryFile, issuesFile, maxIssuePages };
 }
@@ -55,7 +61,7 @@ function objectRecord(value) {
     : {};
 }
 
-function normalizeIssue(rawValue, config, trustedIssueAuthors) {
+function normalizeIssue(rawValue, config, trustedIssueAuthors, issueMarkers) {
   const rawIssue = objectRecord(rawValue);
   if (Object.keys(rawIssue).length === 0 || rawIssue.pull_request != null) return null;
   const rawUser = objectRecord(rawIssue.user);
@@ -65,44 +71,87 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors) {
   const body = typeof rawIssue.body === 'string' ? rawIssue.body : '';
   if (!Number.isSafeInteger(number) || number <= 0) return null;
 
-  const marker = escapeRegExp(config.issueMarker);
-  const beadMatches = [...body.matchAll(new RegExp(
-    `<!--\\s*${marker}\\s+bead-id(?=\\s|=|-->)([^>]*)-->`,
-    'giu',
-  ))];
-  if (beadMatches.length === 0) return null;
-  const beadIds = beadMatches.map((match) => {
-    const metadata = match[1] ?? '';
-    return metadata.match(/^=(.*)$/su)?.[1]?.trim() ?? null;
-  });
+  const markerAlternatives = issueMarkers.map(escapeRegExp).join('|');
+  const markerTokens = new Set(issueMarkers.map((value) => value.toLowerCase()));
+  const markerComments = [...body.matchAll(/<!--[\s\S]*?-->/gu)]
+    .map((match) => match[0])
+    .filter((comment) => {
+      const markerToken = comment
+        .slice(4, -3)
+        .trim()
+        .match(/^([A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,199}))(?=\s|$)/u)?.[1];
+      return markerToken != null && markerTokens.has(markerToken.toLowerCase());
+    });
+  if (markerComments.length === 0) return null;
+
+  const exactBeadMarker = new RegExp(
+    `^<!-- (?:${markerAlternatives}) bead-id=([^\\r\\n>]*) -->$`,
+    'u',
+  );
+  const exactRenderHashMarker = new RegExp(
+    `^<!-- (?:${markerAlternatives}) render-hash=([^\\r\\n>]*) -->$`,
+    'u',
+  );
+  const beadIds = [];
+  const renderValues = [];
+  let beadMarkerCount = 0;
+  let renderHashMarkerCount = 0;
+  let emptyRenderHashMarker = false;
+  let malformedBeadMarker = false;
+  let malformedRenderHashMarker = false;
+
+  for (const comment of markerComments) {
+    const beadMatch = comment.match(exactBeadMarker);
+    if (beadMatch != null) {
+      beadMarkerCount += 1;
+      beadIds.push(beadMatch[1] ?? '');
+      continue;
+    }
+    const renderMatch = comment.match(exactRenderHashMarker);
+    if (renderMatch != null) {
+      renderHashMarkerCount += 1;
+      const value = renderMatch[1] ?? '';
+      renderValues.push(/^[a-f0-9]{64}$/u.test(value) ? value : null);
+      if (value === '') {
+        emptyRenderHashMarker = true;
+      } else if (!/^[a-f0-9]{64}$/u.test(value)) {
+        malformedRenderHashMarker = true;
+      }
+      continue;
+    }
+
+    const hasBeadField = /\bbead-id\b/iu.test(comment);
+    const hasRenderHashField = /\brender-hash\b/iu.test(comment);
+    if (hasBeadField || !hasRenderHashField) {
+      beadMarkerCount += 1;
+      malformedBeadMarker = true;
+    }
+    if (hasRenderHashField) {
+      renderHashMarkerCount += 1;
+      malformedRenderHashMarker = true;
+    }
+  }
+
   const markerFindingKinds = [];
-  if (beadMatches.length > 1) markerFindingKinds.push('duplicate_bead_marker');
+  if (beadMarkerCount === 0 && renderHashMarkerCount > 0) {
+    markerFindingKinds.push('missing_bead_marker');
+  }
+  if (beadMarkerCount > 1) markerFindingKinds.push('duplicate_bead_marker');
   if (beadIds.some((beadId) => beadId === '')) markerFindingKinds.push('empty_bead_marker');
-  if (beadIds.some((beadId) => beadId == null || !BEAD_ID_PATTERN.test(beadId))) {
+  if (malformedBeadMarker || beadIds.some((beadId) => !BEAD_ID_PATTERN.test(beadId))) {
     markerFindingKinds.push('malformed_bead_marker');
   }
   const uniqueBeadIds = [...new Set(
-    beadIds.filter((beadId) => beadId != null && BEAD_ID_PATTERN.test(beadId)),
+    beadIds.filter((beadId) => BEAD_ID_PATTERN.test(beadId)),
   )];
   const beadId = uniqueBeadIds.length === 1 ? uniqueBeadIds[0] : null;
   const state = rawIssue.state === 'closed' ? 'closed' : 'open';
 
-  const renderMatches = [...body.matchAll(new RegExp(
-    `<!--\\s*${marker}\\s+render-hash(?=\\s|=|-->)([^>]*)-->`,
-    'giu',
-  ))];
-  const renderValues = renderMatches.map((match) => {
-    const metadata = match[1] ?? '';
-    return metadata.match(/^=([a-f0-9]{64})\s*$/iu)?.[1] ?? null;
-  });
-  if (renderMatches.length > 1) markerFindingKinds.push('duplicate_render_hash_marker');
-  if (renderMatches.some((match) => /^=\s*$/u.test(match[1] ?? ''))) {
+  if (renderHashMarkerCount > 1) markerFindingKinds.push('duplicate_render_hash_marker');
+  if (emptyRenderHashMarker) {
     markerFindingKinds.push('empty_render_hash_marker');
   }
-  if (renderMatches.some((match) => {
-    const metadata = match[1] ?? '';
-    return !/^=\s*$/u.test(metadata) && !/^=[a-f0-9]{64}\s*$/iu.test(metadata);
-  })) {
+  if (malformedRenderHashMarker) {
     markerFindingKinds.push('malformed_render_hash_marker');
   }
 
@@ -209,7 +258,6 @@ async function loadIssueInventory(options, config, dependencies) {
 }
 
 export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
-  const options = parseOptions(argv);
   const dependencies = {
     cwd: suppliedDependencies.cwd ?? process.cwd(),
     stdout: suppliedDependencies.stdout ?? process.stdout,
@@ -219,31 +267,83 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
     fetchImpl: suppliedDependencies.fetchImpl ?? fetch,
   };
   try {
-    const config = await readSyncConfig(
-      dependencies.configPath ?? resolve(dependencies.cwd, '.github/beads-project-sync.json'),
-    );
-    const source = await loadBeadsSource({
-      cwd: dependencies.cwd,
-      mode: 'dry-run',
-      inventoryFile: options.inventoryFile == null
-        ? null
-        : resolve(dependencies.cwd, options.inventoryFile),
-    });
-    const beads = parseBeadExport(source, { assigneeMap: config.assigneeMap });
-    const rawIssues = dependencies.rawIssues ?? await loadIssueInventory(options, config, dependencies);
+    const options = parseOptions(argv);
+    let config;
+    try {
+      config = await readSyncConfig(
+        dependencies.configPath ?? resolve(dependencies.cwd, '.github/beads-project-sync.json'),
+      );
+    } catch {
+      fail('unable to read or validate sync configuration');
+    }
+
+    let source;
+    try {
+      source = await loadBeadsSource({
+        cwd: dependencies.cwd,
+        mode: 'dry-run',
+        inventoryFile: options.inventoryFile == null
+          ? null
+          : resolve(dependencies.cwd, options.inventoryFile),
+      });
+    } catch {
+      fail(options.inventoryFile == null
+        ? 'unable to establish Beads inventory'
+        : 'unable to read or parse inventory input');
+    }
+
+    let beads;
+    try {
+      beads = parseBeadExport(source, {
+        assigneeMap: config.assigneeMap,
+        deferCanonicalOutcomeValidation: true,
+      });
+    } catch {
+      fail(options.inventoryFile == null
+        ? 'unable to parse Beads inventory'
+        : 'unable to read or parse inventory input');
+    }
+
+    let rawIssues;
+    if (dependencies.rawIssues != null) {
+      rawIssues = dependencies.rawIssues;
+    } else {
+      try {
+        rawIssues = await loadIssueInventory(options, config, dependencies);
+      } catch (error) {
+        if (error instanceof TrackerDriftCliError && options.issuesFile == null) {
+          throw error;
+        }
+        fail(options.issuesFile == null
+          ? 'unable to establish public issue inventory'
+          : 'unable to read or parse issues input');
+      }
+    }
     const trustedIssueAuthors = new Set(
       config.trustedIssueAuthors.map((login) => login.trim().toLowerCase()),
     );
+    const issueMarkers = recognizedMarkers(
+      config.issueMarker,
+      LEGACY_ISSUE_MARKERS,
+      'tracker drift issue marker',
+    );
     const managedIssues = rawIssues
-      .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors))
+      .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors, issueMarkers))
       .filter((issue) => issue != null);
-    const report = validateTrackerDrift(beads, managedIssues, config.canonicalTargets);
+    const report = validateTrackerDrift(
+      beads,
+      managedIssues,
+      config.canonicalTargets,
+      { issueMarkers },
+    );
     dependencies.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return report.result === 'pass' ? 0 : 1;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown tracker drift validation failure';
+    const message = error instanceof TrackerDriftCliError
+      ? error.message
+      : 'unexpected validation failure';
     dependencies.stderr.write(
-      `Tracker drift validation failed: ${message.replace(/\s+/gu, ' ').slice(0, 1_000)}\n`,
+      `Tracker drift validation failed: ${message.replace(/\s+/gu, ' ').slice(0, 256)}\n`,
     );
     return 2;
   }

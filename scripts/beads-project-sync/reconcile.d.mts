@@ -1,6 +1,13 @@
 import type { RenderContext } from './render.mjs';
 import type { PublicBead } from './sanitize.mjs';
 
+export function normalizeCanonicalBody(
+  body: string,
+  markers: readonly string[],
+): string;
+
+export function hashRenderedBody(body: string): string;
+
 export type ReconciliationFieldValue = string | number | boolean | null;
 
 export type ProjectFieldValues = Record<string, ReconciliationFieldValue>;

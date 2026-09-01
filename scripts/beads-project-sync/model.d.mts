@@ -34,6 +34,7 @@ export interface ParsedBead {
 
 export interface ParseBeadExportConfig {
   assigneeMap?: ReadonlyMap<string, string> | Record<string, string>;
+  deferCanonicalOutcomeValidation?: boolean;
 }
 
 export interface IndexableBead {
@@ -60,6 +61,8 @@ export interface InventorySummary<
   statusCounts: Partial<Record<TStatus, number>>;
   typeCounts: Partial<Record<TType, number>>;
 }
+
+export const MALFORMED_CANONICAL_OUTCOME_REF: 'malformed-canonical-outcome-ref';
 
 export const BEAD_ID_PATTERN: RegExp;
 export const PUBLIC_BEAD_TYPES: readonly BeadType[];
