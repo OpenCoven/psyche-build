@@ -1593,7 +1593,7 @@ final class HostReadinessMachineTests: XCTestCase {
         let state = await machine.state
         let committed = await machine.committedHost
         XCTAssertEqual(state, .reconnecting)
-        XCTAssertEqual(committed, makeHost(serverID: "new-host", clientID: "client-new"))
+        XCTAssertEqual(committed, oldHost)
         XCTAssertEqual(
             recorder.calls,
             ["validate:5"],
@@ -1687,7 +1687,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(commitResult, .committed)
         XCTAssertEqual(revokedState, .revoked)
         XCTAssertEqual(persistedHost, host)
-        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertNil(machine.committedHost)
         XCTAssertEqual(machine.state, .revoked)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
@@ -1743,7 +1743,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(commitResult, .committed)
         XCTAssertEqual(secureStore.writeCount, 1)
         XCTAssertEqual(persistedHost, host)
-        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertNil(machine.committedHost)
         XCTAssertEqual(machine.state, .revoked)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.boundary, .revocation)
@@ -1791,7 +1791,8 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(secondResult, .notCommitted(reason: nil))
         XCTAssertEqual(secureStore.writeCount, 1)
         XCTAssertEqual(persistedHost, firstHost)
-        XCTAssertEqual(machine.committedHost, firstHost)
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.authenticatedHost, firstHost)
         XCTAssertEqual(machine.state, .hostCommitted)
         XCTAssertEqual(machine.activeFlow, flow)
     }
@@ -1833,10 +1834,10 @@ final class HostReadinessMachineTests: XCTestCase {
         let persistedHost = try await pairedHostStore.host(withServerID: host.serverID)
 
         XCTAssertEqual(commitResult, .committed)
-        XCTAssertEqual(failedState, .reconnecting)
+        XCTAssertEqual(failedState, .unknown)
         XCTAssertEqual(persistedHost, host)
-        XCTAssertEqual(machine.committedHost, host)
-        XCTAssertEqual(machine.state, .reconnecting)
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.state, .unknown)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.boundary, .transport)
         XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
