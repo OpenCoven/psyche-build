@@ -351,97 +351,106 @@ public actor PairedHostStore {
     }
 
     /// Advances automatic reconnect authority only after the connection's
-    /// first workspace snapshot has completed readiness. The generation lock
-    /// makes teardown and the complete selection transaction mutually exclusive.
+    /// first workspace snapshot has completed readiness. Generation validity
+    /// fences owner replacement and the write without holding its lock across
+    /// the secure-store read.
     func selectReadyHost(
         serverID: String,
         for generation: ConnectionGeneration
     ) -> ReadyHostSelectionPreparation {
-        readyHostSelectionCommitStart()
-        return generation.withValidity {
-            let previousData: Data?
-            let nextData: Data
-            let transaction: ReadyHostSelectionTransaction?
-            do {
-                let snapshot = try stateSnapshot()
-                var state = snapshot.state
-                guard state.records[serverID] != nil else {
-                    return ReadyHostSelectionPreparation(
-                        result: .notCommitted(
-                            reason: "The ready host has no persisted pairing record."
-                        ),
-                        transaction: nil,
-                        authorization: nil
-                    )
-                }
-                let finalizedTransactionID: UUID? = if readySelectionOwner?
-                    .authorization.finalized == true {
-                    readySelectionOwner?.transactionID
-                } else {
-                    nil
-                }
-                if let pending = state.pendingReadySelection,
-                   finalizedTransactionID == pending.id {
-                    state.pendingReadySelection = nil
-                    previousData = try JSONEncoder().encode(state)
-                } else {
-                    previousData = snapshot.currentData
-                }
-                let previousServerID = if let pending = state.pendingReadySelection {
-                    pending.previousServerID
-                } else {
-                    state.selectedServerID
-                }
-                if previousServerID == serverID {
-                    state.selectedServerID = serverID
-                    state.pendingReadySelection = nil
-                    transaction = nil
-                } else {
-                    let pending = ReadyHostSelectionTransaction(
-                        id: UUID(),
-                        candidateServerID: serverID,
-                        previousServerID: previousServerID
-                    )
-                    state.selectedServerID = serverID
-                    state.pendingReadySelection = pending
-                    transaction = pending
-                }
-                nextData = try JSONEncoder().encode(state)
-            } catch {
+        let previousData: Data?
+        let nextData: Data
+        let transaction: ReadyHostSelectionTransaction?
+        do {
+            let snapshot = try stateSnapshot()
+            var state = snapshot.state
+            guard state.records[serverID] != nil else {
                 return ReadyHostSelectionPreparation(
-                    result: .notCommitted(reason: error.localizedDescription),
+                    result: .notCommitted(
+                        reason: "The ready host has no persisted pairing record."
+                    ),
                     transaction: nil,
                     authorization: nil
                 )
             }
+            var finalizedTransactionID: UUID?
+            guard generation.withValidity({
+                if readySelectionOwner?.authorization.finalized == true {
+                    finalizedTransactionID = readySelectionOwner?.transactionID
+                } else {
+                    supersedeReadySelection()
+                }
+                return true
+            }) == true else {
+                return ReadyHostSelectionPreparation(
+                    result: .notCommitted(reason: nil),
+                    transaction: nil,
+                    authorization: nil
+                )
+            }
+            if let pending = state.pendingReadySelection,
+               finalizedTransactionID == pending.id {
+                state.pendingReadySelection = nil
+                previousData = try JSONEncoder().encode(state)
+            } else {
+                previousData = snapshot.currentData
+            }
+            let previousServerID = if let pending = state.pendingReadySelection {
+                pending.previousServerID
+            } else {
+                state.selectedServerID
+            }
+            if previousServerID == serverID {
+                state.selectedServerID = serverID
+                state.pendingReadySelection = nil
+                transaction = nil
+            } else {
+                let pending = ReadyHostSelectionTransaction(
+                    id: UUID(),
+                    candidateServerID: serverID,
+                    previousServerID: previousServerID
+                )
+                state.selectedServerID = serverID
+                state.pendingReadySelection = pending
+                transaction = pending
+            }
+            nextData = try JSONEncoder().encode(state)
+        } catch {
+            return ReadyHostSelectionPreparation(
+                result: .notCommitted(reason: error.localizedDescription),
+                transaction: nil,
+                authorization: nil
+            )
+        }
 
-            let authorization = ReadyHostSelectionAuthorization()
-            supersedeReadySelection()
-            let result: HostReadinessTransactionResult
+        let authorization = ReadyHostSelectionAuthorization()
+        readyHostSelectionCommitStart()
+        let result: HostReadinessTransactionResult = generation.withValidity {
             do {
                 try secureStore.set(nextData, forKey: key)
+                supersedeReadySelection()
                 readySelectionOwner = (
                     generation: ObjectIdentifier(generation),
                     transactionID: transaction?.id,
                     authorization: authorization
                 )
-                result = .committed
+                return .committed
             } catch {
-                result = compensateWrite(
+                let compensation = compensateWrite(
                     to: previousData,
                     after: error,
                     operation: "Ready-host selection"
                 )
+                if case .indeterminate = compensation {
+                    supersedeReadySelection()
+                }
+                return compensation
             }
-            return ReadyHostSelectionPreparation(
-                result: result,
-                transaction: result == .committed ? transaction : nil,
-                authorization: result == .committed ? authorization : nil
-            )
-        } ?? ReadyHostSelectionPreparation(
-            result: .notCommitted(reason: nil),
-            transaction: nil,
-            authorization: nil
+        } ?? .notCommitted(reason: nil)
+        return ReadyHostSelectionPreparation(
+            result: result,
+            transaction: result == .committed ? transaction : nil,
+            authorization: result == .committed ? authorization : nil
         )
     }
 
@@ -457,7 +466,9 @@ public actor PairedHostStore {
               readySelectionOwner?.transactionID == transaction.id,
               readySelectionOwner?.authorization === authorization,
               authorization.finalized else {
-            return .notCommitted(reason: nil)
+            return .indeterminate(
+                reason: "Ready-host selection completion ownership was superseded before durable state could be verified."
+            )
         }
         let previousData: Data?
         let nextData: Data
@@ -467,7 +478,11 @@ public actor PairedHostStore {
             var state = snapshot.state
             guard state.selectedServerID == transaction.candidateServerID,
                   state.pendingReadySelection == transaction else {
-                return .notCommitted(reason: nil)
+                authorization.supersede()
+                readySelectionOwner = nil
+                return .indeterminate(
+                    reason: "Ready-host selection completion found unexpected durable state."
+                )
             }
             state.pendingReadySelection = nil
             nextData = try JSONEncoder().encode(state)
@@ -480,28 +495,24 @@ public actor PairedHostStore {
             try secureStore.set(nextData, forKey: key)
             readySelectionOwner = nil
             return .committed
-        } catch let writeError {
-            let result = compensateWrite(
+        } catch {
+            let compensation = compensateWrite(
                 to: previousData,
-                after: writeError,
+                after: error,
                 operation: "Ready-host selection completion"
             )
-            guard case .indeterminate = result else {
-                return result
+            let result = resolveReadyHostSelectionCompletion(
+                compensation,
+                previousData: previousData,
+                committedData: nextData
+            )
+            if case .indeterminate = result {
+                authorization.supersede()
+                readySelectionOwner = nil
             }
-            if case .success(let currentData) = Result(
-                catching: { try secureStore.data(forKey: key) }
-            ) {
-                if currentData == nextData {
-                    readySelectionOwner = nil
-                    return .committed
-                }
-                if currentData == previousData {
-                    return .notCommitted(reason: writeError.localizedDescription)
-                }
+            if case .committed = result {
+                readySelectionOwner = nil
             }
-            authorization.supersede()
-            readySelectionOwner = nil
             return result
         }
     }
@@ -868,6 +879,32 @@ public actor PairedHostStore {
         }
 
         return .notCommitted(reason: writeError.localizedDescription)
+    }
+
+    private func resolveReadyHostSelectionCompletion(
+        _ compensation: HostReadinessTransactionResult,
+        previousData: Data?,
+        committedData: Data
+    ) -> HostReadinessTransactionResult {
+        guard case .indeterminate(let reason) = compensation else {
+            return compensation
+        }
+        do {
+            let persistedData = try secureStore.data(forKey: key)
+            if persistedData == committedData {
+                return .committed
+            }
+            if persistedData == previousData {
+                return .notCommitted(reason: reason)
+            }
+            return .indeterminate(
+                reason: "\(reason) Durable read-back did not match either valid state."
+            )
+        } catch {
+            return .indeterminate(
+                reason: "\(reason) Durable read-back failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     /// Store fingerprints in one canonical form so a record saved from a

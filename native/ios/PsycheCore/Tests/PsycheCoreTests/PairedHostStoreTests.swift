@@ -654,7 +654,9 @@ final class PairedHostStoreTests: XCTestCase {
         let restarted = PairedHostStore(secureStore: secureStore)
         let restartSelection = try await restarted.selectedHost()
 
-        XCTAssertEqual(completion, .notCommitted(reason: nil))
+        guard case .indeterminate = completion else {
+            return XCTFail("Superseded completion must not claim verified rollback")
+        }
         XCTAssertEqual(selected, candidate)
         XCTAssertEqual(restartSelection, candidate)
     }
@@ -754,7 +756,9 @@ final class PairedHostStoreTests: XCTestCase {
             selectedBy: retired
         )
 
-        XCTAssertEqual(retiredCompletion, .notCommitted(reason: nil))
+        guard case .indeterminate = retiredCompletion else {
+            return XCTFail("A retired completion cannot verify the newer owner")
+        }
         XCTAssertTrue(currentAuthorization.finalize {})
         await store.acknowledgeReadyHostSelection(
             authorizedBy: currentAuthorization,
@@ -762,6 +766,41 @@ final class PairedHostStoreTests: XCTestCase {
         )
         let selected = try await store.selectedHost()
         XCTAssertEqual(selected, candidate)
+    }
+
+    func testExplicitReplacementMakesFinalizedCompletionIndeterminate() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        let replacement = makeHost(
+            serverID: candidate.serverID,
+            fingerprint: otherFingerprint,
+            token: "replacement-token"
+        )
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+
+        try await store.replace(replacement)
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+
+        guard case .indeterminate = completion else {
+            return XCTFail("Superseded completion must not claim verified rollback")
+        }
+        XCTAssertEqual(selected, replacement)
     }
 
     func testReadySelectionCompletionFailureKeepsPreviousRestartAuthority() async throws {
@@ -798,6 +837,40 @@ final class PairedHostStoreTests: XCTestCase {
 
         XCTAssertEqual(selected, candidate)
         XCTAssertEqual(restartedSelection, previouslyReady)
+    }
+
+    func testReadySelectionCompletionReadbackConfirmsPersistedCandidate() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restartedSelection = try await PairedHostStore(
+            secureStore: secureStore
+        ).selectedHost()
+
+        XCTAssertEqual(completion, .committed)
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restartedSelection, candidate)
     }
 
     func testFailedCompletionAndCompensationRecognizeUnchangedPendingSelection() async throws {
@@ -883,6 +956,37 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(selected, finalized)
     }
 
+    func testReadySelectionCompletionReadbackRejectsInconsistentState() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.replaceWith(Data("inconsistent".utf8)))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+
+        guard case .indeterminate(let reason) = completion else {
+            return XCTFail("Inconsistent durable state must remain indeterminate")
+        }
+        XCTAssertTrue(reason.contains("did not match either valid state"))
+    }
+
     func testIndeterminateCompletionReadRelinquishesFinalizedProcessOwner() async throws {
         let secureStore = FaultingTransactionSecureStore()
         let store = PairedHostStore(secureStore: secureStore)
@@ -912,40 +1016,6 @@ final class PairedHostStoreTests: XCTestCase {
             return XCTFail("Completion read failure must be indeterminate")
         }
         XCTAssertEqual(selected, previouslyReady)
-    }
-
-    func testMutatingCompletionWriteIsRecognizedBeforeFailedCompensation() async throws {
-        let secureStore = FaultingTransactionSecureStore()
-        let store = PairedHostStore(secureStore: secureStore)
-        let previouslyReady = makeHost(serverID: "server-a")
-        let candidate = makeHost(serverID: "server-z")
-        try await store.save(previouslyReady)
-        try await store.save(candidate)
-        try await store.save(previouslyReady)
-        let generation = ConnectionGeneration(id: 1)
-        let preparation = await store.selectReadyHost(
-            serverID: candidate.serverID,
-            for: generation
-        )
-        let transaction = try XCTUnwrap(preparation.transaction)
-        let authorization = try XCTUnwrap(preparation.authorization)
-        XCTAssertTrue(authorization.finalize {})
-        secureStore.enqueue(.mutateThenThrow(.writeFailed))
-        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
-
-        let completion = await store.completeReadyHostSelection(
-            transaction,
-            authorizedBy: authorization,
-            selectedBy: generation
-        )
-        let selected = try await store.selectedHost()
-        let restarted = try await PairedHostStore(
-            secureStore: secureStore
-        ).selectedHost()
-
-        XCTAssertEqual(completion, .committed)
-        XCTAssertEqual(selected, candidate)
-        XCTAssertEqual(restarted, candidate)
     }
 
     func testSuccessorCompensationRestoresFinalizedInProcessAuthority() async throws {
@@ -1936,7 +2006,10 @@ final class HostReadinessMachineTests: XCTestCase {
             makeCandidate(sequence: sequence),
             for: flow
         )
-        try machine.finalizeReadyHostSelection(serverID: host.serverID)
+        let finalizationID = try machine.finalizeReadyHostSelection(
+            serverID: host.serverID
+        )
+        machine.acknowledgeReadyHostSelectionFinalization(finalizationID)
         return flow
     }
 
@@ -2049,7 +2122,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(presentation, .live(hostID: "old-host", confirmedAt: fixedDate))
     }
 
-    func testIndeterminateCompletionRollbackSurvivesConcurrentConnectionLoss() async throws {
+    func testUnresolvedCompletionBlocksSuccessorFlowsAndQuarantinesAuthority() async throws {
         let recorder = ReadinessBoundaryRecorder()
         let machine = makeMachine(recorder: recorder)
         let oldHost = makeHost(serverID: "old-host", clientID: "client-old")
@@ -2072,22 +2145,39 @@ final class HostReadinessMachineTests: XCTestCase {
         let finalizationID = try machine.finalizeReadyHostSelection(
             serverID: "new-host"
         )
-
         _ = try machine.noteConnectionLost()
-        let restored = try machine.rollbackReadyHostSelectionFinalization(
+        do {
+            _ = try machine.beginDiscovery()
+            XCTFail("Discovery must wait for ready-host selection completion")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(error, .flowAlreadyActive(serverID: "new-host"))
+        }
+        do {
+            _ = try machine.beginPairing(expectedServerID: "successor-host")
+            XCTFail("A successor flow must wait for ready-host selection completion")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(error, .flowAlreadyActive(serverID: "new-host"))
+        }
+
+        let quarantined = try machine.quarantineReadyHostSelectionFinalization(
             finalizationID,
             reason: "Completion outcome is indeterminate."
         )
 
-        XCTAssertTrue(restored)
+        XCTAssertTrue(quarantined)
         XCTAssertEqual(machine.state, .revoked)
-        XCTAssertEqual(machine.committedHost, oldHost)
-        XCTAssertEqual(
-            machine.presentation,
-            .stale(hostID: "old-host", confirmedAt: fixedDate)
-        )
-        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.presentation, .noState)
+        XCTAssertNil(recorder.workspaceStore.workspace)
+        XCTAssertEqual(recorder.workspaceStore.nowSections, [])
+        XCTAssertEqual(recorder.workspaceStore.sequence, 0)
+        XCTAssertNil(recorder.workspaceStore.lastConfirmedAt)
         XCTAssertTrue(recorder.workspaceStore.isStale)
+        XCTAssertTrue(recorder.workspaceStore.needsFullSnapshot)
+        XCTAssertNil(recorder.workspaceStore.selectedProjectID)
+        XCTAssertNil(recorder.workspaceStore.primaryPaneID)
+        XCTAssertNil(recorder.workspaceStore.secondaryPaneID)
+        XCTAssertEqual(recorder.workspaceStore.drafts, [:])
         XCTAssertEqual(machine.lastFailure?.boundary, .secureStore)
         XCTAssertEqual(machine.lastFailure?.recovery, .indeterminate)
     }

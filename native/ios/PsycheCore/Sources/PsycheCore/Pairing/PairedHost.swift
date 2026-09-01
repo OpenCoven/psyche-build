@@ -461,13 +461,6 @@ public final class HostReadinessMachine: ObservableObject {
     private struct ReadyHostSelectionFinalization {
         let id: UUID
         let candidateServerID: String
-        let previousState: HostReadinessState
-        let previousPresentation: HostWorkspacePresentation
-        let previousCommittedHost: PairedHost?
-        let previousFailure: HostReadinessFailure?
-        let previousProvisionalHost: PairedHost
-        let previousProvisionalWorkspace: HostReadinessSnapshotCandidate
-        let previousWorkspaceState: WorkspaceStore.ReadyHostPublicationState
     }
 
     var authenticatedHost: PairedHost? {
@@ -521,7 +514,6 @@ public final class HostReadinessMachine: ObservableObject {
                 actual: host.serverID
             )
         }
-        readyHostSelectionFinalization = nil
         committedHost = host
     }
 
@@ -530,9 +522,7 @@ public final class HostReadinessMachine: ObservableObject {
     @discardableResult
     public func beginDiscovery() throws -> HostReadinessState {
         try requireIdle()
-        let destination = try apply(.discoveryStarted)
-        readyHostSelectionFinalization = nil
-        return destination
+        return try apply(.discoveryStarted)
     }
 
     /// Begins a pairing flow toward a (possibly not yet identified) host.
@@ -719,10 +709,6 @@ public final class HostReadinessMachine: ObservableObject {
                 actual: serverID
             )
         }
-        let previousState = state
-        let previousPresentation = presentation
-        let previousCommittedHost = committedHost
-        let previousFailure = lastFailure
         let previousWorkspaceState = workspaceStore.publishStagedReadinessSnapshot(
             provisionalWorkspace
         )
@@ -741,14 +727,7 @@ public final class HostReadinessMachine: ObservableObject {
         )
         let finalization = ReadyHostSelectionFinalization(
             id: UUID(),
-            candidateServerID: serverID,
-            previousState: previousState,
-            previousPresentation: previousPresentation,
-            previousCommittedHost: previousCommittedHost,
-            previousFailure: previousFailure,
-            previousProvisionalHost: provisionalHost,
-            previousProvisionalWorkspace: provisionalWorkspace,
-            previousWorkspaceState: previousWorkspaceState
+            candidateServerID: serverID
         )
         readyHostSelectionFinalization = finalization
         return finalization.id
@@ -760,35 +739,30 @@ public final class HostReadinessMachine: ObservableObject {
     }
 
     @discardableResult
-    func rollbackReadyHostSelectionFinalization(
+    func quarantineReadyHostSelectionFinalization(
         _ id: UUID,
         reason: String
     ) throws -> Bool {
-        let presentationHostID: String?
-        switch presentation {
-        case .live(let hostID, _), .stale(let hostID, _):
-            presentationHostID = hostID
-        case .noState:
-            presentationHostID = nil
-        }
         guard let finalization = readyHostSelectionFinalization,
-              finalization.id == id,
-              committedHost?.serverID == finalization.candidateServerID,
-              let presentationHostID,
-              presentationHostID == finalization.candidateServerID else {
+              finalization.id == id else {
             return false
         }
         readyHostSelectionFinalization = nil
-        workspaceStore.restoreReadyHostPublication(
-            finalization.previousWorkspaceState
+        workspaceStore.quarantineReadyHostPublication()
+        let from = state
+        committedHost = nil
+        presentation = .noState
+        provisionalHost = nil
+        provisionalWorkspace = nil
+        activeFlow = nil
+        activeAuthorization = nil
+        state = .revoked
+        lastFailure = HostReadinessFailure(
+            boundary: .secureStore,
+            reason: reason,
+            stateAtFailure: from,
+            recovery: .indeterminate
         )
-        state = finalization.previousState
-        presentation = finalization.previousPresentation
-        committedHost = finalization.previousCommittedHost
-        lastFailure = finalization.previousFailure
-        provisionalHost = finalization.previousProvisionalHost
-        provisionalWorkspace = finalization.previousProvisionalWorkspace
-        recordIndeterminateFailure(.secureStore, reason: reason)
         return true
     }
 
@@ -876,7 +850,6 @@ public final class HostReadinessMachine: ObservableObject {
     private func beginFlow(_ kind: HostReadinessFlow.Kind, event: HostReadinessEvent) throws -> HostReadinessFlow {
         try requireIdle()
         _ = try apply(event)
-        readyHostSelectionFinalization = nil
         relabelForFlowStart()
         lastFailure = nil
         let flow = HostReadinessFlow(id: UUID(), kind: kind)
@@ -943,9 +916,10 @@ public final class HostReadinessMachine: ObservableObject {
     /// A flow-less event (discovery) may not start while a flow owns the
     /// machine.
     private func requireIdle() throws {
-        guard activeFlow == nil else {
+        guard activeFlow == nil, readyHostSelectionFinalization == nil else {
             throw HostReadinessError.flowAlreadyActive(
                 serverID: activeFlow?.expectedServerID
+                    ?? readyHostSelectionFinalization?.candidateServerID
             )
         }
     }

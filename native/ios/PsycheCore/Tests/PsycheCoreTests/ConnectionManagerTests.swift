@@ -1159,7 +1159,7 @@ final class ConnectionManagerTests: XCTestCase {
         }
     }
 
-    func testIndeterminateSelectionCompletionRestoresPreviousAuthorityExactly() async throws {
+    func testIndeterminateSelectionCompletionQuarantinesUnknownAuthority() async throws {
         let secureStore = FailableWriteSecureStore()
         let previouslyReady = makeStoredHost()
         try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
@@ -1175,8 +1175,6 @@ final class ConnectionManagerTests: XCTestCase {
         )
 
         try await reachReadyStoredHost(composition: composition, transport: fake)
-        let expectedCommittedHost = composition.hostReadiness.committedHost
-        let expectedSelectedHost = try await composition.pairedHostStore.selectedHost()
         await composition.manager.disconnect()
         let candidateConnect = Task {
             await composition.manager.connect(to: candidateEndpoint)
@@ -1195,53 +1193,32 @@ final class ConnectionManagerTests: XCTestCase {
         composition.workspaceStore.primaryPaneID = "host-a-primary"
         composition.workspaceStore.secondaryPaneID = "host-a-secondary"
         composition.workspaceStore.setDraft("host-a-draft", forPane: "host-a-primary")
-        let expectedWorkspace = composition.workspaceStore.workspace
-        let expectedSequence = composition.workspaceStore.sequence
-        let expectedConfirmedAt = composition.workspaceStore.lastConfirmedAt
-        let expectedPresentation = composition.hostReadiness.presentation
-        let expectedSelectedProjectID = composition.workspaceStore.selectedProjectID
-        let expectedPrimaryPaneID = composition.workspaceStore.primaryPaneID
-        let expectedSecondaryPaneID = composition.workspaceStore.secondaryPaneID
-        let expectedDrafts = composition.workspaceStore.drafts
         secureStore.setBehavior(.succeedOnceThenFailCompletionCompensationAndReadback)
 
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: snapshotID,
             sequence: 1,
             workspace: makeWorkspace(revision: 2)
-        ))))
+        )        )))
         _ = await waitForFailure(in: composition.manager)
 
-        XCTAssertEqual(composition.workspaceStore.workspace, expectedWorkspace)
-        XCTAssertEqual(composition.workspaceStore.sequence, expectedSequence)
-        XCTAssertEqual(composition.workspaceStore.lastConfirmedAt, expectedConfirmedAt)
+        XCTAssertNil(composition.workspaceStore.workspace)
+        XCTAssertEqual(composition.workspaceStore.nowSections, [])
+        XCTAssertEqual(composition.workspaceStore.sequence, 0)
+        XCTAssertNil(composition.workspaceStore.lastConfirmedAt)
         XCTAssertTrue(composition.workspaceStore.isStale)
         XCTAssertTrue(composition.workspaceStore.needsFullSnapshot)
-        XCTAssertEqual(
-            composition.workspaceStore.selectedProjectID,
-            expectedSelectedProjectID
-        )
-        XCTAssertEqual(
-            composition.workspaceStore.primaryPaneID,
-            expectedPrimaryPaneID
-        )
-        XCTAssertEqual(
-            composition.workspaceStore.secondaryPaneID,
-            expectedSecondaryPaneID
-        )
-        XCTAssertEqual(composition.workspaceStore.drafts, expectedDrafts)
-        XCTAssertEqual(composition.hostReadiness.presentation, expectedPresentation)
+        XCTAssertNil(composition.workspaceStore.selectedProjectID)
+        XCTAssertNil(composition.workspaceStore.primaryPaneID)
+        XCTAssertNil(composition.workspaceStore.secondaryPaneID)
+        XCTAssertEqual(composition.workspaceStore.drafts, [:])
+        XCTAssertEqual(composition.hostReadiness.presentation, .noState)
         XCTAssertEqual(composition.hostReadiness.state, .revoked)
         XCTAssertEqual(
             composition.hostReadiness.lastFailure?.recovery,
             .indeterminate
         )
-        XCTAssertEqual(
-            composition.hostReadiness.committedHost,
-            expectedCommittedHost
-        )
-        let selected = try await composition.pairedHostStore.selectedHost()
-        XCTAssertEqual(selected, expectedSelectedHost)
+        XCTAssertNil(composition.hostReadiness.committedHost)
     }
 
     func testGenerationRetirementAfterSelectionCancelsPendingAuthority() async throws {

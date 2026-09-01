@@ -211,6 +211,21 @@ public final class WorkspaceStore: ObservableObject {
         isAwaitingConnectionSnapshot = state.isAwaitingConnectionSnapshot
     }
 
+    func quarantineReadyHostPublication() {
+        workspace = nil
+        nowSections = []
+        isStale = true
+        needsFullSnapshot = true
+        lastConfirmedAt = nil
+        selectedProjectID = nil
+        primaryPaneID = nil
+        secondaryPaneID = nil
+        drafts = [:]
+        sequence = 0
+        isAwaitingConnectionSnapshot = true
+        activeConnectionGeneration = nil
+    }
+
     private func applySnapshotUnscoped(
         workspace: WorkspaceSnapshot,
         sequence nextSequence: UInt64
