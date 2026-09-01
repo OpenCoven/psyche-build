@@ -172,6 +172,8 @@ pub(crate) struct NativeProjectAuthority {
     open_roots: Mutex<HashSet<PathBuf>>,
 }
 
+const MAX_NATIVE_PROJECTS: usize = 10;
+
 impl NativeProjectAuthority {
     fn from_startup() -> Self {
         Self::default()
@@ -180,8 +182,25 @@ impl NativeProjectAuthority {
     fn authorize_native_open(&self, root: &Path) -> Result<String, String> {
         let root = canonical_project_root(&root.to_string_lossy())?;
         let root_text = root.to_string_lossy().into_owned();
-        self.open_roots.lock().insert(root);
+        let mut open_roots = self.open_roots.lock();
+        if open_roots.contains(&root) {
+            return Ok(root_text);
+        }
+        if open_roots.len() >= MAX_NATIVE_PROJECTS {
+            return Err(format!(
+                "native project authority limit reached ({MAX_NATIVE_PROJECTS})"
+            ));
+        }
+        open_roots.insert(root);
         Ok(root_text)
+    }
+
+    fn revoke_native_open(&self, root: &Path) -> Result<bool, String> {
+        if !root.is_absolute() {
+            return Err("native project authority requires an absolute root".to_string());
+        }
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        Ok(self.open_roots.lock().remove(&root))
     }
 
     pub(crate) fn open_project_roots(&self) -> Vec<PathBuf> {
@@ -1846,6 +1865,16 @@ async fn native_project_open(
         .into_path()
         .map_err(|error| format!("project picker returned an unavailable path: {error}"))?;
     authority.authorize_native_open(&selected).map(Some)
+}
+
+#[tauri::command]
+fn native_project_close(
+    webview: tauri::Webview,
+    authority: State<'_, NativeProjectAuthority>,
+    root: String,
+) -> Result<bool, String> {
+    ensure_trusted_project_caller(webview.label())?;
+    authority.revoke_native_open(Path::new(&root))
 }
 
 #[cfg(mobile)]
@@ -9119,6 +9148,7 @@ pub fn run() {
             pane_session_metrics,
             canonical_project_path,
             native_project_open,
+            native_project_close,
             pty_write,
             pty_resize,
             pty_ack,
@@ -9190,11 +9220,61 @@ pub fn run() {
 mod native_project_authority_tests {
     use super::*;
 
+    fn revoke_project_for_test(authority: &NativeProjectAuthority, root: &Path) {
+        authority.revoke_native_open(root).unwrap();
+    }
+
     #[test]
     fn native_project_authority_starts_fail_closed() {
         assert!(NativeProjectAuthority::from_startup()
             .open_project_roots()
             .is_empty());
+    }
+
+    #[test]
+    fn native_project_authority_is_bounded_and_existing_roots_are_idempotent() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let authority = NativeProjectAuthority::default();
+        let first = tree.path().join("project-0");
+        std::fs::create_dir_all(&first).unwrap();
+
+        authority.authorize_native_open(&first).unwrap();
+        authority.authorize_native_open(&first).unwrap();
+        for index in 1..10 {
+            let root = tree.path().join(format!("project-{index}"));
+            std::fs::create_dir_all(&root).unwrap();
+            authority.authorize_native_open(&root).unwrap();
+        }
+
+        let overflow = tree.path().join("project-10");
+        std::fs::create_dir_all(&overflow).unwrap();
+        assert_eq!(
+            authority.authorize_native_open(&overflow).unwrap_err(),
+            "native project authority limit reached (10)"
+        );
+        assert_eq!(authority.open_project_roots().len(), 10);
+    }
+
+    #[test]
+    fn revoked_project_authority_rejects_stale_launch_scope() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let root = tree.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let authority = NativeProjectAuthority::default();
+        authority.authorize_native_open(&root).unwrap();
+
+        revoke_project_for_test(&authority, &root);
+
+        assert!(authority.open_project_roots().is_empty());
+    }
+
+    #[test]
+    fn project_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_project_caller("main"), Ok(()));
+        assert_eq!(
+            ensure_trusted_project_caller("psyche-browser-untrusted").unwrap_err(),
+            "project authority is only available to trusted webview 'main'; rejected caller 'psyche-browser-untrusted'"
+        );
     }
 }
 

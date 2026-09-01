@@ -18,6 +18,10 @@ const mainJs = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
+const covenSessionsRs = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/coven_sessions.rs'),
+  'utf8',
+);
 const PsychePanes = await import(pathToFileURL(join(
   repoRoot,
   'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
@@ -39,6 +43,21 @@ function functionSource(name: string) {
     if (depth === 0) return mainJs.slice(start, index + 1);
   }
   throw new Error(`unterminated function ${name}`);
+}
+
+function rustFunctionSource(source: string, name: string) {
+  const match = new RegExp(
+    `(?:pub\\(crate\\)\\s+)?(?:async\\s+)?fn\\s+${name}\\s*\\(`,
+  ).exec(source);
+  if (!match || match.index === undefined) throw new Error(`missing Rust function ${name}`);
+  const bodyStart = source.indexOf('{', match.index + match[0].length);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(match.index, index + 1);
+  }
+  throw new Error(`unterminated Rust function ${name}`);
 }
 
 function compileIsolatedFunction<T>(
@@ -205,6 +224,8 @@ describe('Tauri Coven launch project scope', () => {
     expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*canonical_project_path\s*,/);
     expect(libRs).toMatch(/async fn native_project_open\s*\(/);
     expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*native_project_open\s*,/);
+    expect(libRs).toMatch(/fn native_project_close\s*\(/);
+    expect(libRs).toMatch(/tauri::generate_handler!\s*\[[\s\S]*native_project_close\s*,/);
     expect(libRs).toMatch(/pub cwd:\s*Option<String>/);
     expect(libRs).toMatch(/pub launch_kind:\s*Option<String>/);
     expect(libRs).toMatch(/pub coven_session_id:\s*Option<String>/);
@@ -232,6 +253,30 @@ describe('Tauri Coven launch project scope', () => {
     expect(prepareStart.indexOf('PendingPtyStart::reserve')).toBeLessThan(
       prepareStart.indexOf('projectRoot is required'),
     );
+  });
+
+  it('requires the actual trusted webview before Coven launch authority is read', () => {
+    const launchCommand = rustFunctionSource(covenSessionsRs, 'coven_launch_session');
+    const launchSignatures = covenSessionsRs
+      .split('pub(crate) async fn coven_launch_session')
+      .slice(1)
+      .map(source => source.slice(0, source.indexOf('{')));
+    expect(launchSignatures).toHaveLength(2);
+    launchSignatures.forEach(signature => {
+      expect(signature).toMatch(/webview:\s*tauri::Webview/);
+    });
+    expect(launchCommand).toMatch(/webview:\s*tauri::Webview/);
+    expect(launchCommand).toContain('ensure_trusted_project_caller(webview.label())?');
+    expect(
+      launchCommand.indexOf('ensure_trusted_project_caller(webview.label())?'),
+    ).toBeLessThan(launchCommand.indexOf('authority.open_project_roots()'));
+
+    const closeCommand = rustFunctionSource(libRs, 'native_project_close');
+    expect(closeCommand).toMatch(/webview:\s*tauri::Webview/);
+    expect(closeCommand).toContain('ensure_trusted_project_caller(webview.label())?');
+    expect(
+      closeCommand.indexOf('ensure_trusted_project_caller(webview.label())?'),
+    ).toBeLessThan(closeCommand.indexOf('authority.revoke_native_open'));
   });
 
   it('canonicalizes before project deduplication and reports unavailable paths', () => {
@@ -1367,15 +1412,19 @@ describe('native Coven launch routing', () => {
     const project = { id: 'project', root: '/repo', name: 'repo' };
     let pickerLaunches = 0;
     const invocations: Array<[string, Record<string, unknown>]> = [];
+    const state = { env: { home: '/home' }, projects: [] as typeof project[] };
     const openProjectPicker = compileFunction<() => Promise<void>>(
       functionSource('openProjectPicker'),
       {
-        state: { env: { home: '/home' } },
+        state,
         invoke: async (command: string, args: Record<string, unknown>) => {
           invocations.push([command, args]);
           return '/repo';
         },
-        addProject: async () => project,
+        addProject: async () => {
+          state.projects.push(project);
+          return project;
+        },
         ensureProjectCoven: async () => { pickerLaunches += 1; return null; },
         setProjectStatus: () => { throw new Error('setProjectStatus should not be called'); },
         writeToActive: () => undefined,
@@ -1386,6 +1435,60 @@ describe('native Coven launch routing', () => {
       ['native_project_open', { defaultPath: '/home' }],
     ]);
     expect(pickerLaunches).toBe(0);
+  });
+
+  it('revokes a native-picked root when project admission is rejected', async () => {
+    const state = {
+      env: { home: '/home' },
+      projects: [] as Array<{ root: string }>,
+    };
+    const invocations: Array<[string, Record<string, unknown>]> = [];
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          invocations.push([command, args]);
+          if (command === 'native_project_open') return '/repo/rejected';
+          return true;
+        },
+        addProject: async () => null,
+        writeToActive: () => undefined,
+      },
+    );
+
+    await openProjectPicker();
+
+    expect(invocations).toEqual([
+      ['native_project_open', { defaultPath: '/home' }],
+      ['native_project_close', { root: '/repo/rejected' }],
+    ]);
+  });
+
+  it('does not revoke an existing project when focusing it fails', async () => {
+    const state = {
+      env: { home: '/home' },
+      projects: [{ id: 'existing', root: '/repo/existing' }],
+    };
+    const invocations: Array<[string, Record<string, unknown>]> = [];
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          invocations.push([command, args]);
+          return '/repo/existing';
+        },
+        addProject: async () => null,
+        writeToActive: () => undefined,
+      },
+    );
+
+    await openProjectPicker();
+
+    expect(invocations).toEqual([
+      ['native_project_open', { defaultPath: '/home' }],
+    ]);
   });
 
   it('does not launch Coven when activating a project without a visible pane', async () => {

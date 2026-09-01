@@ -8720,6 +8720,14 @@
       });
     }));
     if (closeResults.some(function (closed) { return closed === false; })) return false;
+    if (project.root) {
+      try {
+        await invoke("native_project_close", { root: project.root });
+      } catch (error) {
+        setStatus("failed to revoke project authority for " + project.name + ": " + String(error), "error");
+        return false;
+      }
+    }
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -14201,15 +14209,31 @@
   }
 
   async function openProjectPicker() {
+    var selected = null;
     try {
       var defaultPath = (state.env && state.env.home) || undefined;
-      var selected = await invoke("native_project_open", {
+      selected = await invoke("native_project_open", {
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
       await addProject(selected);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
+    } finally {
+      if (
+        selected &&
+        typeof selected === "string" &&
+        !state.projects.some(function (project) { return project.root === selected; })
+      ) {
+        try {
+          await invoke("native_project_close", { root: selected });
+        } catch (cleanupError) {
+          writeToActive(
+            "\r\n\x1b[31m[open-project cleanup]\x1b[0m failed to revoke native project authority: " +
+              cleanupError + "\r\n"
+          );
+        }
+      }
     }
   }
 

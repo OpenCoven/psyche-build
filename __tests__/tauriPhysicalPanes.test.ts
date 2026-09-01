@@ -2774,7 +2774,7 @@ describe('Tauri physical terminal panes', () => {
 
   it('preserves the focused terminal while removing an inactive project', async () => {
     const activeProject = { id: 'active-project' };
-    const removedProject = { id: 'removed-project' };
+    const removedProject = { id: 'removed-project', root: '/repo/removed' };
     const removedThread = {
       id: 'removed-thread',
       projectId: removedProject.id,
@@ -2788,6 +2788,7 @@ describe('Tauri physical terminal panes', () => {
       openFiles: [] as Array<{ id: string; projectId: string }>,
     };
     const closeOptions: Array<Record<string, unknown> | undefined> = [];
+    const nativeProjectCloseCalls: Array<Record<string, unknown>> = [];
     const removeProject = compileFunction<(
       id: string,
     ) => Promise<boolean>>(functionSource('removeProject'), {
@@ -2809,6 +2810,10 @@ describe('Tauri physical terminal panes', () => {
         closeOptions.push(options);
         return true;
       },
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        expect(command).toBe('native_project_close');
+        nativeProjectCloseCalls.push(args);
+      },
       fileViewEl: null,
       terminalHost: null,
       startCovenPolling: () => undefined,
@@ -2827,6 +2832,7 @@ describe('Tauri physical terminal panes', () => {
       focus: false,
       preserveTerminalFocus: true,
     }]);
+    expect(nativeProjectCloseCalls).toEqual([{ root: '/repo/removed' }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
   });

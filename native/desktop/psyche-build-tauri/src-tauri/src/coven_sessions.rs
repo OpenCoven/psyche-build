@@ -850,9 +850,11 @@ fn launch_validation_rejection(message: String) -> CovenLaunchResponse {
 #[cfg(unix)]
 #[tauri::command]
 pub(crate) async fn coven_launch_session(
+    webview: tauri::Webview,
     authority: tauri::State<'_, super::NativeProjectAuthority>,
     request: CovenLaunchRequest,
 ) -> Result<CovenLaunchResponse, String> {
+    super::ensure_trusted_project_caller(webview.label())?;
     let open_project_roots = authority.open_project_roots();
     Ok(
         match tauri::async_runtime::spawn_blocking(
@@ -877,9 +879,11 @@ pub(crate) async fn coven_launch_session(
 #[cfg(target_os = "windows")]
 #[tauri::command]
 pub(crate) async fn coven_launch_session(
+    webview: tauri::Webview,
     _authority: tauri::State<'_, super::NativeProjectAuthority>,
     _request: CovenLaunchRequest,
 ) -> Result<CovenLaunchResponse, String> {
+    super::ensure_trusted_project_caller(webview.label())?;
     Ok(launch_failure_response(CovenAdapterError::Unavailable))
 }
 
@@ -3719,6 +3723,26 @@ mod tests {
         request.project_root = injected_project.to_string_lossy().into_owned();
         request.cwd = Some(injected_project.to_string_lossy().into_owned());
         let result = super::validate_launch_request(request, &roots);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Coven launch project is not open in Psyche"
+        );
+    }
+
+    #[test]
+    fn revoked_native_project_root_rejects_a_stale_launch_request() {
+        let tree = TempTree::new("launch-revoked-project-authority");
+        let project = tree.directory("project");
+        initialize_git_repo(&project);
+        let authority = super::super::NativeProjectAuthority::default();
+        authority.authorize_native_open(&project).unwrap();
+        authority.revoke_native_open(&project).unwrap();
+        let mut request = launch_fixture();
+        request.project_root = project.to_string_lossy().into_owned();
+        request.cwd = Some(project.to_string_lossy().into_owned());
+
+        let result = super::validate_launch_request(request, &authority.open_project_roots());
 
         assert_eq!(
             result.unwrap_err(),
