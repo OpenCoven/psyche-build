@@ -1037,7 +1037,8 @@ function hasDesiredFieldValues(currentFields, desiredFields) {
  */
 function hasCurrentRenderedBody(issue, desiredBody, desiredRenderHash, issueMarkers) {
   if (issue.body != null) {
-    return normalizeCanonicalBody(issue.body, issueMarkers) === desiredBody;
+    return normalizeCanonicalBody(issue.body, issueMarkers) === desiredBody
+      && (issue.renderHash ?? extractRenderHash(issue.body, issueMarkers)) === desiredRenderHash;
   }
 
   return (issue.renderHash ?? extractRenderHash(issue.body, issueMarkers)) === desiredRenderHash;
