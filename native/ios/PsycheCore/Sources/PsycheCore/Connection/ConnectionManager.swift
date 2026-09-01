@@ -138,6 +138,7 @@ public actor ConnectionManager {
     private let pairedHostStore: PairedHostStore
     private let messageProcessorStart: @Sendable () async -> Void
     private let snapshotRequestFailureStart: @Sendable () async -> Void
+    private let readinessFlowPublicationStart: @Sendable () async -> Void
     private let manualCredentials: ConnectionCredentials
     private var activeConnection: ConnectionConfiguration?
     private var readinessFlow: HostReadinessFlow?
@@ -182,7 +183,8 @@ public actor ConnectionManager {
         clientName: String = "Psyche iOS",
         token: String? = nil,
         messageProcessorStart: @escaping @Sendable () async -> Void = {},
-        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {}
+        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {},
+        readinessFlowPublicationStart: @escaping @Sendable () async -> Void = {}
     ) {
         self.transport = transport
         self.workspaceStore = workspaceStore
@@ -196,6 +198,7 @@ public actor ConnectionManager {
         self.clientName = clientName
         self.messageProcessorStart = messageProcessorStart
         self.snapshotRequestFailureStart = snapshotRequestFailureStart
+        self.readinessFlowPublicationStart = readinessFlowPublicationStart
     }
 
     deinit {
@@ -222,7 +225,7 @@ public actor ConnectionManager {
         guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
 
         do {
-            guard let host = try await pairedHostStore.hosts().first else { return }
+            guard let host = try await pairedHostStore.selectedHost() else { return }
             guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
             await connect(
                 using: ConnectionConfiguration(
@@ -272,7 +275,9 @@ public actor ConnectionManager {
             }
         }
 
-        await tearDownActiveConnection()
+        await tearDownActiveConnection(
+            readinessError: ConnectionManagerError.connectionCancelled
+        )
         guard lifecycleIntentEpoch == intentEpoch else { return }
         guard !Task.isCancelled else {
             transition(to: .failed(ConnectionManagerError.connectionCancelled.localizedDescription))
@@ -286,7 +291,10 @@ public actor ConnectionManager {
         activeConnection = configuration
         transition(to: .connecting)
 
-        if let readinessError = await beginReadinessFlow(for: configuration) {
+        if let readinessError = await beginReadinessFlow(
+            for: configuration,
+            generation: generation
+        ) {
             guard isActive(attempt: attempt, generation: generation) else { return }
             await tearDownActiveConnection(
                 generation: generation,
@@ -414,7 +422,10 @@ public actor ConnectionManager {
             return
         }
         transition(to: .disconnecting)
-        await tearDownActiveConnection(finalState: .disconnected)
+        await tearDownActiveConnection(
+            readinessError: ConnectionManagerError.connectionCancelled,
+            finalState: .disconnected
+        )
     }
 
     /// Defaults to the identity already announced in `hello`. Passing a
@@ -706,6 +717,7 @@ public actor ConnectionManager {
                 )
                 await tearDownActiveConnection(
                     generation: generation,
+                    readinessError: PairingError.cancelled,
                     finalState: .disconnected
                 )
                 return .ignored
@@ -718,6 +730,7 @@ public actor ConnectionManager {
                 )
                 await tearDownActiveConnection(
                     generation: generation,
+                    readinessError: error,
                     finalState: .failed(error.localizedDescription)
                 )
                 return .ignored
@@ -802,11 +815,12 @@ public actor ConnectionManager {
     // MARK: - Host readiness
 
     /// Opens the readiness flow that owns this connection. Returns the reason
-    /// readiness refused, if it did: a connection readiness will not own must
-    /// not proceed, because nothing on it may commit host identity or present
-    /// a workspace as confirmed.
+    /// readiness refused, if it did. A connection that readiness will not own
+    /// must not proceed, because nothing on it may commit host identity or
+    /// present a workspace as confirmed.
     private func beginReadinessFlow(
-        for configuration: ConnectionConfiguration
+        for configuration: ConnectionConfiguration,
+        generation: ConnectionGeneration
     ) async -> (any Error)? {
         let machine = hostReadiness
         let intent = configuration.readinessIntent
@@ -831,6 +845,15 @@ public actor ConnectionManager {
                     flow = try machine.beginPairing()
                 }
                 return (flow, machine.authorization(for: flow))
+            }
+            await readinessFlowPublicationStart()
+            guard isActive(generation: generation), activeTeardown == nil else {
+                started.1?.revoke()
+                let reason = "The connection retired before readiness flow publication."
+                await MainActor.run {
+                    _ = try? machine.fail(.transport, reason: reason, for: started.0)
+                }
+                return nil
             }
             readinessFlow = started.0
             readinessAuthorization = started.1
@@ -943,13 +966,29 @@ public actor ConnectionManager {
                 actual: host.serverID
             )
         }
-        return try await pairedHostStore.reissueToken(
+        let result = try await pairedHostStore.reissueToken(
             host.token,
+            clientID: host.clientID,
             forServerID: host.serverID,
             certificateFingerprint: host.certificateFingerprint,
             for: generation,
             authorizedBy: authorization
         )
+        switch result {
+        case .committed:
+            return true
+        case .notCommitted(let reason):
+            guard let reason else { return false }
+            throw ConnectionManagerError.hostIdentityNotCommitted(reason)
+        case .indeterminate(let reason):
+            let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
+            let machine = hostReadiness
+            await MainActor.run {
+                _ = try? machine.revoke(reason: error.localizedDescription)
+            }
+            clearReadinessFlow()
+            throw error
+        }
     }
 
     /// Publishes the host identity through readiness, which owns the ordering
@@ -1167,6 +1206,7 @@ public actor ConnectionManager {
         snapshotRequestTask = nil
         await tearDownActiveConnection(
             generation: generation,
+            readinessError: error,
             finalState: .failed(error.localizedDescription)
         )
     }
@@ -1331,6 +1371,7 @@ public actor ConnectionManager {
         ) else { return }
         await tearDownActiveConnection(
             generation: generation,
+            readinessError: error,
             finalState: .failed(error.localizedDescription)
         )
     }
@@ -1351,6 +1392,7 @@ public actor ConnectionManager {
         ) else { return }
         await tearDownActiveConnection(
             generation: generation,
+            readinessError: PairingError.cancelled,
             finalState: .disconnected
         )
     }
@@ -1412,6 +1454,7 @@ public actor ConnectionManager {
         transition(to: .disconnecting)
         await tearDownActiveConnection(
             generation: generation,
+            readinessError: ConnectionManagerError.readinessUnavailable(reason),
             finalState: .failed(reason)
         )
     }

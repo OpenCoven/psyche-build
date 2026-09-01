@@ -816,6 +816,141 @@ final class ConnectionManagerTests: XCTestCase {
         await connectTask.value
     }
 
+    func testRestartReconnectsToTheLastSelectedHostNotTheFirstServerID() async throws {
+        let secureStore = InMemorySecureStore()
+        let seedStore = PairedHostStore(secureStore: secureStore)
+        let alphabeticallyFirst = PairedHost(
+            serverID: "server-a",
+            serverName: "Host A",
+            endpoint: HostEndpoint(
+                host: "host-a.local",
+                port: 5151,
+                certificateFingerprint: testCertificateFingerprint
+            ),
+            clientID: "client-a",
+            token: "token-a"
+        )
+        let selected = PairedHost(
+            serverID: "server-z",
+            serverName: "Host Z",
+            endpoint: HostEndpoint(
+                host: "host-z.local",
+                port: 5252,
+                certificateFingerprint: testCertificateFingerprint
+            ),
+            clientID: "client-z",
+            token: "token-z"
+        )
+        try await seedStore.save(alphabeticallyFirst)
+        try await seedStore.save(selected)
+
+        let fake = FakeTransport()
+        let restarted = makeComposition(
+            transport: fake,
+            clientID: "new-install-id",
+            secureStore: secureStore
+        )
+        let connectTask = Task { await restarted.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+
+        let attempts = await fake.connectionAttempts
+        XCTAssertEqual(attempts, [selected.endpoint])
+        let hello = await fake.sentMessages.compactMap { message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }.first
+        XCTAssertEqual(hello?.clientID, selected.clientID)
+        XCTAssertEqual(hello?.token, selected.token)
+
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: selected.serverID))))
+        await connectTask.value
+    }
+
+    func testPreReadyTeardownPreservesPreviousSelectionForRestart() async throws {
+        let secureStore = InMemorySecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let firstTransport = FakeTransport()
+        let firstLaunch = makeComposition(
+            transport: firstTransport,
+            secureStore: secureStore
+        )
+
+        let connect = Task {
+            await firstLaunch.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: firstTransport)
+        await firstTransport.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await connect.value
+        let pairing = pairingResult(code: "123456", on: firstLaunch.manager)
+        try await waitForPairRequest(on: firstTransport)
+        await firstTransport.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+
+        let selectedBeforeTeardown = try await firstLaunch.pairedHostStore.selectedHost()
+        XCTAssertEqual(selectedBeforeTeardown, previouslyReady)
+        await firstLaunch.manager.disconnect()
+
+        let restartTransport = FakeTransport()
+        let restarted = makeComposition(
+            transport: restartTransport,
+            secureStore: secureStore
+        )
+        let reconnect = Task { await restarted.manager.connectToStoredHost() }
+        try await waitForHello(on: restartTransport)
+        let attempts = await restartTransport.connectionAttempts
+        XCTAssertEqual(attempts, [previouslyReady.endpoint])
+        await restartTransport.emit(.legacy(.welcome(
+            makeWelcome(serverID: previouslyReady.serverID)
+        )))
+        await reconnect.value
+    }
+
+    func testPreReadySnapshotFailurePreservesPreviousSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore,
+            validateSnapshot: { _ in throw TestError.timedOut }
+        )
+
+        let connect = Task { await composition.manager.connect(to: candidateEndpoint) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await connect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await composition.manager.waitForState(.failed(TestError.timedOut.localizedDescription))
+
+        let selected = try await composition.pairedHostStore.selectedHost()
+        XCTAssertEqual(selected, previouslyReady)
+    }
+
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(
@@ -878,6 +1013,104 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(reconnectHello?.token, "issued-token")
         await fake.emit(.legacy(.welcome(makeWelcome())))
         await storedReconnect.value
+    }
+
+    func testReissuedCredentialsSurviveRestartAsOneBinding() async throws {
+        let secureStore = InMemorySecureStore()
+        let stored = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(stored)
+        let firstTransport = FakeTransport()
+        let firstLaunch = makeComposition(
+            transport: firstTransport,
+            clientID: "unused-install-id",
+            secureStore: secureStore
+        )
+
+        let initialConnect = Task { await firstLaunch.manager.connectToStoredHost() }
+        try await waitForHello(on: firstTransport)
+        await firstTransport.emit(.legacy(.welcome(makeWelcome(serverID: stored.serverID))))
+        await initialConnect.value
+
+        let pairing = pairingResult(
+            code: "123456",
+            clientID: "reissued-client-id",
+            on: firstLaunch.manager
+        )
+        try await waitForPairRequest(on: firstTransport)
+        await firstTransport.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "reissued-token")
+        )))
+        let paired = try await pairing.value.get()
+        XCTAssertEqual(paired.clientID, "reissued-client-id")
+        XCTAssertEqual(paired.token, "reissued-token")
+        await firstLaunch.manager.disconnect()
+
+        let restartedTransport = FakeTransport()
+        let restarted = makeComposition(
+            transport: restartedTransport,
+            clientID: "another-install-id",
+            secureStore: secureStore
+        )
+        let reconnect = Task { await restarted.manager.connectToStoredHost() }
+        try await waitForHello(on: restartedTransport)
+        let hello = await restartedTransport.sentMessages.compactMap {
+            message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }.first
+        XCTAssertEqual(hello?.clientID, "reissued-client-id")
+        XCTAssertEqual(hello?.token, "reissued-token")
+
+        await restartedTransport.emit(.legacy(.welcome(
+            makeWelcome(serverID: stored.serverID)
+        )))
+        await reconnect.value
+    }
+
+    func testIndeterminateCredentialReissueRevokesReadinessAndFailsClosed() async throws {
+        let secureStore = FailableWriteSecureStore()
+        let stored = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(stored)
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            clientID: "unused-install-id",
+            secureStore: secureStore
+        )
+
+        let connect = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: stored.serverID))))
+        await connect.value
+
+        secureStore.setBehavior(.failWriteAndCompensation)
+        let pairing = pairingResult(
+            code: "123456",
+            clientID: "reissued-client-id",
+            on: composition.manager
+        )
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "reissued-token")
+        )))
+
+        let expectedFailure: ConnectionState
+        do {
+            _ = try await pairing.value.get()
+            XCTFail("An indeterminate credential write must not report pairing success")
+            expectedFailure = .failed("Pairing unexpectedly succeeded")
+        } catch {
+            guard case .hostIdentityIndeterminate = error as? ConnectionManagerError else {
+                return XCTFail("Expected fail-closed indeterminate state, got \(error)")
+            }
+            expectedFailure = .failed(error.localizedDescription)
+        }
+        await composition.manager.waitForState(expectedFailure)
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        let state = await composition.manager.state
+        guard case .failed = state else {
+            return XCTFail("Indeterminate credentials must tear down the connection, got \(state)")
+        }
     }
 
     func testStoredHostLookupCannotOverrideManualConnectCredentials() async throws {
@@ -1011,6 +1244,37 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(state, .disconnected)
 
         await manager.disconnect()
+    }
+
+    func testDisconnectDuringReadinessFlowPublicationDoesNotOrphanTheFlow() async throws {
+        let gate = MessageProcessorStartGate()
+        let firstTransport = FakeTransport()
+        let composition = makeComposition(
+            transport: firstTransport,
+            readinessFlowPublicationStart: gate.wait
+        )
+
+        let retiredConnect = Task {
+            await composition.manager.connect(to: testEndpoint())
+        }
+        await gate.waitUntilEntered()
+        await composition.manager.disconnect()
+        await gate.release()
+        await retiredConnect.value
+
+        XCTAssertNil(composition.hostReadiness.activeFlow)
+        XCTAssertEqual(composition.hostReadiness.state, .unknown)
+
+        let replacementConnect = Task {
+            await composition.manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: firstTransport)
+        await firstTransport.emit(.legacy(.welcome(makeWelcome())))
+        await replacementConnect.value
+
+        let attempts = await firstTransport.connectionAttempts
+        XCTAssertEqual(attempts, [testEndpoint()])
+        await composition.manager.disconnect()
     }
 
     func testAppCompositionSharesItsGraphAndStartsStoredHostReconnectOnlyOnce() async throws {
@@ -2366,25 +2630,32 @@ final class ConnectionManagerTests: XCTestCase {
         token: String? = nil,
         secureStore: any SecureStore = InMemorySecureStore(),
         messageProcessorStart: @escaping @Sendable () async -> Void = {},
-        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {}
+        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {},
+        readinessFlowPublicationStart: @escaping @Sendable () async -> Void = {},
+        validateSnapshot: @escaping @Sendable (
+            HostReadinessSnapshotCandidate
+        ) async throws -> Void = { _ in }
     ) -> TestComposition {
         let requestClient = ControlRequestClient(transport: transport)
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
         let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let hostReadiness = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: workspaceStore,
+            validateSnapshot: validateSnapshot
+        )
         let manager = ConnectionManager(
             transport: transport,
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
-            hostReadiness: HostReadinessMachine(
-                pairedHostStore: pairedHostStore,
-                workspaceStore: workspaceStore
-            ),
+            hostReadiness: hostReadiness,
             clientID: clientID,
             clientName: clientName,
             token: token,
             messageProcessorStart: messageProcessorStart,
-            snapshotRequestFailureStart: snapshotRequestFailureStart
+            snapshotRequestFailureStart: snapshotRequestFailureStart,
+            readinessFlowPublicationStart: readinessFlowPublicationStart
         )
         XCTAssertTrue(manager.requestClient === requestClient)
         return TestComposition(

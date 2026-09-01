@@ -38,6 +38,16 @@ public struct PairedHost: Codable, Sendable, Equatable, Identifiable {
         )
     }
 
+    public func withCredentials(clientID: String, token: String?) -> PairedHost {
+        PairedHost(
+            serverID: serverID,
+            serverName: serverName,
+            endpoint: endpoint,
+            clientID: clientID,
+            token: token
+        )
+    }
+
     public func withEndpoint(_ endpoint: HostEndpoint) -> PairedHost {
         PairedHost(
             serverID: serverID,
