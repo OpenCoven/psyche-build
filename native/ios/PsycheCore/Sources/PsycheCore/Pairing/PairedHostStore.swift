@@ -113,6 +113,48 @@ public actor PairedHostStore {
         return committed
     }
 
+    /// Revalidates the readiness flow and publishes while this actor owns the
+    /// paired-host record. A throwing store write is compensated and verified
+    /// before it may be reported as not committed.
+    func publishReadinessHost(
+        _ host: PairedHost,
+        policy: HostIdentityPublicationPolicy,
+        claimedBy claim: HostReadinessHostPublicationClaim,
+        authorizedBy authorization: HostReadinessFlowAuthorization
+    ) -> HostReadinessTransactionResult {
+        let previousData: Data?
+        let nextData: Data
+        do {
+            try Task.checkCancellation()
+            let normalized = try normalize(host)
+            previousData = try secureStore.data(forKey: key)
+            var records = try records(from: previousData)
+            if policy == .preserve,
+               let existing = records[normalized.serverID],
+               existing.certificateFingerprint != normalized.certificateFingerprint {
+                throw PairedHostStoreError.identityChanged(serverID: normalized.serverID)
+            }
+            records[normalized.serverID] = normalized
+            nextData = try JSONEncoder().encode(records)
+            try Task.checkCancellation()
+        } catch {
+            return .notCommitted(reason: error.localizedDescription)
+        }
+
+        return authorization.publishHost(claimedBy: claim) {
+            do {
+                try Task.checkCancellation()
+                try secureStore.set(nextData, forKey: key)
+                return .committed
+            } catch {
+                return compensateReadinessWrite(
+                    to: previousData,
+                    after: error
+                )
+            }
+        }
+    }
+
     /// Tokens are reissued without the host identity changing, so this skips
     /// the fingerprint rule rather than forcing a re-pair on every refresh.
     public func updateToken(_ token: String?, forServerID serverID: String) throws {
@@ -145,7 +187,11 @@ public actor PairedHostStore {
     }
 
     private func records() throws -> [String: PairedHost] {
-        guard let data = try secureStore.data(forKey: key) else { return [:] }
+        try records(from: secureStore.data(forKey: key))
+    }
+
+    private func records(from data: Data?) throws -> [String: PairedHost] {
+        guard let data else { return [:] }
         do {
             return try JSONDecoder().decode([String: PairedHost].self, from: data)
         } catch {
@@ -155,6 +201,40 @@ public actor PairedHostStore {
 
     private func write(_ records: [String: PairedHost]) throws {
         try secureStore.set(try JSONEncoder().encode(records), forKey: key)
+    }
+
+    private func compensateReadinessWrite(
+        to previousData: Data?,
+        after writeError: any Error
+    ) -> HostReadinessTransactionResult {
+        do {
+            if let previousData {
+                try secureStore.set(previousData, forKey: key)
+            } else {
+                try secureStore.removeValue(forKey: key)
+            }
+        } catch {
+            return .indeterminate(reason: [
+                "Paired-host publication failed: \(writeError.localizedDescription)",
+                "Compensation failed: \(error.localizedDescription)"
+            ].joined(separator: " "))
+        }
+
+        do {
+            guard try secureStore.data(forKey: key) == previousData else {
+                return .indeterminate(reason: [
+                    "Paired-host publication failed: \(writeError.localizedDescription)",
+                    "Compensation could not be verified."
+                ].joined(separator: " "))
+            }
+        } catch {
+            return .indeterminate(reason: [
+                "Paired-host publication failed: \(writeError.localizedDescription)",
+                "Compensation verification failed: \(error.localizedDescription)"
+            ].joined(separator: " "))
+        }
+
+        return .notCommitted(reason: writeError.localizedDescription)
     }
 
     /// Store fingerprints in one canonical form so a record saved from a

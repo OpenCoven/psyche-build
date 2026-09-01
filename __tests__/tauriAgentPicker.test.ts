@@ -85,24 +85,26 @@ describe('Tauri agent picker', () => {
     );
 
     expect(agentLaunchOptions()).toEqual([
-      { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code' },
-      { id: 'copilot', label: 'Copilot CLI', command: 'coven', args: ['run', 'copilot'], kind: 'agent-copilot' },
-      { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex' },
-      { id: 'anthropic', label: 'Anthropic CLI', command: 'coven', args: ['run', 'claude'], kind: 'agent-anthropic' },
-      { id: 'grok-build', label: 'Grok Build', command: 'coven', args: ['run', 'grok'], kind: 'agent-grok-build' },
+      { id: 'coven-code', label: 'Coven CLI', command: 'coven', args: [], kind: 'coven-code', harness: null },
+      { id: 'copilot', label: 'Copilot CLI', command: 'coven', args: ['run', 'copilot'], kind: 'agent-copilot', harness: 'copilot' },
+      { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+      { id: 'anthropic', label: 'Anthropic CLI', command: 'coven', args: ['run', 'claude'], kind: 'agent-anthropic', harness: 'claude' },
+      { id: 'grok-build', label: 'Grok Build', command: 'coven', args: ['run', 'grok'], kind: 'agent-grok-build', harness: 'grok' },
     ]);
   });
 
-  it('launches an agent through Coven with the user prompt', async () => {
-    const createCalls: Array<Record<string, unknown>> = [];
-    const registryArgs = ['run', 'codex'];
+  it('launches an agent through the Coven daemon with the prompt in the request body', async () => {
+    const launchCalls: Array<[string, Record<string, unknown>]> = [];
+    const events: string[] = [];
     const project: PickerProject = { id: 'project', root: '/repo' };
+    const reservation = { id: 'reserved-thread' };
     const entry = {
       id: 'codex',
       label: 'Codex CLI',
       command: 'coven',
-      args: registryArgs,
+      args: ['run', 'codex'],
       kind: 'agent-codex',
+      harness: 'codex',
     };
     const spawnAgentThread = compileFunction<(
       agentId: string,
@@ -117,30 +119,214 @@ describe('Tauri agent picker', () => {
         agentLaunchOptions: () => [entry],
         state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
         setStatus: () => undefined,
-        createThread: (options: Record<string, unknown>) => {
-          createCalls.push(options);
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        hasCovenLaunchRecovery: () => false,
+        covenPromptDigest: async () => 'sha256:0f1e2d3c4b5a6978',
+        reserveCovenLaunchThread: (options: Record<string, unknown>) => {
+          events.push('reserve');
+          expect(options).toMatchObject({
+            project,
+            projectRoot: '/repo',
+            worktreePath: '/repo/worktree',
+          });
+          return reservation;
+        },
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          events.push('post');
+          launchCalls.push([command, args]);
+          return {
+            status: 'accepted',
+            sessionId: '12345678-1234-4abc-8def-1234567890ab',
+            harness: 'codex',
+          };
+        },
+        covenLaunchOutcome: (result: Record<string, unknown>) =>
+          result && result.status === 'accepted' && result.sessionId ? 'accepted' : 'failed',
+        covenLaunchFailureStatus: () => 'Codex CLI launch failed',
+        acceptCovenLaunchReservation: (
+          thread: Record<string, unknown>,
+          options: Record<string, unknown>,
+        ) => {
+          events.push('persist-accepted-before-attach');
+          expect(thread).toBe(reservation);
           return options;
         },
+        markCovenLaunchRecoveryRequired: () => undefined,
+        releaseCovenLaunchReservation: () => undefined,
       },
     );
 
     const result = await spawnAgentThread('codex', project, 'Fix the failing tests');
 
-    expect(createCalls).toHaveLength(1);
-    const created = createCalls[0]!;
+    expect(launchCalls).toEqual([
+      [
+        'coven_launch_session',
+        {
+          request: {
+            projectRoot: '/repo',
+            cwd: '/repo/worktree',
+            harness: 'codex',
+            prompt: 'Fix the failing tests',
+            title: 'Codex CLI',
+          },
+        },
+      ],
+    ]);
+    expect(events).toEqual([
+      'reserve',
+      'post',
+      'persist-accepted-before-attach',
+    ]);
+    const created = result!;
     expect(result).toBe(created);
     expect(created).toMatchObject({
       name: 'Codex CLI',
-      kind: 'agent-codex',
-      command: '/opt/homebrew/bin/coven',
-      args: ['run', 'codex', '--', 'Fix the failing tests'],
-      launchKind: null,
-      projectRoot: '/repo',
-      cwd: '/repo/worktree',
-      worktreePath: '/repo/worktree',
-      waitForPtyStart: true,
+      sessionId: '12345678-1234-4abc-8def-1234567890ab',
+      harness: 'codex',
     });
-    expect(created.args).not.toBe(registryArgs);
+    expect(created.promptDigest).toMatch(/^sha256:[0-9a-f]{16}$/);
+    expect(JSON.stringify(created)).not.toContain('Fix the failing tests');
+    expect(JSON.stringify(launchCalls[0]![1])).toContain('Fix the failing tests');
+  });
+
+  it('keeps the composer prompt when the Coven daemon rejects the launch', async () => {
+    const reservationCalls: Array<Record<string, unknown>> = [];
+    const released: unknown[] = [];
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        hasCovenLaunchRecovery: () => false,
+        reserveCovenLaunchThread: (options: Record<string, unknown>) => {
+          reservationCalls.push(options);
+          return { id: 'reservation' };
+        },
+        invoke: async () => ({
+          status: 'rejected',
+          message: 'unknown harness `codex`',
+        }),
+        covenLaunchOutcome: (result: Record<string, unknown>) =>
+          result && result.status === 'accepted' && result.sessionId
+            ? 'accepted'
+            : (result && (result.status === 'unavailable' || result.status === 'incompatible')
+              ? 'recovery_required'
+              : 'failed'),
+        covenLaunchFailureStatus: (entry: { label: string }, result: Record<string, unknown>) =>
+          result && result.status === 'rejected'
+            ? entry.label + ' launch failed: ' + String(result.message)
+            : 'Codex CLI launch failed',
+        covenPromptDigest: async () => null,
+        releaseCovenLaunchReservation: async (thread: unknown) => { released.push(thread); },
+        markCovenLaunchRecoveryRequired: () => undefined,
+        acceptCovenLaunchReservation: () => {
+          throw new Error('rejected launch must not attach');
+        },
+      },
+    );
+
+    await expect(spawnAgentThread('codex', project, 'Fix the failing tests')).resolves.toBeNull();
+    expect(reservationCalls).toHaveLength(1);
+    expect(released).toHaveLength(1);
+    expect(status).toEqual(['Codex CLI launch failed: unknown harness `codex`', 'error']);
+  });
+
+  it('maps an unavailable daemon to recovery-required guidance', async () => {
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        hasCovenLaunchRecovery: () => false,
+        reserveCovenLaunchThread: () => ({ id: 'reservation' }),
+        invoke: async () => ({
+          status: 'unavailable',
+          message: 'Coven daemon is not running; run `coven daemon start`',
+        }),
+        covenLaunchOutcome: (result: Record<string, unknown>) =>
+          result && (result.status === 'unavailable' || result.status === 'incompatible')
+            ? 'recovery_required'
+            : 'failed',
+        covenLaunchFailureStatus: (_entry: unknown, result: Record<string, unknown>) =>
+          String(result.message),
+        covenPromptDigest: async () => null,
+        releaseCovenLaunchReservation: async () => true,
+        markCovenLaunchRecoveryRequired: () => undefined,
+        acceptCovenLaunchReservation: () => {
+          throw new Error('unavailable launch must not attach');
+        },
+      },
+    );
+
+    await expect(spawnAgentThread('codex', project, 'Fix the failing tests')).resolves.toBeNull();
+    expect(status).toEqual([
+      'Coven daemon is not running; run `coven daemon start`',
+      'error',
+    ]);
+  });
+
+  it('rejects over-long prompts before any Coven exchange', async () => {
+    const invokeCalls: unknown[] = [];
+    let status: [string, string] | null = null;
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+        setStatus: (message: string, level: string) => { status = [message, level]; },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        invoke: async (...args: unknown[]) => {
+          invokeCalls.push(args);
+          return { status: 'accepted', sessionId: 'x' };
+        },
+        covenLaunchOutcome: () => 'accepted',
+        covenLaunchFailureStatus: () => 'unreachable',
+        covenPromptDigest: async () => null,
+        createThread: () => ({}),
+      },
+    );
+
+    await expect(
+      spawnAgentThread('codex', project, 'x'.repeat(8193)),
+    ).resolves.toBeNull();
+    expect(invokeCalls).toEqual([]);
+    expect(status![0]).toContain('8192-character Coven launch limit');
   });
 
   it('requires a prompt before launching a Coven harness', async () => {
@@ -316,6 +502,7 @@ describe('Tauri agent picker', () => {
         closeNewPaneMenu: () => undefined,
         closeScopeMenu: () => undefined,
         closeSessionContextMenu: () => { closeSessionContextMenuCalls += 1; },
+        refreshCovenLaunchCapabilities: async () => undefined,
       },
       {
         agentPickerOverlayEl: overlay,
@@ -1217,6 +1404,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<string | null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'coven-code' },
           { id: 'codex' },
@@ -1256,6 +1444,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'coven-code' },
         ],
@@ -1284,6 +1473,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'codex', label: 'Codex CLI' },
         ],
@@ -1326,6 +1516,7 @@ describe('Tauri agent picker', () => {
     const controller = compileFunctionWithState<() => Promise<string | null>>(
       functionSource('launchSelectedAgent'),
       {
+        covenLaunchGate: () => null,
         agentLaunchOptions: () => [
           { id: 'codex', label: 'Codex CLI' },
         ],
@@ -1361,6 +1552,642 @@ describe('Tauri agent picker', () => {
     expect(closeCalls).toBe(2);
     expect(commandInput.value).toBe('');
     expect(controller.snapshot().agentLaunchInFlight).toBe(false);
+  });
+
+  it('keeps an effect-unknown reservation and blocks a blind retry', async () => {
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const worktree = { path: '/repo/worktree' };
+    const reservation = { id: 'reserved-thread' };
+    const invocations: string[] = [];
+    const statuses: Array<[string, string]> = [];
+    let recoveryExists = false;
+    const dependencies = {
+      activeProject: () => project,
+      selectedWorktree: () => worktree,
+      showTerminalView: async () => true,
+      agentLaunchOptions: () => [
+        { id: 'codex', label: 'Codex CLI', command: 'coven', args: ['run', 'codex'], kind: 'agent-codex', harness: 'codex' },
+      ],
+      state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+      hasCovenLaunchRecovery: () => recoveryExists,
+      covenPromptDigest: async () => 'sha256:0f1e2d3c4b5a6978',
+      reserveCovenLaunchThread: () => reservation,
+      invoke: async (command: string) => {
+        invocations.push(command);
+        return {
+          status: 'effect_unknown',
+          message: 'Coven launch outcome is unknown; inspect Coven sessions before retrying',
+        };
+      },
+      covenLaunchOutcome: (result: Record<string, unknown>) =>
+        result.status === 'effect_unknown' ? 'recovery_required' : 'failed',
+      covenLaunchFailureStatus: (_entry: unknown, result: Record<string, unknown>) =>
+        String(result.message),
+      markCovenLaunchRecoveryRequired: async () => {
+        recoveryExists = true;
+      },
+      releaseCovenLaunchReservation: () => {
+        throw new Error('effect-unknown reservation must not be released');
+      },
+      acceptCovenLaunchReservation: () => {
+        throw new Error('effect-unknown launch must not attach');
+      },
+    };
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      selectedProject?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      dependencies,
+    );
+
+    await expect(spawnAgentThread('codex', project, 'Fix it')).resolves.toBe(reservation);
+    await expect(spawnAgentThread('codex', project, 'Fix it')).resolves.toBeNull();
+
+    expect(invocations).toEqual(['coven_launch_session']);
+    expect(statuses.at(-1)?.[0]).toContain('inspect Coven sessions before retrying');
+  });
+
+  it('persists the recovery reservation before a launch can be submitted', async () => {
+    const events: string[] = [];
+    const reservation = { id: 'reserved-thread' };
+    const reserveCovenLaunchThread = compileFunction<(
+      options: Record<string, unknown>,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('reserveCovenLaunchThread'),
+      {
+        createThread: async () => {
+          events.push('reserve');
+          return reservation;
+        },
+        saveWorkspaceNow: async () => {
+          events.push('persist');
+          return true;
+        },
+      },
+    );
+
+    await expect(reserveCovenLaunchThread({
+      project: { id: 'project', root: '/repo' },
+      projectRoot: '/repo',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(reservation);
+
+    expect(events).toEqual(['reserve', 'persist']);
+  });
+
+  it('releases an unsubmitted reservation when pre-POST persistence fails', async () => {
+    const state = { threads: [] as Array<Record<string, any>> };
+    let persistenceFails = true;
+    const reserveCovenLaunchThread = compileFunction<(
+      options: Record<string, unknown>,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('reserveCovenLaunchThread'),
+      {
+        createThread: async () => {
+          const reservation = {
+            id: `reserved-${state.threads.length + 1}`,
+            projectId: 'project',
+            worktreePath: '/repo/worktree',
+            launch: { launchKind: 'coven-recovery' },
+          };
+          state.threads.push(reservation);
+          return reservation;
+        },
+        saveWorkspaceNow: async () => {
+          if (persistenceFails) throw new Error('disk full');
+          return true;
+        },
+        releaseCovenLaunchReservation: async (thread: Record<string, unknown>) => {
+          state.threads = state.threads.filter(candidate => candidate !== thread);
+          return true;
+        },
+      },
+    );
+    const hasCovenLaunchRecovery = compileFunction<(
+      projectId: string,
+      worktreePath: string,
+    ) => boolean>(
+      functionSource('hasCovenLaunchRecovery'),
+      { state },
+    );
+    const options = {
+      project: { id: 'project', root: '/repo' },
+      projectRoot: '/repo',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI',
+      promptDigest: 'sha256:abc',
+    };
+
+    await expect(reserveCovenLaunchThread(options)).rejects.toThrow(
+      'Coven launch was not submitted because its recovery reservation could not be saved: Error: disk full',
+    );
+    expect(hasCovenLaunchRecovery('project', '/repo/worktree')).toBe(false);
+
+    persistenceFails = false;
+    await expect(reserveCovenLaunchThread(options)).resolves.toBe(state.threads[0]);
+    expect(hasCovenLaunchRecovery('project', '/repo/worktree')).toBe(true);
+  });
+
+  it('surfaces reservation persistence failure as an explicitly unsubmitted launch', async () => {
+    const statuses: Array<[string, string]> = [];
+    let postAttempts = 0;
+    const spawnAgentThread = compileFunction<(
+      agentId: string,
+      project?: PickerProject,
+      prompt?: string,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnAgentThread'),
+      {
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        selectedWorktree: () => ({ path: '/repo/worktree' }),
+        showTerminalView: async () => true,
+        agentLaunchOptions: () => [
+          { id: 'codex', label: 'Codex CLI', harness: 'codex' },
+        ],
+        state: { env: { coven_path: '/bin/coven' } },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        COVEN_LAUNCH_PROMPT_MAX_CHARS: 8192,
+        hasCovenLaunchRecovery: () => false,
+        covenPromptDigest: async () => 'sha256:abc',
+        reserveCovenLaunchThread: async () => {
+          throw new Error(
+            'Coven launch was not submitted because its recovery reservation could not be saved: Error: disk full',
+          );
+        },
+        invoke: async () => {
+          postAttempts += 1;
+          return null;
+        },
+        covenLaunchOutcome: () => 'failed',
+        covenLaunchFailureStatus: () => 'failed',
+        markCovenLaunchRecoveryRequired: () => undefined,
+        releaseCovenLaunchReservation: () => undefined,
+        acceptCovenLaunchReservation: () => undefined,
+      },
+    );
+
+    await expect(spawnAgentThread('codex', undefined, 'Fix it')).resolves.toBeNull();
+
+    expect(postAttempts).toBe(0);
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI launch was not submitted: Error: Coven launch was not submitted because its recovery reservation could not be saved: Error: disk full',
+      'error',
+    ]);
+  });
+
+  it('persists an accepted session identity before creating its native attachment', async () => {
+    const events: string[] = [];
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => { events.push('persist'); },
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          events.push(command);
+          expect(args).toMatchObject({
+            request: {
+              id: 'reserved-thread',
+              launchKind: 'coven-attach',
+              covenSessionId: 'session-1',
+            },
+          });
+        },
+        nativeSessionRequest: (value: Record<string, unknown>) => ({
+          id: value.id,
+          launchKind: (value.launch as Record<string, unknown>).launchKind,
+          covenSessionId: (value.launch as Record<string, unknown>).covenSessionId,
+        }),
+        attachThreadClient: async () => {
+          events.push('attach');
+          return false;
+        },
+        setStatus: () => undefined,
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    const accepted = await acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-1',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    });
+
+    expect(events).toEqual(['persist', 'native_session_create', 'attach', 'persist']);
+    expect(accepted).toBe(thread);
+    expect(thread.launch).toMatchObject({
+      launchKind: 'coven-attach',
+      covenSessionId: 'session-1',
+      promptDigest: 'sha256:abc',
+      metricsProvider: 'codex',
+    });
+  });
+
+  it('does not create a native attachment after an accepted reservation starts closing', async () => {
+    const statuses: Array<[string, string]> = [];
+    let finishFirstSave: (() => void) | undefined;
+    let nativeAttachmentAttempts = 0;
+    const thread: Record<string, any> = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      closeStarted: false,
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any> | null>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: () => new Promise<void>((resolve) => {
+          finishFirstSave = resolve;
+        }),
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          throw new Error('closing reservation must not attach');
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    const acceptance = acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    });
+    expect(thread.covenLaunchAcceptanceInFlight).toBeInstanceOf(Promise);
+    thread.closeStarted = true;
+    if (!finishFirstSave) throw new Error('accepted-session save did not start');
+    finishFirstSave();
+
+    await expect(acceptance).resolves.toBe(thread);
+    expect(nativeAttachmentAttempts).toBe(0);
+    expect(thread.covenLaunchAcceptanceInFlight).toBeNull();
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI was accepted by Coven after its local reservation was closed; no local attachment was created. Inspect Coven session session-accepted.',
+      'error',
+    ]);
+  });
+
+  it('waits for accepted-session conversion before stopping a closing native session', () => {
+    const closeThread = functionSource('closeThread');
+    expect(closeThread.indexOf('await covenLaunchAcceptanceInFlight')).toBeLessThan(
+      closeThread.indexOf('invoke("native_session_stop"'),
+    );
+  });
+
+  it('quarantines an accepted session when its first persistence attempt fails', async () => {
+    const statuses: Array<[string, string]> = [];
+    const writes: string[] = [];
+    let saveAttempts = 0;
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      terminalController: {
+        write: (value: string) => { writes.push(value); },
+      },
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          saveAttempts += 1;
+          if (saveAttempts === 1) throw new Error('disk full');
+          return true;
+        },
+        invoke: async () => {
+          throw new Error('must not create a native attachment before accepted identity persists');
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          throw new Error('must not attach before accepted identity persists');
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saveAttempts).toBe(2);
+    expect(thread).toMatchObject({
+      kind: 'coven-attach',
+      status: 'failed',
+      spawning: false,
+      sidebarStatusKey: 'error',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: true,
+      },
+    });
+    expect(writes.join('')).toContain('Coven session accepted');
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI was accepted by Coven but local recovery is required: Error: disk full',
+      'error',
+    ]);
+    const persistableSession = compileFunction<(
+      value: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(functionSource('persistableSession'), {});
+    expect(persistableSession(thread)).toMatchObject({
+      launchKind: 'coven-attach',
+      covenSessionId: 'session-accepted',
+      recoveryRequired: true,
+    });
+  });
+
+  it('surfaces non-durable recovery when both accepted-session saves fail', async () => {
+    const statuses: Array<[string, string]> = [];
+    const writes: string[] = [];
+    let saveAttempts = 0;
+    let nativeAttachmentAttempts = 0;
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      terminalController: {
+        write: (value: string) => { writes.push(value); },
+      },
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          saveAttempts += 1;
+          throw new Error(saveAttempts === 1 ? 'disk full' : 'disk still full');
+        },
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          nativeAttachmentAttempts += 1;
+          return false;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saveAttempts).toBe(2);
+    expect(nativeAttachmentAttempts).toBe(0);
+    expect(thread.launch).toMatchObject({
+      launchKind: 'coven-attach',
+      covenSessionId: 'session-accepted',
+      recoveryRequired: true,
+    });
+    expect(writes.join('')).toContain('recovery state is not durable');
+    expect(writes.join('')).toContain('inspect Coven before closing');
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI was accepted by Coven, but its recovery state is not durable; inspect Coven before closing: Error: disk still full',
+      'error',
+    ]);
+  });
+
+  it('quarantines an accepted session when attachment-failure persistence fails', async () => {
+    const statuses: Array<[string, string]> = [];
+    const writes: string[] = [];
+    let saveAttempts = 0;
+    let nativeAttachmentAttempts = 0;
+    let clientAttachmentAttempts = 0;
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      terminalController: {
+        write: (value: string) => { writes.push(value); },
+      },
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          saveAttempts += 1;
+          if (saveAttempts === 2) throw new Error('attachment recovery save failed');
+          return true;
+        },
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+          throw new Error('tmux unavailable');
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          clientAttachmentAttempts += 1;
+          return false;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+    const hasCovenLaunchRecovery = compileFunction<(
+      projectId: string,
+      worktreePath: string,
+    ) => boolean>(functionSource('hasCovenLaunchRecovery'), { state });
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saveAttempts).toBe(2);
+    expect(nativeAttachmentAttempts).toBe(1);
+    expect(clientAttachmentAttempts).toBe(0);
+    expect(thread.launch).toMatchObject({
+      covenSessionId: 'session-accepted',
+      recoveryRequired: true,
+    });
+    expect(hasCovenLaunchRecovery('project', '/repo/worktree')).toBe(true);
+    expect(writes.join('')).toContain('recovery state is not durable');
+    expect(statuses.at(-1)?.[0]).toContain('inspect Coven before closing');
+  });
+
+  it('quarantines an accepted session when final attachment persistence fails', async () => {
+    const statuses: Array<[string, string]> = [];
+    let saveAttempts = 0;
+    let nativeAttachmentAttempts = 0;
+    let clientAttachmentAttempts = 0;
+    const thread = {
+      id: 'reserved-thread',
+      projectId: 'project',
+      worktreePath: '/repo/worktree',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        projectRoot: '/repo',
+        cwd: '/repo/worktree',
+      },
+      status: 'starting',
+      spawning: true,
+      terminalController: { write: () => undefined },
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [thread],
+    };
+    const acceptCovenLaunchReservation = compileFunction<(
+      thread: Record<string, any>,
+      options: Record<string, any>,
+    ) => Promise<Record<string, any>>>(
+      functionSource('acceptCovenLaunchReservation'),
+      {
+        state,
+        saveWorkspaceNow: async () => {
+          saveAttempts += 1;
+          if (saveAttempts === 2) throw new Error('final attachment save failed');
+          return true;
+        },
+        invoke: async () => {
+          nativeAttachmentAttempts += 1;
+        },
+        nativeSessionRequest: () => ({}),
+        attachThreadClient: async () => {
+          clientAttachmentAttempts += 1;
+          thread.status = 'running';
+          thread.spawning = false;
+          return true;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+      },
+    );
+    const hasCovenLaunchRecovery = compileFunction<(
+      projectId: string,
+      worktreePath: string,
+    ) => boolean>(functionSource('hasCovenLaunchRecovery'), { state });
+
+    await expect(acceptCovenLaunchReservation(thread, {
+      sessionId: 'session-accepted',
+      harness: 'codex',
+      promptDigest: 'sha256:abc',
+    })).resolves.toBe(thread);
+
+    expect(saveAttempts).toBe(3);
+    expect(nativeAttachmentAttempts).toBe(1);
+    expect(clientAttachmentAttempts).toBe(1);
+    expect(thread.launch).toMatchObject({
+      covenSessionId: 'session-accepted',
+      recoveryRequired: true,
+    });
+    expect(hasCovenLaunchRecovery('project', '/repo/worktree')).toBe(true);
+    expect(statuses.at(-1)?.[0]).toContain(
+      'was accepted by Coven but final attachment persistence failed',
+    );
   });
 
   it('does not persist an agent preference and always reselects Coven CLI', () => {
