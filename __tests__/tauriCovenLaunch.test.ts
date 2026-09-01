@@ -1230,6 +1230,54 @@ describe('native Coven launch routing', () => {
     expect(thread).toMatchObject({ project, kind: 'coven-code', name: 'Coven CLI' });
   });
 
+  it('tracks promptless Coven creation until native session creation settles', async () => {
+    const project: {
+      id: string;
+      root: string;
+      covenLocalLaunchesInFlight?: number;
+    } = { id: 'project', root: '/repo' };
+    let resolveCreation!: (thread: Record<string, unknown>) => void;
+    let markCreationStarted!: () => void;
+    const creationStarted = new Promise<void>((resolve) => {
+      markCreationStarted = resolve;
+    });
+    const creation = new Promise<Record<string, unknown>>((resolve) => {
+      resolveCreation = resolve;
+    });
+    const spawnCovenThread = compileFunction<(
+      value: typeof project,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnCovenThread'),
+      {
+        state: { env: { coven_path: '/bin/coven' } },
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo' }),
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        requestAnimationFrame: (callback: () => void) => callback(),
+        covenCliLaunch: () => ({
+          command: '/bin/coven',
+          args: [],
+          cwd: '/repo',
+          launchKind: 'coven-code',
+        }),
+        createThread: () => {
+          markCreationStarted();
+          return creation;
+        },
+      },
+    );
+
+    const pending = spawnCovenThread(project);
+    await creationStarted;
+    expect(project.covenLocalLaunchesInFlight).toBe(1);
+
+    const thread = { id: 'coven-thread' };
+    resolveCreation(thread);
+    await expect(pending).resolves.toBe(thread);
+    expect(project.covenLocalLaunchesInFlight).toBeUndefined();
+  });
+
   it('coalesces concurrent explicit ensures through one animation-frame launch', async () => {
     const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
     const state = {

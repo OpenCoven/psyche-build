@@ -2569,7 +2569,7 @@
       thread.launch.covenSessionId = options.sessionId;
       thread.launch.promptDigest = options.promptDigest || null;
       thread.launch.metricsProvider = options.harness || "coven";
-      thread.launch.recoveryRequired = false;
+      thread.launch.recoveryRequired = true;
       thread.status = "starting";
       thread.spawning = true;
       thread.finishedAt = null;
@@ -2641,6 +2641,7 @@
         return thread;
       }
       await attachThreadClient(thread);
+      thread.launch.recoveryRequired = false;
       try {
         await saveWorkspaceNow();
       } catch (error) {
@@ -8836,7 +8837,8 @@
     var project = findProject(id);
     if (!project || project.closing) return false;
     function hasUnresolvedCovenLaunch() {
-      return state.threads.some(function (thread) {
+      return project.covenLocalLaunchesInFlight > 0 ||
+        state.threads.some(function (thread) {
         return thread.projectId === id
           && thread.launch
           && (thread.covenLaunchOutcomeInFlight ||
@@ -8892,41 +8894,128 @@
         if (filesPane.projectId === id) projectFilesPanes.push(filesPane);
       });
     }
+    var projectIndex = state.projects.indexOf(project);
+    var threadSnapshot = state.threads.slice();
+    var activeThreadIdSnapshot = state.activeThreadId;
+    var lastActiveThreadIdSnapshot = project.lastActiveThreadId;
+    var paneLayoutSnapshot = [];
+    if (typeof paneLayouts !== "undefined") {
+      paneLayouts.forEach(function (layout, key) {
+        if (key.indexOf(id + "\u0000") === 0) {
+          paneLayoutSnapshot.push([key, Object.assign({}, layout)]);
+        }
+      });
+    }
+    function restoreProjectRemovalState() {
+      if (!state.projects.some(function (candidate) { return candidate.id === id; })) {
+        var restoreIndex = Math.max(0, Math.min(projectIndex, state.projects.length));
+        state.projects.splice(restoreIndex, 0, project);
+      }
+      var currentThreads = new Map(state.threads.map(function (thread) {
+        return [thread.id, thread];
+      }));
+      var originalThreadIds = new Set(threadSnapshot.map(function (thread) {
+        return thread.id;
+      }));
+      state.threads = threadSnapshot.map(function (thread) {
+        var current = currentThreads.get(thread.id);
+        if (current) return current;
+        if (thread.projectId !== id) return thread;
+        thread.closeStarted = false;
+        thread.closing = false;
+        thread.persistentLive = false;
+        thread.spawning = false;
+        thread.status = thread.launch &&
+          (thread.launch.launchKind === "coven-recovery" ||
+            thread.launch.recoveryRequired === true)
+          ? "failed"
+          : "exited";
+        thread.sidebarStatusKey = thread.status === "failed" ? "error" : "done";
+        thread.finishedAt = Date.now();
+        thread.term = null;
+        thread.host = null;
+        thread.pane = null;
+        thread.terminalController = null;
+        thread.ptyStarted = false;
+        thread.ptyGeneration = null;
+        if (typeof createThreadPtyIoQueue === "function") {
+          thread.ptyIoQueue = createThreadPtyIoQueue();
+        }
+        return thread;
+      }).concat(state.threads.filter(function (thread) {
+        return !originalThreadIds.has(thread.id);
+      }));
+      if (typeof paneLayouts !== "undefined") {
+        Array.from(paneLayouts.keys()).forEach(function (key) {
+          if (key.indexOf(id + "\u0000") === 0) paneLayouts.delete(key);
+        });
+        paneLayoutSnapshot.forEach(function (entry) {
+          paneLayouts.set(entry[0], entry[1]);
+        });
+      }
+      state.activeThreadId = activeThreadIdSnapshot;
+      project.lastActiveThreadId = lastActiveThreadIdSnapshot;
+      project.closing = false;
+      renderPaneWorkspace({ preserveTerminalFocus: false });
+      refreshSidebar();
+      refreshTabs();
+    }
+    async function failProjectRemoval(message) {
+      restoreProjectRemovalState();
+      try {
+        await saveWorkspaceNow();
+      } catch (rollbackError) {
+        setStatus(
+          message + " and its workspace rollback is not durable: " +
+            String(rollbackError),
+          "error"
+        );
+        return false;
+      }
+      setStatus(message, "error");
+      return false;
+    }
     covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    var closeResults;
-    try {
-      closeResults = await Promise.all(threadIds.map(function (tid) {
-        var preserveTerminalFocus = state.activeProjectId !== id;
-        return closeThread(tid, {
-          focus: false,
-          preserveTerminalFocus: preserveTerminalFocus,
-          protectCovenRecovery: true,
-        });
-      }));
-    } catch (error) {
-      project.closing = false;
-      throw error;
+    var closeResults = await Promise.allSettled(threadIds.map(function (tid) {
+      var preserveTerminalFocus = state.activeProjectId !== id;
+      return closeThread(tid, {
+        focus: false,
+        preserveTerminalFocus: preserveTerminalFocus,
+        protectCovenRecovery: true,
+      });
+    }));
+    var closeFailure = closeResults.find(function (result) {
+      return result.status === "rejected" || result.value === false;
+    });
+    if (closeFailure) {
+      return failProjectRemoval(
+        "failed to close every pane for " + project.name +
+          (closeFailure.status === "rejected"
+            ? ": " + String(closeFailure.reason)
+            : "")
+      );
     }
-    if (closeResults.some(function (closed) { return closed === false; })) {
-      project.closing = false;
-      return false;
+    state.projects = state.projects.filter(function (p) { return p.id !== id; });
+    try {
+      await saveWorkspaceNow();
+    } catch (error) {
+      return failProjectRemoval(
+        "failed to save removal of " + project.name + ": " + String(error)
+      );
     }
     if (project.root) {
       try {
         await invoke("native_project_close", { root: project.root });
       } catch (error) {
-        project.closing = false;
-        setStatus("failed to revoke project authority for " + project.name + ": " + String(error), "error");
-        return false;
+        return failProjectRemoval(
+          "failed to revoke project authority for " + project.name + ": " + String(error)
+        );
       }
     }
-    // Native authority is gone, so remove the project from visible state
-    // before any ancillary pane or file cleanup can fail.
-    state.projects = state.projects.filter(function (p) { return p.id !== id; });
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -14953,7 +15042,7 @@
 
   async function spawnCovenThread(project, expectedWorktreePath) {
     project = project || activeProject();
-    if (!project || !project.root) return null;
+    if (!project || !project.root || project.closing) return null;
     if (!state.env || !state.env.coven_path) {
       setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
       return null;
@@ -14968,16 +15057,26 @@
     var currentProject = activeProject();
     var currentWorktree = selectedWorktree(currentProject);
     if (!currentProject || currentProject.id !== intendedProjectId ||
+        currentProject.closing ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
     var launch = covenCliLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
     if (!launch) return null;
-    return createThread({
-      project: currentProject,
-      worktreePath: launch.cwd,
-      name: "Coven CLI",
-      kind: "coven-code",
-      launch: launch,
-    });
+    currentProject.covenLocalLaunchesInFlight =
+      (currentProject.covenLocalLaunchesInFlight || 0) + 1;
+    try {
+      return await createThread({
+        project: currentProject,
+        worktreePath: launch.cwd,
+        name: "Coven CLI",
+        kind: "coven-code",
+        launch: launch,
+      });
+    } finally {
+      currentProject.covenLocalLaunchesInFlight -= 1;
+      if (currentProject.covenLocalLaunchesInFlight <= 0) {
+        delete currentProject.covenLocalLaunchesInFlight;
+      }
+    }
   }
 
   function ensureProjectCoven(project) {

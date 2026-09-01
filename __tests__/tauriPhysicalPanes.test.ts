@@ -1424,7 +1424,6 @@ describe('Tauri physical terminal panes', () => {
       'reopenThread',
       'hideFilesPane',
       'reopenFilesPane',
-      'removeProject',
       'returnFromFileFocus',
       'revealFileForDecision',
       'closeFileTab',
@@ -1434,6 +1433,10 @@ describe('Tauri physical terminal panes', () => {
         'renderPaneWorkspace({ preserveTerminalFocus: false });',
       ]);
     }
+    expect(renderPaneWorkspaceCalls('removeProject')).toEqual([
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+    ]);
 
     const preserveOnly = [
       'movePaneTo',
@@ -1469,7 +1472,7 @@ describe('Tauri physical terminal panes', () => {
     ]);
 
     const expectedCallCount =
-      transitionOnly.length + preserveOnly.length + 1 + 5 + 2 + 1 + 1;
+      transitionOnly.length + preserveOnly.length + 2 + 1 + 5 + 2 + 1 + 1;
     expect((mainJs.match(/renderPaneWorkspace\(/g) || []).length - 1).toBe(
       expectedCallCount,
     );
@@ -2826,6 +2829,10 @@ describe('Tauri physical terminal panes', () => {
       refreshTabs: () => undefined,
       syncPaneMetricsVisibility: () => undefined,
       syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => {
+        teardownEvents.push('persist-removal');
+        return true;
+      },
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => undefined,
     });
@@ -2836,7 +2843,11 @@ describe('Tauri physical terminal panes', () => {
       preserveTerminalFocus: true,
       protectCovenRecovery: true,
     }]);
-    expect(teardownEvents).toEqual(['close-thread', 'revoke-authority']);
+    expect(teardownEvents).toEqual([
+      'close-thread',
+      'persist-removal',
+      'revoke-authority',
+    ]);
     expect(nativeProjectCloseCalls).toEqual([{ root: '/repo/removed' }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
@@ -2884,9 +2895,11 @@ describe('Tauri physical terminal panes', () => {
       startCovenPolling: () => undefined,
       setActiveProject: async () => true,
       renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncPaneMetricsVisibility: () => undefined,
       syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => true,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => undefined,
       fileViewEl: null,
@@ -2899,6 +2912,213 @@ describe('Tauri physical terminal panes', () => {
     expect(project.closing).toBe(false);
     expect(state.projects).toEqual([project]);
     expect(state.threads).toEqual([thread]);
+  });
+
+  it('restores a project without revoking authority when removal persistence fails', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      closing?: boolean;
+    } = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: null,
+      projects: [project],
+      threads: [],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    let saveAttempts = 0;
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => true,
+      saveWorkspaceNow: async () => {
+        saveAttempts += 1;
+        if (saveAttempts === 1) throw new Error('disk full');
+        return true;
+      },
+      invoke: async () => {
+        revokeAttempts += 1;
+      },
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(saveAttempts).toBe(2);
+    expect(revokeAttempts).toBe(0);
+    expect(project.closing).toBe(false);
+    expect(state.projects).toEqual([project]);
+    expect(statuses.at(-1)).toEqual([
+      'failed to save removal of Repo: Error: disk full',
+      'error',
+    ]);
+  });
+
+  it('restores exited panes when native project authority revocation fails', async () => {
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      lastActiveThreadId: 'thread',
+      closing: false,
+    };
+    const thread = {
+      id: 'thread',
+      projectId: project.id,
+      worktreePath: '/repo',
+      name: 'Shell',
+      kind: 'shell',
+      launch: { launchKind: 'shell' },
+      persistentLive: true,
+      spawning: false,
+      closeStarted: false,
+      closing: false,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: thread.id as string | null,
+      activeFileId: null,
+      projects: [project],
+      threads: [thread],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    let saves = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => {
+        thread.closeStarted = true;
+        thread.closing = true;
+        state.threads = [];
+        state.activeThreadId = null;
+        return true;
+      },
+      invoke: async () => {
+        throw new Error('native bridge unavailable');
+      },
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => { saves += 1; },
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(saves).toBe(2);
+    expect(state.projects).toEqual([project]);
+    expect(state.threads).toEqual([thread]);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(thread).toMatchObject({
+      closeStarted: false,
+      closing: false,
+      persistentLive: false,
+      status: 'exited',
+      sidebarStatusKey: 'done',
+    });
+    expect(project.lastActiveThreadId).toBe(thread.id);
+    expect(project.closing).toBe(false);
+    expect(statuses.at(-1)).toEqual([
+      'failed to revoke project authority for Repo: Error: native bridge unavailable',
+      'error',
+    ]);
+  });
+
+  it('refuses project removal while a promptless Coven pane is being created', async () => {
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      covenLocalLaunchesInFlight: 1,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: null,
+      projects: [project],
+      threads: [],
+      openFiles: [],
+    };
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => true,
+      invoke: async () => {
+        revokeAttempts += 1;
+      },
+      setStatus: () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+    expect(revokeAttempts).toBe(0);
+    expect(state.projects).toEqual([project]);
   });
 
   it('refuses project removal while a Coven launch outcome is unresolved', async () => {

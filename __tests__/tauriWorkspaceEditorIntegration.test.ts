@@ -895,6 +895,7 @@ describe('native CodeMirror workspace editor surface', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => true,
       saveWorkspaceSoon: () => undefined,
       PsycheSessions: {
         invalidateCovenRequests: (discovery: unknown) => discovery,
@@ -1288,8 +1289,12 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(extractFunctionSource(mainJs, 'closeFileTab')).toMatch(
       /await guardDirtyFile\(file\)[\s\S]*if \(!canClose\) return false;[\s\S]*state\.openFiles =/
     );
-    expect(extractFunctionSource(mainJs, 'removeProject')).toMatch(
-      /await guardDirtyFiles\([\s\S]*if \(!canRemove\) return false;[\s\S]*state\.projects =/
+    const removeProjectSource = extractFunctionSource(mainJs, 'removeProject');
+    expect(removeProjectSource.indexOf('canRemove = await guardDirtyFiles(projectOpenFiles);')).toBeLessThan(
+      removeProjectSource.indexOf('if (!canRemove)'),
+    );
+    expect(removeProjectSource.indexOf('if (!canRemove)')).toBeLessThan(
+      removeProjectSource.indexOf('state.projects = state.projects.filter'),
     );
     expect(extractFunctionSource(mainJs, 'showTerminalView')).not.toMatch(
       /guardDirtyFile\(|clearFileFocusPresentation\(\)|fileViewEl\.hidden|terminalHost\.hidden/

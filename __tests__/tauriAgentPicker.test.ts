@@ -2030,6 +2030,7 @@ describe('Tauri agent picker', () => {
 
   it('persists an accepted session identity before creating its native attachment', async () => {
     const events: string[] = [];
+    const persistedRecoveryStates: boolean[] = [];
     const thread = {
       id: 'reserved-thread',
       projectId: 'project',
@@ -2039,6 +2040,7 @@ describe('Tauri agent picker', () => {
         launchKind: 'coven-recovery',
         projectRoot: '/repo',
         cwd: '/repo/worktree',
+        recoveryRequired: false,
       },
       status: 'starting',
       spawning: true,
@@ -2054,7 +2056,10 @@ describe('Tauri agent picker', () => {
       functionSource('acceptCovenLaunchReservation'),
       {
         state,
-        saveWorkspaceNow: async () => { events.push('persist'); },
+        saveWorkspaceNow: async () => {
+          events.push('persist');
+          persistedRecoveryStates.push(thread.launch.recoveryRequired === true);
+        },
         invoke: async (command: string, args: Record<string, unknown>) => {
           events.push(command);
           expect(args).toMatchObject({
@@ -2088,12 +2093,14 @@ describe('Tauri agent picker', () => {
     });
 
     expect(events).toEqual(['persist', 'native_session_create', 'attach', 'persist']);
+    expect(persistedRecoveryStates).toEqual([true, false]);
     expect(accepted).toBe(thread);
     expect(thread.launch).toMatchObject({
       launchKind: 'coven-attach',
       covenSessionId: 'session-1',
       promptDigest: 'sha256:abc',
       metricsProvider: 'codex',
+      recoveryRequired: false,
     });
   });
 
