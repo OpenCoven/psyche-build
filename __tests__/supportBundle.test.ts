@@ -1147,6 +1147,37 @@ describe('support bundle v1', () => {
     ]));
   });
 
+  it('retains captured array lengths when a later snapshot field exhausts the budget', async () => {
+    let recordGetterReads = 0;
+    const result: Record<string, unknown> = {};
+    Object.defineProperty(result, 'records', {
+      enumerable: true,
+      get() {
+        recordGetterReads += 1;
+        if (recordGetterReads > 1) return [];
+        return Array.from({ length: 1_024 }, (_, sequence) => ({
+          sequence,
+          at: '2026-01-01T00:00:00.000Z',
+          component: 'collector',
+          event: 'ready',
+        }));
+      },
+    });
+    result.lifecycle = Object.fromEntries(Array.from({ length: 12 }, (_, section) => [
+      `section-${section}`,
+      Array.from({ length: 1_000 }, () => 'ready'),
+    ]));
+
+    const bundle = await collectSupportBundle([{
+      name: 'partial-snapshot',
+      collect: async () => result,
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(recordGetterReads).toBe(1);
+    expect(bundle.truncation.recordsOmitted).toBe(1_024);
+  });
+
   it('accounts for payload arrays discarded during collector overflow preflight', async () => {
     const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
       sequence,

@@ -596,12 +596,34 @@ function safeCollectorArraySnapshotWithBudget(
   }
 }
 
+interface CollectorResultSnapshotAttempt {
+  readonly result?: SupportBundleInput;
+  readonly arrayLengths: ReadonlyMap<CollectorPayloadField, number>;
+}
+
 function snapshotCollectorResult(
   value: unknown,
   budget: NormalizationBudget,
-): SupportBundleInput | undefined {
-  const snapshot = snapshotBoundedInputValue(value, 0, new Set<object>(), budget);
-  return isRecord(snapshot) ? snapshot as SupportBundleInput : undefined;
+): CollectorResultSnapshotAttempt {
+  const arrayLengths = new Map<CollectorPayloadField, number>();
+  assertNormalizationDeadline(budget.deadlineAt);
+  if (budget.remaining <= 0 || !isRecord(value)) return { arrayLengths };
+  budget.remaining -= 1;
+  const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, budget.deadlineAt);
+  if (entries === undefined) return { arrayLengths };
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [key, childValue] of entries) {
+    if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField) && Array.isArray(childValue)) {
+      const length = childValue.length;
+      if (Number.isSafeInteger(length) && length >= 0) {
+        arrayLengths.set(key as CollectorPayloadField, length);
+      }
+    }
+    const childSnapshot = snapshotBoundedInputValue(childValue, 1, new Set<object>(), budget);
+    if (childSnapshot === undefined) return { arrayLengths };
+    snapshot[key] = childSnapshot;
+  }
+  return { result: snapshot as SupportBundleInput, arrayLengths };
 }
 
 function hasOnlyKeys(
@@ -2854,6 +2876,7 @@ export async function collectSupportBundle(
     name: string;
     result?: SupportBundleInput;
     error?: SupportCollectionError;
+    arrayLengths?: ReadonlyMap<CollectorPayloadField, number>;
   }> = [];
   type ActiveCollectorPayload = {
     readonly item: typeof collected[number];
@@ -3135,16 +3158,17 @@ export async function collectSupportBundle(
       processedCollectorItems.add(item.index);
       if (item.result !== undefined && item.result !== null) {
         try {
-          const resultSnapshot = snapshotCollectorResult(item.result, preflightBudget);
-          if (resultSnapshot !== undefined) {
-            item.result = resultSnapshot;
+          const snapshotAttempt = snapshotCollectorResult(item.result, preflightBudget);
+          item.arrayLengths = snapshotAttempt.arrayLengths;
+          if (snapshotAttempt.result !== undefined) {
+            item.result = snapshotAttempt.result;
             snapshottedCollectorItems.add(item.index);
           }
         } catch (error) {
           if (isNormalizationDeadlineError(error)) return recoveryBundle(normalizationError());
         }
         for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-          const length = safeCollectorArrayLength(item.result, field);
+          const length = item.arrayLengths?.get(field) ?? safeCollectorArrayLength(item.result, field);
           if (length === undefined) continue;
           accountCollectorArrayLoss(field, length);
           processedCollectorFields.add(`${item.index}:${field}`);
@@ -3176,11 +3200,12 @@ export async function collectSupportBundle(
         : undefined;
     let violation: 'invalid' | 'overflow' | undefined;
     try {
-      const resultSnapshot = snapshotCollectorResult(item.result, preflightBudget);
-      if (resultSnapshot === undefined) {
+      const snapshotAttempt = snapshotCollectorResult(item.result, preflightBudget);
+      item.arrayLengths = snapshotAttempt.arrayLengths;
+      if (snapshotAttempt.result === undefined) {
         violation = 'invalid';
       } else {
-        item.result = resultSnapshot;
+        item.result = snapshotAttempt.result;
         snapshottedCollectorItems.add(item.index);
         violation = collectorSnapshotViolation(item.result, maxRecords, maxReceipts, preflightBudget);
       }
@@ -3200,7 +3225,7 @@ export async function collectSupportBundle(
       });
       processedCollectorItems.add(item.index);
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const length = safeCollectorArrayLength(item.result, field);
+        const length = item.arrayLengths?.get(field) ?? safeCollectorArrayLength(item.result, field);
         if (length === undefined) continue;
         accountCollectorArrayLoss(field, length);
         processedCollectorFields.add(`${item.index}:${field}`);
@@ -3219,7 +3244,7 @@ export async function collectSupportBundle(
       });
       processedCollectorItems.add(item.index);
       for (const field of ['records', 'receipts', 'errors', 'terminalTail'] as const) {
-        const length = safeCollectorArrayLength(item.result, field);
+        const length = item.arrayLengths?.get(field) ?? safeCollectorArrayLength(item.result, field);
         if (length === undefined) continue;
         accountCollectorArrayLoss(field, length);
         processedCollectorFields.add(`${item.index}:${field}`);
