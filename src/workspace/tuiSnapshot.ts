@@ -224,10 +224,7 @@ export function createTuiWorkspaceProvider(
 
     const ritualsByProjectRoot = loadRituals
       ? await loadRitualPublications(
-        mergeProjectSeeds(
-          publishedProjects,
-          [...associatedCovenSessions.keys()],
-        ).map((project) => project.root),
+        publishedProjects.map((project) => project.root),
         loadRituals,
       )
       : undefined;

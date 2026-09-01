@@ -592,6 +592,45 @@ describe('TUI workspace snapshot adapter', () => {
       expect(JSON.stringify(snapshot)).not.toContain('"command"');
     });
 
+    it('does not read ritual metadata for unscoped Coven-only session roots', async () => {
+      const loadedRoots: string[] = [];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        covenSessionsByProject: () => new Map([
+          ['/repo/unrelated', [session({
+            id: 'unrelated-session',
+            projectRoot: '/repo/unrelated',
+          })]],
+        ]),
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/unrelated', []],
+        ]),
+        loadRituals: (projectRoot) => {
+          loadedRoots.push(projectRoot);
+          return {
+            state: 'available',
+            rituals: [{
+              id: 'private-project-ritual',
+              displayName: 'Private project ritual',
+              scope: 'project',
+            }],
+          };
+        },
+      });
+
+      const snapshot = await provider();
+
+      expect(loadedRoots).toEqual(['/repo/primary']);
+      expect(project(snapshot, '/repo/primary').rituals.state).toBe('available');
+      expect(project(snapshot, '/repo/unrelated').rituals).toEqual({
+        state: 'unavailable',
+        rituals: [],
+      });
+    });
+
     it('degrades a failing ritual read to an explicit unavailable listing', async () => {
       const provider = createTuiWorkspaceProvider({
         primaryProjectRoot: '/repo/primary',
