@@ -2822,6 +2822,7 @@ export async function collectSupportBundle(
   const maxReceipts = optionLimit(options.maxReceipts, SUPPORT_BUNDLE_LIMITS.maxReceipts);
   const collectionAuthorized = options.authority === CONTROL_PLANE_AUTHORITY;
   const boundedCollectors = collectors.slice(0, MAX_SUPPORT_COLLECTORS);
+  const invalidCollectorOutput = Symbol('collection_invalid_output');
   const controller = new AbortController();
   const collectionSignal = options.signal
     ? AbortSignal.any([controller.signal, options.signal])
@@ -2987,10 +2988,7 @@ export async function collectSupportBundle(
               throw timeoutError;
             }
             if (!isPromiseLike(collectedResult)) {
-              throw Object.assign(new Error('support bundle collectors must return a promise'), {
-                code: 'collection_invalid_output',
-                recoveryRequired: true,
-              });
+              throw invalidCollectorOutput;
             }
             const resolvedResult = await collectedResult;
             if (Date.now() >= deadlineAt) {
@@ -3003,8 +3001,7 @@ export async function collectSupportBundle(
         collected.push({ index, name: collectorName, result });
       } catch (error) {
         const timedOut = collectionSignal.aborted;
-        const invalidCollector = error instanceof Error
-          && (error as Error & { code?: unknown }).code === 'collection_invalid_output';
+        const invalidCollector = error === invalidCollectorOutput;
         collected.push({
           index,
           name: collectorName,

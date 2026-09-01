@@ -775,13 +775,20 @@ describe('support bundle v1', () => {
     expect(first.truncation.errorsOmitted).toBe(second.truncation.errorsOmitted);
   });
 
-  it('does not read unbounded collector error messages', async () => {
+  it('does not read untrusted collector error properties', async () => {
     let messageReads = 0;
+    let codeReads = 0;
     const error = new Error();
     Object.defineProperty(error, 'message', {
       get() {
         messageReads += 1;
         return 'x'.repeat(1_000_000);
+      },
+    });
+    Object.defineProperty(error, 'code', {
+      get() {
+        codeReads += 1;
+        throw new Error('collector error code must not be read');
       },
     });
 
@@ -791,6 +798,7 @@ describe('support bundle v1', () => {
     }]);
 
     expect(messageReads).toBe(0);
+    expect(codeReads).toBe(0);
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ collector: 'alpha', code: 'collection_failed' }),
     ]));
