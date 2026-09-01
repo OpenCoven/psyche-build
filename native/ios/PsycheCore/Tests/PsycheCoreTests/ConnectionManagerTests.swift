@@ -991,6 +991,14 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(paired.token, "issued-token")
         let persistedHosts = try await composition.pairedHostStore.hosts()
         XCTAssertEqual(persistedHosts, [paired])
+        let snapshotID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await manager.waitForEventDrain(after: 3)
+        XCTAssertEqual(composition.hostReadiness.state, .ready)
 
         let followUpPairing = pairingResult(code: "654321", on: manager)
         try await waitForPairRequest(on: fake, occurrence: 2)

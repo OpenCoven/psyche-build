@@ -277,8 +277,9 @@ final class PairedHostStoreTests: XCTestCase {
 
         XCTAssertEqual(publication, .committed)
         let selectedBeforeReadiness = try await store.selectedHost()
+        let persistedCandidate = try await store.host(withServerID: candidate.serverID)
         XCTAssertEqual(selectedBeforeReadiness, previouslyReady)
-        XCTAssertEqual(try await store.host(withServerID: candidate.serverID), candidate)
+        XCTAssertEqual(persistedCandidate, candidate)
 
         let generation = ConnectionGeneration(id: 1)
         let selection = await store.selectReadyHost(

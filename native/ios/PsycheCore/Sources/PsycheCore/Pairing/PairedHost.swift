@@ -541,8 +541,9 @@ public final class HostReadinessMachine {
         return try apply(.authenticationStarted)
     }
 
-    /// Persists the authoritative paired-host identity and selected-host
-    /// state BEFORE any workspace snapshot can be applied.
+    /// Persists the paired-host identity and credentials BEFORE any workspace
+    /// snapshot can be applied. Automatic reconnect selection remains on the
+    /// previously ready host until the first snapshot completes readiness.
     ///
     /// The paired-host store owns the transaction and revalidates flow
     /// authorization around its write and any compensation. A wrong host

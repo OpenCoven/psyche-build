@@ -53,6 +53,52 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.hostName)
     }
 
+    func testProductionStartNamesSelectedHostInsteadOfLexicalFirstHost() async throws {
+        let secureStore = InMemorySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let lexicalFirst = PairedHost(
+            serverID: "server-a",
+            serverName: "Lexical First",
+            endpoint: HostEndpoint(
+                host: "first.local",
+                port: 5151,
+                certificateFingerprint: String(repeating: "a", count: 64)
+            ),
+            clientID: "client-a",
+            token: "token-a"
+        )
+        let selected = PairedHost(
+            serverID: "server-z",
+            serverName: "Selected Host",
+            endpoint: HostEndpoint(
+                host: "selected.local",
+                port: 5252,
+                certificateFingerprint: String(repeating: "b", count: 64)
+            ),
+            clientID: "client-z",
+            token: "token-z"
+        )
+        try await pairedHostStore.save(lexicalFirst)
+        try await pairedHostStore.save(selected)
+        let transport = FakeTransport(scriptedMessages: [
+            .legacy(.welcome(WelcomePayload(
+                serverID: selected.serverID,
+                serverName: selected.serverName,
+                protocolVersion: 3,
+                projectName: nil
+            )))
+        ])
+        let composition = MobileAppComposition(
+            transport: transport,
+            pairedHostStore: pairedHostStore
+        )
+        let model = AppModel(productionComposition: composition)
+
+        await model.start()
+
+        XCTAssertEqual(model.hostName, selected.serverName)
+    }
+
     func testFixtureNameIsReadFromLaunchArguments() {
         XCTAssertEqual(
             AppModel.fixtureName(in: ["Psyche", "-uiFixture", "multiproject"]),

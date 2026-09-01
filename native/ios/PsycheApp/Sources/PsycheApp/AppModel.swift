@@ -29,22 +29,26 @@ final class AppModel: ObservableObject {
     let paneComposerSendAttempts = PaneComposerSendAttempts()
 
     private var hasStarted = false
+    private var hostContextRefreshGeneration: UInt64 = 0
+    private var subscriptions = Set<AnyCancellable>()
 
     var isFixture: Bool { fixtureName != nil }
 
     init(
         fixture: String? = nil,
         fixtureSendFails: Bool = false,
-        fixtureInspectionFails: Bool = false
+        fixtureInspectionFails: Bool = false,
+        productionComposition: MobileAppComposition? = nil
     ) {
         fixtureName = fixture
 
         guard let fixture else {
-            let composition = MobileAppComposition.production()
+            let composition = productionComposition ?? MobileAppComposition.production()
             self.composition = composition
             workspaceStore = composition.workspaceStore
             remoteActionStore = composition.remoteActionStore
             terminalRegistry = composition.terminalRegistry
+            bindHostContextUpdates()
             return
         }
 
@@ -67,7 +71,11 @@ final class AppModel: ObservableObject {
     static let fixtureHostName = "psyche-demo.local"
 
     func recordPairedHostName(_ name: String) {
-        hostName = name
+        guard composition != nil else {
+            hostName = name
+            return
+        }
+        Task { await refreshHostContext() }
     }
 
     /// Reads the launch arguments once so the decision cannot drift between
@@ -95,17 +103,54 @@ final class AppModel: ObservableObject {
         guard let composition else { return }
 
         await composition.start()
-
-        // Read the stored identity rather than waiting on a welcome: it is
-        // what auto-connect just used, and it lets Settings and VoiceOver name
-        // the host even when the connection has not come up.
-        if let paired = try? await composition.pairedHostStore.hosts().first {
-            hostName = paired.serverName
-        }
+        await refreshHostContext()
 
         let state = await composition.connectionManager.state
         if case let .failed(reason) = state {
             connectionError = reason
         }
+    }
+
+    private func bindHostContextUpdates() {
+        workspaceStore.objectWillChange
+            .sink { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.refreshHostContext()
+                }
+            }
+            .store(in: &subscriptions)
+    }
+
+    private func refreshHostContext() async {
+        guard let composition else { return }
+        hostContextRefreshGeneration &+= 1
+        let refreshGeneration = hostContextRefreshGeneration
+
+        let presentationHostID: String?
+        switch composition.hostReadiness.presentation {
+        case .live(let hostID, _), .stale(let hostID, _):
+            presentationHostID = hostID
+        case .noState:
+            presentationHostID = nil
+        }
+
+        let resolvedHostName: String?
+        if let presentationHostID {
+            resolvedHostName = try? await composition.pairedHostStore.host(
+                withServerID: presentationHostID
+            )?.serverName
+        } else {
+            let connectionState = await composition.connectionManager.state
+            if case .connected = connectionState,
+               let committedHost = composition.hostReadiness.committedHost {
+                resolvedHostName = committedHost.serverName
+            } else {
+                resolvedHostName = try? await composition.pairedHostStore
+                    .selectedHost()?.serverName
+            }
+        }
+
+        guard refreshGeneration == hostContextRefreshGeneration else { return }
+        hostName = resolvedHostName
     }
 }

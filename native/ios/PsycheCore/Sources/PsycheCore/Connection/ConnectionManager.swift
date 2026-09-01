@@ -1075,8 +1075,31 @@ public actor ConnectionManager {
         switch outcome {
         case .committed:
             // Readiness ends the flow itself once the workspace is live.
+            guard let readyHostID = await machine.committedHost?.serverID else {
+                clearReadinessFlow()
+                return ConnectionManagerError.readinessUnavailable(
+                    "Ready workspace has no committed host identity."
+                )
+            }
+            let selection = await pairedHostStore.selectReadyHost(
+                serverID: readyHostID,
+                for: generation
+            )
+            guard isActive(session: session, generation: generation) else { return nil }
             clearReadinessFlow()
-            return nil
+            switch selection {
+            case .committed:
+                return nil
+            case .notCommitted(let reason):
+                guard let reason else { return nil }
+                return ConnectionManagerError.hostIdentityNotCommitted(reason)
+            case .indeterminate(let reason):
+                let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
+                await MainActor.run {
+                    _ = try? machine.revoke(reason: error.localizedDescription)
+                }
+                return error
+            }
         case .notCommitted(let reason):
             clearReadinessFlow()
             return ConnectionManagerError.workspaceNotAccepted(reason)

@@ -161,7 +161,6 @@ public actor PairedHostStore {
             clientID: clientID,
             token: token
         )
-        state.selectedServerID = serverID
         let nextData = try JSONEncoder().encode(state)
 
         return generation.withValidity {
@@ -203,7 +202,6 @@ public actor PairedHostStore {
                 throw PairedHostStoreError.identityChanged(serverID: normalized.serverID)
             }
             state.records[normalized.serverID] = normalized
-            state.selectedServerID = normalized.serverID
             nextData = try JSONEncoder().encode(state)
             try Task.checkCancellation()
         } catch {
@@ -223,6 +221,48 @@ public actor PairedHostStore {
                 )
             }
         }
+    }
+
+    /// Advances automatic reconnect authority only after the connection's
+    /// first workspace snapshot has completed readiness. The generation lock
+    /// makes teardown and selection mutually exclusive at the write boundary.
+    func selectReadyHost(
+        serverID: String,
+        for generation: ConnectionGeneration
+    ) -> HostReadinessTransactionResult {
+        let previousData: Data?
+        let nextData: Data
+        do {
+            let snapshot = try stateSnapshot()
+            previousData = snapshot.currentData
+            var state = snapshot.state
+            guard state.records[serverID] != nil else {
+                return .notCommitted(
+                    reason: "The ready host has no persisted pairing record."
+                )
+            }
+            guard state.selectedServerID != serverID else {
+                return generation.withValidity { .committed }
+                    ?? .notCommitted(reason: nil)
+            }
+            state.selectedServerID = serverID
+            nextData = try JSONEncoder().encode(state)
+        } catch {
+            return .notCommitted(reason: error.localizedDescription)
+        }
+
+        return generation.withValidity {
+            do {
+                try secureStore.set(nextData, forKey: key)
+                return .committed
+            } catch {
+                return compensateWrite(
+                    to: previousData,
+                    after: error,
+                    operation: "Ready-host selection"
+                )
+            }
+        } ?? .notCommitted(reason: nil)
     }
 
     /// Tokens are reissued without the host identity changing, so this skips
