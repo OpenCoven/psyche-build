@@ -38,6 +38,20 @@ public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
 /// state it cannot place in order.
 @MainActor
 public final class WorkspaceStore: ObservableObject {
+    struct ReadyHostPublicationState {
+        let workspace: WorkspaceSnapshot?
+        let nowSections: [NowSection]
+        let isStale: Bool
+        let needsFullSnapshot: Bool
+        let lastConfirmedAt: Date?
+        let selectedProjectID: String?
+        let primaryPaneID: String?
+        let secondaryPaneID: String?
+        let drafts: [String: String]
+        let sequence: UInt64
+        let isAwaitingConnectionSnapshot: Bool
+    }
+
     @Published public private(set) var workspace: WorkspaceSnapshot?
     @Published public private(set) var nowSections: [NowSection] = []
     @Published public private(set) var isStale = true
@@ -162,11 +176,39 @@ public final class WorkspaceStore: ObservableObject {
     /// succeeds, so no UI turn can observe one without the other.
     func publishStagedReadinessSnapshot(
         _ candidate: HostReadinessSnapshotCandidate
-    ) {
+    ) -> ReadyHostPublicationState {
+        let previousState = ReadyHostPublicationState(
+            workspace: workspace,
+            nowSections: nowSections,
+            isStale: isStale,
+            needsFullSnapshot: needsFullSnapshot,
+            lastConfirmedAt: lastConfirmedAt,
+            selectedProjectID: selectedProjectID,
+            primaryPaneID: primaryPaneID,
+            secondaryPaneID: secondaryPaneID,
+            drafts: drafts,
+            sequence: sequence,
+            isAwaitingConnectionSnapshot: isAwaitingConnectionSnapshot
+        )
         applySnapshotUnscoped(
             workspace: candidate.workspace,
             sequence: candidate.sequence
         )
+        return previousState
+    }
+
+    func restoreReadyHostPublication(_ state: ReadyHostPublicationState) {
+        workspace = state.workspace
+        nowSections = state.nowSections
+        isStale = state.isStale
+        needsFullSnapshot = state.needsFullSnapshot
+        lastConfirmedAt = state.lastConfirmedAt
+        selectedProjectID = state.selectedProjectID
+        primaryPaneID = state.primaryPaneID
+        secondaryPaneID = state.secondaryPaneID
+        drafts = state.drafts
+        sequence = state.sequence
+        isAwaitingConnectionSnapshot = state.isAwaitingConnectionSnapshot
     }
 
     private func applySnapshotUnscoped(

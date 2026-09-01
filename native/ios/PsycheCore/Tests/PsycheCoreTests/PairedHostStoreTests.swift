@@ -800,6 +800,37 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(restartedSelection, previouslyReady)
     }
 
+    func testIndeterminateCompletionReadRelinquishesFinalizedProcessOwner() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.failNextRead(.compensationFailed)
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+
+        guard case .indeterminate = completion else {
+            return XCTFail("Completion read failure must be indeterminate")
+        }
+        XCTAssertEqual(selected, previouslyReady)
+    }
+
     func testSuccessorCompensationRestoresFinalizedInProcessAuthority() async throws {
         let secureStore = FaultingTransactionSecureStore()
         let store = PairedHostStore(secureStore: secureStore)
@@ -1318,10 +1349,17 @@ private final class FaultingTransactionSecureStore: SecureStore, @unchecked Send
     private let lock = NSLock()
     private var storage: [String: Data] = [:]
     private var writeBehaviors: [WriteBehavior] = []
+    private var nextReadError: FaultingTransactionSecureStoreError?
 
     func enqueue(_ behavior: WriteBehavior) {
         lock.withLock {
             writeBehaviors.append(behavior)
+        }
+    }
+
+    func failNextRead(_ error: FaultingTransactionSecureStoreError) {
+        lock.withLock {
+            nextReadError = error
         }
     }
 
@@ -1337,7 +1375,13 @@ private final class FaultingTransactionSecureStore: SecureStore, @unchecked Send
     }
 
     func data(forKey key: String) throws -> Data? {
-        lock.withLock { storage[key] }
+        try lock.withLock {
+            if let nextReadError {
+                self.nextReadError = nil
+                throw nextReadError
+            }
+            return storage[key]
+        }
     }
 
     func set(_ data: Data, forKey key: String) throws {
@@ -1867,6 +1911,49 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(recorder.calls, ["validate:7"])
         let presentation = await machine.presentation
         XCTAssertEqual(presentation, .live(hostID: "old-host", confirmedAt: fixedDate))
+    }
+
+    func testIndeterminateCompletionRollbackSurvivesConcurrentConnectionLoss() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let machine = makeMachine(recorder: recorder)
+        let oldHost = makeHost(serverID: "old-host", clientID: "client-old")
+        try await driveToReady(
+            machine,
+            recorder: recorder,
+            host: oldHost,
+            sequence: 5
+        )
+        let flow = try machine.beginPairing(expectedServerID: "new-host")
+        _ = try machine.markAuthenticated(for: flow)
+        try await machine.commitHostIdentity(
+            makeHost(serverID: "new-host"),
+            for: flow
+        )
+        try await machine.synchronizeWorkspace(
+            makeCandidate(sequence: 8),
+            for: flow
+        )
+        let finalizationID = try machine.finalizeReadyHostSelection(
+            serverID: "new-host"
+        )
+
+        _ = try machine.noteConnectionLost()
+        let restored = try machine.rollbackReadyHostSelectionFinalization(
+            finalizationID,
+            reason: "Completion outcome is indeterminate."
+        )
+
+        XCTAssertTrue(restored)
+        XCTAssertEqual(machine.state, .revoked)
+        XCTAssertEqual(machine.committedHost, oldHost)
+        XCTAssertEqual(
+            machine.presentation,
+            .stale(hostID: "old-host", confirmedAt: fixedDate)
+        )
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
+        XCTAssertTrue(recorder.workspaceStore.isStale)
+        XCTAssertEqual(machine.lastFailure?.boundary, .secureStore)
+        XCTAssertEqual(machine.lastFailure?.recovery, .indeterminate)
     }
 
     func testASecureStoreFailureNeverLeavesTheNewWorkspaceApplied() async throws {
