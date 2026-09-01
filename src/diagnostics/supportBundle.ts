@@ -615,13 +615,21 @@ function snapshotCollectorResult(
   for (const [key, childValue] of entries) {
     if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField) && Array.isArray(childValue)) {
       const length = childValue.length;
-      if (Number.isSafeInteger(length) && length >= 0) {
-        arrayLengths.set(key as CollectorPayloadField, length);
-      }
+      if (!Number.isSafeInteger(length) || length < 0) return { arrayLengths };
+      arrayLengths.set(key as CollectorPayloadField, length);
     }
   }
   for (const [key, childValue] of entries) {
-    const childSnapshot = snapshotBoundedInputValue(childValue, 1, new Set<object>(), budget);
+    const payloadField = COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField)
+      ? key as CollectorPayloadField
+      : undefined;
+    const childSnapshot = snapshotBoundedInputValue(
+      childValue,
+      1,
+      new Set<object>(),
+      budget,
+      payloadField === undefined ? undefined : arrayLengths.get(payloadField),
+    );
     if (childSnapshot === undefined) return { arrayLengths };
     snapshot[key] = childSnapshot;
   }
@@ -678,6 +686,7 @@ function snapshotBoundedInputValue(
   depth = 0,
   seen = new Set<object>(),
   budget: NormalizationBudget = { remaining: MAX_ATTRIBUTE_NODES },
+  capturedArrayLength?: number,
 ): unknown | undefined {
   assertNormalizationDeadline(budget.deadlineAt);
   if (depth > SUPPORT_BUNDLE_LIMITS.maxAttributeDepth || budget.remaining <= 0) return undefined;
@@ -689,7 +698,7 @@ function snapshotBoundedInputValue(
   seen.add(value);
   try {
     if (Array.isArray(value)) {
-      const length = value.length;
+      const length = capturedArrayLength ?? value.length;
       if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ATTRIBUTE_SCAN_KEYS) return undefined;
       const snapshot: unknown[] = [];
       for (let index = 0; index < length; index += 1) {

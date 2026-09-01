@@ -1179,6 +1179,39 @@ describe('support bundle v1', () => {
     expect(bundle.truncation.recordsOmitted).toBe(1_024);
   });
 
+  it('uses one captured top-level array length for snapshot and accounting', async () => {
+    let lengthReads = 0;
+    let elementReads = 0;
+    const records = new Proxy(
+      Array.from({ length: 1_024 }, (_, sequence) => ({
+        sequence,
+        at: '2026-01-01T00:00:00.000Z',
+        component: 'collector',
+        event: 'ready',
+      })),
+      {
+        get(target, property, receiver) {
+          if (property === 'length') {
+            lengthReads += 1;
+            return lengthReads === 1 ? 0 : Reflect.get(target, property, receiver);
+          }
+          if (typeof property === 'string' && /^\d+$/.test(property)) elementReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+
+    const bundle = await collectSupportBundle([{
+      name: 'stateful-array-length',
+      collect: async () => ({ records }),
+    }]);
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(lengthReads).toBe(1);
+    expect(elementReads).toBe(0);
+    expect(bundle.truncation.recordsOmitted).toBe(0);
+  });
+
   it('accounts for payload arrays discarded during collector overflow preflight', async () => {
     const records = Array.from({ length: SUPPORT_BUNDLE_LIMITS.maxRecords + 1 }, (_, sequence) => ({
       sequence,
