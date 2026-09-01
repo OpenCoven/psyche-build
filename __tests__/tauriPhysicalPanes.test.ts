@@ -1479,7 +1479,7 @@ describe('Tauri physical terminal panes', () => {
       createThread.indexOf('refreshSidebar()'),
     );
     expect(functionSource('removeProject')).toMatch(
-      /threadIds\.map\(function \(tid\) \{[\s\S]*var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
+      /threadIds\.map\(function \(tid\) \{[\s\S]*var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*protectCovenRecovery: true,\s*\}\)/,
     );
   });
 
@@ -2831,10 +2831,127 @@ describe('Tauri physical terminal panes', () => {
     expect(closeOptions).toEqual([{
       focus: false,
       preserveTerminalFocus: true,
+      protectCovenRecovery: true,
     }]);
     expect(nativeProjectCloseCalls).toEqual([{ root: '/repo/removed' }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('refuses project removal while a Coven launch outcome is unresolved', async () => {
+    const project = { id: 'project', root: '/repo', name: 'Repo' };
+    const recovery = {
+      id: 'recovery',
+      projectId: project.id,
+      worktreePath: '/repo',
+      launch: { launchKind: 'coven-recovery', recoveryRequired: false },
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: recovery.id,
+      activeFileId: null,
+      projects: [project],
+      threads: [recovery],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    let closeAttempts = 0;
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => { closeAttempts += 1; return true; },
+      invoke: async () => { revokeAttempts += 1; return true; },
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(closeAttempts).toBe(0);
+    expect(revokeAttempts).toBe(0);
+    expect(state.projects).toEqual([project]);
+    expect(state.threads).toEqual([recovery]);
+    expect(statuses.at(-1)).toEqual([
+      'Repo cannot be closed while a Coven launch outcome is unresolved; inspect Coven before closing',
+      'error',
+    ]);
+  });
+
+  it('retains an accepted unattached session when protected close races acceptance', async () => {
+    const thread = {
+      id: 'accepted-thread',
+      projectId: 'project',
+      worktreePath: '/repo',
+      name: 'Codex CLI',
+      kind: 'coven-attach',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: false,
+      },
+      persistentLive: false,
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      metricsGeneration: 0,
+      covenLaunchAcceptanceInFlight: Promise.resolve(),
+    };
+    const state = {
+      activeThreadId: 'other',
+      threads: [thread],
+    };
+    let saves = 0;
+    const statuses: Array<[string, string]> = [];
+    const closeThread = compileFunction<(
+      id: string,
+      options: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('closeThread'), {
+      findThread: () => thread,
+      state,
+      suspendGitRequests: () => undefined,
+      stageGitSurface: () => undefined,
+      markActiveSurface: () => undefined,
+      isPersistentThread: () => false,
+      noteStatusActivity: () => undefined,
+      forgetThreadInSets: () => undefined,
+      detachThreadPane: () => null,
+      stopThreadPty: async () => true,
+      retainFileFocusAfterThreadRemoval: () => false,
+      syncThreadPaneMetadata: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      saveWorkspaceNow: async () => { saves += 1; return true; },
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+    });
+
+    await expect(closeThread(thread.id, {
+      protectCovenRecovery: true,
+    })).resolves.toBe(false);
+
+    expect(state.threads).toEqual([thread]);
+    expect(thread.closeStarted).toBe(false);
+    expect(thread.closing).toBe(false);
+    expect(thread.launch.recoveryRequired).toBe(true);
+    expect(saves).toBe(1);
+    expect(statuses.at(-1)?.[0]).toContain('inspect Coven before closing');
   });
 
   it('refreshes the siderail after removing an inactive project with no local threads', async () => {

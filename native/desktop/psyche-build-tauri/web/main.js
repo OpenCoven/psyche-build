@@ -5587,6 +5587,47 @@
     if (covenLaunchAcceptanceInFlight) {
       await covenLaunchAcceptanceInFlight;
     }
+    var acceptedWithoutAttachment = thread.launch &&
+      thread.launch.launchKind === "coven-attach" &&
+      thread.persistentLive !== true;
+    if (
+      options &&
+      options.protectCovenRecovery &&
+      thread.launch &&
+      (thread.launch.launchKind === "coven-recovery" ||
+        thread.launch.recoveryRequired === true ||
+        acceptedWithoutAttachment)
+    ) {
+      if (acceptedWithoutAttachment) {
+        thread.launch.recoveryRequired = true;
+        thread.status = "failed";
+        thread.spawning = false;
+        thread.finishedAt = Date.now();
+        thread.sidebarStatusKey = "error";
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        try {
+          await saveWorkspaceNow();
+        } catch (error) {
+          setStatus(
+            thread.name +
+              " cannot be closed and its Coven recovery state is not durable; " +
+              "inspect Coven before closing: " + String(error),
+            "error"
+          );
+        }
+      }
+      thread.closeStarted = false;
+      thread.closing = false;
+      setStatus(
+        thread.name +
+          " cannot be closed while its Coven launch outcome requires recovery; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
     if (isPersistentThread(thread) && !(options && options.skipNativeSessionStop)) {
       try {
         await invoke("native_session_stop", { id: thread.id });
@@ -8732,6 +8773,24 @@
   async function removeProject(id) {
     var project = findProject(id);
     if (!project) return false;
+    function hasUnresolvedCovenLaunch() {
+      return state.threads.some(function (thread) {
+        return thread.projectId === id
+          && thread.launch
+          && (thread.covenLaunchAcceptanceInFlight ||
+            thread.launch.launchKind === "coven-recovery" ||
+            thread.launch.recoveryRequired === true);
+      });
+    }
+    if (hasUnresolvedCovenLaunch()) {
+      setStatus(
+        project.name +
+          " cannot be closed while a Coven launch outcome is unresolved; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
     var projectOpenFiles = state.openFiles.filter(function (file) {
       return file.projectId === id;
     });
@@ -8744,6 +8803,23 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
+    if (project.root) {
+      try {
+        await invoke("native_project_close", { root: project.root });
+      } catch (error) {
+        setStatus("failed to revoke project authority for " + project.name + ": " + String(error), "error");
+        return false;
+      }
+    }
+    if (hasUnresolvedCovenLaunch()) {
+      setStatus(
+        project.name +
+          " cannot be closed because its Coven launch outcome became unresolved; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
     var projectFilesPanes = [];
     if (typeof filesPanes !== "undefined") {
       filesPanes.forEach(function (filesPane) {
@@ -8760,17 +8836,10 @@
       return closeThread(tid, {
         focus: false,
         preserveTerminalFocus: preserveTerminalFocus,
+        protectCovenRecovery: true,
       });
     }));
     if (closeResults.some(function (closed) { return closed === false; })) return false;
-    if (project.root) {
-      try {
-        await invoke("native_project_close", { root: project.root });
-      } catch (error) {
-        setStatus("failed to revoke project authority for " + project.name + ": " + String(error), "error");
-        return false;
-      }
-    }
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
