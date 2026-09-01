@@ -95,6 +95,11 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+private enum ReadyHostSelectionPublication {
+    case finalized(UUID)
+    case superseded
+}
+
 public enum PairingError: Error, Sendable, Equatable, LocalizedError {
     case notConnected
     case alreadyInProgress
@@ -1121,17 +1126,23 @@ public actor ConnectionManager {
                     return nil
                 }
                 await readyHostSelectionFinalizationStart()
+                let publication: ReadyHostSelectionPublication?
                 do {
-                    let finalized = try await MainActor.run {
+                    publication = try await MainActor.run {
                         try generation.withValidity {
-                            try authorization.finalize {
-                                try machine.finalizeReadyHostSelection(
+                            var finalizationID: UUID?
+                            let finalized = try authorization.finalize {
+                                finalizationID = try machine.finalizeReadyHostSelection(
                                     serverID: readyHostID
                                 )
                             }
+                            guard finalized, let finalizationID else {
+                                return .superseded
+                            }
+                            return .finalized(finalizationID)
                         }
                     }
-                    guard let finalized else {
+                    guard let publication else {
                         if let transaction = selection.transaction {
                             await compensateRetiredReadyHostSelection(
                                 transaction,
@@ -1146,7 +1157,7 @@ public actor ConnectionManager {
                         }
                         return nil
                     }
-                    guard finalized else {
+                    guard case .finalized = publication else {
                         return ConnectionManagerError.hostIdentityNotCommitted(
                             "Ready-host selection was superseded before workspace publication."
                         )
@@ -1169,17 +1180,47 @@ public actor ConnectionManager {
                     }
                     return error
                 }
+                guard case .finalized(let finalizationID) = publication else {
+                    return ConnectionManagerError.hostIdentityNotCommitted(
+                        "Ready-host selection was superseded before workspace publication."
+                    )
+                }
                 if let transaction = selection.transaction {
-                    _ = await pairedHostStore.completeReadyHostSelection(
+                    let completion = await pairedHostStore.completeReadyHostSelection(
                         transaction,
                         authorizedBy: authorization,
                         selectedBy: generation
                     )
+                    switch completion {
+                    case .committed:
+                        await MainActor.run {
+                            machine.acknowledgeReadyHostSelectionFinalization(
+                                finalizationID
+                            )
+                        }
+                    case .notCommitted:
+                        break
+                    case .indeterminate(let reason):
+                        let error = ConnectionManagerError
+                            .hostIdentityIndeterminate(reason)
+                        await MainActor.run {
+                            _ = try? machine.rollbackReadyHostSelectionFinalization(
+                                finalizationID,
+                                reason: error.localizedDescription
+                            )
+                        }
+                        return error
+                    }
                 } else {
                     await pairedHostStore.acknowledgeReadyHostSelection(
                         authorizedBy: authorization,
                         selectedBy: generation
                     )
+                    await MainActor.run {
+                        machine.acknowledgeReadyHostSelectionFinalization(
+                            finalizationID
+                        )
+                    }
                 }
                 return nil
             case .notCommitted(let reason):

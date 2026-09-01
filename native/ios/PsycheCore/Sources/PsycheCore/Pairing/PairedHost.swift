@@ -456,6 +456,19 @@ public final class HostReadinessMachine: ObservableObject {
     private var activeAuthorization: HostReadinessFlowAuthorization?
     private var provisionalHost: PairedHost?
     private var provisionalWorkspace: HostReadinessSnapshotCandidate?
+    private var readyHostSelectionFinalization: ReadyHostSelectionFinalization?
+
+    private struct ReadyHostSelectionFinalization {
+        let id: UUID
+        let candidateServerID: String
+        let previousState: HostReadinessState
+        let previousPresentation: HostWorkspacePresentation
+        let previousCommittedHost: PairedHost?
+        let previousFailure: HostReadinessFailure?
+        let previousProvisionalHost: PairedHost
+        let previousProvisionalWorkspace: HostReadinessSnapshotCandidate
+        let previousWorkspaceState: WorkspaceStore.ReadyHostPublicationState
+    }
 
     var authenticatedHost: PairedHost? {
         provisionalHost ?? committedHost
@@ -508,6 +521,7 @@ public final class HostReadinessMachine: ObservableObject {
                 actual: host.serverID
             )
         }
+        readyHostSelectionFinalization = nil
         committedHost = host
     }
 
@@ -516,7 +530,9 @@ public final class HostReadinessMachine: ObservableObject {
     @discardableResult
     public func beginDiscovery() throws -> HostReadinessState {
         try requireIdle()
-        return try apply(.discoveryStarted)
+        let destination = try apply(.discoveryStarted)
+        readyHostSelectionFinalization = nil
+        return destination
     }
 
     /// Begins a pairing flow toward a (possibly not yet identified) host.
@@ -688,11 +704,13 @@ public final class HostReadinessMachine: ObservableObject {
     /// Publishes the staged workspace and promotes its provisional host after
     /// reconnect selection is durable. The readiness flow is already closed,
     /// so teardown can safely discard the pending pair before this call.
-    func finalizeReadyHostSelection(serverID: String) throws {
+    @discardableResult
+    func finalizeReadyHostSelection(serverID: String) throws -> UUID {
         guard activeFlow == nil,
               state == .synchronizing,
               let provisionalHost,
-              let provisionalWorkspace else {
+              let provisionalWorkspace,
+              readyHostSelectionFinalization == nil else {
             throw HostReadinessError.supersededFlow
         }
         guard provisionalHost.serverID == serverID else {
@@ -701,8 +719,19 @@ public final class HostReadinessMachine: ObservableObject {
                 actual: serverID
             )
         }
-        workspaceStore.publishStagedReadinessSnapshot(provisionalWorkspace)
-        _ = try apply(.workspaceAccepted)
+        let previousState = state
+        let previousPresentation = presentation
+        let previousCommittedHost = committedHost
+        let previousFailure = lastFailure
+        let previousWorkspaceState = workspaceStore.publishStagedReadinessSnapshot(
+            provisionalWorkspace
+        )
+        do {
+            _ = try apply(.workspaceAccepted)
+        } catch {
+            workspaceStore.restoreReadyHostPublication(previousWorkspaceState)
+            throw error
+        }
         committedHost = provisionalHost
         self.provisionalHost = nil
         self.provisionalWorkspace = nil
@@ -710,6 +739,57 @@ public final class HostReadinessMachine: ObservableObject {
             hostID: serverID,
             confirmedAt: now()
         )
+        let finalization = ReadyHostSelectionFinalization(
+            id: UUID(),
+            candidateServerID: serverID,
+            previousState: previousState,
+            previousPresentation: previousPresentation,
+            previousCommittedHost: previousCommittedHost,
+            previousFailure: previousFailure,
+            previousProvisionalHost: provisionalHost,
+            previousProvisionalWorkspace: provisionalWorkspace,
+            previousWorkspaceState: previousWorkspaceState
+        )
+        readyHostSelectionFinalization = finalization
+        return finalization.id
+    }
+
+    func acknowledgeReadyHostSelectionFinalization(_ id: UUID) {
+        guard readyHostSelectionFinalization?.id == id else { return }
+        readyHostSelectionFinalization = nil
+    }
+
+    @discardableResult
+    func rollbackReadyHostSelectionFinalization(
+        _ id: UUID,
+        reason: String
+    ) throws -> Bool {
+        let presentationHostID: String?
+        switch presentation {
+        case .live(let hostID, _), .stale(let hostID, _):
+            presentationHostID = hostID
+        case .noState:
+            presentationHostID = nil
+        }
+        guard let finalization = readyHostSelectionFinalization,
+              finalization.id == id,
+              committedHost?.serverID == finalization.candidateServerID,
+              let presentationHostID,
+              presentationHostID == finalization.candidateServerID else {
+            return false
+        }
+        readyHostSelectionFinalization = nil
+        workspaceStore.restoreReadyHostPublication(
+            finalization.previousWorkspaceState
+        )
+        state = finalization.previousState
+        presentation = finalization.previousPresentation
+        committedHost = finalization.previousCommittedHost
+        lastFailure = finalization.previousFailure
+        provisionalHost = finalization.previousProvisionalHost
+        provisionalWorkspace = finalization.previousProvisionalWorkspace
+        recordIndeterminateFailure(.secureStore, reason: reason)
+        return true
     }
 
     /// The active flow failed at one boundary. Rolls the machine back
@@ -796,6 +876,7 @@ public final class HostReadinessMachine: ObservableObject {
     private func beginFlow(_ kind: HostReadinessFlow.Kind, event: HostReadinessEvent) throws -> HostReadinessFlow {
         try requireIdle()
         _ = try apply(event)
+        readyHostSelectionFinalization = nil
         relabelForFlowStart()
         lastFailure = nil
         let flow = HostReadinessFlow(id: UUID(), kind: kind)

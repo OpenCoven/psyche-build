@@ -1048,8 +1048,11 @@ final class ConnectionManagerTests: XCTestCase {
 
         XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
         XCTAssertTrue(composition.workspaceStore.isStale)
-        await composition.manager.disconnect()
+        let disconnecting = Task {
+            await composition.manager.disconnect()
+        }
         secureStore.releaseRead()
+        await disconnecting.value
         for _ in 0..<100 {
             await Task.yield()
         }
@@ -1154,6 +1157,91 @@ final class ConnectionManagerTests: XCTestCase {
         if case .live(let hostID, _) = composition.hostReadiness.presentation {
             XCTFail("Indeterminate selection must not leave \(hostID) live")
         }
+    }
+
+    func testIndeterminateSelectionCompletionRestoresPreviousAuthorityExactly() async throws {
+        let secureStore = FailableWriteSecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        let expectedCommittedHost = composition.hostReadiness.committedHost
+        let expectedSelectedHost = try await composition.pairedHostStore.selectedHost()
+        await composition.manager.disconnect()
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        composition.workspaceStore.selectedProjectID = "host-a-project"
+        composition.workspaceStore.primaryPaneID = "host-a-primary"
+        composition.workspaceStore.secondaryPaneID = "host-a-secondary"
+        composition.workspaceStore.setDraft("host-a-draft", forPane: "host-a-primary")
+        let expectedWorkspace = composition.workspaceStore.workspace
+        let expectedSequence = composition.workspaceStore.sequence
+        let expectedConfirmedAt = composition.workspaceStore.lastConfirmedAt
+        let expectedPresentation = composition.hostReadiness.presentation
+        let expectedSelectedProjectID = composition.workspaceStore.selectedProjectID
+        let expectedPrimaryPaneID = composition.workspaceStore.primaryPaneID
+        let expectedSecondaryPaneID = composition.workspaceStore.secondaryPaneID
+        let expectedDrafts = composition.workspaceStore.drafts
+        secureStore.setBehavior(.succeedOnceThenFailCompletionCompensationAndReadback)
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        _ = await waitForFailure(in: composition.manager)
+
+        XCTAssertEqual(composition.workspaceStore.workspace, expectedWorkspace)
+        XCTAssertEqual(composition.workspaceStore.sequence, expectedSequence)
+        XCTAssertEqual(composition.workspaceStore.lastConfirmedAt, expectedConfirmedAt)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        XCTAssertTrue(composition.workspaceStore.needsFullSnapshot)
+        XCTAssertEqual(
+            composition.workspaceStore.selectedProjectID,
+            expectedSelectedProjectID
+        )
+        XCTAssertEqual(
+            composition.workspaceStore.primaryPaneID,
+            expectedPrimaryPaneID
+        )
+        XCTAssertEqual(
+            composition.workspaceStore.secondaryPaneID,
+            expectedSecondaryPaneID
+        )
+        XCTAssertEqual(composition.workspaceStore.drafts, expectedDrafts)
+        XCTAssertEqual(composition.hostReadiness.presentation, expectedPresentation)
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        XCTAssertEqual(
+            composition.hostReadiness.lastFailure?.recovery,
+            .indeterminate
+        )
+        XCTAssertEqual(
+            composition.hostReadiness.committedHost,
+            expectedCommittedHost
+        )
+        let selected = try await composition.pairedHostStore.selectedHost()
+        XCTAssertEqual(selected, expectedSelectedHost)
     }
 
     func testGenerationRetirementAfterSelectionCancelsPendingAuthority() async throws {
@@ -3610,6 +3698,7 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
         case failWriteAndCompensation
         case mutateThenFailWrite
         case mutateThenFailWriteAndCompensation
+        case succeedOnceThenFailCompletionCompensationAndReadback
     }
 
     enum StoreError: Error {
@@ -3620,16 +3709,31 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
     private var storage: [String: Data] = [:]
     private var behavior: Behavior = .succeed
     private var hasRefusedWrite = false
+    private var successfulWritesRemaining = 0
+    private var failedWrites = 0
+    private var shouldFailReadback = false
 
     func setBehavior(_ behavior: Behavior) {
         lock.withLock {
             self.behavior = behavior
             hasRefusedWrite = false
+            successfulWritesRemaining =
+                behavior == .succeedOnceThenFailCompletionCompensationAndReadback
+                ? 1
+                : 0
+            failedWrites = 0
+            shouldFailReadback = false
         }
     }
 
     func data(forKey key: String) throws -> Data? {
-        lock.withLock { storage[key] }
+        try lock.withLock {
+            if shouldFailReadback {
+                shouldFailReadback = false
+                throw StoreError.denied
+            }
+            return storage[key]
+        }
     }
 
     func set(_ data: Data, forKey key: String) throws {
@@ -3660,6 +3764,15 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
                     storage[key] = data
                 }
                 throw StoreError.denied
+            case .succeedOnceThenFailCompletionCompensationAndReadback:
+                guard successfulWritesRemaining == 0 else {
+                    successfulWritesRemaining -= 1
+                    storage[key] = data
+                    return
+                }
+                failedWrites += 1
+                shouldFailReadback = failedWrites >= 2
+                throw StoreError.denied
             }
         }
     }
@@ -3670,6 +3783,9 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
                 throw StoreError.denied
             }
             if case .mutateThenFailWriteAndCompensation = behavior {
+                throw StoreError.denied
+            }
+            if case .succeedOnceThenFailCompletionCompensationAndReadback = behavior {
                 throw StoreError.denied
             }
             storage.removeValue(forKey: key)
