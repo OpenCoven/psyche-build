@@ -140,7 +140,7 @@ public actor PairedHostStore {
             return .notCommitted(reason: error.localizedDescription)
         }
 
-        return authorization.withAuthorization {
+        return authorization.publishHost(host) {
             do {
                 try Task.checkCancellation()
                 try secureStore.set(nextData, forKey: key)
@@ -151,7 +151,7 @@ public actor PairedHostStore {
                     after: error
                 )
             }
-        } ?? .notCommitted(reason: nil)
+        }
     }
 
     /// Tokens are reissued without the host identity changing, so this skips

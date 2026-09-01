@@ -325,13 +325,23 @@ public enum HostReadinessTransactionResult: Equatable, Sendable {
     case indeterminate(reason: String)
 }
 
+enum HostReadinessHostPublicationOutcome: Equatable, Sendable {
+    case pending
+    case committed(PairedHost)
+    case notCommitted
+    case indeterminate(reason: String)
+}
+
 final class HostReadinessFlowAuthorization: @unchecked Sendable {
     private let lock = NSLock()
     private var isAuthorized = true
+    private var hostPublication: HostReadinessHostPublicationOutcome = .pending
 
-    func revoke() {
+    @discardableResult
+    func revoke() -> HostReadinessHostPublicationOutcome {
         lock.withLock {
             isAuthorized = false
+            return hostPublication
         }
     }
 
@@ -339,6 +349,30 @@ final class HostReadinessFlowAuthorization: @unchecked Sendable {
         lock.withLock {
             guard isAuthorized else { return nil }
             return operation()
+        }
+    }
+
+    func publishHost(
+        _ host: PairedHost,
+        operation: () -> HostReadinessTransactionResult
+    ) -> HostReadinessTransactionResult {
+        lock.withLock {
+            guard isAuthorized else {
+                return .notCommitted(reason: nil)
+            }
+            let result = operation()
+            // Record the durable outcome before releasing the same lock that
+            // revocation acquires. A waiter can therefore reconcile machine
+            // authority before it discards this flow.
+            switch result {
+            case .committed:
+                hostPublication = .committed(host)
+            case .notCommitted:
+                hostPublication = .notCommitted
+            case .indeterminate(let reason):
+                hostPublication = .indeterminate(reason: reason)
+            }
+            return result
         }
     }
 }
@@ -594,7 +628,12 @@ public final class HostReadinessMachine {
     /// committed identity survives on disk for the explicit re-pair path.
     @discardableResult
     public func revoke(reason: String? = nil) throws -> HostReadinessState {
-        activeAuthorization?.revoke()
+        if let flow = activeFlow, let authorization = activeAuthorization {
+            let publication = authorization.revoke()
+            guard try reconcileHostPublication(publication, for: flow) else {
+                return state
+            }
+        }
         let from = state
         let destination = try apply(.revoked)
         relabelForFlowStart()
@@ -670,6 +709,26 @@ public final class HostReadinessMachine {
         }
     }
 
+    private func reconcileHostPublication(
+        _ publication: HostReadinessHostPublicationOutcome,
+        for flow: HostReadinessFlow
+    ) throws -> Bool {
+        try requireActive(flow)
+        switch publication {
+        case .pending, .notCommitted:
+            return true
+        case .committed(let host):
+            committedHost = host
+            if state == .authenticating {
+                _ = try apply(.hostCommitSucceeded)
+            }
+            return true
+        case .indeterminate(let reason):
+            failIndeterminate(.secureStore, reason: reason)
+            return false
+        }
+    }
+
     private func apply(_ event: HostReadinessEvent) throws -> HostReadinessState {
         guard let destination = HostReadinessTransitions.destination(
             for: event,
@@ -693,6 +752,12 @@ public final class HostReadinessMachine {
         guard activeFlow == flow else {
             throw HostReadinessError.supersededFlow
         }
+        if let authorization = activeAuthorization {
+            let publication = authorization.revoke()
+            guard try reconcileHostPublication(publication, for: flow) else {
+                return state
+            }
+        }
         let from = state
         guard let destination = HostReadinessTransitions.destination(
             forFailure: boundary,
@@ -710,7 +775,6 @@ public final class HostReadinessMachine {
             stateAtFailure: from,
             recovery: recovery
         )
-        activeAuthorization?.revoke()
         activeFlow = nil
         activeAuthorization = nil
         state = destination

@@ -412,6 +412,61 @@ private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
     }
 }
 
+private final class SuccessfulWriteBoundarySecureStore: SecureStore, @unchecked Sendable {
+    private let condition = NSCondition()
+    private let writeBeganSignal = BoundedAsyncSignal()
+    private var storage: [String: Data] = [:]
+    private var shouldBlockNextWrite = false
+    private var writeReleased = false
+
+    func blockNextWrite() {
+        writeBeganSignal.reset()
+        condition.withLock {
+            shouldBlockNextWrite = true
+            writeReleased = false
+        }
+    }
+
+    func waitUntilWriteBegins(timeout: Duration = .milliseconds(250)) async throws {
+        try await writeBeganSignal.wait(
+            for: "paired host store secure-store write to begin",
+            timeout: timeout
+        )
+    }
+
+    func releaseWrite() {
+        condition.withLock {
+            writeReleased = true
+            condition.broadcast()
+        }
+    }
+
+    func data(forKey key: String) throws -> Data? {
+        condition.withLock { storage[key] }
+    }
+
+    func set(_ data: Data, forKey key: String) throws {
+        condition.lock()
+        storage[key] = data
+        if shouldBlockNextWrite {
+            shouldBlockNextWrite = false
+            condition.unlock()
+            writeBeganSignal.signal()
+            condition.lock()
+            while !writeReleased {
+                condition.wait()
+            }
+        }
+        condition.unlock()
+    }
+
+    func removeValue(forKey key: String) throws {
+        _ = condition.withLock {
+            storage.removeValue(forKey: key)
+        }
+    }
+}
+
 private enum FaultingTransactionSecureStoreError: Error, Equatable {
     case writeFailed
     case compensationFailed
@@ -1211,6 +1266,97 @@ final class HostReadinessMachineTests: XCTestCase {
             freshHost,
             "a stale async commit must never overwrite the newer durable authority"
         )
+    }
+
+    func testSuccessfulHostWriteLinearizesBeforeConcurrentRevocation() async throws {
+        let secureStore = SuccessfulWriteBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let machine = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let host = makeHost(serverID: "new-host")
+        let flow = try machine.beginPairing(expectedServerID: host.serverID)
+        _ = try machine.markAuthenticated(for: flow)
+
+        secureStore.blockNextWrite()
+        let commit = Task {
+            try await machine.commitHostIdentity(host, for: flow)
+        }
+        try await secureStore.waitUntilWriteBegins()
+
+        let revocationStarted = BoundedAsyncSignal()
+        let release = Task.detached {
+            try await revocationStarted.wait(
+                for: "host readiness revocation to begin",
+                timeout: .seconds(1)
+            )
+            secureStore.releaseWrite()
+        }
+        let revocation = Task { @MainActor in
+            revocationStarted.signal()
+            return try machine.revoke(reason: "Credential revoked")
+        }
+
+        let revokedState = try await revocation.value
+        let commitResult = try await commit.value
+        try await release.value
+        let persistedHost = try await pairedHostStore.host(withServerID: host.serverID)
+
+        XCTAssertEqual(commitResult, .committed)
+        XCTAssertEqual(revokedState, .revoked)
+        XCTAssertEqual(persistedHost, host)
+        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertEqual(machine.state, .revoked)
+        XCTAssertNil(machine.activeFlow)
+        XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
+    }
+
+    func testSuccessfulHostWriteLinearizesBeforeConcurrentFailure() async throws {
+        let secureStore = SuccessfulWriteBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let machine = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let host = makeHost(serverID: "new-host")
+        let flow = try machine.beginPairing(expectedServerID: host.serverID)
+        _ = try machine.markAuthenticated(for: flow)
+
+        secureStore.blockNextWrite()
+        let commit = Task {
+            try await machine.commitHostIdentity(host, for: flow)
+        }
+        try await secureStore.waitUntilWriteBegins()
+
+        let failureStarted = BoundedAsyncSignal()
+        let release = Task.detached {
+            try await failureStarted.wait(
+                for: "host readiness failure to begin",
+                timeout: .seconds(1)
+            )
+            secureStore.releaseWrite()
+        }
+        let failure = Task { @MainActor in
+            failureStarted.signal()
+            return try machine.fail(.transport, reason: "Connection lost", for: flow)
+        }
+
+        let failedState = try await failure.value
+        let commitResult = try await commit.value
+        try await release.value
+        let persistedHost = try await pairedHostStore.host(withServerID: host.serverID)
+
+        XCTAssertEqual(commitResult, .committed)
+        XCTAssertEqual(failedState, .reconnecting)
+        XCTAssertEqual(persistedHost, host)
+        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertEqual(machine.state, .reconnecting)
+        XCTAssertNil(machine.activeFlow)
+        XCTAssertEqual(machine.lastFailure?.boundary, .transport)
+        XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
     }
 
     func testAStaleWorkspaceApplyCannotOverwriteANewerAuthoritativeWorkspace() async throws {
