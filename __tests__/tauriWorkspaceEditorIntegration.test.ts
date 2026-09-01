@@ -903,6 +903,7 @@ describe('native CodeMirror workspace editor surface', () => {
       covenDiscovery: {},
       startCovenPolling: () => undefined,
       syncPaneMetricsVisibility: () => true,
+      projectNativeSessionCreateCount: () => 0,
     });
 
     const removing = removeProject(project.id);
