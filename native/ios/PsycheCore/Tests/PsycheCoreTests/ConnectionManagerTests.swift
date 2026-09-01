@@ -1739,6 +1739,40 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(composition.hostReadiness.state, .revoked)
     }
 
+    func testDisconnectDuringInvalidTokenRetirementStillClearsCredential() async throws {
+        let secureStore = BlockingReadSecureStore()
+        let stored = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(stored)
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        let connect = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await composition.manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(
+            makeWelcome(serverID: stored.serverID)
+        )))
+        await connect.value
+
+        secureStore.blockNextRead()
+        await fake.emit(.legacy(.error(ProtocolError(
+            code: "invalid_token",
+            message: "token rejected"
+        ))))
+        try await secureStore.waitUntilReadBegins(timeout: .seconds(2))
+
+        await composition.manager.disconnect()
+        secureStore.releaseRead()
+        let retained = try await composition.pairedHostStore.host(
+            withServerID: stored.serverID
+        )
+
+        XCTAssertNil(retained?.token)
+    }
+
     private func makePane(id: String) -> PaneSnapshot {
         PaneSnapshot(
             id: id,

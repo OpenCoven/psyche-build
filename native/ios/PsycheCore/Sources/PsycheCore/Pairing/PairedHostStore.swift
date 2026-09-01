@@ -28,15 +28,30 @@ public actor PairedHostStore {
     public static let defaultKey = "paired-hosts.v2"
     static let legacyKey = "paired-hosts.v1"
 
+    struct ReadyHostSelectionTransaction: Codable, Equatable, Sendable {
+        let id: UUID
+        let candidateServerID: String
+        let previousServerID: String?
+    }
+
+    struct ReadyHostSelectionPreparation: Equatable, Sendable {
+        let result: HostReadinessTransactionResult
+        let transaction: ReadyHostSelectionTransaction?
+    }
+
     private struct PersistedState: Codable {
         var records: [String: PairedHost]
         var selectedServerID: String?
+        var pendingReadySelection: ReadyHostSelectionTransaction? = nil
     }
 
     private let secureStore: any SecureStore
     private let key: String
     private let fallbackKey: String?
-    private var readySelectionOwner: ObjectIdentifier?
+    private var readySelectionOwner: (
+        generation: ObjectIdentifier,
+        transactionID: UUID
+    )?
 
     public init(secureStore: any SecureStore, key: String = defaultKey) {
         self.secureStore = secureStore
@@ -57,7 +72,12 @@ public actor PairedHostStore {
     public func selectedHost() throws -> PairedHost? {
         let snapshot = try stateSnapshot()
         let state = snapshot.state
-        guard let selectedServerID = state.selectedServerID else { return nil }
+        let selectedServerID = if let pending = state.pendingReadySelection {
+            pending.previousServerID
+        } else {
+            state.selectedServerID
+        }
+        guard let selectedServerID else { return nil }
         guard let host = state.records[selectedServerID] else {
             throw PairedHostStoreError.corruptedRecord
         }
@@ -82,6 +102,7 @@ public actor PairedHostStore {
 
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
+        state.pendingReadySelection = nil
         try Task.checkCancellation()
         try write(state)
     }
@@ -100,6 +121,7 @@ public actor PairedHostStore {
 
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
+        state.pendingReadySelection = nil
         return try generation.withValidity {
             try write(state)
             return true
@@ -113,6 +135,7 @@ public actor PairedHostStore {
         var state = try state()
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
+        state.pendingReadySelection = nil
         try write(state)
     }
 
@@ -128,6 +151,7 @@ public actor PairedHostStore {
         var state = try state()
         state.records[normalized.serverID] = normalized
         state.selectedServerID = normalized.serverID
+        state.pendingReadySelection = nil
         guard let committed = try generation.withValidity({
             try authorization.withAuthorization {
                 try write(state)
@@ -234,35 +258,60 @@ public actor PairedHostStore {
     func selectReadyHost(
         serverID: String,
         for generation: ConnectionGeneration
-    ) -> HostReadinessTransactionResult {
+    ) -> ReadyHostSelectionPreparation {
         let previousData: Data?
         let nextData: Data
+        let transaction: ReadyHostSelectionTransaction?
         do {
             let snapshot = try stateSnapshot()
             previousData = snapshot.currentData
             var state = snapshot.state
             guard state.records[serverID] != nil else {
-                return .notCommitted(
-                    reason: "The ready host has no persisted pairing record."
+                return ReadyHostSelectionPreparation(
+                    result: .notCommitted(
+                        reason: "The ready host has no persisted pairing record."
+                    ),
+                    transaction: nil
                 )
             }
-            guard state.selectedServerID != serverID else {
-                return generation.withValidity {
-                    readySelectionOwner = ObjectIdentifier(generation)
-                    return .committed
-                }
-                    ?? .notCommitted(reason: nil)
+            let previousServerID = if let pending = state.pendingReadySelection {
+                pending.previousServerID
+            } else {
+                state.selectedServerID
             }
-            state.selectedServerID = serverID
+            if previousServerID == serverID {
+                state.selectedServerID = serverID
+                state.pendingReadySelection = nil
+                transaction = nil
+            } else {
+                let pending = ReadyHostSelectionTransaction(
+                    id: UUID(),
+                    candidateServerID: serverID,
+                    previousServerID: previousServerID
+                )
+                state.selectedServerID = serverID
+                state.pendingReadySelection = pending
+                transaction = pending
+            }
             nextData = try JSONEncoder().encode(state)
         } catch {
-            return .notCommitted(reason: error.localizedDescription)
+            return ReadyHostSelectionPreparation(
+                result: .notCommitted(reason: error.localizedDescription),
+                transaction: nil
+            )
         }
 
-        return generation.withValidity {
+        let result: HostReadinessTransactionResult = generation.withValidity {
             do {
                 try secureStore.set(nextData, forKey: key)
-                readySelectionOwner = ObjectIdentifier(generation)
+                if let transaction {
+                    readySelectionOwner = (
+                        generation: ObjectIdentifier(generation),
+                        transactionID: transaction.id
+                    )
+                } else {
+                    readySelectionOwner = nil
+                }
                 return .committed
             } catch {
                 return compensateWrite(
@@ -272,14 +321,70 @@ public actor PairedHostStore {
                 )
             }
         } ?? .notCommitted(reason: nil)
+        return ReadyHostSelectionPreparation(
+            result: result,
+            transaction: result == .committed ? transaction : nil
+        )
+    }
+
+    /// Commits a prepared ready-host promotion before the workspace becomes
+    /// live. Ownership remains until the caller acknowledges synchronous
+    /// in-memory finalization, allowing in-process teardown to compensate.
+    func completeReadyHostSelection(
+        _ transaction: ReadyHostSelectionTransaction,
+        selectedBy generation: ConnectionGeneration
+    ) -> HostReadinessTransactionResult {
+        guard readySelectionOwner?.generation == ObjectIdentifier(generation),
+              readySelectionOwner?.transactionID == transaction.id else {
+            return .notCommitted(reason: nil)
+        }
+        let previousData: Data?
+        let nextData: Data
+        do {
+            let snapshot = try stateSnapshot()
+            previousData = snapshot.currentData
+            var state = snapshot.state
+            guard state.selectedServerID == transaction.candidateServerID,
+                  state.pendingReadySelection == transaction else {
+                return .notCommitted(reason: nil)
+            }
+            state.pendingReadySelection = nil
+            nextData = try JSONEncoder().encode(state)
+        } catch {
+            return .indeterminate(reason: error.localizedDescription)
+        }
+        return generation.withValidity {
+            do {
+                try secureStore.set(nextData, forKey: key)
+                return .committed
+            } catch {
+                return compensateWrite(
+                    to: previousData,
+                    after: error,
+                    operation: "Ready-host selection completion"
+                )
+            }
+        } ?? .notCommitted(reason: nil)
+    }
+
+    func acknowledgeReadyHostSelection(
+        _ transaction: ReadyHostSelectionTransaction,
+        selectedBy generation: ConnectionGeneration
+    ) {
+        guard readySelectionOwner?.generation == ObjectIdentifier(generation),
+              readySelectionOwner?.transactionID == transaction.id else {
+            return
+        }
+        readySelectionOwner = nil
     }
 
     /// Removes a server-rejected credential without discarding the pinned host
-    /// identity. The generation lock prevents a retired connection from
-    /// clearing credentials written by a newer one.
+    /// identity. The expected binding makes a delayed revocation safe after
+    /// connection teardown without overwriting a newer credential.
     func revokeToken(
         forServerID serverID: String,
-        for generation: ConnectionGeneration
+        expectedClientID: String,
+        expectedToken: String?
     ) -> HostReadinessTransactionResult {
         let previousData: Data?
         let nextData: Data
@@ -292,9 +397,12 @@ public actor PairedHostStore {
                     reason: "The rejected credential has no persisted host record."
                 )
             }
+            guard existing.clientID == expectedClientID,
+                  existing.token == expectedToken else {
+                return .notCommitted(reason: nil)
+            }
             guard existing.token != nil else {
-                return generation.withValidity { .committed }
-                    ?? .notCommitted(reason: nil)
+                return .committed
             }
             state.records[serverID] = existing.withToken(nil)
             nextData = try JSONEncoder().encode(state)
@@ -302,29 +410,27 @@ public actor PairedHostStore {
             return .notCommitted(reason: error.localizedDescription)
         }
 
-        return generation.withValidity {
-            do {
-                try secureStore.set(nextData, forKey: key)
-                return .committed
-            } catch {
-                return compensateWrite(
-                    to: previousData,
-                    after: error,
-                    operation: "Credential revocation"
-                )
-            }
-        } ?? .notCommitted(reason: nil)
+        do {
+            try secureStore.set(nextData, forKey: key)
+            return .committed
+        } catch {
+            return compensateWrite(
+                to: previousData,
+                after: error,
+                operation: "Credential revocation"
+            )
+        }
     }
 
     /// Restores the previous reconnect selection when a generation retires
     /// after selection committed but before readiness could promote the host.
     /// The expected-current check avoids overwriting a later selection.
     func compensateReadyHostSelection(
-        expectedServerID: String,
-        restoringServerID: String?,
+        _ transaction: ReadyHostSelectionTransaction,
         selectedBy generation: ConnectionGeneration
     ) -> HostReadinessTransactionResult {
-        guard readySelectionOwner == ObjectIdentifier(generation) else {
+        guard readySelectionOwner?.generation == ObjectIdentifier(generation),
+              readySelectionOwner?.transactionID == transaction.id else {
             return .notCommitted(reason: nil)
         }
         let previousData: Data?
@@ -333,16 +439,21 @@ public actor PairedHostStore {
             let snapshot = try stateSnapshot()
             previousData = snapshot.currentData
             var state = snapshot.state
-            guard state.selectedServerID == expectedServerID else {
+            let isPrepared = state.selectedServerID == transaction.candidateServerID
+                && state.pendingReadySelection == transaction
+            let isCompleted = state.selectedServerID == transaction.candidateServerID
+                && state.pendingReadySelection == nil
+            guard isPrepared || isCompleted else {
                 return .notCommitted(reason: nil)
             }
-            if let restoringServerID,
-               state.records[restoringServerID] == nil {
+            if let previousServerID = transaction.previousServerID,
+               state.records[previousServerID] == nil {
                 return .indeterminate(
                     reason: "The previous ready host record is missing."
                 )
             }
-            state.selectedServerID = restoringServerID
+            state.selectedServerID = transaction.previousServerID
+            state.pendingReadySelection = nil
             nextData = try JSONEncoder().encode(state)
         } catch {
             return .indeterminate(reason: error.localizedDescription)
@@ -399,7 +510,15 @@ public actor PairedHostStore {
     public func remove(serverID: String) throws {
         var state = try state()
         guard state.records.removeValue(forKey: serverID) != nil else { return }
-        if state.selectedServerID == serverID {
+        if let pending = state.pendingReadySelection,
+           pending.candidateServerID == serverID {
+            state.selectedServerID = pending.previousServerID
+            state.pendingReadySelection = nil
+        } else if let pending = state.pendingReadySelection,
+                  pending.previousServerID == serverID {
+            state.selectedServerID = nil
+            state.pendingReadySelection = nil
+        } else if state.selectedServerID == serverID {
             state.selectedServerID = nil
         }
         try write(state)
@@ -425,12 +544,23 @@ public actor PairedHostStore {
            let fallbackData = try secureStore.data(forKey: fallbackKey) {
             return (try state(from: fallbackData), nil)
         }
-        return (PersistedState(records: [:], selectedServerID: nil), nil)
+        return (
+            PersistedState(
+                records: [:],
+                selectedServerID: nil,
+                pendingReadySelection: nil
+            ),
+            nil
+        )
     }
 
     private func state(from data: Data?) throws -> PersistedState {
         guard let data else {
-            return PersistedState(records: [:], selectedServerID: nil)
+            return PersistedState(
+                records: [:],
+                selectedServerID: nil,
+                pendingReadySelection: nil
+            )
         }
         do {
             let decoder = JSONDecoder()
@@ -440,7 +570,8 @@ public actor PairedHostStore {
             let records = try decoder.decode([String: PairedHost].self, from: data)
             return try validate(PersistedState(
                 records: records,
-                selectedServerID: records.keys.sorted().first
+                selectedServerID: records.keys.sorted().first,
+                pendingReadySelection: nil
             ))
         } catch {
             if let error = error as? PairedHostStoreError {
@@ -457,6 +588,17 @@ public actor PairedHostStore {
         if let selectedServerID = state.selectedServerID,
            state.records[selectedServerID] == nil {
             throw PairedHostStoreError.corruptedRecord
+        }
+        if let pending = state.pendingReadySelection {
+            guard state.selectedServerID == pending.candidateServerID,
+                  state.records[pending.candidateServerID] != nil,
+                  pending.previousServerID != pending.candidateServerID else {
+                throw PairedHostStoreError.corruptedRecord
+            }
+            if let previousServerID = pending.previousServerID,
+               state.records[previousServerID] == nil {
+                throw PairedHostStoreError.corruptedRecord
+            }
         }
         return state
     }

@@ -1068,7 +1068,6 @@ public actor ConnectionManager {
             workspace: result.workspace,
             sequence: result.sequence
         )
-        let previousReadyHostID = await machine.committedHost?.serverID
         let outcome: HostReadinessTransactionResult
         do {
             outcome = try await machine.synchronizeWorkspace(candidate, for: flow)
@@ -1096,14 +1095,42 @@ public actor ConnectionManager {
                 serverID: readyHostID,
                 for: generation
             )
-            switch selection {
+            switch selection.result {
             case .committed:
-                guard isActive(session: session, generation: generation) else {
-                    await compensateRetiredReadyHostSelection(
-                        selectedServerID: readyHostID,
-                        restoringServerID: previousReadyHostID,
+                if let transaction = selection.transaction {
+                    let completion = await pairedHostStore.completeReadyHostSelection(
+                        transaction,
                         selectedBy: generation
                     )
+                    switch completion {
+                    case .committed:
+                        break
+                    case .notCommitted(let reason):
+                        await compensateRetiredReadyHostSelection(
+                            transaction,
+                            selectedBy: generation
+                        )
+                        guard isActive(session: session, generation: generation) else {
+                            return nil
+                        }
+                        return ConnectionManagerError.hostIdentityNotCommitted(
+                            reason ?? "Ready-host selection completion was superseded."
+                        )
+                    case .indeterminate(let reason):
+                        let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
+                        await MainActor.run {
+                            _ = try? machine.revoke(reason: error.localizedDescription)
+                        }
+                        return error
+                    }
+                }
+                guard isActive(session: session, generation: generation) else {
+                    if let transaction = selection.transaction {
+                        await compensateRetiredReadyHostSelection(
+                            transaction,
+                            selectedBy: generation
+                        )
+                    }
                     return nil
                 }
                 do {
@@ -1111,15 +1138,22 @@ public actor ConnectionManager {
                         try machine.finalizeReadyHostSelection(serverID: readyHostID)
                     }
                 } catch {
-                    await compensateRetiredReadyHostSelection(
-                        selectedServerID: readyHostID,
-                        restoringServerID: previousReadyHostID,
-                        selectedBy: generation
-                    )
+                    if let transaction = selection.transaction {
+                        await compensateRetiredReadyHostSelection(
+                            transaction,
+                            selectedBy: generation
+                        )
+                    }
                     guard isActive(session: session, generation: generation) else {
                         return nil
                     }
                     return error
+                }
+                if let transaction = selection.transaction {
+                    await pairedHostStore.acknowledgeReadyHostSelection(
+                        transaction,
+                        selectedBy: generation
+                    )
                 }
                 return nil
             case .notCommitted(let reason):
@@ -1142,13 +1176,11 @@ public actor ConnectionManager {
     }
 
     private func compensateRetiredReadyHostSelection(
-        selectedServerID: String,
-        restoringServerID: String?,
+        _ transaction: PairedHostStore.ReadyHostSelectionTransaction,
         selectedBy generation: ConnectionGeneration
     ) async {
         let result = await pairedHostStore.compensateReadyHostSelection(
-            expectedServerID: selectedServerID,
-            restoringServerID: restoringServerID,
+            transaction,
             selectedBy: generation
         )
         guard case .indeterminate(let reason) = result else { return }
@@ -1196,11 +1228,12 @@ public actor ConnectionManager {
         generation: ConnectionGeneration
     ) async {
         guard isActive(session: session, generation: generation) else { return }
+        guard let activeConnection else { return }
 
         let persistedServerID: String?
         if let serverID = welcomeIdentity?.serverID {
             persistedServerID = serverID
-        } else if case .reconnection(let host) = activeConnection?.readinessIntent {
+        } else if case .reconnection(let host) = activeConnection.readinessIntent {
             persistedServerID = host.serverID
         } else {
             persistedServerID = nil
@@ -1210,7 +1243,8 @@ public actor ConnectionManager {
         if let persistedServerID {
             persistence = await pairedHostStore.revokeToken(
                 forServerID: persistedServerID,
-                for: generation
+                expectedClientID: activeConnection.credentials.clientID,
+                expectedToken: activeConnection.credentials.token
             )
         } else {
             persistence = .notCommitted(
