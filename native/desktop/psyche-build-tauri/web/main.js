@@ -14927,8 +14927,10 @@
 
   async function addProject(rootPath, options) {
     if (!rootPath) return null;
-    rootPath = await canonicalProjectPath(rootPath);
-    if (!rootPath) return null;
+    if (!(options && options.nativeAuthorityReady === true)) {
+      rootPath = await canonicalProjectPath(rootPath);
+      if (!rootPath) return null;
+    }
     if (options) options.canonicalRoot = rootPath;
     function blockedByNativeProjectRevocation() {
       if (closingNativeProjectRoots.has(rootPath)) {

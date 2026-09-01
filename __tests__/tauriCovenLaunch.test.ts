@@ -386,6 +386,50 @@ describe('Tauri Coven launch project scope', () => {
     expect(deduplicate).toBeGreaterThan(canonicalize);
   });
 
+  it('keeps the exact root already authorized by the native picker', async () => {
+    const state = {
+      projects: [] as Array<Record<string, unknown>>,
+      activeProjectId: null as string | null,
+      activeThreadId: null as string | null,
+    };
+    let canonicalizeCalls = 0;
+    const addProject = compileFunction<(
+      root: string,
+      options: Record<string, unknown>,
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async () => {
+          canonicalizeCalls += 1;
+          return '/replaced/root';
+        },
+        state,
+        settings: { maxProjects: 8 },
+        HARD_MAX_PROJECTS: 8,
+        showTerminalView: async () => true,
+        makeProjectId: () => 'project-1',
+        assignActiveProjectId: (id: string) => { state.activeProjectId = id; },
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshProjectWorktrees: async () => undefined,
+        syncProjectBrowser: () => undefined,
+        saveWorkspaceSoon: () => undefined,
+        startCovenPolling: () => undefined,
+        installAgentControlUi: () => undefined,
+        setStatus: () => undefined,
+      },
+    );
+
+    await expect(addProject('/native/authorized', {
+      nativeAuthorityReady: true,
+      blockedByClosing: false,
+    })).resolves.toMatchObject({
+      root: '/native/authorized',
+      nativeAuthorityReady: true,
+    });
+    expect(canonicalizeCalls).toBe(0);
+  });
+
   it('blocks project admission when the canonical root starts closing during reveal', async () => {
     const reveal = deferred<boolean>();
     const revealStarted = deferred<void>();
@@ -449,7 +493,9 @@ describe('Tauri Coven launch project scope', () => {
     ) => Promise<Record<string, unknown> | null>>(
       functionSource('addProject'),
       {
-        canonicalProjectPath: async () => '/repo',
+        canonicalProjectPath: async () => {
+          throw new Error('native picker roots must not be canonicalized again');
+        },
         state,
         settings: { maxProjects: 8 },
         HARD_MAX_PROJECTS: 8,
@@ -478,7 +524,7 @@ describe('Tauri Coven launch project scope', () => {
           invocations.push(command);
           if (command === 'native_project_open') {
             pickerOpens += 1;
-            return pickerOpens === 1 ? '/alias/repo' : '/repo';
+            return '/repo';
           }
           return true;
         },
