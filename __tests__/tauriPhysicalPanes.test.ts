@@ -79,6 +79,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     mountedSplitBranches: new Map(),
     applyProjectedSplitRatios: () => false,
     schedulePaneTreeLayout: () => undefined,
+    projectRootsClosing: new Set<string>(),
     isPersistentThread: (thread: Record<string, any>) =>
       ['shell', 'psyche', 'coven-code', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
@@ -3072,12 +3073,12 @@ describe('Tauri physical terminal panes', () => {
     ]);
   });
 
-  it('refuses project removal while a promptless Coven pane is being created', async () => {
+  it('refuses project removal while a native project session is being created', async () => {
     const project = {
       id: 'project',
       root: '/repo',
       name: 'Repo',
-      covenLocalLaunchesInFlight: 1,
+      localSessionCreatesInFlight: 1,
     };
     const state = {
       activeProjectId: project.id,
@@ -4055,6 +4056,45 @@ describe('Tauri physical terminal panes', () => {
     visible.resolve(true);
     await expect(pendingCreate).resolves.toEqual({ kind: 'shell' });
     expect(calls).toEqual(['project', 'worktree:project', 'show:start', 'show:end:true', 'spawn:project']);
+  });
+
+  it('cancels shell creation when project teardown starts during terminal reveal', async () => {
+    const visible = deferred<boolean>();
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      closing: false,
+    };
+    const statuses: Array<[string, string]> = [];
+    let spawnAttempts = 0;
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo' }),
+        showTerminalView: () => visible.promise,
+        spawnShellThread: () => {
+          spawnAttempts += 1;
+          return { kind: 'shell' };
+        },
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+      },
+    );
+
+    const pending = createTerminalPane();
+    await Promise.resolve();
+    project.closing = true;
+    visible.resolve(true);
+
+    await expect(pending).resolves.toBeNull();
+    expect(spawnAttempts).toBe(0);
+    expect(statuses.at(-1)).toEqual([
+      'Repo is closing; wait before starting a terminal',
+      'warn',
+    ]);
   });
 
   it('cancels shell creation when terminal reveal is rejected by dirty-file flow', async () => {

@@ -2093,14 +2093,14 @@ describe('Tauri agent picker', () => {
     });
 
     expect(events).toEqual(['persist', 'native_session_create', 'attach', 'persist']);
-    expect(persistedRecoveryStates).toEqual([true, false]);
+    expect(persistedRecoveryStates).toEqual([true, true]);
     expect(accepted).toBe(thread);
     expect(thread.launch).toMatchObject({
       launchKind: 'coven-attach',
       covenSessionId: 'session-1',
       promptDigest: 'sha256:abc',
       metricsProvider: 'codex',
-      recoveryRequired: false,
+      recoveryRequired: true,
     });
   });
 

@@ -292,6 +292,51 @@ describe('Tauri Coven launch project scope', () => {
     expect(deduplicate).toBeGreaterThan(canonicalize);
   });
 
+  it('blocks project admission when the canonical root starts closing during reveal', async () => {
+    const reveal = deferred<boolean>();
+    const revealStarted = deferred<void>();
+    const projectRootsClosing = new Set<string>();
+    const state = {
+      projects: [] as Array<Record<string, unknown>>,
+    };
+    const operation = { blockedByClosing: false };
+    const statuses: Array<[string, string]> = [];
+    const addProject = compileFunction<(
+      root: string,
+      operation: { blockedByClosing: boolean },
+    ) => Promise<Record<string, unknown> | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async (root: string) => root,
+        projectRootsClosing,
+        state,
+        settings: { maxProjects: 8 },
+        HARD_MAX_PROJECTS: 8,
+        setActiveProject: async () => true,
+        showTerminalView: async () => {
+          revealStarted.resolve();
+          return reveal.promise;
+        },
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+      },
+    );
+
+    const admission = addProject('/repo', operation);
+    await revealStarted.promise;
+    projectRootsClosing.add('/repo');
+    reveal.resolve(true);
+
+    await expect(admission).resolves.toBeNull();
+    expect(operation.blockedByClosing).toBe(true);
+    expect(state.projects).toEqual([]);
+    expect(statuses.at(-1)).toEqual([
+      'Project is still closing; wait before reopening /repo',
+      'warn',
+    ]);
+  });
+
   it('canonicalizes saved roots concurrently before restoring projects', () => {
     const boot = functionSource('boot');
     expect(boot).toContain('restoreSavedProjects');
@@ -1230,52 +1275,62 @@ describe('native Coven launch routing', () => {
     expect(thread).toMatchObject({ project, kind: 'coven-code', name: 'Coven CLI' });
   });
 
-  it('tracks promptless Coven creation until native session creation settles', async () => {
+  it('tracks project session creation until native session creation settles', async () => {
     const project: {
       id: string;
       root: string;
-      covenLocalLaunchesInFlight?: number;
+      localSessionCreatesInFlight?: number;
     } = { id: 'project', root: '/repo' };
-    let resolveCreation!: (thread: Record<string, unknown>) => void;
-    let markCreationStarted!: () => void;
-    const creationStarted = new Promise<void>((resolve) => {
-      markCreationStarted = resolve;
-    });
-    const creation = new Promise<Record<string, unknown>>((resolve) => {
-      resolveCreation = resolve;
-    });
-    const spawnCovenThread = compileFunction<(
-      value: typeof project,
+    const nativeCreation = deferred<unknown>();
+    const nativeCreationStarted = deferred<void>();
+    const state = {
+      threads: [] as Array<Record<string, unknown>>,
+      activeThreadId: null,
+    };
+    const createThread = compileFunction<(
+      options: Record<string, unknown>,
     ) => Promise<Record<string, unknown> | null>>(
-      functionSource('spawnCovenThread'),
+      functionSource('createThread'),
       {
-        state: { env: { coven_path: '/bin/coven' } },
+        state,
+        makeThreadId: () => 'shell-thread',
         activeProject: () => project,
-        selectedWorktree: () => ({ path: '/repo' }),
+        activeWorkspaceRoot: () => '/repo',
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        commitPanePlacement: () => undefined,
         setStatus: () => undefined,
-        showTerminalView: async () => true,
-        requestAnimationFrame: (callback: () => void) => callback(),
-        covenCliLaunch: () => ({
-          command: '/bin/coven',
-          args: [],
-          cwd: '/repo',
-          launchKind: 'coven-code',
-        }),
-        createThread: () => {
-          markCreationStarted();
-          return creation;
+        invoke: async (command: string) => {
+          expect(command).toBe('native_session_create');
+          nativeCreationStarted.resolve();
+          return nativeCreation.promise;
         },
+        mountTerminal: () => undefined,
+        focusThread: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        requestAnimationFrame: () => undefined,
       },
     );
 
-    const pending = spawnCovenThread(project);
-    await creationStarted;
-    expect(project.covenLocalLaunchesInFlight).toBe(1);
+    const pending = createThread({
+      project,
+      command: '/bin/zsh',
+      args: [],
+      projectRoot: '/repo',
+      cwd: '/repo',
+      worktreePath: '/repo',
+      launchKind: 'shell',
+    });
+    await nativeCreationStarted.promise;
+    expect(project.localSessionCreatesInFlight).toBe(1);
+    expect(state.threads).toEqual([]);
 
-    const thread = { id: 'coven-thread' };
-    resolveCreation(thread);
-    await expect(pending).resolves.toBe(thread);
-    expect(project.covenLocalLaunchesInFlight).toBeUndefined();
+    nativeCreation.resolve({});
+    await expect(pending).resolves.toMatchObject({
+      id: 'shell-thread',
+      projectId: 'project',
+    });
+    expect(project.localSessionCreatesInFlight).toBeUndefined();
   });
 
   it('coalesces concurrent explicit ensures through one animation-frame launch', async () => {
@@ -1510,6 +1565,38 @@ describe('native Coven launch routing', () => {
     expect(invocations).toEqual([
       ['native_project_open', { defaultPath: '/home' }],
       ['native_project_close', { root: '/repo/rejected' }],
+    ]);
+  });
+
+  it('does not revoke a native-picked root whose admission is blocked by teardown', async () => {
+    const state = {
+      env: { home: '/home' },
+      projects: [] as Array<{ root: string }>,
+    };
+    const invocations: Array<[string, Record<string, unknown>]> = [];
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        state,
+        invoke: async (command: string, args: Record<string, unknown>) => {
+          invocations.push([command, args]);
+          return '/repo/closing';
+        },
+        addProject: async (
+          _root: string,
+          operation: { blockedByClosing: boolean },
+        ) => {
+          operation.blockedByClosing = true;
+          return null;
+        },
+        writeToActive: () => undefined,
+      },
+    );
+
+    await openProjectPicker();
+
+    expect(invocations).toEqual([
+      ['native_project_open', { defaultPath: '/home' }],
     ]);
   });
 
