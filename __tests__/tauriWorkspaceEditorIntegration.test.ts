@@ -886,6 +886,7 @@ describe('native CodeMirror workspace editor surface', () => {
       fileNavigationInFlight: false,
       fileDecisionInFlight: null,
       guardDirtyFiles,
+      projectNativeSessionCreateCount: () => 0,
       closeThread: () => undefined,
       fileViewEl: { hidden: true },
       terminalHost: { hidden: false, children: [] },
