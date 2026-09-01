@@ -118,6 +118,68 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(loaded?.token, "token-1")
     }
 
+    func testReadinessPublicationRevalidatesItsFlowInsideTheStoreActor() async throws {
+        let secureStore = SaveBoundarySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let authorization = HostReadinessFlowAuthorization()
+        let host = makeHost()
+
+        secureStore.blockNextRead()
+        let publication = Task {
+            await store.publishReadinessHost(
+                host,
+                policy: .replace,
+                authorizedBy: authorization
+            )
+        }
+        try await secureStore.waitUntilReadBegins()
+        authorization.revoke()
+        secureStore.releaseRead()
+
+        let result = await publication.value
+        let hosts = try await store.hosts()
+        XCTAssertEqual(result, .notCommitted(reason: nil))
+        XCTAssertEqual(hosts, [])
+    }
+
+    func testReadinessPublicationCompensatesAMutateThenThrowWrite() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let original = makeHost()
+        try await store.save(original)
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+
+        let result = await store.publishReadinessHost(
+            makeHost(fingerprint: otherFingerprint, token: "token-2"),
+            policy: .replace,
+            authorizedBy: HostReadinessFlowAuthorization()
+        )
+
+        guard case .notCommitted = result else {
+            return XCTFail("Expected a proven compensation, got \(result)")
+        }
+        let restored = try await store.host(withServerID: original.serverID)
+        XCTAssertEqual(restored, original)
+    }
+
+    func testReadinessPublicationReportsIndeterminateWhenCompensationFails() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        try await store.save(makeHost())
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let result = await store.publishReadinessHost(
+            makeHost(fingerprint: otherFingerprint, token: "token-2"),
+            policy: .replace,
+            authorizedBy: HostReadinessFlowAuthorization()
+        )
+
+        guard case .indeterminate = result else {
+            return XCTFail("Failed compensation must be indeterminate, got \(result)")
+        }
+    }
+
     func testSaveUpdatesEverythingElseAboutAKnownHost() async throws {
         let store = PairedHostStore(secureStore: InMemorySecureStore())
         try await store.save(makeHost())
@@ -350,6 +412,61 @@ private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
     }
 }
 
+private enum FaultingTransactionSecureStoreError: Error, Equatable {
+    case writeFailed
+    case compensationFailed
+}
+
+private final class FaultingTransactionSecureStore: SecureStore, @unchecked Sendable {
+    enum WriteBehavior {
+        case succeed
+        case mutateThenThrow(FaultingTransactionSecureStoreError)
+        case throwBeforeMutation(FaultingTransactionSecureStoreError)
+    }
+
+    private let lock = NSLock()
+    private var storage: [String: Data] = [:]
+    private var writeBehaviors: [WriteBehavior] = []
+
+    func enqueue(_ behavior: WriteBehavior) {
+        lock.withLock {
+            writeBehaviors.append(behavior)
+        }
+    }
+
+    func hosts() -> [String: PairedHost]? {
+        lock.withLock {
+            guard let data = storage[PairedHostStore.defaultKey] else { return nil }
+            return try? JSONDecoder().decode([String: PairedHost].self, from: data)
+        }
+    }
+
+    func data(forKey key: String) throws -> Data? {
+        lock.withLock { storage[key] }
+    }
+
+    func set(_ data: Data, forKey key: String) throws {
+        try lock.withLock {
+            let behavior = writeBehaviors.isEmpty ? .succeed : writeBehaviors.removeFirst()
+            switch behavior {
+            case .succeed:
+                storage[key] = data
+            case .mutateThenThrow(let error):
+                storage[key] = data
+                throw error
+            case .throwBeforeMutation(let error):
+                throw error
+            }
+        }
+    }
+
+    func removeValue(forKey key: String) throws {
+        _ = lock.withLock {
+            storage.removeValue(forKey: key)
+        }
+    }
+}
+
 private extension String {
     func chunked(every size: Int) -> [Substring] {
         stride(from: 0, to: count, by: size).map { offset in
@@ -361,66 +478,6 @@ private extension String {
 }
 
 // MARK: - Host readiness (issue #241, slice 1)
-
-/// Deterministic in-memory record of every boundary call a readiness flow
-/// made, with configurable failures per boundary. A lock-guarded class keeps
-/// every test deterministic — no actor hops, no scheduling.
-private final class ReadinessBoundaryRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var callLog: [String] = []
-    private var commitFailure: (any Error)?
-    private var validationFailure: (any Error)?
-    private var applyFailure: (any Error)?
-    private var storedHostID: String?
-    private var workspaceSequence: UInt64?
-
-    var calls: [String] {
-        lock.withLock { callLog }
-    }
-
-    var committedHostID: String? {
-        lock.withLock { storedHostID }
-    }
-
-    var appliedWorkspaceSequence: UInt64? {
-        lock.withLock { workspaceSequence }
-    }
-
-    func setCommitFailure(_ error: (any Error)?) {
-        lock.withLock { commitFailure = error }
-    }
-
-    func setValidationFailure(_ error: (any Error)?) {
-        lock.withLock { validationFailure = error }
-    }
-
-    func setApplyFailure(_ error: (any Error)?) {
-        lock.withLock { applyFailure = error }
-    }
-
-    func commitHostIdentity(_ host: PairedHost) throws {
-        lock.withLock { callLog.append("commit:\(host.serverID)") }
-        if let commitFailure {
-            throw commitFailure
-        }
-        lock.withLock { storedHostID = host.serverID }
-    }
-
-    func validateSnapshot(_ candidate: HostReadinessSnapshotCandidate) throws {
-        lock.withLock { callLog.append("validate:\(candidate.sequence)") }
-        if let validationFailure {
-            throw validationFailure
-        }
-    }
-
-    func applyWorkspace(_ candidate: HostReadinessSnapshotCandidate) throws {
-        lock.withLock { callLog.append("apply:\(candidate.sequence)") }
-        if let applyFailure {
-            throw applyFailure
-        }
-        lock.withLock { workspaceSequence = candidate.sequence }
-    }
-}
 
 private actor ReadinessBoundaryGate {
     private var entered = false
@@ -450,10 +507,72 @@ private actor ReadinessBoundaryGate {
     }
 }
 
+private actor ReadinessValidationRecorder {
+    private var blockedSequence: UInt64?
+    private var gate: ReadinessBoundaryGate?
+
+    func validate(_ candidate: HostReadinessSnapshotCandidate) async throws {
+        if blockedSequence == candidate.sequence, let gate {
+            await gate.suspend()
+        }
+    }
+
+    func block(sequence: UInt64, on gate: ReadinessBoundaryGate) {
+        blockedSequence = sequence
+        self.gate = gate
+    }
+
+}
+
+@MainActor
+private final class ReadinessBoundaryRecorder {
+    let secureStore = FaultingTransactionSecureStore()
+    let workspaceStore = WorkspaceStore()
+    let pairedHostStore: PairedHostStore
+
+    private var validationCalls: [String] = []
+    private var validationFailure: (any Error)?
+
+    init() {
+        pairedHostStore = PairedHostStore(secureStore: secureStore)
+    }
+
+    var calls: [String] {
+        validationCalls
+    }
+
+    var committedHostID: String? {
+        secureStore.hosts()?.keys.sorted().last
+    }
+
+    var appliedWorkspaceSequence: UInt64? {
+        workspaceStore.workspace == nil ? nil : workspaceStore.sequence
+    }
+
+    func setCommitFailure(_ error: (any Error)?, afterMutation: Bool = false) {
+        guard error != nil else { return }
+        secureStore.enqueue(
+            afterMutation
+                ? .mutateThenThrow(.writeFailed)
+                : .throwBeforeMutation(.writeFailed)
+        )
+    }
+
+    func setValidationFailure(_ error: (any Error)?) {
+        validationFailure = error
+    }
+
+    func validateSnapshot(_ candidate: HostReadinessSnapshotCandidate) throws {
+        validationCalls.append("validate:\(candidate.sequence)")
+        if let validationFailure {
+            throw validationFailure
+        }
+    }
+}
+
 private enum ReadinessBoundaryError: Error, Equatable {
     case commitFailed
     case validationFailed
-    case applyFailed
 }
 
 /// Exhaustive coverage of the pure transition table: every allowed transition
@@ -683,6 +802,7 @@ final class HostReadinessTransitionsTests: XCTestCase {
 /// Behavioral coverage of the machine: the atomic commit-before-apply
 /// sequence, every rollback boundary, stale-state preservation, and the
 /// single-flight concurrency guard.
+@MainActor
 final class HostReadinessMachineTests: XCTestCase {
     private let fixedDate = Date(timeIntervalSinceReferenceDate: 762_543_210)
 
@@ -713,21 +833,11 @@ final class HostReadinessMachineTests: XCTestCase {
     ) -> HostReadinessMachine {
         HostReadinessMachine(
             committedHost: committedHost,
-            adapters: HostReadinessAdapters(
-                prepareHostIdentity: { host in
-                    HostReadinessPublication {
-                        try recorder.commitHostIdentity(host)
-                    }
-                },
-                validateSnapshot: { candidate in
-                    try recorder.validateSnapshot(candidate)
-                },
-                prepareWorkspace: { candidate in
-                    HostReadinessPublication {
-                        try recorder.applyWorkspace(candidate)
-                    }
-                }
-            ),
+            pairedHostStore: recorder.pairedHostStore,
+            workspaceStore: recorder.workspaceStore,
+            validateSnapshot: { candidate in
+                try await recorder.validateSnapshot(candidate)
+            },
             now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
         )
     }
@@ -765,9 +875,14 @@ final class HostReadinessMachineTests: XCTestCase {
         let failure = await machine.lastFailure
         XCTAssertEqual(
             recorder.calls,
-            ["commit:new-host", "validate:7", "apply:7"],
-            "the secure-store commit must precede validation and the workspace apply"
+            ["validate:7"],
+            "validation must run before the workspace owner publishes"
         )
+        let persistedHost = try await recorder.pairedHostStore.host(
+            withServerID: host.serverID
+        )
+        XCTAssertEqual(persistedHost, host)
+        XCTAssertEqual(recorder.workspaceStore.sequence, 7)
         XCTAssertEqual(state, .ready)
         XCTAssertEqual(presentation, .live(hostID: "new-host", confirmedAt: fixedDate))
         XCTAssertEqual(committed, host)
@@ -786,7 +901,7 @@ final class HostReadinessMachineTests: XCTestCase {
 
         let state = await machine.state
         XCTAssertEqual(state, .ready)
-        XCTAssertEqual(recorder.calls, ["commit:old-host", "validate:7", "apply:7"])
+        XCTAssertEqual(recorder.calls, ["validate:7"])
         let presentation = await machine.presentation
         XCTAssertEqual(presentation, .live(hostID: "old-host", confirmedAt: fixedDate))
     }
@@ -805,11 +920,12 @@ final class HostReadinessMachineTests: XCTestCase {
         let flow = try await machine.beginPairing(expectedServerID: "new-host")
         _ = try await machine.markAuthenticated(for: flow)
 
-        do {
-            try await machine.commitHostIdentity(makeHost(serverID: "new-host"), for: flow)
-            XCTFail("Expected the secure-store boundary to fail the flow")
-        } catch {
-            // The original secure-store error surfaces to the caller.
+        let result = try await machine.commitHostIdentity(
+            makeHost(serverID: "new-host"),
+            for: flow
+        )
+        guard case .notCommitted = result else {
+            return XCTFail("Expected the secure-store boundary not to commit, got \(result)")
         }
 
         let state = await machine.state
@@ -826,9 +942,10 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(failure?.boundary, .secureStore)
         XCTAssertEqual(
             recorder.calls,
-            ["commit:old-host", "validate:5", "apply:5", "commit:new-host"],
+            ["validate:5"],
             "no snapshot may be applied after a failed commit"
         )
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
     }
 
     func testASecureStoreFailureForAFirstHostLeavesNoWorkspaceState() async throws {
@@ -839,11 +956,12 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         recorder.setCommitFailure(ReadinessBoundaryError.commitFailed)
 
-        do {
-            try await machine.commitHostIdentity(makeHost(serverID: "new-host"), for: flow)
-            XCTFail("Expected the secure-store boundary to fail the flow")
-        } catch {
-            // Expected.
+        let result = try await machine.commitHostIdentity(
+            makeHost(serverID: "new-host"),
+            for: flow
+        )
+        guard case .notCommitted = result else {
+            return XCTFail("Expected the secure-store boundary not to commit, got \(result)")
         }
 
         let state = await machine.state
@@ -852,7 +970,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(state, .unknown, "a failed first host leaves nothing authoritative")
         XCTAssertEqual(presentation, .noState, "a failed new host must not show any state")
         XCTAssertNil(committed)
-        XCTAssertEqual(recorder.calls, ["commit:new-host"])
+        XCTAssertEqual(recorder.calls, [])
     }
 
     func testADecodeRevisionFailureRejectsTheSnapshotBeforeItIsApplied() async throws {
@@ -878,9 +996,10 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(state, .degraded)
         XCTAssertEqual(
             recorder.calls,
-            ["commit:old-host", "validate:5", "apply:5", "commit:new-host", "validate:7"],
+            ["validate:5", "validate:7"],
             "the workspace apply must never run after validation rejects the snapshot"
         )
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
         XCTAssertEqual(presentation, .stale(hostID: "old-host", confirmedAt: fixedDate))
     }
 
@@ -894,13 +1013,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(makeHost(serverID: "new-host"), for: flow)
 
-        recorder.setApplyFailure(ReadinessBoundaryError.applyFailed)
-        do {
-            try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: flow)
-            XCTFail("Expected the workspace-apply boundary to fail the flow")
-        } catch {
-            // Expected.
-        }
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 4), for: flow)
 
         let state = await machine.state
         let presentation = await machine.presentation
@@ -908,11 +1021,8 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(presentation, .stale(hostID: "old-host", confirmedAt: fixedDate))
         let committed = await machine.committedHost
         XCTAssertEqual(committed?.serverID, "new-host", "the commit succeeded, so authority moved")
-        XCTAssertEqual(
-            recorder.calls,
-            ["commit:old-host", "validate:5", "apply:5", "commit:new-host", "validate:7", "apply:7"],
-            "the apply ran but its failure must not leave a success-shaped workspace"
-        )
+        XCTAssertEqual(recorder.calls, ["validate:5", "validate:4"])
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
     }
 
     func testATransportFailureDuringSynchronizationRollsBackToReconnecting() async throws {
@@ -930,7 +1040,7 @@ final class HostReadinessMachineTests: XCTestCase {
         let presentation = await machine.presentation
         XCTAssertEqual(state, .reconnecting)
         XCTAssertEqual(presentation, .stale(hostID: "old-host", confirmedAt: fixedDate))
-        XCTAssertFalse(recorder.calls.contains("apply:7"))
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
     }
 
     func testAnAuthenticationFailurePreservesThePreviousStaleState() async throws {
@@ -1003,11 +1113,11 @@ final class HostReadinessMachineTests: XCTestCase {
             stalePresentation,
             .stale(hostID: "old-host", confirmedAt: fixedDate)
         )
-        XCTAssertEqual(recorder.calls, ["commit:old-host", "validate:5", "apply:5"])
-        XCTAssertFalse(
-            recorder.calls.contains("commit:impostor"),
-            "a wrong-host commit must never reach the secure store"
+        XCTAssertEqual(recorder.calls, ["validate:5"])
+        let persistedImpostor = try await recorder.pairedHostStore.host(
+            withServerID: "impostor"
         )
+        XCTAssertNil(persistedImpostor, "a wrong-host commit must never reach the secure store")
         XCTAssertEqual(failure?.boundary, .revocation)
     }
 
@@ -1052,67 +1162,53 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(committed, makeHost(serverID: "new-host", clientID: "client-new"))
         XCTAssertEqual(
             recorder.calls,
-            ["commit:old-host", "validate:5", "apply:5", "commit:new-host"],
+            ["validate:5"],
             "only the owning flow ever crosses the commit boundary"
         )
     }
 
     func testAStaleCommitCannotOverwriteANewerAuthoritativeHost() async throws {
-        let recorder = ReadinessBoundaryRecorder()
-        let staleCommitGate = ReadinessBoundaryGate()
+        let secureStore = SaveBoundarySecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
         let machine = HostReadinessMachine(
-            adapters: HostReadinessAdapters(
-                prepareHostIdentity: { host in
-                    if host.serverID == "stale-host" {
-                        await staleCommitGate.suspend()
-                    }
-                    return HostReadinessPublication {
-                        try recorder.commitHostIdentity(host)
-                    }
-                },
-                validateSnapshot: { candidate in
-                    try recorder.validateSnapshot(candidate)
-                },
-                prepareWorkspace: { candidate in
-                    HostReadinessPublication {
-                        try recorder.applyWorkspace(candidate)
-                    }
-                }
-            ),
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
             now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
         )
 
         let staleFlow = try await machine.beginPairing(expectedServerID: "stale-host")
         _ = try await machine.markAuthenticated(for: staleFlow)
         let staleHost = makeHost(serverID: "stale-host")
+        secureStore.blockNextRead()
         let staleCommit = Task {
             try await machine.commitHostIdentity(staleHost, for: staleFlow)
         }
-        await staleCommitGate.waitUntilEntered()
+        try await secureStore.waitUntilReadBegins()
 
         _ = try await machine.revoke(reason: "Credential revoked")
         _ = try await machine.beginDiscovery()
         let freshFlow = try await machine.beginPairing(expectedServerID: "fresh-host")
         _ = try await machine.markAuthenticated(for: freshFlow)
         let freshHost = makeHost(serverID: "fresh-host", clientID: "client-fresh")
-        try await machine.commitHostIdentity(freshHost, for: freshFlow)
-        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
-
-        await staleCommitGate.release()
-        do {
-            try await staleCommit.value
-            XCTFail("The stale commit must be rejected after revocation and replacement")
-        } catch let error as HostReadinessError {
-            XCTAssertEqual(error, .supersededFlow)
+        let freshCommit = Task {
+            try await machine.commitHostIdentity(freshHost, for: freshFlow)
         }
+
+        secureStore.releaseRead()
+        let staleResult = try await staleCommit.value
+        let freshResult = try await freshCommit.value
+        XCTAssertEqual(staleResult, .notCommitted(reason: nil))
+        XCTAssertEqual(freshResult, .committed)
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
 
         let state = await machine.state
         let committedHost = await machine.committedHost
+        let persistedHost = try await pairedHostStore.host(withServerID: freshHost.serverID)
         XCTAssertEqual(state, .ready)
         XCTAssertEqual(committedHost, freshHost)
         XCTAssertEqual(
-            recorder.committedHostID,
-            "fresh-host",
+            persistedHost,
+            freshHost,
             "a stale async commit must never overwrite the newer durable authority"
         )
     }
@@ -1120,25 +1216,14 @@ final class HostReadinessMachineTests: XCTestCase {
     func testAStaleWorkspaceApplyCannotOverwriteANewerAuthoritativeWorkspace() async throws {
         let recorder = ReadinessBoundaryRecorder()
         let staleApplyGate = ReadinessBoundaryGate()
+        let validation = ReadinessValidationRecorder()
+        await validation.block(sequence: 7, on: staleApplyGate)
         let machine = HostReadinessMachine(
-            adapters: HostReadinessAdapters(
-                prepareHostIdentity: { host in
-                    HostReadinessPublication {
-                        try recorder.commitHostIdentity(host)
-                    }
-                },
-                validateSnapshot: { candidate in
-                    try recorder.validateSnapshot(candidate)
-                },
-                prepareWorkspace: { candidate in
-                    if candidate.sequence == 7 {
-                        await staleApplyGate.suspend()
-                    }
-                    return HostReadinessPublication {
-                        try recorder.applyWorkspace(candidate)
-                    }
-                }
-            ),
+            pairedHostStore: recorder.pairedHostStore,
+            workspaceStore: recorder.workspaceStore,
+            validateSnapshot: { candidate in
+                try await validation.validate(candidate)
+            },
             now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
         )
 
@@ -1186,11 +1271,9 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
 
         recorder.setCommitFailure(ReadinessBoundaryError.commitFailed)
-        do {
-            try await machine.commitHostIdentity(host, for: flow)
-            XCTFail("A failed atomic host publication must fail the flow")
-        } catch {
-            // Expected.
+        let result = try await machine.commitHostIdentity(host, for: flow)
+        guard case .notCommitted = result else {
+            return XCTFail("Expected an explicit not-committed result, got \(result)")
         }
 
         let state = await machine.state
@@ -1201,6 +1284,54 @@ final class HostReadinessMachineTests: XCTestCase {
             recorder.committedHostID,
             "a throwing publication must fail closed without durable authority"
         )
+    }
+
+    func testAMutateThenThrowPublicationReportsNotCommittedAfterVerifiedCompensation() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let machine = makeMachine(recorder: recorder)
+        let host = makeHost(serverID: "new-host")
+        let flow = try await machine.beginPairing(expectedServerID: host.serverID)
+        _ = try await machine.markAuthenticated(for: flow)
+
+        recorder.setCommitFailure(ReadinessBoundaryError.commitFailed, afterMutation: true)
+        let result = try await machine.commitHostIdentity(host, for: flow)
+        guard case .notCommitted = result else {
+            return XCTFail("Expected verified compensation, got \(result)")
+        }
+
+        XCTAssertNil(recorder.committedHostID)
+        let state = await machine.state
+        let failure = await machine.lastFailure
+        XCTAssertEqual(state, .unknown)
+        XCTAssertEqual(failure?.recovery, .rolledBack)
+    }
+
+    @MainActor
+    func testIndeterminateStorePublicationIsExplicitAndFailsClosed() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let oldHost = makeHost(serverID: "old-host", clientID: "client-old")
+        try await pairedHostStore.save(oldHost)
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+        let machine = HostReadinessMachine(
+            committedHost: oldHost,
+            pairedHostStore: pairedHostStore,
+            workspaceStore: WorkspaceStore(),
+            now: { Date(timeIntervalSinceReferenceDate: 762_543_210) }
+        )
+        let host = makeHost(serverID: "new-host")
+        let flow = try machine.beginPairing(expectedServerID: host.serverID)
+        _ = try machine.markAuthenticated(for: flow)
+
+        let result = try await machine.commitHostIdentity(host, for: flow)
+
+        guard case .indeterminate = result else {
+            return XCTFail("Expected explicit indeterminate result, got \(result)")
+        }
+        XCTAssertEqual(machine.state, .revoked)
+        XCTAssertEqual(machine.lastFailure?.recovery, .indeterminate)
+        XCTAssertEqual(machine.presentation, .noState)
     }
 
     func testASecondFlowCannotStartWhileOneIsActive() async throws {
@@ -1269,6 +1400,27 @@ final class HostReadinessMachineTests: XCTestCase {
         )
     }
 
+    func testAReadinessFlowPreservesTheWorkspaceConnectionGeneration() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let generation = ConnectionGeneration(id: 1)
+        recorder.workspaceStore.beginConnection(for: generation)
+        let machine = makeMachine(recorder: recorder)
+        let host = makeHost(serverID: "new-host")
+
+        let flow = try machine.beginPairing(expectedServerID: host.serverID)
+        _ = try machine.markAuthenticated(for: flow)
+        try await machine.commitHostIdentity(host, for: flow)
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: flow)
+        recorder.workspaceStore.applyEvent(
+            workspace: WorkspaceSnapshot(revision: 9, projects: []),
+            sequence: 9,
+            for: generation
+        )
+
+        XCTAssertEqual(recorder.workspaceStore.workspace?.revision, 9)
+        XCTAssertEqual(recorder.workspaceStore.sequence, 9)
+    }
+
     func testARollbackKeepsThePreviousConfirmedAtTimestamp() async throws {
         let recorder = ReadinessBoundaryRecorder()
         let machine = makeMachine(recorder: recorder)
@@ -1282,13 +1434,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(makeHost(serverID: "new-host"), for: flow)
 
-        recorder.setApplyFailure(ReadinessBoundaryError.applyFailed)
-        do {
-            try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: flow)
-            XCTFail("Expected the workspace-apply boundary to fail")
-        } catch {
-            // Expected.
-        }
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 6), for: flow)
 
         let presentation = await machine.presentation
         guard case .stale(let hostID, let confirmedAt) = presentation else {
@@ -1339,19 +1485,12 @@ final class HostReadinessMachineTests: XCTestCase {
             makeHost(serverID: "new-host", clientID: "client-new"),
             for: failed
         )
-        recorder.setApplyFailure(ReadinessBoundaryError.applyFailed)
-        do {
-            try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: failed)
-            XCTFail("Expected the workspace-apply boundary to fail")
-        } catch {
-            // Expected.
-        }
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 4), for: failed)
         let degradedState = await machine.state
         XCTAssertEqual(degradedState, .degraded)
 
         // Recovery runs the same spine against the committed authority, with
         // the workspace boundary healthy again.
-        recorder.setApplyFailure(nil)
         let retry = try await machine.beginReconnection()
         _ = try await machine.markAuthenticated(for: retry)
         try await machine.commitHostIdentity(

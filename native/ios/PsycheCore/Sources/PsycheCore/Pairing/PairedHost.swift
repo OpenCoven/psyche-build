@@ -77,9 +77,9 @@ public enum HostReadinessState: String, Codable, Sendable, Equatable, CaseIterab
     case revoked
 }
 
-/// The failure boundaries the readiness contract defines rollback behavior
-/// for. Each one maps to exactly one deterministic rollback — never to a
-/// success-shaped workspace.
+/// The failure boundaries the readiness contract defines recovery behavior
+/// for. A failure records whether rollback was proven or durable state became
+/// indeterminate; neither may expose a success-shaped workspace.
 public enum HostReadinessFailureBoundary: String, CaseIterable, Sendable, Equatable {
     case transport
     case authentication
@@ -95,16 +95,24 @@ public struct HostReadinessFailure: Equatable, Sendable {
     public let boundary: HostReadinessFailureBoundary
     public let reason: String?
     public let stateAtFailure: HostReadinessState
+    public let recovery: HostReadinessFailureRecovery
 
     public init(
         boundary: HostReadinessFailureBoundary,
         reason: String?,
-        stateAtFailure: HostReadinessState
+        stateAtFailure: HostReadinessState,
+        recovery: HostReadinessFailureRecovery = .rolledBack
     ) {
         self.boundary = boundary
         self.reason = reason
         self.stateAtFailure = stateAtFailure
+        self.recovery = recovery
     }
+}
+
+public enum HostReadinessFailureRecovery: Equatable, Sendable {
+    case rolledBack
+    case indeterminate
 }
 
 /// The inputs that move readiness forward. The transition table is the single
@@ -241,8 +249,8 @@ public enum HostWorkspacePresentation: Equatable, Sendable {
 }
 
 /// The workspace payload a readiness flow synchronizes, with the sequence that
-/// orders it. Decoding and revision validation happen behind the validation
-/// adapter; the machine guarantees they run — and that the workspace is
+/// orders it. Decoding and revision validation happen at the validation
+/// boundary; the machine guarantees they run — and that the workspace is
 /// applied — only after the host identity is durably committed.
 public struct HostReadinessSnapshotCandidate: Sendable, Equatable {
     public let workspace: WorkspaceSnapshot
@@ -308,50 +316,36 @@ public enum HostReadinessError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
-/// A prepared externally visible state change. Preparation may suspend, but
-/// publication cannot: the operation must synchronously perform one atomic,
-/// all-or-nothing mutation or throw without changing externally visible state.
-///
-/// The readiness actor invokes the operation only after rechecking flow
-/// ownership, then updates its matching internal state without yielding. This
-/// makes the external publication and readiness transition one serialized
-/// critical section with respect to revocation and replacement flows.
-public struct HostReadinessPublication: Sendable {
-    private let operation: @Sendable () throws -> Void
+/// The only three truthful outcomes of a state-owner publication attempt.
+/// `notCommitted` means no new state survived (including verified
+/// compensation); `indeterminate` means callers must fail closed.
+public enum HostReadinessTransactionResult: Equatable, Sendable {
+    case committed
+    case notCommitted(reason: String?)
+    case indeterminate(reason: String)
+}
 
-    public init(_ operation: @escaping @Sendable () throws -> Void) {
-        self.operation = operation
+final class HostReadinessFlowAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isAuthorized = true
+
+    func revoke() {
+        lock.withLock {
+            isAuthorized = false
+        }
     }
 
-    fileprivate func publish() throws {
-        try operation()
+    func withAuthorization<T>(_ operation: () -> T) -> T? {
+        lock.withLock {
+            guard isAuthorized else { return nil }
+            return operation()
+        }
     }
 }
 
-/// The boundaries a readiness flow crosses, bound to their concrete
-/// implementations at composition time. Async adapters may prepare a
-/// publication but must not mutate durable or visible authoritative state.
-/// Their returned `HostReadinessPublication` performs the final mutation
-/// synchronously and atomically after the machine revalidates flow ownership.
-public struct HostReadinessAdapters: Sendable {
-    /// Prepares an atomic secure-store publication for the authoritative
-    /// paired-host identity and selected-host state.
-    public let prepareHostIdentity: @Sendable (PairedHost) async throws -> HostReadinessPublication
-    /// The decode/revision boundary. Runs after the commit succeeded and
-    /// before anything touches the workspace.
-    public let validateSnapshot: @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
-    /// Prepares an atomic publication of an already-validated workspace.
-    public let prepareWorkspace: @Sendable (HostReadinessSnapshotCandidate) async throws -> HostReadinessPublication
-
-    public init(
-        prepareHostIdentity: @escaping @Sendable (PairedHost) async throws -> HostReadinessPublication,
-        validateSnapshot: @escaping @Sendable (HostReadinessSnapshotCandidate) async throws -> Void,
-        prepareWorkspace: @escaping @Sendable (HostReadinessSnapshotCandidate) async throws -> HostReadinessPublication
-    ) {
-        self.prepareHostIdentity = prepareHostIdentity
-        self.validateSnapshot = validateSnapshot
-        self.prepareWorkspace = prepareWorkspace
-    }
+enum HostIdentityPublicationPolicy: Sendable {
+    case preserve
+    case replace
 }
 
 /// The atomic host-readiness state machine (issue #241, slice 1).
@@ -362,13 +356,14 @@ public struct HostReadinessAdapters: Sendable {
 /// the secure-store commit of that identity, decode/revision validation, and
 /// workspace acceptance have all succeeded, in that order.
 ///
-/// Every failure boundary rolls back deterministically: freshly fetched state
-/// is never applied, the previously authoritative host's workspace stays on
-/// screen labeled stale (or there is no state at all for a failed first host),
-/// and revocation or a wrong-host identity fails closed. A concurrent or
-/// superseded flow cannot overwrite committed authority — only the flow the
-/// machine currently owns can cross the commit boundary.
-public actor HostReadinessMachine {
+/// Proven failures preserve the previously authoritative workspace as stale
+/// (or no state for a failed first host). A secure-store write whose
+/// compensation cannot be verified is explicitly indeterminate and fails
+/// closed as revoked. A concurrent or superseded flow cannot overwrite newer
+/// authority because each actual state owner revalidates the revocable flow
+/// authorization inside its publication transaction.
+@MainActor
+public final class HostReadinessMachine {
     public private(set) var state: HostReadinessState
     /// What the workspace surface may show. `stale` is semantically distinct
     /// from `live`: it is previously authoritative state, never current.
@@ -379,16 +374,25 @@ public actor HostReadinessMachine {
     public private(set) var lastFailure: HostReadinessFailure?
     public private(set) var activeFlow: HostReadinessFlow?
 
-    private let adapters: HostReadinessAdapters
+    private let pairedHostStore: PairedHostStore
+    private let workspaceStore: WorkspaceStore
+    private let validateSnapshot: @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
     private let now: @Sendable () -> Date
+    private var activeAuthorization: HostReadinessFlowAuthorization?
 
     public init(
         committedHost: PairedHost? = nil,
-        adapters: HostReadinessAdapters,
+        pairedHostStore: PairedHostStore,
+        workspaceStore: WorkspaceStore,
+        validateSnapshot: @escaping @Sendable (
+            HostReadinessSnapshotCandidate
+        ) async throws -> Void = { _ in },
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.committedHost = committedHost
-        self.adapters = adapters
+        self.pairedHostStore = pairedHostStore
+        self.workspaceStore = workspaceStore
+        self.validateSnapshot = validateSnapshot
         self.now = now
         state = .unknown
         presentation = .noState
@@ -433,13 +437,14 @@ public actor HostReadinessMachine {
     /// Persists the authoritative paired-host identity and selected-host
     /// state BEFORE any workspace snapshot can be applied.
     ///
-    /// The secure-store adapter must complete first; if it throws, the flow
-    /// rolls back and the snapshot is never applied. A wrong host identity
-    /// fails closed as a revocation without touching committed authority.
+    /// The paired-host store owns the transaction and revalidates flow
+    /// authorization around its write and any compensation. A wrong host
+    /// identity fails closed before touching committed authority.
+    @discardableResult
     public func commitHostIdentity(
         _ host: PairedHost,
         for flow: HostReadinessFlow
-    ) async throws {
+    ) async throws -> HostReadinessTransactionResult {
         try requireActive(flow)
         if let expected = flow.expectedServerID, host.serverID != expected {
             failClosed(.revocation, reason: HostReadinessError
@@ -450,34 +455,56 @@ public actor HostReadinessMachine {
                 actual: host.serverID
             )
         }
-        let publication: HostReadinessPublication
-        do {
-            publication = try await adapters.prepareHostIdentity(host)
-        } catch {
-            _ = try rollback(.secureStore, reason: error.localizedDescription, for: flow)
-            throw error
-        }
-        guard activeFlow == flow, state == .authenticating else {
+        guard let authorization = activeAuthorization else {
             throw HostReadinessError.supersededFlow
         }
-        do {
-            try publication.publish()
+        let policy: HostIdentityPublicationPolicy
+        switch flow.kind {
+        case .pairing:
+            policy = .replace
+        case .reconnection:
+            policy = .preserve
+        }
+        let result = await pairedHostStore.publishReadinessHost(
+            host,
+            policy: policy,
+            authorizedBy: authorization
+        )
+        switch result {
+        case .committed:
+            guard activeFlow == flow, state == .authenticating else {
+                return result
+            }
             committedHost = host
             _ = try apply(.hostCommitSucceeded)
-        } catch {
-            _ = try rollback(.secureStore, reason: error.localizedDescription, for: flow)
-            throw error
+        case .notCommitted(let reason):
+            guard activeFlow == flow, state == .authenticating else {
+                return result
+            }
+            _ = try rollback(
+                .secureStore,
+                reason: reason,
+                recovery: .rolledBack,
+                for: flow
+            )
+        case .indeterminate(let reason):
+            guard activeFlow == flow, state == .authenticating else {
+                return result
+            }
+            failIndeterminate(.secureStore, reason: reason)
         }
+        return result
     }
 
     /// Takes an already-fetched snapshot candidate through the remaining
     /// readiness gates in the only order that can make it authoritative:
     /// decode/revision validation, workspace acceptance, and only then
     /// `ready`. Nothing else may label state ready.
+    @discardableResult
     public func synchronizeWorkspace(
         _ candidate: HostReadinessSnapshotCandidate,
         for flow: HostReadinessFlow
-    ) async throws {
+    ) async throws -> HostReadinessTransactionResult {
         try requireActive(flow)
         guard state == .hostCommitted else {
             throw HostReadinessError.transitionRejected(
@@ -488,7 +515,7 @@ public actor HostReadinessMachine {
         _ = try apply(.synchronizationStarted)
 
         do {
-            try await adapters.validateSnapshot(candidate)
+            try await validateSnapshot(candidate)
         } catch {
             _ = try rollback(.decodeRevision, reason: error.localizedDescription, for: flow)
             throw error
@@ -497,31 +524,44 @@ public actor HostReadinessMachine {
             throw HostReadinessError.supersededFlow
         }
 
-        let publication: HostReadinessPublication
-        do {
-            publication = try await adapters.prepareWorkspace(candidate)
-        } catch {
-            _ = try rollback(.workspaceApply, reason: error.localizedDescription, for: flow)
-            throw error
-        }
-
-        guard activeFlow == flow, state == .synchronizing else {
+        guard let authorization = activeAuthorization else {
             throw HostReadinessError.supersededFlow
         }
-
-        do {
-            try publication.publish()
+        let result = workspaceStore.publishReadinessSnapshot(
+            candidate,
+            authorizedBy: authorization
+        )
+        switch result {
+        case .committed:
+            guard activeFlow == flow, state == .synchronizing else {
+                return result
+            }
             _ = try apply(.workspaceAccepted)
             lastFailure = nil
+            authorization.revoke()
             activeFlow = nil
+            activeAuthorization = nil
             presentation = .live(
                 hostID: committedHost?.serverID ?? "",
                 confirmedAt: now()
             )
-        } catch {
-            _ = try rollback(.workspaceApply, reason: error.localizedDescription, for: flow)
-            throw error
+        case .notCommitted(let reason):
+            guard activeFlow == flow, state == .synchronizing else {
+                return result
+            }
+            _ = try rollback(
+                .workspaceApply,
+                reason: reason,
+                recovery: .rolledBack,
+                for: flow
+            )
+        case .indeterminate(let reason):
+            guard activeFlow == flow, state == .synchronizing else {
+                return result
+            }
+            failIndeterminate(.workspaceApply, reason: reason)
         }
+        return result
     }
 
     /// The active flow failed at one boundary. Rolls the machine back
@@ -554,6 +594,7 @@ public actor HostReadinessMachine {
     /// committed identity survives on disk for the explicit re-pair path.
     @discardableResult
     public func revoke(reason: String? = nil) throws -> HostReadinessState {
+        activeAuthorization?.revoke()
         let from = state
         let destination = try apply(.revoked)
         relabelForFlowStart()
@@ -563,6 +604,7 @@ public actor HostReadinessMachine {
             stateAtFailure: from
         )
         activeFlow = nil
+        activeAuthorization = nil
         return destination
     }
 
@@ -575,19 +617,41 @@ public actor HostReadinessMachine {
         lastFailure = nil
         let flow = HostReadinessFlow(id: UUID(), kind: kind)
         activeFlow = flow
+        activeAuthorization = HostReadinessFlowAuthorization()
         return flow
     }
 
     /// Fails closed without touching committed authority — used when a flow
     /// contradicts the identity it committed to.
     private func failClosed(_ boundary: HostReadinessFailureBoundary, reason: String?) {
+        activeAuthorization?.revoke()
         lastFailure = HostReadinessFailure(
             boundary: boundary,
             reason: reason,
             stateAtFailure: state
         )
         activeFlow = nil
+        activeAuthorization = nil
         state = .revoked
+        relabelForFlowStart()
+    }
+
+    private func failIndeterminate(
+        _ boundary: HostReadinessFailureBoundary,
+        reason: String
+    ) {
+        let from = state
+        activeAuthorization?.revoke()
+        lastFailure = HostReadinessFailure(
+            boundary: boundary,
+            reason: reason,
+            stateAtFailure: from,
+            recovery: .indeterminate
+        )
+        activeFlow = nil
+        activeAuthorization = nil
+        state = .revoked
+        relabelForFlowStart()
     }
 
     /// A flow-less event (discovery) may not start while a flow owns the
@@ -623,6 +687,7 @@ public actor HostReadinessMachine {
     private func rollback(
         _ boundary: HostReadinessFailureBoundary,
         reason: String?,
+        recovery: HostReadinessFailureRecovery = .rolledBack,
         for flow: HostReadinessFlow
     ) throws -> HostReadinessState {
         guard activeFlow == flow else {
@@ -642,9 +707,12 @@ public actor HostReadinessMachine {
         lastFailure = HostReadinessFailure(
             boundary: boundary,
             reason: reason,
-            stateAtFailure: from
+            stateAtFailure: from,
+            recovery: recovery
         )
+        activeAuthorization?.revoke()
         activeFlow = nil
+        activeAuthorization = nil
         state = destination
         return destination
     }
@@ -653,6 +721,7 @@ public actor HostReadinessMachine {
     /// single transport about to be retargeted, readiness cannot vouch for
     /// the visible workspace until the new host is committed and accepted.
     private func relabelForFlowStart() {
+        workspaceStore.markReadinessStale()
         if case .live(let hostID, let confirmedAt) = presentation {
             presentation = .stale(hostID: hostID, confirmedAt: confirmedAt)
         }
