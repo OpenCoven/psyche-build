@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -42,6 +42,8 @@ use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
+#[cfg(desktop)]
+use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "linux")]
 use webkit2gtk::{
     glib::{self, translate::ToGlibPtr},
@@ -78,7 +80,9 @@ use control_provider::{
 };
 
 use coven_sessions::is_safe_session_id;
-use coven_sessions::{coven_session_kill, coven_sessions};
+use coven_sessions::{
+    coven_launch_capabilities, coven_launch_session, coven_session_kill, coven_sessions,
+};
 use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use native_sessions::{
     native_session_capture, native_session_create, native_session_list, native_session_stop,
@@ -152,6 +156,56 @@ fn ensure_trusted_pty_caller(label: &str) -> Result<(), String> {
     Err(format!(
         "PTY authority is only available to trusted webview 'main'; rejected caller '{label}'"
     ))
+}
+
+fn ensure_trusted_project_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "project authority is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
+}
+
+#[derive(Default)]
+pub(crate) struct NativeProjectAuthority {
+    open_roots: Mutex<HashSet<PathBuf>>,
+}
+
+const MAX_NATIVE_PROJECTS: usize = 10;
+
+impl NativeProjectAuthority {
+    fn from_startup() -> Self {
+        Self::default()
+    }
+
+    fn authorize_native_open(&self, root: &Path) -> Result<String, String> {
+        let root = canonical_project_root(&root.to_string_lossy())?;
+        let root_text = root.to_string_lossy().into_owned();
+        let mut open_roots = self.open_roots.lock();
+        if open_roots.contains(&root) {
+            return Ok(root_text);
+        }
+        if open_roots.len() >= MAX_NATIVE_PROJECTS {
+            return Err(format!(
+                "native project authority limit reached ({MAX_NATIVE_PROJECTS})"
+            ));
+        }
+        open_roots.insert(root);
+        Ok(root_text)
+    }
+
+    fn revoke_native_open(&self, root: &Path) -> Result<bool, String> {
+        if !root.is_absolute() {
+            return Err("native project authority requires an absolute root".to_string());
+        }
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        Ok(self.open_roots.lock().remove(&root))
+    }
+
+    pub(crate) fn open_project_roots(&self) -> Vec<PathBuf> {
+        self.open_roots.lock().iter().cloned().collect()
+    }
 }
 
 fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), String> {
@@ -1627,6 +1681,26 @@ fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+fn verified_worktree_root(project_root: &str, cwd: &Path) -> Result<PathBuf, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let canonical_cwd = cwd
+        .canonicalize()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd.display(), e))?;
+    if canonical_cwd.starts_with(&canonical_root) {
+        return Ok(canonical_root);
+    }
+    linked_worktree_roots(&canonical_root)?
+        .into_iter()
+        .filter(|root| canonical_cwd.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .ok_or_else(|| {
+            format!(
+                "PTY cwd is outside the project and its linked worktrees: {}",
+                cwd.display()
+            )
+        })
+}
+
 fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
     let candidate = pty_cwd_candidate(&canonical_root, cwd);
@@ -1677,10 +1751,7 @@ fn validate_coven_launch_with(
         return Err(format!("unsupported launch kind: {launch_kind}"));
     }
 
-    let resolved_coven = resolved_coven.ok_or_else(|| "Coven executable not found".to_string())?;
-    if options.command.as_deref() != Some(resolved_coven) {
-        return Err("Coven launch command does not match the resolved executable".to_string());
-    }
+    trusted_coven_executable_with(options.command.as_deref(), resolved_coven)?;
 
     match launch_kind {
         "coven-code" => {
@@ -1718,6 +1789,23 @@ fn validate_coven_launch_with(
     }
 }
 
+fn trusted_coven_executable_with(
+    requested_coven: Option<&str>,
+    resolved_coven: Option<&str>,
+) -> Result<String, String> {
+    let resolved_coven = resolved_coven.ok_or_else(|| "Coven executable not found".to_string())?;
+    if requested_coven != Some(resolved_coven) {
+        return Err("Coven launch command does not match the resolved executable".to_string());
+    }
+    Ok(resolved_coven.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_coven_executable(requested_coven: &str) -> Result<String, String> {
+    let resolved_coven = which_on_path("coven");
+    trusted_coven_executable_with(Some(requested_coven), resolved_coven.as_deref())
+}
+
 fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
     let resolved_coven = which_on_path("coven");
     validate_coven_launch_with(options, resolved_coven.as_deref())
@@ -1747,6 +1835,58 @@ fn apply_launch_env(
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn native_project_open(
+    app: AppHandle,
+    webview: tauri::Webview,
+    authority: State<'_, NativeProjectAuthority>,
+    default_path: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_trusted_project_caller(webview.label())?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app.dialog().file().set_title("Open project");
+        if let Some(default_path) = default_path {
+            let default_path = PathBuf::from(default_path);
+            if default_path.is_dir() {
+                dialog = dialog.set_directory(default_path);
+            }
+        }
+        dialog.blocking_pick_folder()
+    })
+    .await
+    .map_err(|error| format!("project picker failed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|error| format!("project picker returned an unavailable path: {error}"))?;
+    authority.authorize_native_open(&selected).map(Some)
+}
+
+#[tauri::command]
+fn native_project_close(
+    webview: tauri::Webview,
+    authority: State<'_, NativeProjectAuthority>,
+    root: String,
+) -> Result<bool, String> {
+    ensure_trusted_project_caller(webview.label())?;
+    authority.revoke_native_open(Path::new(&root))
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn native_project_open(
+    _app: AppHandle,
+    webview: tauri::Webview,
+    _authority: State<'_, NativeProjectAuthority>,
+    _default_path: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_trusted_project_caller(webview.label())?;
+    Err("native project selection is unavailable on this platform".to_string())
 }
 
 #[tauri::command]
@@ -8984,6 +9124,7 @@ pub fn run() {
     env_logger::init();
 
     let runtime_diagnostics_state = RuntimeDiagnosticsState::from_startup();
+    let native_project_authority = NativeProjectAuthority::from_startup();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -8996,6 +9137,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(runtime_diagnostics_state)
+        .manage(native_project_authority)
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
         .manage(BrowserShortcutAuthorizations::default())
@@ -9005,6 +9147,8 @@ pub fn run() {
             pty_attach,
             pane_session_metrics,
             canonical_project_path,
+            native_project_open,
+            native_project_close,
             pty_write,
             pty_resize,
             pty_ack,
@@ -9029,6 +9173,8 @@ pub fn run() {
             browser_snapshot,
             app_environment,
             coven_sessions,
+            coven_launch_session,
+            coven_launch_capabilities,
             coven_session_kill,
             workspace_load,
             workspace_save,
@@ -9068,6 +9214,68 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod native_project_authority_tests {
+    use super::*;
+
+    fn revoke_project_for_test(authority: &NativeProjectAuthority, root: &Path) {
+        authority.revoke_native_open(root).unwrap();
+    }
+
+    #[test]
+    fn native_project_authority_starts_fail_closed() {
+        assert!(NativeProjectAuthority::from_startup()
+            .open_project_roots()
+            .is_empty());
+    }
+
+    #[test]
+    fn native_project_authority_is_bounded_and_existing_roots_are_idempotent() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let authority = NativeProjectAuthority::default();
+        let first = tree.path().join("project-0");
+        std::fs::create_dir_all(&first).unwrap();
+
+        authority.authorize_native_open(&first).unwrap();
+        authority.authorize_native_open(&first).unwrap();
+        for index in 1..10 {
+            let root = tree.path().join(format!("project-{index}"));
+            std::fs::create_dir_all(&root).unwrap();
+            authority.authorize_native_open(&root).unwrap();
+        }
+
+        let overflow = tree.path().join("project-10");
+        std::fs::create_dir_all(&overflow).unwrap();
+        assert_eq!(
+            authority.authorize_native_open(&overflow).unwrap_err(),
+            "native project authority limit reached (10)"
+        );
+        assert_eq!(authority.open_project_roots().len(), 10);
+    }
+
+    #[test]
+    fn revoked_project_authority_rejects_stale_launch_scope() {
+        let tree = tempfile::TempDir::new().unwrap();
+        let root = tree.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let authority = NativeProjectAuthority::default();
+        authority.authorize_native_open(&root).unwrap();
+
+        revoke_project_for_test(&authority, &root);
+
+        assert!(authority.open_project_roots().is_empty());
+    }
+
+    #[test]
+    fn project_privileged_commands_reject_external_callers() {
+        assert_eq!(ensure_trusted_project_caller("main"), Ok(()));
+        assert_eq!(
+            ensure_trusted_project_caller("psyche-browser-untrusted").unwrap_err(),
+            "project authority is only available to trusted webview 'main'; rejected caller 'psyche-browser-untrusted'"
+        );
+    }
 }
 
 #[cfg(test)]
