@@ -1923,6 +1923,73 @@ describe('native Coven launch routing', () => {
     ]]);
   });
 
+  it('blocks confirmed recovery resolution for the complete attachment retry', async () => {
+    const refresh = deferred<void>();
+    const thread: Record<string, any> = {
+      id: 'accepted-thread',
+      projectId: 'project',
+      name: 'Codex CLI',
+      status: 'failed',
+      closeStarted: false,
+      startInFlight: false,
+      persistentLive: false,
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: COVEN_SESSION_ID,
+        recoveryRequired: true,
+      },
+    };
+    const project = { id: 'project', root: '/repo', closing: false };
+    const state = { threads: [thread] };
+    let nativeCreates = 0;
+    let resolutionCloses = 0;
+    const statuses: Array<[string, string]> = [];
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('retryThread'),
+      {
+        findThread: (id: string) => state.threads.find(candidate => candidate.id === id) || null,
+        findProject: () => project,
+        refreshCovenSessions: () => refresh.promise,
+        covenDiscovery: { phase: 'ready' },
+        covenSessionsForProject: () => [{ id: COVEN_SESSION_ID }],
+        noteStatusActivity: () => undefined,
+        invoke: async (command: string) => {
+          if (command === 'native_session_create') nativeCreates += 1;
+          return true;
+        },
+        attachThreadClient: async () => true,
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      },
+    );
+    const resolveCovenLaunchRecovery = compileFunction<(
+      candidate: Record<string, any>,
+    ) => Promise<boolean>>(
+      functionSource('resolveCovenLaunchRecovery'),
+      {
+        isLiveThread: () => true,
+        closeThread: async () => {
+          resolutionCloses += 1;
+          return true;
+        },
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      },
+    );
+
+    const retry = retryThread(thread.id);
+    expect(thread.retryInFlight).toBeInstanceOf(Promise);
+    await expect(resolveCovenLaunchRecovery(thread)).resolves.toBe(false);
+    expect(resolutionCloses).toBe(0);
+
+    refresh.resolve();
+    await expect(retry).resolves.toBe(true);
+    expect(nativeCreates).toBe(1);
+    expect(thread.retryInFlight).toBeNull();
+    expect(statuses[0]).toEqual([
+      'Codex CLI Coven launch is still settling; wait before resolving recovery',
+      'warn',
+    ]);
+  });
+
   it('retries a bare Coven CLI durable session without a stale Coven session id', async () => {
     const requests: Array<Record<string, unknown>> = [];
     const nativeSessionRequest = compileFunction<(
@@ -2444,7 +2511,9 @@ describe('native Coven launch routing', () => {
 
     // The in-flight guard that the old hidden-button logic enforced still lives
     // in retryThread itself, which its own lifecycle tests cover.
-    expect(functionSource('retryThread')).toMatch(/thread\.startInFlight \|\| thread\.closeStarted/);
+    expect(functionSource('retryThread')).toMatch(
+      /thread\.startInFlight \|\| thread\.retryInFlight \|\| thread\.closeStarted/,
+    );
     expect(functionSource('retryThread')).toMatch(
       /thread\.status !== "exited" && thread\.status !== "failed"/
     );

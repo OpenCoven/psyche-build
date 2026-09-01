@@ -2915,6 +2915,77 @@ describe('Tauri physical terminal panes', () => {
     expect(state.threads).toEqual([thread]);
   });
 
+  it('restores project focus-set membership when pane teardown rolls back', async () => {
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      closing: false,
+    };
+    const first = { id: 'first', projectId: project.id, worktreePath: '/repo' };
+    const second = { id: 'second', projectId: project.id, worktreePath: '/repo' };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: first.id,
+      activeFileId: null,
+      projects: [project],
+      threads: [first, second],
+      openFiles: [],
+    };
+    const focusSets = [{
+      id: 'set-1',
+      key: 'project\u0000/repo',
+      name: 'Set 1',
+      index: 1,
+      threadIds: [first.id],
+    }];
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      focusSets,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async (id: string) => {
+        if (id === first.id) {
+          state.threads = state.threads.filter(thread => thread.id !== id);
+          focusSets.splice(0, focusSets.length);
+          return true;
+        }
+        return false;
+      },
+      invoke: async () => true,
+      setStatus: () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => true,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(state.threads).toEqual([first, second]);
+    expect(focusSets).toEqual([{
+      id: 'set-1',
+      key: 'project\u0000/repo',
+      name: 'Set 1',
+      index: 1,
+      threadIds: [first.id],
+    }]);
+  });
+
   it('restores a project without revoking authority when removal persistence fails', async () => {
     const project: {
       id: string;

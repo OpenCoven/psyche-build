@@ -3151,7 +3151,7 @@
 
   async function retryThread(id) {
     var thread = findThread(id);
-    if (!thread || thread.startInFlight || thread.closeStarted) return false;
+    if (!thread || thread.startInFlight || thread.retryInFlight || thread.closeStarted) return false;
     if (thread.status !== "exited" && thread.status !== "failed") return false;
     if (thread.launch.launchKind === "coven-recovery") {
       setStatus(
@@ -3160,29 +3160,53 @@
       );
       return false;
     }
-    if (thread.launch.launchKind === "coven-attach") {
-      var project = findProject(thread.projectId);
-      await refreshCovenSessions();
-      var stillExists = project
-        && covenDiscovery.phase === "ready"
-        && covenSessionsForProject(project).some(function (session) {
-          return session.id === thread.launch.covenSessionId;
-        });
-      if (!stillExists) {
-        setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+    var finishRetry;
+    var retryInFlight = new Promise(function (resolve) {
+      finishRetry = resolve;
+    });
+    thread.retryInFlight = retryInFlight;
+    try {
+      if (thread.launch.launchKind === "coven-attach") {
+        var project = findProject(thread.projectId);
+        await refreshCovenSessions();
+        if (findThread(id) !== thread || thread.closeStarted) return false;
+        var stillExists = project
+          && !project.closing
+          && covenDiscovery.phase === "ready"
+          && covenSessionsForProject(project).some(function (session) {
+            return session.id === thread.launch.covenSessionId;
+          });
+        if (!stillExists) {
+          setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+          return false;
+        }
+      }
+      if (typeof noteStatusActivity === "function") noteStatusActivity();
+      if (!isPersistentThread(thread)) return await spawnPty(thread);
+      if (thread.persistentLive) return await attachThreadClient(thread);
+      try {
+        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+      } catch (error) {
+        setStatus(thread.name + " failed to restart: " + String(error), "error");
         return false;
       }
+      if (findThread(id) !== thread || thread.closeStarted) {
+        try {
+          await invoke("native_session_stop", { id: id });
+        } catch (cleanupError) {
+          setStatus(
+            thread.name + " restarted after local removal and cleanup failed: " +
+              String(cleanupError),
+            "error"
+          );
+        }
+        return false;
+      }
+      return await attachThreadClient(thread);
+    } finally {
+      if (thread.retryInFlight === retryInFlight) thread.retryInFlight = null;
+      finishRetry();
     }
-    if (typeof noteStatusActivity === "function") noteStatusActivity();
-    if (!isPersistentThread(thread)) return spawnPty(thread);
-    if (thread.persistentLive) return attachThreadClient(thread);
-    try {
-      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
-    } catch (error) {
-      setStatus(thread.name + " failed to restart: " + String(error), "error");
-      return false;
-    }
-    return attachThreadClient(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -5639,6 +5663,11 @@
       thread = findThread(id);
       if (!thread || thread.closeStarted) return false;
     }
+    if (protectCovenRecovery && thread.retryInFlight) {
+      await thread.retryInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
     var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") {
       suspendGitRequests();
@@ -7168,7 +7197,9 @@
           thread.launch.recoveryRequired !== true)) {
       return false;
     }
-    if (thread.covenLaunchOutcomeInFlight || thread.covenLaunchAcceptanceInFlight) {
+    if (thread.covenLaunchOutcomeInFlight ||
+        thread.covenLaunchAcceptanceInFlight ||
+        thread.retryInFlight) {
       setStatus(
         thread.name + " Coven launch is still settling; wait before resolving recovery",
         "warn"
@@ -8871,6 +8902,7 @@
           && thread.launch
           && (thread.covenLaunchOutcomeInFlight ||
             thread.covenLaunchAcceptanceInFlight ||
+            thread.retryInFlight ||
             thread.launch.launchKind === "coven-recovery" ||
             thread.launch.recoveryRequired === true);
       });
@@ -8932,6 +8964,16 @@
     var threadSnapshot = state.threads.slice();
     var activeThreadIdSnapshot = state.activeThreadId;
     var lastActiveThreadIdSnapshot = project.lastActiveThreadId;
+    var focusSetSnapshot = [];
+    if (typeof focusSets !== "undefined") {
+      focusSets.forEach(function (set, index) {
+        if (set.key.indexOf(id + "\u0000") !== 0) return;
+        focusSetSnapshot.push({
+          index: index,
+          set: Object.assign({}, set, { threadIds: set.threadIds.slice() }),
+        });
+      });
+    }
     var paneLayoutSnapshot = [];
     if (typeof paneLayouts !== "undefined") {
       paneLayouts.forEach(function (layout, key) {
@@ -8985,6 +9027,23 @@
         });
         paneLayoutSnapshot.forEach(function (entry) {
           paneLayouts.set(entry[0], entry[1]);
+        });
+      }
+      if (typeof focusSets !== "undefined") {
+        for (var focusSetIndex = focusSets.length - 1; focusSetIndex >= 0; focusSetIndex -= 1) {
+          if (focusSets[focusSetIndex].key.indexOf(id + "\u0000") === 0) {
+            focusSets.splice(focusSetIndex, 1);
+          }
+        }
+        focusSetSnapshot.forEach(function (entry) {
+          var restoredSet = Object.assign({}, entry.set, {
+            threadIds: entry.set.threadIds.slice(),
+          });
+          focusSets.splice(
+            Math.max(0, Math.min(entry.index, focusSets.length)),
+            0,
+            restoredSet
+          );
         });
       }
       state.activeThreadId = activeThreadIdSnapshot;
