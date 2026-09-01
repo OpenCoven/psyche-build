@@ -700,6 +700,33 @@ describe('tracker drift validation', () => {
     });
   });
 
+  it('validates legacy managed markers after a current marker change', async () => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file',
+      '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+      '--issues-file',
+      '__tests__/fixtures/beads-project-sync/tracker-issues.json',
+    ], {
+      configPath: join(
+        process.cwd(),
+        '__tests__/fixtures/beads-project-sync/tracker-custom-marker-config.json',
+      ),
+      stdout,
+      stderr,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value())).toMatchObject({
+      result: 'pass',
+      managedMirrorCount: 2,
+      findingCount: 0,
+    });
+  });
+
   it('loads more than ten GitHub issue pages without ambient authorization', async () => {
     const requests: Array<{ url: string; headers: RequestInit['headers'] }> = [];
     const fetchImpl = async (

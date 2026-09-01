@@ -61,7 +61,7 @@ function objectRecord(value) {
     : {};
 }
 
-function normalizeIssue(rawValue, config, trustedIssueAuthors) {
+function normalizeIssue(rawValue, config, trustedIssueAuthors, issueMarkers) {
   const rawIssue = objectRecord(rawValue);
   if (Object.keys(rawIssue).length === 0 || rawIssue.pull_request != null) return null;
   const rawUser = objectRecord(rawIssue.user);
@@ -71,7 +71,8 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors) {
   const body = typeof rawIssue.body === 'string' ? rawIssue.body : '';
   if (!Number.isSafeInteger(number) || number <= 0) return null;
 
-  const marker = escapeRegExp(config.issueMarker);
+  const markerAlternatives = issueMarkers.map(escapeRegExp).join('|');
+  const markerTokens = new Set(issueMarkers.map((value) => value.toLowerCase()));
   const markerComments = [...body.matchAll(/<!--[\s\S]*?-->/gu)]
     .map((match) => match[0])
     .filter((comment) => {
@@ -79,16 +80,16 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors) {
         .slice(4, -3)
         .trim()
         .match(/^([A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,199}))(?=\s|$)/u)?.[1];
-      return markerToken?.toLowerCase() === config.issueMarker.toLowerCase();
+      return markerToken != null && markerTokens.has(markerToken.toLowerCase());
     });
   if (markerComments.length === 0) return null;
 
   const exactBeadMarker = new RegExp(
-    `^<!-- ${marker} bead-id=([^\\r\\n>]*) -->$`,
+    `^<!-- (?:${markerAlternatives}) bead-id=([^\\r\\n>]*) -->$`,
     'u',
   );
   const exactRenderHashMarker = new RegExp(
-    `^<!-- ${marker} render-hash=([^\\r\\n>]*) -->$`,
+    `^<!-- (?:${markerAlternatives}) render-hash=([^\\r\\n>]*) -->$`,
     'u',
   );
   const beadIds = [];
@@ -321,14 +322,14 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
     const trustedIssueAuthors = new Set(
       config.trustedIssueAuthors.map((login) => login.trim().toLowerCase()),
     );
-    const managedIssues = rawIssues
-      .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors))
-      .filter((issue) => issue != null);
     const issueMarkers = recognizedMarkers(
       config.issueMarker,
       LEGACY_ISSUE_MARKERS,
       'tracker drift issue marker',
     );
+    const managedIssues = rawIssues
+      .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors, issueMarkers))
+      .filter((issue) => issue != null);
     const report = validateTrackerDrift(
       beads,
       managedIssues,
