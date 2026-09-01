@@ -1843,6 +1843,36 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
     }
 
+    func testStaleFlowTeardownAfterSynchronizationRollsBackProvisionalReadiness() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let machine = makeMachine(recorder: recorder)
+        let oldHost = makeHost(serverID: "old-host", clientID: "client-old")
+        try await driveToReady(machine, recorder: recorder, host: oldHost, sequence: 5)
+        let previousWorkspace = recorder.workspaceStore.workspace
+
+        let flow = try machine.beginPairing(expectedServerID: "new-host")
+        _ = try machine.markAuthenticated(for: flow)
+        try await machine.commitHostIdentity(
+            makeHost(serverID: "new-host", clientID: "client-new"),
+            for: flow
+        )
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: flow)
+
+        let state = try machine.reconcileConnectionLoss(
+            ownedFlow: flow,
+            reason: "Transport disconnected"
+        )
+
+        XCTAssertEqual(state, .reconnecting)
+        XCTAssertEqual(machine.committedHost, oldHost)
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
+        XCTAssertEqual(recorder.workspaceStore.workspace, previousWorkspace)
+        XCTAssertEqual(
+            machine.presentation,
+            .stale(hostID: oldHost.serverID, confirmedAt: fixedDate)
+        )
+    }
+
     func testAStaleWorkspaceApplyCannotOverwriteANewerAuthoritativeWorkspace() async throws {
         let recorder = ReadinessBoundaryRecorder()
         let staleApplyGate = ReadinessBoundaryGate()

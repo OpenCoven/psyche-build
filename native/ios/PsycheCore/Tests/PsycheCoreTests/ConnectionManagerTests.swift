@@ -1036,6 +1036,8 @@ final class ConnectionManagerTests: XCTestCase {
         ))))
         try await secureStore.waitUntilReadBegins(timeout: .seconds(2))
 
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertTrue(composition.workspaceStore.isStale)
         await composition.manager.disconnect()
         secureStore.releaseRead()
         for _ in 0..<100 {
@@ -1049,6 +1051,99 @@ final class ConnectionManagerTests: XCTestCase {
         let selected = try await composition.pairedHostStore.selectedHost()
         XCTAssertEqual(selected?.serverID, previouslyReady.serverID)
         XCTAssertEqual(selected?.endpoint, previouslyReady.endpoint)
+    }
+
+    func testSelectionMutationFailureKeepsPreviouslyReadyWorkspace() async throws {
+        let secureStore = FailableWriteSecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        await composition.manager.disconnect()
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        secureStore.setBehavior(.mutateThenFailWrite)
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        try await waitForDisconnectCount(2, on: fake)
+
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        let selected = try await composition.pairedHostStore.selectedHost()
+        XCTAssertEqual(selected?.serverID, previouslyReady.serverID)
+        XCTAssertEqual(selected?.endpoint, previouslyReady.endpoint)
+    }
+
+    func testIndeterminateSelectionMutationNeverPublishesCandidateWorkspace() async throws {
+        let secureStore = FailableWriteSecureStore()
+        let previouslyReady = makeStoredHost()
+        try await PairedHostStore(secureStore: secureStore).save(previouslyReady)
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        await composition.manager.disconnect()
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        secureStore.setBehavior(.mutateThenFailWriteAndCompensation)
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        try await waitForDisconnectCount(2, on: fake)
+
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        if case .live(let hostID, _) = composition.hostReadiness.presentation {
+            XCTFail("Indeterminate selection must not leave \(hostID) live")
+        }
     }
 
     func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
@@ -3296,6 +3391,8 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
         case succeed
         case failWrite
         case failWriteAndCompensation
+        case mutateThenFailWrite
+        case mutateThenFailWriteAndCompensation
     }
 
     enum StoreError: Error {
@@ -3332,6 +3429,20 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
                 throw StoreError.denied
             case .failWriteAndCompensation:
                 throw StoreError.denied
+            case .mutateThenFailWrite:
+                guard !hasRefusedWrite else {
+                    storage[key] = data
+                    return
+                }
+                hasRefusedWrite = true
+                storage[key] = data
+                throw StoreError.denied
+            case .mutateThenFailWriteAndCompensation:
+                if !hasRefusedWrite {
+                    hasRefusedWrite = true
+                    storage[key] = data
+                }
+                throw StoreError.denied
             }
         }
     }
@@ -3339,6 +3450,9 @@ private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
     func removeValue(forKey key: String) throws {
         try lock.withLock {
             if case .failWriteAndCompensation = behavior {
+                throw StoreError.denied
+            }
+            if case .mutateThenFailWriteAndCompensation = behavior {
                 throw StoreError.denied
             }
             storage.removeValue(forKey: key)

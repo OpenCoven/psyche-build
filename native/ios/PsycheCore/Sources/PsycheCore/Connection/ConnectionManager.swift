@@ -1156,13 +1156,13 @@ public actor ConnectionManager {
     private func endReadinessFlow(reason: any Error) async {
         let machine = hostReadiness
         let description = reason.localizedDescription
-        guard let flow = readinessFlow else {
-            await MainActor.run { _ = try? machine.noteConnectionLost() }
-            return
-        }
+        let flow = readinessFlow
         clearReadinessFlow()
         await MainActor.run {
-            _ = try? machine.fail(.transport, reason: description, for: flow)
+            _ = try? machine.reconcileConnectionLoss(
+                ownedFlow: flow,
+                reason: description
+            )
         }
     }
 

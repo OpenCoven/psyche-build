@@ -119,6 +119,14 @@ final class AppModel: ObservableObject {
                 }
             }
             .store(in: &subscriptions)
+
+        composition?.hostReadiness.objectWillChange
+            .sink { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.refreshHostContext()
+                }
+            }
+            .store(in: &subscriptions)
     }
 
     private func refreshHostContext() async {
