@@ -82,11 +82,13 @@ final class PairedHostStoreTests: XCTestCase {
         )
 
         let migrated = PairedHostStore(secureStore: secureStore)
-        XCTAssertEqual(try await migrated.selectedHost(), first)
+        let migratedSelection = try await migrated.selectedHost()
+        XCTAssertEqual(migratedSelection, first)
 
         try secureStore.removeValue(forKey: PairedHostStore.legacyKey)
         let reopened = PairedHostStore(secureStore: secureStore)
-        XCTAssertEqual(try await reopened.selectedHost(), first)
+        let reopenedSelection = try await reopened.selectedHost()
+        XCTAssertEqual(reopenedSelection, first)
     }
 
     func testSelectedHostFailsClosedWhenSelectionDoesNotNameARecord() async throws {
