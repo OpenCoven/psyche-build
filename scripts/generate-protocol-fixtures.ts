@@ -14,6 +14,7 @@ import {
   SERVER_FIXTURES,
   WORKSPACE_SNAPSHOT_FIXTURE,
 } from '../protocol-fixtures/fixtures.js';
+import { createSafeSupportBundleFixture } from '../src/diagnostics/supportBundle.js';
 
 const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../protocol-fixtures');
 
@@ -39,6 +40,7 @@ export const OUTPUTS = [
   ['mobile-control.json', MOBILE_CONTROL_FIXTURES],
   ['server-messages.json', SERVER_FIXTURES],
   ['workspace-snapshot.json', WORKSPACE_SNAPSHOT_FIXTURE],
+  ['support-bundle/v1/safe-bundle.json', createSafeSupportBundleFixture()],
 ] as const;
 
 if (import.meta.url === `file://${process.argv[1]}`) {

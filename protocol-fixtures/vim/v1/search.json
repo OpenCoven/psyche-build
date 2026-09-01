@@ -1,0 +1,109 @@
+{
+  "version": "vim/v1",
+  "kind": "editor",
+  "traces": [
+    {
+      "id": "search-forward-jumps-to-next-match",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": ["/", "a", "l", "p", "h", "a", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 11,
+        "actions": [{ "type": "search", "query": "alpha", "direction": "forward", "active": true }],
+        "search": { "pattern": "alpha", "direction": "forward", "highlight": true }
+      }
+    },
+    {
+      "id": "search-backward-jumps-to-previous-match",
+      "document": { "text": "alpha beta alpha", "cursor": 6 },
+      "inputs": ["?", "a", "l", "p", "h", "a", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 0,
+        "actions": [{ "type": "search", "query": "alpha", "direction": "backward", "active": true }],
+        "search": { "pattern": "alpha", "direction": "backward", "highlight": true }
+      }
+    },
+    {
+      "id": "search-n-repeats-last-search",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": ["/", "b", "e", "t", "a", "Enter", "n"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 6,
+        "actions": [{ "type": "search", "query": "beta", "direction": "forward", "active": true }],
+        "search": { "pattern": "beta", "direction": "forward", "highlight": true }
+      }
+    },
+    {
+      "id": "search-N-inverts-direction",
+      "document": { "text": "alpha beta alpha", "cursor": 6 },
+      "inputs": ["?", "a", "l", "p", "h", "a", "Enter", "N"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 11,
+        "actions": [{ "type": "search", "query": "alpha", "direction": "forward", "active": true }],
+        "search": { "pattern": "alpha", "direction": "backward", "highlight": true }
+      }
+    },
+    {
+      "id": "search-star-whole-word-under-cursor",
+      "document": { "text": "alpha beta alpha", "cursor": 12 },
+      "inputs": ["*"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 0,
+        "actions": [{ "type": "search", "query": "alpha", "direction": "forward", "active": true }],
+        "search": { "pattern": "alpha", "direction": "forward", "highlight": true, "wholeWord": true }
+      }
+    },
+    {
+      "id": "search-n-without-previous-search-consumed",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": ["n"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "No previous search" }]
+      }
+    },
+    {
+      "id": "search-unsupported-pattern-fails-closed",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": ["/", "(", "?", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Unsupported search pattern" }],
+        "search": { "pattern": "", "direction": "forward", "highlight": true }
+      }
+    },
+    {
+      "id": "search-invalid-pattern-fails-closed",
+      "document": { "text": "alpha beta alpha", "cursor": 0 },
+      "inputs": ["/", "a", "(", "Enter"],
+      "expected": {
+        "mode": "normal",
+        "pending": "",
+        "text": "alpha beta alpha",
+        "cursor": 0,
+        "actions": [{ "type": "status", "level": "error", "message": "Invalid search pattern" }],
+        "search": { "pattern": "", "direction": "forward", "highlight": true }
+      }
+    }
+  ]
+}
