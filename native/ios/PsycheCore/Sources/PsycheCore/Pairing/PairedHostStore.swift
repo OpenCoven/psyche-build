@@ -113,6 +113,33 @@ public actor PairedHostStore {
         return committed
     }
 
+    /// Records a reissued token for a host whose identity is already
+    /// committed. This is deliberately not an identity path: the record must
+    /// already exist with the same pinned fingerprint, and a retired
+    /// connection or a cancelled pairing may not write at all.
+    func reissueToken(
+        _ token: String?,
+        forServerID serverID: String,
+        certificateFingerprint: String,
+        for generation: ConnectionGeneration,
+        authorizedBy authorization: PairingPersistenceAuthorization
+    ) throws -> Bool {
+        var records = try records()
+        guard let existing = records[serverID] else { return false }
+        let normalized = try PinnedCertificateDelegate
+            .normalizeFingerprint(certificateFingerprint)
+        guard existing.certificateFingerprint == normalized else {
+            throw PairedHostStoreError.identityChanged(serverID: serverID)
+        }
+        records[serverID] = existing.withToken(token)
+        return try generation.withValidity {
+            try authorization.withAuthorization {
+                try write(records)
+                return true
+            } ?? false
+        } ?? false
+    }
+
     /// Revalidates the readiness flow and publishes while this actor owns the
     /// paired-host record. A throwing store write is compensated and verified
     /// before it may be reported as not committed.

@@ -461,6 +461,40 @@ public final class HostReadinessMachine {
         presentation = .noState
     }
 
+    /// The revocable publication authority of the flow that currently owns the
+    /// machine.
+    ///
+    /// A caller that must withdraw a flow's right to publish from a context
+    /// that cannot hop to the main actor — a pairing cancelled while a
+    /// secure-store write is already in flight — revokes this directly.
+    /// Revoking is exactly what a failure boundary does internally, and the
+    /// machine reconciles whatever durable outcome was recorded at its next
+    /// boundary call, so no authority is lost or invented by doing so.
+    func authorization(for flow: HostReadinessFlow) -> HostReadinessFlowAuthorization? {
+        guard activeFlow == flow else { return nil }
+        return activeAuthorization
+    }
+
+    /// Hydrates the machine with a host identity the paired-host store already
+    /// holds, so a relaunch can reconnect to the authority it committed in an
+    /// earlier session.
+    ///
+    /// This adopts durable state; it never creates authority. It is refused
+    /// while a flow owns the machine, and refused outright when it contradicts
+    /// an identity already committed in this session — a durable record naming
+    /// a different host than the one currently authoritative is exactly the
+    /// wrong-host case, and it fails closed rather than silently retargeting.
+    public func adoptPersistedHost(_ host: PairedHost) throws {
+        try requireIdle()
+        if let committedHost, committedHost.serverID != host.serverID {
+            throw HostReadinessError.wrongHostIdentity(
+                expected: committedHost.serverID,
+                actual: host.serverID
+            )
+        }
+        committedHost = host
+    }
+
     /// Starts browsing for hosts. Discovery is not a readiness flow: nothing
     /// is torn down, so the workspace presentation is left untouched.
     @discardableResult

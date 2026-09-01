@@ -553,6 +553,10 @@ final class ConnectionManagerTests: XCTestCase {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: HostReadinessMachine(
+                pairedHostStore: pairedHostStore,
+                workspaceStore: workspaceStore
+            ),
             clientID: "test-client",
             clientName: "Psyche Tests"
         )
@@ -592,6 +596,10 @@ final class ConnectionManagerTests: XCTestCase {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: HostReadinessMachine(
+                pairedHostStore: pairedHostStore,
+                workspaceStore: workspaceStore
+            ),
             clientID: "test-client",
             clientName: "Psyche Tests"
         )
@@ -608,7 +616,12 @@ final class ConnectionManagerTests: XCTestCase {
             _ = try firstResult.get()
             XCTFail("Expected store cancellation to fail pairing")
         } catch {
-            XCTAssertEqual(error as? PairingError, .cancelled)
+            // Host persistence now runs through readiness, which reports a
+            // proven rollback rather than the store's own error identity.
+            XCTAssertEqual(
+                error as? ConnectionManagerError,
+                .hostIdentityNotCommitted(CancellationError().localizedDescription)
+            )
         }
         try await waitForDisconnectCount(1, on: fake)
 
@@ -702,6 +715,10 @@ final class ConnectionManagerTests: XCTestCase {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: HostReadinessMachine(
+                pairedHostStore: pairedHostStore,
+                workspaceStore: workspaceStore
+            ),
             clientID: "test-client",
             clientName: "Psyche Tests",
             token: "original-token"
@@ -745,7 +762,12 @@ final class ConnectionManagerTests: XCTestCase {
         }
 
         let persistedHosts = try await pairedHostStore.hosts()
-        XCTAssertEqual(persistedHosts, [])
+        XCTAssertEqual(
+            persistedHosts.map(\.token),
+            ["original-token"],
+            "The retired session's late acceptance must not replace the committed token"
+        )
+        XCTAssertEqual(persistedHosts.map(\.endpoint), [secondEndpoint])
 
         let hellos = await fake.sentMessages.compactMap { message -> HelloPayload? in
             guard case let .legacy(.hello(payload)) = message else { return nil }
@@ -869,6 +891,10 @@ final class ConnectionManagerTests: XCTestCase {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: HostReadinessMachine(
+                pairedHostStore: pairedHostStore,
+                workspaceStore: workspaceStore
+            ),
             clientID: "manual-client",
             clientName: "Psyche Tests"
         )
@@ -936,6 +962,10 @@ final class ConnectionManagerTests: XCTestCase {
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: HostReadinessMachine(
+                pairedHostStore: pairedHostStore,
+                workspaceStore: workspaceStore
+            ),
             clientID: "new-install-id",
             clientName: "Psyche Tests"
         )
@@ -2089,22 +2119,267 @@ final class ConnectionManagerTests: XCTestCase {
         }
     }
 
+    // MARK: - Host readiness composition (issue #241)
+
+    func testStoredHostReconnectCommitsIdentityBeforeAnyWorkspaceBecomesVisible() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, clientID: "install-id")
+        let stored = makeStoredHost()
+        try await composition.pairedHostStore.save(stored)
+
+        let connectTask = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-1"))))
+        await connectTask.value
+
+        XCTAssertEqual(composition.hostReadiness.state, .hostCommitted)
+        XCTAssertNil(
+            composition.workspaceStore.workspace,
+            "No workspace may be visible before one is accepted for the committed host"
+        )
+
+        let snapshotID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await composition.manager.waitForEventDrain(after: 2)
+
+        XCTAssertEqual(composition.hostReadiness.state, .ready)
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertFalse(composition.workspaceStore.isStale)
+        guard case let .live(hostID, _) = composition.hostReadiness.presentation else {
+            return XCTFail("An accepted workspace must present as live")
+        }
+        XCTAssertEqual(hostID, "server-1")
+    }
+
+    func testStoredHostReconnectFailsClosedWhenAnotherHostAnswers() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, clientID: "install-id")
+        let stored = makeStoredHost()
+        try await composition.pairedHostStore.save(stored)
+
+        let connectTask = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-2"))))
+        await connectTask.value
+
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        XCTAssertNil(composition.workspaceStore.workspace)
+        XCTAssertEqual(composition.hostReadiness.committedHost?.serverID, "server-1")
+        let snapshotRequests = await fake.sentMessages
+            .filter(\.isWorkspaceSnapshotRequest)
+        XCTAssertEqual(
+            snapshotRequests.count,
+            0,
+            "A wrong-host connection must never reach the point of asking for state"
+        )
+        let persistedHosts = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(persistedHosts, [stored])
+        let state = await composition.manager.state
+        guard case .failed = state else {
+            return XCTFail("A wrong-host welcome must fail the connection, got \(state)")
+        }    }
+
+    func testStoredHostReconnectIsRefusedWhileReadinessIsRevoked() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, clientID: "install-id")
+        try await composition.pairedHostStore.save(makeStoredHost())
+
+        let connectTask = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-2"))))
+        await connectTask.value
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+
+        await composition.manager.disconnect()
+        await composition.manager.connectToStoredHost()
+
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        let attempts = await fake.connectionAttempts
+        XCTAssertEqual(
+            attempts.count,
+            1,
+            "Revoked trust must not silently reconnect to the stored host"
+        )
+        let state = await composition.manager.state
+        guard case .failed = state else {
+            return XCTFail("A refused readiness flow must fail the connection, got \(state)")
+        }
+    }
+
+    func testFailedNewHostPairingLeavesThePreviousWorkspaceStaleNotLive() async throws {
+        let fake = FakeTransport()
+        let secureStore = FailableWriteSecureStore()
+        let composition = makeComposition(
+            transport: fake,
+            clientID: "install-id",
+            secureStore: secureStore
+        )
+        let stored = makeStoredHost()
+        try await composition.pairedHostStore.save(stored)
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+
+        let newHostEndpoint = HostEndpoint(
+            host: "new-host.local",
+            port: 4343,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let connectTask = Task { await composition.manager.connect(to: newHostEndpoint) }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-2"))))
+        await connectTask.value
+
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertTrue(
+            composition.workspaceStore.isStale,
+            "Retargeting the transport must relabel the visible workspace"
+        )
+
+        secureStore.setBehavior(.failWrite)
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "new-token"))))
+        let pairingOutcome = await pairing.value
+
+        do {
+            _ = try pairingOutcome.get()
+            XCTFail("A refused secure-store write must fail pairing")
+        } catch {
+            guard case .hostIdentityNotCommitted = error as? ConnectionManagerError else {
+                return XCTFail("Expected a proven rollback, got \(error)")
+            }
+        }
+        XCTAssertEqual(composition.hostReadiness.state, .degraded)
+        XCTAssertEqual(
+            composition.hostReadiness.committedHost?.serverID,
+            "server-1",
+            "A failed new host must not become the committed authority"
+        )
+        XCTAssertEqual(
+            composition.workspaceStore.workspace?.revision,
+            1,
+            "The previously authoritative workspace must survive the failure"
+        )
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        guard case let .stale(hostID, _) = composition.hostReadiness.presentation else {
+            return XCTFail(
+                "Preserved state must present as stale, got \(composition.hostReadiness.presentation)"
+            )
+        }
+        XCTAssertEqual(hostID, "server-1")
+        let survivingHosts = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(survivingHosts.map(\.serverID), ["server-1"])
+    }
+
+    func testIndeterminateHostCommitFailsClosedWithNoVisibleWorkspace() async throws {
+        let fake = FakeTransport()
+        let secureStore = FailableWriteSecureStore()
+        let composition = makeComposition(transport: fake, secureStore: secureStore)
+
+        let connectTask = Task { await composition.manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
+
+        secureStore.setBehavior(.failWriteAndCompensation)
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "new-token"))))
+        let pairingOutcome = await pairing.value
+
+        do {
+            _ = try pairingOutcome.get()
+            XCTFail("An unverifiable secure-store write must fail pairing")
+        } catch {
+            guard case .hostIdentityIndeterminate = error as? ConnectionManagerError else {
+                return XCTFail("Expected an indeterminate commit, got \(error)")
+            }
+        }
+        XCTAssertEqual(composition.hostReadiness.state, .revoked)
+        XCTAssertNil(composition.hostReadiness.committedHost)
+        XCTAssertNil(composition.workspaceStore.workspace)
+        XCTAssertEqual(composition.hostReadiness.presentation, .noState)
+    }
+
+    func testConnectionLossAfterReadyKeepsTheWorkspaceVisibleButStale() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, clientID: "install-id")
+        try await composition.pairedHostStore.save(makeStoredHost())
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+
+        await composition.manager.disconnect()
+
+        XCTAssertEqual(composition.hostReadiness.state, .reconnecting)
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        guard case let .stale(hostID, _) = composition.hostReadiness.presentation else {
+            return XCTFail(
+                "Offline state must present as stale, got \(composition.hostReadiness.presentation)"
+            )
+        }
+        XCTAssertEqual(hostID, "server-1")
+    }
+
+    private func makeStoredHost() -> PairedHost {
+        PairedHost(
+            serverID: "server-1",
+            serverName: "Stored Host",
+            endpoint: HostEndpoint(
+                host: "stored.local",
+                port: 5151,
+                certificateFingerprint: testCertificateFingerprint
+            ),
+            clientID: "original-client-id",
+            token: "issued-token"
+        )
+    }
+
+    /// Drives a stored host all the way to `ready` so a test can start from
+    /// state that is genuinely authoritative rather than merely present.
+    private func reachReadyStoredHost(
+        composition: TestComposition,
+        transport fake: FakeTransport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let connectTask = Task { await composition.manager.connectToStoredHost() }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-1"))))
+        await connectTask.value
+        let snapshotID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await composition.manager.waitForEventDrain(after: 2)
+        XCTAssertEqual(composition.hostReadiness.state, .ready, file: file, line: line)
+    }
+
     private func makeComposition(
         transport: any PsycheTransport,
         clientID: String = "test-client",
         clientName: String = "Psyche Tests",
         token: String? = nil,
+        secureStore: any SecureStore = InMemorySecureStore(),
         messageProcessorStart: @escaping @Sendable () async -> Void = {},
         snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {}
     ) -> TestComposition {
         let requestClient = ControlRequestClient(transport: transport)
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
-        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
         let manager = ConnectionManager(
             transport: transport,
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: HostReadinessMachine(
+                pairedHostStore: pairedHostStore,
+                workspaceStore: workspaceStore
+            ),
             clientID: clientID,
             clientName: clientName,
             token: token,
@@ -2116,7 +2391,8 @@ final class ConnectionManagerTests: XCTestCase {
             manager: manager,
             workspaceStore: workspaceStore,
             requestClient: requestClient,
-            pairedHostStore: pairedHostStore
+            pairedHostStore: pairedHostStore,
+            hostReadiness: manager.hostReadiness
         )
     }
 
@@ -2128,9 +2404,9 @@ final class ConnectionManagerTests: XCTestCase {
         )
     }
 
-    private func makeWelcome() -> WelcomePayload {
+    private func makeWelcome(serverID: String = "host") -> WelcomePayload {
         WelcomePayload(
-            serverID: "host",
+            serverID: serverID,
             serverName: "Host",
             protocolVersion: 3,
             projectName: nil
@@ -2361,6 +2637,7 @@ private struct TestComposition {
     let workspaceStore: WorkspaceStore
     let requestClient: ControlRequestClient
     let pairedHostStore: PairedHostStore
+    let hostReadiness: HostReadinessMachine
 }
 
 private enum TestError: Error {
@@ -2626,6 +2903,65 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
 
     func removeValue(forKey key: String) throws {
         _ = condition.withLock {
+            storage.removeValue(forKey: key)
+        }
+    }
+}
+
+/// A secure store whose next write can be refused, with control over whether the
+/// compensating write that follows is allowed to prove the rollback. That
+/// distinction is the whole difference between a refused commit and an
+/// indeterminate one, so a test must be able to pick which one it exercises.
+private final class FailableWriteSecureStore: SecureStore, @unchecked Sendable {
+    enum Behavior {
+        case succeed
+        case failWrite
+        case failWriteAndCompensation
+    }
+
+    enum StoreError: Error {
+        case denied
+    }
+
+    private let lock = NSLock()
+    private var storage: [String: Data] = [:]
+    private var behavior: Behavior = .succeed
+    private var hasRefusedWrite = false
+
+    func setBehavior(_ behavior: Behavior) {
+        lock.withLock {
+            self.behavior = behavior
+            hasRefusedWrite = false
+        }
+    }
+
+    func data(forKey key: String) throws -> Data? {
+        lock.withLock { storage[key] }
+    }
+
+    func set(_ data: Data, forKey key: String) throws {
+        try lock.withLock {
+            switch behavior {
+            case .succeed:
+                storage[key] = data
+            case .failWrite:
+                guard !hasRefusedWrite else {
+                    storage[key] = data
+                    return
+                }
+                hasRefusedWrite = true
+                throw StoreError.denied
+            case .failWriteAndCompensation:
+                throw StoreError.denied
+            }
+        }
+    }
+
+    func removeValue(forKey key: String) throws {
+        try lock.withLock {
+            if case .failWriteAndCompensation = behavior {
+                throw StoreError.denied
+            }
             storage.removeValue(forKey: key)
         }
     }
