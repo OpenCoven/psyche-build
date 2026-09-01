@@ -16,6 +16,7 @@ import {
   serializeSupportBundle,
   supportBundleDigest,
   type SupportBundle,
+  type SupportCollector,
 } from '../src/diagnostics/supportBundle.js';
 
 function sortDeep(value: unknown): unknown {
@@ -657,6 +658,52 @@ describe('support bundle v1', () => {
     expect(roundTripped.truncation).toEqual(bundle.truncation);
   });
 
+  it('bounds cancellation recovery and preserves accumulated omission counters', async () => {
+    const cancelled = new AbortController();
+    let originalArrayReads = 0;
+    const countedArray = <T>(values: T[]) => new Proxy(values, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) originalArrayReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const collectors: SupportCollector[] = Array.from({ length: 64 }, (_, collectorIndex) => ({
+      name: `collector-${String(collectorIndex).padStart(2, '0')}`,
+      collect: async () => {
+        const result: Record<string, unknown> = {};
+        if (collectorIndex === 0) {
+          Object.defineProperty(result, 'lifecycle', {
+            enumerable: true,
+            get() {
+              cancelled.abort();
+              return { state: 'ready' };
+            },
+          });
+        }
+        result.records = countedArray(Array.from({ length: 256 }, (_, sequence) => ({
+          sequence,
+          at: '2026-01-01T00:00:00.000Z',
+          component: 'collector',
+          event: 'ready',
+        })));
+        result.terminalTail = countedArray(Array.from({ length: 64 }, () => 'bounded-terminal-line'));
+        return result;
+      },
+    }));
+
+    const bundle = await collectSupportBundle(collectors, {
+      signal: cancelled.signal,
+      now: () => 1_767_225_600_000,
+    });
+
+    expect(bundle.status).toBe('recovery_required');
+    expect(originalArrayReads).toBeLessThanOrEqual(16_384);
+    expect(bundle.truncation.terminalLinesOmitted).toBe(4_096);
+    expect(bundle.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'normalization_cancelled', recoveryRequired: true }),
+    ]));
+  });
+
   it('keeps caller cancellation connected while collector results are normalized', async () => {
     const cancelled = new AbortController();
     const result: Record<string, unknown> = {};
@@ -778,13 +825,7 @@ describe('support bundle v1', () => {
       enumerable: true,
       get: () => {
         reads += 1;
-        if (reads >= 3) throw new Error('record getter boom');
-        return {
-          sequence: 1,
-          at: '2026-01-01T00:00:00.000Z',
-          component: 'collector',
-          event: 'ready',
-        };
+        throw new Error('record getter boom');
       },
     });
     records.length = 1;
@@ -797,9 +838,10 @@ describe('support bundle v1', () => {
     expect(bundle.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
     ]));
+    expect(reads).toBe(1);
   });
 
-  it('does not sort a stateful collector array element after it changes shape', async () => {
+  it('snapshots a stateful collector array element before it changes shape', async () => {
     let firstRecordReads = 0;
     const validRecord = {
       sequence: 1,
@@ -812,7 +854,7 @@ describe('support bundle v1', () => {
       enumerable: true,
       get: () => {
         firstRecordReads += 1;
-        return firstRecordReads >= 3 ? null : validRecord;
+        return firstRecordReads >= 2 ? null : validRecord;
       },
     });
     const bundle = await collectSupportBundle([{
@@ -820,12 +862,15 @@ describe('support bundle v1', () => {
       collect: async () => ({ records } as never),
     }]);
 
-    expect(bundle.status).toBe('recovery_required');
-    expect(bundle.records).toEqual([expect.objectContaining({ sequence: 1 })]);
-    expect(bundle.truncation.recordsOmitted).toBe(1);
-    expect(bundle.errors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: 'collection_invalid_output', recoveryRequired: true }),
+    expect(bundle.records).toEqual([
+      expect.objectContaining({ sequence: 1 }),
+      expect.objectContaining({ sequence: 1 }),
+    ]);
+    expect(bundle.truncation.recordsOmitted).toBe(0);
+    expect(bundle.errors).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'collection_invalid_output' }),
     ]));
+    expect(firstRecordReads).toBe(1);
   });
 
   it('does not call an overridable collector array slice method', async () => {

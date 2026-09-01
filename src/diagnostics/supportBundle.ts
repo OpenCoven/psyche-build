@@ -575,37 +575,33 @@ function safeCollectorArrayLength(value: unknown, field: CollectorPayloadField):
   }
 }
 
+function safeCollectorArraySnapshotWithBudget(
+  value: unknown,
+  field: CollectorPayloadField,
+  budget: NormalizationBudget,
+): CollectorArraySnapshot | undefined {
+  try {
+    if (!isRecord(value)) return undefined;
+    const fieldValue = value[field];
+    if (!Array.isArray(fieldValue)) return undefined;
+    const length = fieldValue.length;
+    if (!Number.isSafeInteger(length) || length < 0) return undefined;
+    if (length > MAX_ATTRIBUTE_SCAN_KEYS || length > budget.remaining) return { length };
+    budget.remaining -= length;
+    const values: unknown[] = [];
+    for (let index = 0; index < length; index += 1) values.push(fieldValue[index]);
+    return { length, values };
+  } catch {
+    return undefined;
+  }
+}
+
 function snapshotCollectorResult(
   value: unknown,
   budget: NormalizationBudget,
 ): SupportBundleInput | undefined {
-  assertNormalizationDeadline(budget.deadlineAt);
-  if (budget.remaining <= 0) return undefined;
-  budget.remaining -= 1;
-  if (!isRecord(value)) return undefined;
-  const entries = limitedEntries(value, MAX_ATTRIBUTE_SCAN_KEYS, budget.deadlineAt);
-  if (entries === undefined) return undefined;
-  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const [key, childValue] of entries) {
-    if (COLLECTOR_ARRAY_FIELDS.includes(key as CollectorPayloadField) && Array.isArray(childValue)) {
-      assertNormalizationDeadline(budget.deadlineAt);
-      if (budget.remaining <= 0) return undefined;
-      budget.remaining -= 1;
-      snapshot[key] = childValue;
-      continue;
-    }
-    const childSnapshot = snapshotBoundedInputValue(childValue, 1, new Set<object>(), budget);
-    if (childSnapshot === undefined) return undefined;
-    snapshot[key] = childSnapshot;
-  }
-  return snapshot as SupportBundleInput;
-}
-
-function boundedCollectorArrayValues(value: readonly unknown[], budget: NormalizationBudget): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    if (!isBoundedInputValue(value[index], 1, new Set<object>(), budget)) return false;
-  }
-  return true;
+  const snapshot = snapshotBoundedInputValue(value, 0, new Set<object>(), budget);
+  return isRecord(snapshot) ? snapshot as SupportBundleInput : undefined;
 }
 
 function hasOnlyKeys(
@@ -790,10 +786,6 @@ function collectorSnapshotViolation(
   if (Array.isArray(value.receipts) && value.receipts.length > maxReceipts) return 'overflow';
   if (Array.isArray(value.errors) && value.errors.length > SUPPORT_BUNDLE_LIMITS.maxErrorChain) return 'overflow';
   if (Array.isArray(value.terminalTail) && value.terminalTail.length > SUPPORT_BUNDLE_LIMITS.maxTerminalLines) return 'overflow';
-  if (Array.isArray(value.records) && !boundedCollectorArrayValues(value.records, budget)) return 'invalid';
-  if (Array.isArray(value.receipts) && !boundedCollectorArrayValues(value.receipts, budget)) return 'invalid';
-  if (Array.isArray(value.errors) && !boundedCollectorArrayValues(value.errors, budget)) return 'invalid';
-  if (Array.isArray(value.terminalTail) && !boundedCollectorArrayValues(value.terminalTail, budget)) return 'invalid';
   if (Array.isArray(value.records) && !value.records.every((item) => isCollectorRecordShape(item))) return 'invalid';
   if (Array.isArray(value.receipts) && !value.receipts.every((item) => isCollectorReceiptShape(item))) return 'invalid';
   if (Array.isArray(value.errors) && !value.errors.every((item) => isCollectorErrorShape(item))) return 'invalid';
@@ -2369,20 +2361,25 @@ function fitBundle(
 
 type ReceiptInputMode = 'raw' | 'projected';
 
+interface InternalSupportBundleMetadata {
+  readonly trustedFields?: ReadonlySet<TrustedSupportField>;
+  readonly truncation?: Partial<SupportTruncationManifest>;
+}
+
 function buildSupportBundleWithReceiptMode(
   input: SupportBundleInput,
   options: SupportBundleOptions,
   receiptMode: ReceiptInputMode,
   deadlineAt?: number,
+  internalMetadata?: InternalSupportBundleMetadata,
 ): SupportBundle {
   const homeDirectory = options.homeDirectory;
   const controlPlaneAuthorized = options.authority === CONTROL_PLANE_AUTHORITY;
   const reusablePrivateMetadata = hasReusablePrivateMetadata(input, deadlineAt);
   const audit = seededAudit(input, deadlineAt, reusablePrivateMetadata);
   assertNormalizationDeadline(deadlineAt);
-  const trustedInputFields = reusablePrivateMetadata && isRecord(input)
-    ? TRUSTED_SUPPORT_FIELDS.get(input)
-    : undefined;
+  const trustedInputFields = internalMetadata?.trustedFields
+    ?? (reusablePrivateMetadata && isRecord(input) ? TRUSTED_SUPPORT_FIELDS.get(input) : undefined);
   const trustedProvenance = receiptMode === 'raw'
     ? controlPlaneAuthorized || trustedInputFields?.has('provenance') === true
     : trustedInputFields?.has('provenance') === true;
@@ -2480,9 +2477,8 @@ function buildSupportBundleWithReceiptMode(
   // Only a prior result from this module can carry truncation accounting
   // forward. Public input is allowed to contain a similarly shaped field, but
   // its counters are data and must not be treated as audit evidence.
-  const priorTruncation = reusablePrivateMetadata && isRecord(input)
-    ? TRUSTED_TRUNCATIONS.get(input) ?? {}
-    : {};
+  const priorTruncation = internalMetadata?.truncation
+    ?? (reusablePrivateMetadata && isRecord(input) ? TRUSTED_TRUNCATIONS.get(input) ?? {} : {});
   let errorsOmitted = suppliedCount(priorTruncation.errorsOmitted);
   let invalidErrors = 0;
   const appendError = (error: SupportCollectionError): void => {
@@ -2997,6 +2993,7 @@ export async function collectSupportBundle(
     recoveryRequired: true,
   });
   const recoveryBundle = (error: SupportCollectionError): SupportBundle => {
+    const recoveryTimedOut = normalizationTimedOut();
     const recoveryRecords = recordsFinalized ? [...records] : [...recordCandidates];
     const recoveryReceipts = [...receipts];
     const recoveryErrors: unknown[] = [...errorCandidates];
@@ -3017,16 +3014,29 @@ export async function collectSupportBundle(
         const active = activePayload?.item.index === item.index && activePayload.field === field
           ? activePayload
           : undefined;
-        const snapshot = active === undefined ? safeCollectorArraySnapshot(item.result, field) : undefined;
-        if (active === undefined && snapshot === undefined) continue;
-        const values = active?.values ?? snapshot?.values;
-        if (values === undefined) {
-          accountCollectorArrayLoss(field, snapshot?.length ?? 0);
+        let pendingValue: readonly unknown[] | undefined;
+        let pendingLength = 0;
+        if (active !== undefined) {
+          pendingLength = Math.max(0, active.values.length - active.nextIndex);
+          if (!recoveryTimedOut && pendingLength <= preflightBudget.remaining) {
+            preflightBudget.remaining -= pendingLength;
+            pendingValue = active.values.slice(active.nextIndex);
+          }
+        } else {
+          const snapshot: CollectorArraySnapshot | undefined = recoveryTimedOut
+            ? (() => {
+                const length = safeCollectorArrayLength(item.result, field);
+                return length === undefined ? undefined : { length } satisfies CollectorArraySnapshot;
+              })()
+            : safeCollectorArraySnapshotWithBudget(item.result, field, preflightBudget);
+          if (snapshot === undefined) continue;
+          pendingLength = snapshot.length;
+          pendingValue = snapshot.values;
+        }
+        if (pendingValue === undefined) {
+          accountCollectorArrayLoss(field, pendingLength);
           continue;
         }
-        const pendingValue = active === undefined
-          ? values
-          : values.slice(active.nextIndex);
         if (field === 'records') recoveryRecords.push(...pendingValue as readonly SupportRecord[]);
         else if (field === 'receipts') recoveryReceipts.push(...pendingValue as readonly SupportReceipt[]);
         else if (field === 'errors') recoveryErrors.push(...pendingValue);
@@ -3056,18 +3066,18 @@ export async function collectSupportBundle(
         terminalLinesOmitted,
       },
     };
-    TRUSTED_SUPPORT_FIELDS.set(recoveryInput, Object.freeze(new Set(trustedMergedFields)));
-    TRUSTED_TRUNCATIONS.set(recoveryInput, Object.freeze({
+    const recoveryTruncation = Object.freeze({
       recordsOmitted,
       receiptsOmitted,
       errorsOmitted,
       stateFieldsOmitted,
       terminalLinesOmitted,
-    }));
-    const recoveryFingerprint = normalizedSourceFingerprint(recoveryInput, deadlineAt);
-    if (recoveryFingerprint !== undefined) NORMALIZED_SOURCE_FINGERPRINTS.set(recoveryInput, recoveryFingerprint);
+    });
     try {
-      return buildSupportBundleWithReceiptMode(recoveryInput, options, 'raw', deadlineAt);
+      return buildSupportBundleWithReceiptMode(recoveryInput, options, 'raw', deadlineAt, {
+        trustedFields: Object.freeze(new Set(trustedMergedFields)),
+        truncation: recoveryTruncation,
+      });
     } catch (recoveryError) {
       if (isNormalizationDeadlineError(recoveryError)) {
         return minimalRecoveryBundle('normalization_timeout', recoveryErrors, options.codec,
