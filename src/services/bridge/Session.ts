@@ -54,6 +54,8 @@ export class Session {
   }
 
   close(reason: string): void {
+    this.state = "unauthenticated";
+    this.token = null;
     try {
       this.send({ type: "error", payload: { code: "closing", message: reason } });
     } catch {

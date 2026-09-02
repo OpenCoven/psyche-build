@@ -1054,6 +1054,78 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
+  it("does not launch a ritual when the device is revoked during publication lookup", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "ritual-revocation-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    let resolveWorkspace!: (workspace: typeof WORKSPACE_SNAPSHOT_FIXTURE.workspace) => void;
+    let markWorkspaceReadStarted!: () => void;
+    const workspaceReadStarted = new Promise<void>((resolve) => {
+      markWorkspaceReadStarted = resolve;
+    });
+    const workspaceRead = new Promise<typeof WORKSPACE_SNAPSHOT_FIXTURE.workspace>((resolve) => {
+      resolveWorkspace = resolve;
+    });
+    const launchRitual = vi.fn(async () => {});
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => {
+        markWorkspaceReadStarted();
+        return workspaceRead;
+      },
+      ritualProvider: () => [],
+      launchRitual,
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "sync" } }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "pong" && message.payload.token === "sync") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    client.send(JSON.stringify({
+      type: "launchRitual",
+      payload: { projectId: "project-1", ritualId: "review-stack", params: {} },
+    }));
+    await workspaceReadStarted;
+
+    const closed = new Promise<void>((resolve) => {
+      client.on("close", () => resolve());
+    });
+    expect(await daemon.revokeDevice(knownToken)).toBe(true);
+    resolveWorkspace(structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace));
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    expect(launchRitual).not.toHaveBeenCalled();
+    await daemon.stop();
+  });
+
   it("does not report ritual_failed when post-launch state broadcast fails", async () => {
     const tokenStore = new FakeTokenStore() as any;
     const knownToken = "ritual-broadcast-failure-token";

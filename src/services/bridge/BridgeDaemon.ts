@@ -385,6 +385,9 @@ export class BridgeDaemon {
           if (!await this.isPublishedRitual(m.payload.projectId, m.payload.ritualId)) {
             throw new Error("ritual is not published by this host project");
           }
+          if (s.state !== "authenticated") {
+            throw new Error("session is no longer authenticated");
+          }
           const launcher = this.ritualLauncher ?? this.opts.launchRitual;
           await launcher(m.payload.projectId, m.payload.ritualId, m.payload.params);
         } catch (err) {
