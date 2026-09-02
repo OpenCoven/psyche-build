@@ -265,9 +265,13 @@ pushes remain platform-blocked for `BunsDev`; all other actors require
 approval, and the owner path is an explicit PR-only bypass/admin merge after
 exact-head checks and resolved conversations, never a self-approval claim.
 
-One control-state regression is open: the scheduled Beads Project sync has
-failed on every scheduled run since 2026-08-30, so the public mirror is stale
-and the read-only validator reports a `psyche-z7c.4.4`/#230 state mismatch.
+One control-state regression is under repair: the
+scheduled Beads Project sync failed on every scheduled run from 2026-08-30
+until 2026-09-02 after an accidental Beads v1.2.1 binary on one checkout
+migrated the shared Dolt schema;
+the cursor was rolled back per the upstream recovery guide on 2026-09-02. The
+public mirror stays stale until the first unattended apply succeeds, and the
+read-only validator still reports the `psyche-z7c.4.4`/#230 state mismatch.
 Repair is source-first through Beads and the supported synchronizer; generated
 mirror bodies are never the place to repair it.
 [#342](https://github.com/OpenCoven/psyche-build/issues/342) owns the repair

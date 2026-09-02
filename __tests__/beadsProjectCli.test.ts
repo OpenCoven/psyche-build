@@ -923,6 +923,49 @@ describe('Beads source adapter', () => {
     },
   );
 
+  it('reports Beads schema version skew as a bounded class without raw stderr or bootstrap', async () => {
+    const calls: Array<{command: string; args: readonly string[]}> = [];
+    const temporaryDirectory = join(tmpdir(), 'psyche-beads-project-sync-skew-test');
+    const runnerPath = '/home/runner/work/psyche-build/psyche-build/.beads';
+    const stderr = [
+      `Warning: ${runnerPath} has permissions 0755 (recommended: 0700). Run: chmod 700 ${runnerPath}`,
+      'schema version mismatch: database is at v65, binary knows up to v53 (12 migrations ahead)',
+      '',
+      '  This database was migrated by the accidental, untested v1.2.0/v1.2.1',
+      '  release. Recovery guide: https://github.com/gastownhall/beads/blob/v1.2.2/docs/RECOVERY-1.2.1.md',
+      '    BD_IGNORE_SCHEMA_SKEW=1 bd <command>',
+    ].join('\n');
+
+    let error: unknown;
+    try {
+      await loadBeadsSource({
+        cwd: repositoryRoot,
+        mode: 'apply',
+        run: async (command, args) => {
+          calls.push({ command, args: [...args] });
+          return { stdout: '', stderr, exitCode: 1 };
+        },
+        makeTemporaryDirectory: async () => temporaryDirectory,
+        remove: async () => undefined,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toMatch(
+      /^bd readonly export failed: Beads schema version skew: database schema v65, binary schema v53\b/u,
+    );
+    expect(message).toMatch(/pinned Beads CLI/iu);
+    expect(message).not.toContain(runnerPath);
+    expect(message).not.toMatch(/permissions|chmod|https?:|BD_IGNORE_SCHEMA_SKEW/u);
+    expect(calls).toEqual([{
+      command: 'bd',
+      args: ['--readonly', 'export', '-o', join(temporaryDirectory, 'issues.jsonl')],
+    }]);
+  });
+
   it('dry-runs with only readonly export and gives explicit bootstrap guidance on missing DBs', async () => {
     const calls: Array<{command: string; args: readonly string[]}> = [];
     const temporaryDirectory = join(tmpdir(), 'psyche-beads-project-sync-dry-test');
