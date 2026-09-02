@@ -57,6 +57,7 @@ export type MobileActionExecutor = (input: MobileActionExecutorInput) => Promise
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
 import {
+  hasPublishedRitual,
   hasPublishedTmuxBackedPane,
   type ReadonlyWorkspaceSnapshot,
 } from "../../workspace/snapshot.js";
@@ -371,7 +372,7 @@ export class BridgeDaemon {
           return;
         }
         const projectId = m.payload.projectId;
-        const rituals = this.opts.ritualProvider(projectId);
+        const rituals = await this.listPublishedRituals(projectId);
         s.send({ type: "ritualList", payload: { projectId, rituals } });
         return;
       }
@@ -381,6 +382,12 @@ export class BridgeDaemon {
           return;
         }
         try {
+          if (!await this.isPublishedRitual(m.payload.projectId, m.payload.ritualId)) {
+            throw new Error("ritual is not published by this host project");
+          }
+          if (s.state !== "authenticated") {
+            throw new Error("session is no longer authenticated");
+          }
           const launcher = this.ritualLauncher ?? this.opts.launchRitual;
           await launcher(m.payload.projectId, m.payload.ritualId, m.payload.params);
         } catch (err) {
@@ -820,6 +827,32 @@ export class BridgeDaemon {
   private async isPublishedPane(paneId: string): Promise<boolean> {
     const { workspace } = await this.readWorkspaceSnapshot();
     return hasPublishedTmuxBackedPane(workspace, paneId);
+  }
+
+  private async isPublishedRitual(projectId: string, ritualId: string): Promise<boolean> {
+    if (this.opts.workspaceProvider) {
+      const { workspace } = await this.readWorkspaceSnapshot();
+      return hasPublishedRitual(workspace, projectId, ritualId);
+    }
+    return this.opts.ritualProvider(projectId).some((ritual) => ritual.id === ritualId);
+  }
+
+  private async listPublishedRituals(projectId: string | null): Promise<Ritual[]> {
+    if (!this.opts.workspaceProvider) {
+      return this.opts.ritualProvider(projectId);
+    }
+    const { workspace } = await this.readWorkspaceSnapshot();
+    const project = projectId === null
+      ? workspace.projects[0]
+      : workspace.projects.find((candidate) => candidate.id === projectId);
+    if (!project || project.rituals.state === "stale") return [];
+    return project.rituals.rituals.map((ritual) => ({
+      id: ritual.id,
+      displayName: ritual.displayName,
+      description: ritual.description ?? null,
+      scope: ritual.scope,
+      projectId: ritual.scope === "project" ? project.id : null,
+    }));
   }
 
   /**

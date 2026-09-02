@@ -4,6 +4,7 @@ import { RemoteActionSessions } from '../../actions/remoteActionSessions.js';
 import { decodeBase64Payload } from '../../utils/base64.js';
 import type { BrowserFileRecord, BrowserSnapshot } from '../../utils/fileBrowser.js';
 import {
+  hasPublishedRitual,
   hasPublishedTmuxBackedPane,
   type ReadonlyWorkspaceSnapshot,
 } from '../../workspace/snapshot.js';
@@ -243,8 +244,8 @@ export class MobileControlGateway {
 
         await this.requireScope(
           requestId,
-          (workspace) => workspace.projects.some((project) => project.id === projectId),
-          'project is not published by this host',
+          (workspace) => hasPublishedRitual(workspace, projectId, ritualId),
+          'ritual is not published by this host project',
         );
 
         await launchRitual(projectId, ritualId, params);

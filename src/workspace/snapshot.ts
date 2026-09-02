@@ -43,10 +43,47 @@ export interface WorktreeSnapshot extends GitWorktreeSnapshotInput {
   attentionCount: number;
 }
 
+/**
+ * The state of a project's published ritual listing. Every state a client can
+ * observe is spelled out so absence, failure, and staleness are never silently
+ * rendered as an empty-but-healthy list.
+ */
+export type RitualPublicationState =
+  | 'available'
+  | 'empty'
+  | 'unavailable'
+  | 'stale'
+  | 'incompatible'
+  | 'limit-exceeded'
+  | 'permission-denied';
+
+/**
+ * Bounded, sanitized ritual metadata. A published ritual deliberately carries
+ * no command, prompt, pane list, or project-root path: those stay on the host,
+ * and the authoritative launcher resolves them at execution time.
+ */
+export interface PublishedRitual {
+  id: string;
+  displayName: string;
+  description?: string;
+  scope: 'builtIn' | 'project';
+}
+
+export interface RitualPublicationSnapshot {
+  state: RitualPublicationState;
+  rituals: PublishedRitual[];
+}
+
+/** A fresh, empty publication for hosts that did not publish a listing. */
+export function unpublishedRituals(): RitualPublicationSnapshot {
+  return { state: 'unavailable', rituals: [] };
+}
+
 export interface ProjectSnapshot {
   id: string;
   root: string;
   title: string;
+  rituals: RitualPublicationSnapshot;
   worktrees: WorktreeSnapshot[];
   projectPanes: PaneSnapshot[];
   runningCount: number;
@@ -88,10 +125,27 @@ export function hasPublishedTmuxBackedPane(
       worktree.panes.some((pane) => pane.id === paneId && isTmuxBackedWorkspacePane(pane))));
 }
 
+export function hasPublishedRitual(
+  workspace: ReadonlyWorkspaceSnapshot,
+  projectId: string,
+  ritualId: string,
+): boolean {
+  return workspace.projects.some((project) =>
+    project.id === projectId
+    && project.rituals.state !== 'stale'
+    && project.rituals.rituals.some((ritual) => ritual.id === ritualId));
+}
+
 export interface WorkspaceProjectInput {
   id: string;
   root: string;
   title: string;
+  /**
+   * The host's bounded ritual listing for this exact project. When omitted the
+   * builder publishes `unavailable` — the host did not compose a listing, and
+   * the client must never read that as "no rituals exist".
+   */
+  rituals?: RitualPublicationSnapshot;
   worktrees: GitWorktreeSnapshotInput[];
   panes: WorkspacePaneInput[];
   covenSessions?: CovenSessionSummary[];
@@ -390,6 +444,7 @@ function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
     id: project.id,
     root: project.root,
     title: project.title,
+    rituals: project.rituals ?? unpublishedRituals(),
     worktrees,
     projectPanes,
     runningCount:

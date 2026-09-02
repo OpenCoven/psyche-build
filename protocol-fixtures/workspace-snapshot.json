@@ -17,6 +17,22 @@
             "title": "orphaned pane"
           }
         ],
+        "rituals": {
+          "rituals": [
+            {
+              "description": "Open implementation, review, and checks panes.",
+              "displayName": "Review Stack",
+              "id": "review-stack",
+              "scope": "builtIn"
+            },
+            {
+              "displayName": "Release checklist",
+              "id": "release-checklist",
+              "scope": "project"
+            }
+          ],
+          "state": "available"
+        },
         "root": "/repo",
         "runningCount": 1,
         "title": "psyche-build",
