@@ -202,7 +202,7 @@ Deferred P2 trains
 
 | Outcome | Priority | Train | Close condition |
 |---|---:|---|---|
-| [#195 — roadmap and post-release control](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Portfolio | Every active outcome has one owner, priority, dependency chain, support decision, and evidence location; the scheduled Beads mirror sync is healthy |
+| [#195 — roadmap and post-release control](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Portfolio | Every active outcome has one owner, priority, dependency chain, support decision, and evidence location; the scheduled Beads mirror sync is healthy again (#342) |
 | [#238 — critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | Documentation | **Delivered** by PR #245 / `5f4b7b05`; preserve it as completed Stage 0 foundation |
 | [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Governance | **Delivered** — closed 2026-08-30 with sanitized ruleset/protection evidence, direct-push rejection proof, and protected proof PR #283 |
 | [#237 — Beads/mirror reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) | P0 | Tracker integrity | **Delivered** — closed 2026-08-29 after source-first Beads reconciliation left no open generated `priority:P0` mirror |
@@ -269,7 +269,9 @@ One control-state regression is open: the scheduled Beads Project sync has
 failed on every scheduled run since 2026-08-30, so the public mirror is stale
 and the read-only validator reports a `psyche-z7c.4.4`/#230 state mismatch.
 Repair is source-first through Beads and the supported synchronizer; generated
-mirror bodies are never the place to repair it. #195 tracks the repair.
+mirror bodies are never the place to repair it.
+[#342](https://github.com/OpenCoven/psyche-build/issues/342) owns the repair
+under #195.
 
 ## Stage 1 — close the supported release stabilization baseline
 

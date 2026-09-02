@@ -141,8 +141,9 @@ mirror is stale. The read-only validator currently reports one
 `state_mismatch`: Bead `psyche-z7c.4.4` is open while its mirror #230 was
 closed by PR #281. Repair is source-first: close the Bead through the reviewed
 Beads workflow, restore the scheduled apply, and retain the zero-operation
-report. Generated mirror bodies are never edited to repair this. #195 owns the
-repair.
+report. Generated mirror bodies are never edited to repair this.
+[#342](https://github.com/OpenCoven/psyche-build/issues/342) owns the repair
+under #195.
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
