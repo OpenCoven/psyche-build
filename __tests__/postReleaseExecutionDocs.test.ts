@@ -57,10 +57,10 @@ describe('post-release execution documentation', () => {
     );
 
     for (const { filePath, source } of documents) {
-      for (const issue of [243, 244, 198, 279, 280]) {
+      for (const issue of [198, 242, 243, 244, 252, 279, 280]) {
         expect(source, `${filePath} missing issue #${issue}`).toContain(issueUrl(issue));
       }
-      for (const pull of [261, 278, 321, 322, 323]) {
+      for (const pull of [260, 261, 278, 321, 322, 323]) {
         expect(source, `${filePath} missing pull request #${pull}`).toContain(pullUrl(pull));
       }
       expect(source, filePath).toMatch(
