@@ -135,15 +135,21 @@ exact-head checks and resolved conversations, never a self-approval claim.
 mirrors, and live PR disposition agree on what is delivered, active, blocked,
 and deferred as of this reconciliation.
 
-**Open regression:** the scheduled Beads Project sync workflow has failed on
-every scheduled run since 2026-08-30 (last success 2026-08-29), so the public
-mirror is stale. The read-only validator currently reports one
-`state_mismatch`: Bead `psyche-z7c.4.4` is open while its mirror #230 was
-closed by PR #281. Repair is source-first: close the Bead through the reviewed
-Beads workflow, restore the scheduled apply, and retain the zero-operation
-report. Generated mirror bodies are never edited to repair this.
+**Control-state regression under repair:** the scheduled Beads Project sync
+failed on every scheduled run from 2026-08-30 until 2026-09-02 because a
+checkout running the accidental Beads v1.2.1 release migrated the shared Dolt
+schema to v65 and pushed it; the pinned 1.2.2 CLI could not open it. The
+schema cursor was rolled back to v53 and pushed on 2026-09-02 following the
+upstream recovery guide, with all 111 Beads preserved. The public mirror stays
+stale until the first unattended apply succeeds, and the read-only validator
+still reports the `psyche-z7c.4.4`/#230 `state_mismatch` (the Bead is open
+while PR #281 closed its mirror) plus the resulting source-status drift. Repair
+remains source-first: close the Bead through the reviewed Beads workflow, let
+the restored scheduled apply publish it, and retain the zero-operation report.
+Generated mirror bodies are never edited to repair this.
 [#342](https://github.com/OpenCoven/psyche-build/issues/342) owns the repair
-under #195.
+under #195, including the Beads CLI fleet rule in
+[`.beads/README.md`](../.beads/README.md).
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 

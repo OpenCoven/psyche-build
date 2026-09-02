@@ -23,6 +23,28 @@ and affected issue identifiers out of public updates.
 
 Psyche Build currently standardizes automation on Beads CLI **1.2.2**.
 
+## Beads CLI fleet rule
+
+Every checkout, worktree, container, and automation runner that touches this
+repository's Beads database must run the pinned Beads CLI above. The Dolt
+schema replicates with the data: a single `bd` command from a different
+release can migrate the shared schema, and `bd dolt push` then publishes that
+migration to every other clone and to the scheduled Project sync.
+
+The accidental, untested Beads v1.2.0/v1.2.1 release migrates a v53 database
+to schema v65 on any command. Between 2026-08-30 and 2026-09-02 one checkout
+running v1.2.1 pushed such a migration, and every scheduled Project sync
+failed inside `bd --readonly export` with `schema version mismatch` until the
+schema cursor was rolled back per the upstream
+[recovery guide](https://github.com/gastownhall/beads/blob/v1.2.2/docs/RECOVERY-1.2.1.md)
+and the versioned `events` audit table was re-tracked ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
+
+Before running `bd` on a clone that has been idle, confirm `bd version`
+reports the pinned release. If `bd` reports a schema version mismatch, do not
+set `BD_IGNORE_SCHEMA_SKEW`; stop and coordinate a source-first recovery from
+the sole migrator. The synchronizer reports this class as a bounded
+`Beads schema version skew` diagnostic rather than raw `bd` output.
+
 ## Daily Beads commands
 
 ```bash

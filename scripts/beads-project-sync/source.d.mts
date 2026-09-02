@@ -76,3 +76,5 @@ export function loadBeadsSource(options: {
   ) => Promise<unknown>;
   signalProcess?: SignalProcess;
 }): Promise<string>;
+
+export function classifyBeadsCommandFailure(stderr: string): string | null;

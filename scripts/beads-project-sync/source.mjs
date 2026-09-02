@@ -281,6 +281,28 @@ export function createExecFileRun(execFile = nodeExecFile) {
   });
 }
 
+const SCHEMA_VERSION_SKEW_PATTERN =
+  /schema version mismatch: database is at v(\d+), binary (?:knows up to|expects) v(\d+)/u;
+
+/**
+ * Classify a failed `bd` command into a bounded, path-free diagnostic when the
+ * failure class is known. Beads schema skew is reported by version numbers
+ * only, because the raw `bd` stderr carries local paths and recovery URLs that
+ * the public sanitizer must not republish.
+ *
+ * @param {string} stderr
+ * @returns {string | null}
+ */
+export function classifyBeadsCommandFailure(stderr) {
+  const skew = SCHEMA_VERSION_SKEW_PATTERN.exec(stderr);
+  if (skew != null) {
+    return `Beads schema version skew: database schema v${skew[1]}, binary schema v${skew[2]}. `
+      + 'Every checkout and automation runner must use the pinned Beads CLI from .beads/README.md; '
+      + 'a newer or accidental release migrated the shared database.';
+  }
+  return null;
+}
+
 /**
  * @param {ExecFileRunResult} result
  * @param {string} operation
@@ -290,8 +312,11 @@ function assertCommandSucceeded(result, operation) {
     fail(`${operation} runner returned an invalid exit code`);
   }
   if (result.exitCode !== 0) {
-    const detail = result.stderr.trim() || `exit code ${result.exitCode}`;
-    fail(`${operation} failed: ${detail}`);
+    const stderr = result.stderr.trim();
+    const detail = classifyBeadsCommandFailure(stderr)
+      ?? stderr
+      ?? `exit code ${result.exitCode}`;
+    fail(`${operation} failed: ${detail || `exit code ${result.exitCode}`}`);
   }
 }
 
