@@ -302,7 +302,8 @@ async function loadRitualPublications(
       remainingOutputBytes -= outputBytes;
       publications.set(projectRoot, publication);
     } catch {
-      remainingReadBytes = 0;
+      // A failing loader degrades only its own project; the read budget is
+      // untouched so later projects still get their store read.
       publications.set(projectRoot, unpublishedRituals());
     }
   }

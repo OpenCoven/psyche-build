@@ -653,6 +653,40 @@ describe('TUI workspace snapshot adapter', () => {
       expect(snapshot.projects[0]!.rituals).toEqual({ state: 'unavailable', rituals: [] });
     });
 
+    it('keeps reading later projects after one ritual loader fails', async () => {
+      const sidebarProjects = [
+        { projectRoot: '/repo/sidebar-a', projectName: 'Sidebar A' },
+        { projectRoot: '/repo/sidebar-b', projectName: 'Sidebar B' },
+      ];
+      const roots = ['/repo/primary', ...sidebarProjects.map((project) => project.projectRoot)];
+      const observedBudgets = new Map<string, number>();
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => sidebarProjects,
+        worktreesByProjectRoot: () => new Map(
+          roots.map((root) => [root, [worktree(root, { isMain: true, branch: 'main' })]]),
+        ),
+        loadRituals: (projectRoot, maxReadBytes) => {
+          observedBudgets.set(projectRoot, maxReadBytes);
+          if (projectRoot === '/repo/primary') {
+            throw new Error('ritual store exploded');
+          }
+          return { state: 'empty', rituals: [] };
+        },
+      });
+
+      const snapshot = await provider();
+
+      expect(project(snapshot, '/repo/primary').rituals)
+        .toEqual({ state: 'unavailable', rituals: [] });
+      expect(project(snapshot, '/repo/sidebar-a').rituals).toEqual({ state: 'empty', rituals: [] });
+      expect(project(snapshot, '/repo/sidebar-b').rituals).toEqual({ state: 'empty', rituals: [] });
+      // The failed read consumed none of the workspace budget.
+      expect([...observedBudgets.values()]).toEqual(roots.map(() => MAX_WORKSPACE_RITUAL_READ_BYTES));
+    });
+
     it('publishes every project as unavailable when no ritual loader is wired', async () => {
       const provider = createTuiWorkspaceProvider({
         primaryProjectRoot: '/repo/primary',
