@@ -5,6 +5,16 @@ import {
   canonicalOutcomeIssueNumber,
   validateCanonicalOutcomes,
 } from './outcomes.mjs';
+import {
+  DEFAULT_ISSUE_MARKER,
+  LEGACY_ISSUE_MARKERS,
+  recognizedMarkers,
+} from './markers.mjs';
+import {
+  hashRenderedBody,
+  normalizeCanonicalBody,
+} from './reconcile.mjs';
+import { MALFORMED_CANONICAL_OUTCOME_REF } from './model.mjs';
 
 export const TRACKER_DRIFT_REPORT_SCHEMA_VERSION = 1;
 export const TRACKER_DRIFT_FINDING_LIMIT = 100;
@@ -30,6 +40,7 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  *     | 'duplicate_bead_marker'
  *     | 'empty_bead_marker'
  *     | 'malformed_bead_marker'
+ *     | 'missing_bead_marker'
  *     | 'duplicate_render_hash_marker'
  *     | 'empty_render_hash_marker'
  *     | 'malformed_render_hash_marker'
@@ -48,6 +59,8 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  *     | 'source_status_metadata_mismatch'
  *     | 'source_priority_metadata_mismatch'
  *     | 'missing_render_hash'
+ *     | 'render_hash_mismatch'
+ *     | 'obsolete_blocker_metadata'
  *     | 'canonical_mapping_missing'
  *     | 'canonical_mapping_malformed'
  *     | 'canonical_mapping_unknown'
@@ -55,6 +68,7 @@ export const TRACKER_DRIFT_FINDING_LIMIT = 100;
  *     | 'duplicate_bead_marker'
  *     | 'empty_bead_marker'
  *     | 'malformed_bead_marker'
+ *     | 'missing_bead_marker'
  *     | 'duplicate_render_hash_marker'
  *     | 'empty_render_hash_marker'
  *     | 'malformed_render_hash_marker',
@@ -143,7 +157,8 @@ function hasBeadMarkerFinding(issue) {
   return (issue.markerFindingKinds ?? []).some((kind) =>
     kind === 'duplicate_bead_marker'
     || kind === 'empty_bead_marker'
-    || kind === 'malformed_bead_marker');
+    || kind === 'malformed_bead_marker'
+    || kind === 'missing_bead_marker');
 }
 
 /** @param {DriftManagedIssue} issue */
@@ -162,11 +177,17 @@ function hasRenderHashMarkerFinding(issue) {
  * @param {readonly DriftBead[]} beads
  * @param {readonly DriftManagedIssue[]} managedIssues
  * @param {import('./outcomes.mjs').CanonicalTargets} canonicalTargets
+ * @param {{issueMarkers?: readonly string[]}} [options]
  * @returns {TrackerDriftReport}
  */
-export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
+export function validateTrackerDrift(beads, managedIssues, canonicalTargets, options = {}) {
   /** @type {TrackerDriftFinding[]} */
   const findings = [];
+  const issueMarkers = options.issueMarkers ?? recognizedMarkers(
+    DEFAULT_ISSUE_MARKER,
+    LEGACY_ISSUE_MARKERS,
+    'tracker drift issue marker',
+  );
   const sourceById = new Map(beads.map((bead) => [bead.id, bead]));
   let preOmittedFindingCount = 0;
   let canonical;
@@ -207,6 +228,19 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
           ),
         });
       }
+    }
+  }
+  for (const bead of beads) {
+    if (
+      bead.status === 'closed'
+      && bead.externalRef === MALFORMED_CANONICAL_OUTCOME_REF
+    ) {
+      findings.push({
+        kind: 'canonical_mapping_malformed',
+        beadId: bead.id,
+        sourceStatus: bead.status,
+        sourcePriority: bead.priority,
+      });
     }
   }
   const mirrorsByBeadId = new Map();
@@ -257,13 +291,27 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
       });
     }
 
-    const labels = new Set(issue.labels ?? []);
-    if (!labels.has(`priority:P${bead.priority}`)) {
+    const labels = /** @type {readonly string[]} */ (issue.labels ?? []);
+    const expectedPriorityLabel = `priority:p${bead.priority}`;
+    const managedPriorityLabels = labels
+      .map((label) => label.toLowerCase())
+      .filter((label) => label.startsWith('priority:'));
+    if (
+      managedPriorityLabels.length !== 1
+      || managedPriorityLabels[0] !== expectedPriorityLabel
+    ) {
       findings.push({
         kind: 'priority_mismatch',
         beadId: bead.id,
         issueNumber: issue.number,
         sourcePriority: bead.priority,
+      });
+    }
+    if (labels.some((label) => label.toLowerCase() === 'release-blocker')) {
+      findings.push({
+        kind: 'obsolete_blocker_metadata',
+        beadId: bead.id,
+        issueNumber: issue.number,
       });
     }
 
@@ -296,6 +344,18 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets) {
     ) {
       findings.push({
         kind: 'missing_render_hash',
+        beadId: bead.id,
+        issueNumber: issue.number,
+      });
+    } else if (
+      issue.body != null
+      && issue.renderHash != null
+      && !hasRenderHashMarkerFinding(issue)
+      && hashRenderedBody(normalizeCanonicalBody(issue.body, issueMarkers))
+        !== issue.renderHash
+    ) {
+      findings.push({
+        kind: 'render_hash_mismatch',
         beadId: bead.id,
         issueNumber: issue.number,
       });

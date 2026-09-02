@@ -115,7 +115,7 @@ describe('Tauri desktop tab shortcuts', () => {
   it('routes Command+T to terminal panes globally', () => {
     expect(mainJs).toMatch(/async function createTerminalPane\(\)/);
     expect(mainJs).toMatch(
-      /async function createTerminalPane\(\)\s*\{[\s\S]*var project = activeProject\(\);[\s\S]*if \(!project \|\| !project\.root\)\s*\{[\s\S]*setStatus\("Open a project before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*var worktree = selectedWorktree\(project\);[\s\S]*if \(!worktree \|\| !worktree\.path\)\s*\{[\s\S]*setStatus\("Select an available worktree before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*await showTerminalView\(\)[\s\S]*return spawnShellThread\(project\);[\s\S]*\}/
+      /async function createTerminalPane\(\)\s*\{[\s\S]*var project = activeProject\(\);[\s\S]*if \(!project \|\| !project\.root\)\s*\{[\s\S]*setStatus\("Open a project before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*if \(project\.closing\)\s*\{[\s\S]*setStatus\(project\.name \+ " is closing; wait before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*var worktree = selectedWorktree\(project\);[\s\S]*if \(!worktree \|\| !worktree\.path\)\s*\{[\s\S]*setStatus\("Select an available worktree before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*await showTerminalView\(\)[\s\S]*return spawnShellThread\(project\);[\s\S]*\}/
     );
     expect(mainJs).toMatch(
       /String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"[\s\S]*e\.preventDefault\(\);[\s\S]*await createTerminalPane\(\);/

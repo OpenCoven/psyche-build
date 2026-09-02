@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-native-project-reconcile"
+description = "Enables the native_project_reconcile command without any pre-configured scope."
+commands.allow = ["native_project_reconcile"]
+
+[[permission]]
+identifier = "deny-native-project-reconcile"
+description = "Denies the native_project_reconcile command without any pre-configured scope."
+commands.deny = ["native_project_reconcile"]

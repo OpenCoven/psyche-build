@@ -1,0 +1,22 @@
+{
+  "owner": "OpenCoven",
+  "repository": "psyche-build",
+  "projectNodeId": "PVT_kwDOECXnmc4BhMIA",
+  "projectTitle": "Psyche Build: Goals & Implementation",
+  "projectMarker": "custom-project-sync:v2",
+  "issueMarker": "custom-issue-sync:v2",
+  "applyLockRef": "refs/heads/psyche-beads-project-sync-lock",
+  "trustedIssueAuthors": ["BunsDev"],
+  "assigneeMap": {},
+  "canonicalTargets": {
+    "gh-200": {
+      "issue": 200,
+      "title": "Model Beads project inventory",
+      "priority": 1
+    }
+  },
+  "massClose": {
+    "minimum": 5,
+    "fraction": 0.25
+  }
+}

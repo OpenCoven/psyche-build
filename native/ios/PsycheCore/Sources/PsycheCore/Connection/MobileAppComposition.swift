@@ -11,6 +11,10 @@ public final class MobileAppComposition: ObservableObject {
     /// action cannot silently switch transports or lose its session state.
     public let remoteActionStore: RemoteActionStore
     public let pairedHostStore: PairedHostStore
+    /// The atomic host-readiness authority for this app. It is created here so
+    /// every surface observes the same readiness state and the same
+    /// live/stale workspace presentation the connection publishes.
+    public let hostReadiness: HostReadinessMachine
     public let connectionManager: ConnectionManager
     public let terminalRegistry: TerminalSessionRegistry
 
@@ -30,11 +34,17 @@ public final class MobileAppComposition: ObservableObject {
         self.requestClient = requestClient
         self.workspaceStore = workspaceStore
         remoteActionStore = RemoteActionStore(controlRequests: requestClient)
+        let hostReadiness = HostReadinessMachine(
+            pairedHostStore: pairedHostStore,
+            workspaceStore: workspaceStore
+        )
+        self.hostReadiness = hostReadiness
         connectionManager = ConnectionManager(
             transport: transport,
             workspaceStore: workspaceStore,
             requestClient: requestClient,
             pairedHostStore: pairedHostStore,
+            hostReadiness: hostReadiness,
             clientID: clientID,
             clientName: clientName
         )

@@ -306,8 +306,12 @@ describe('Tauri workspace panels', () => {
     });
 
     it('returns contextual shortcuts to terminal mode through every Web close path', () => {
-      expect(mainJs).toMatch(
-        /function closeThread\(id, options\)[\s\S]{0,160}var wasActive = state\.activeThreadId === id;[\s\S]{0,120}thread\.kind === "web" && wasActive[\s\S]{0,120}markActiveSurface\("terminal"\)/
+      const closeThread = functionSource('closeThread');
+      expect(closeThread.indexOf('var wasActive = state.activeThreadId === id;')).toBeLessThan(
+        closeThread.indexOf('thread.kind === "web" && wasActive'),
+      );
+      expect(closeThread.indexOf('thread.kind === "web" && wasActive')).toBeLessThan(
+        closeThread.indexOf('markActiveSurface("terminal")'),
       );
     });
 
@@ -418,7 +422,7 @@ describe('Tauri workspace panels', () => {
       const close = functionSource('closeThread');
       expect(close.indexOf('stageGitSurface();')).toBeGreaterThan(-1);
       expect(close.indexOf('stageGitSurface();')).toBeLessThan(
-        close.indexOf('detachThreadPane(thread)'),
+        close.indexOf('detachThreadPane(thread,'),
       );
     });
 
@@ -473,6 +477,18 @@ describe('Tauri workspace panels', () => {
         callbacks,
       ).map((action) => action.label)).toEqual([
         'Focus', 'Hide', 'Close Web pane',
+      ]);
+      expect(actionsFor(
+        {
+          kind: 'coven-recovery',
+          name: 'Codex CLI',
+          status: 'failed',
+          launch: { launchKind: 'coven-recovery' },
+        },
+        [],
+        callbacks,
+      ).map((action) => action.label)).toEqual([
+        'Focus', 'Rename…', 'Hide', 'Resolve inspected Coven recovery for Codex CLI',
       ]);
     });
 
