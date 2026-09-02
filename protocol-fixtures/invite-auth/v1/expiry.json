@@ -1,0 +1,20 @@
+{
+  "canonicalFixture": "canonical-invite.json",
+  "credential": {
+    "clientId": "fixture-client",
+    "clientName": "Fixture iPhone",
+    "pairedAt": "2026-08-30T00:10:00.001Z",
+    "token": "unused-expiry-token"
+  },
+  "expected": [
+    {
+      "code": "invite_expired",
+      "ok": false
+    }
+  ],
+  "redeemAt": "2026-08-30T00:10:00.001Z",
+  "request": {
+    "clientId": "fixture-client",
+    "clientName": "Fixture iPhone"
+  }
+}

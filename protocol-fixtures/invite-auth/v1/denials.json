@@ -1,0 +1,11 @@
+{
+  "credential_store_unavailable": "The host could not store the credential. Ask for a new invite.",
+  "invite_already_redeemed": "This invite was already used. Ask the host for a new one.",
+  "invite_attempts_exhausted": "Too many failed attempts with this invite. Ask the host for a new one.",
+  "invite_expired": "This invite has expired. Ask the host for a new one.",
+  "invite_revoked": "This invite was revoked. Ask the host for a new one.",
+  "invite_secret_mismatch": "The invite did not match. Check it and try again.",
+  "malformed_request": "The pairing request was malformed.",
+  "profile_mismatch": "This invite requires a newer app version. Update and try again.",
+  "unknown_invite": "This invite is not valid for this host."
+}

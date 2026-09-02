@@ -36,7 +36,7 @@ These fixtures are the link. Each suite asserts three things:
     fixtures.ts          typed source, compile-checked against the TS unions
       │  pnpm run fixtures:generate
       ▼
-    top-level *.json     what the Swift suite reads
+    generated JSON       what the contract suites read
 
 `fixtures.ts` types every payload through a `Complete<>` mapped type that
 strips optionality, so a fixture must spell out **every** field. That is what
@@ -47,6 +47,18 @@ to update — which is the moment to update the Swift struct.
 
 The host contract test asserts the checked-in JSON is byte-identical to what
 the source emits, so the two cannot silently diverge.
+
+`invite-auth/v1/` contains the focused #280 contract vectors:
+
+- `canonical-invite.json` pins deterministic issuance, canonical deep-link
+  encoding, and parsing;
+- `replay.json` pins one successful redemption followed by the terminal replay
+  denial;
+- `expiry.json` pins expiry denial;
+- `denials.json` pins every structured denial code and safe message.
+
+These files contain only conspicuously synthetic, public test values. Runtime
+invite material must never be copied into fixtures.
 
 > Note: this only binds via `tsconfig.test.json`, which reaches `fixtures.ts`
 > through the test's import. The base `tsconfig.json` includes `src/**/*` only,

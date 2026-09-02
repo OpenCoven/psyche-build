@@ -1,0 +1,52 @@
+{
+  "expected": {
+    "deepLink": "psyc://invite/v1/eyJ2IjoxLCJob3N0SWQiOiJmaXh0dXJlLWhvc3QtaWQiLCJob3N0RmluZ2VycHJpbnQiOiJBQTpCQjpDQzpERDpFRTpGRjowMDoxMToyMjozMzo0NDo1NTo2Njo3Nzo4ODo5OTpBQTpCQjpDQzpERDpFRTpGRjowMDoxMToyMjozMzo0NDo1NTo2Njo3Nzo4ODo5OSIsImhvc3ROYW1lIjoiRml4dHVyZSBIb3N0IiwiaW52aXRlSWQiOiJpMS1BQUVDQXdRRkJnY0lDUW9MREEwT0R3Iiwic2VjcmV0IjoiRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUFoSWlNa0pTWW5LQ2txS3l3dExpOCIsImV4cGlyZXNBdCI6IjIwMjYtMDgtMzBUMDA6MTA6MDAuMDAwWiIsInByb3RvY29sUHJvZmlsZSI6ImJyaWRnZS52MyIsImVuZHBvaW50cyI6W3sia2luZCI6InRjcCIsImhvc3QiOiIxOTIuMC4yLjEwIiwicG9ydCI6NDcxMjN9XX0",
+    "payload": {
+      "endpoints": [
+        {
+          "host": "192.0.2.10",
+          "kind": "tcp",
+          "port": 47123
+        }
+      ],
+      "expiresAt": "2026-08-30T00:10:00.000Z",
+      "hostFingerprint": "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+      "hostId": "fixture-host-id",
+      "hostName": "Fixture Host",
+      "inviteId": "i1-AAECAwQFBgcICQoLDA0ODw",
+      "protocolProfile": "bridge.v3",
+      "secret": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8",
+      "v": 1
+    },
+    "record": {
+      "attemptsUsed": 0,
+      "expiresAt": "2026-08-30T00:10:00.000Z",
+      "hostFingerprint": "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+      "hostId": "fixture-host-id",
+      "inviteId": "i1-AAECAwQFBgcICQoLDA0ODw",
+      "issuedAt": "2026-08-30T00:00:00.000Z",
+      "protocolProfile": "bridge.v3",
+      "secretVerifier": "5052238d6ed3f185660a2886b34bfc1749537a4fe2966d56997f17215415f2d3",
+      "status": "pending"
+    }
+  },
+  "issue": {
+    "endpoints": [
+      {
+        "host": "192.0.2.10",
+        "kind": "tcp",
+        "port": 47123
+      }
+    ],
+    "hostName": "Fixture Host"
+  },
+  "now": "2026-08-30T00:00:00.000Z",
+  "random": {
+    "inviteIdBytes": "AAECAwQFBgcICQoLDA0ODw",
+    "secretBytes": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8"
+  },
+  "store": {
+    "hostFingerprint": "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+    "hostId": "fixture-host-id"
+  }
+}
