@@ -204,6 +204,23 @@ export const WORKSPACE_SNAPSHOT_FIXTURE = {
       id: 'project-1',
       root: '/repo',
       title: 'psyche-build',
+      // Bounded, sanitized ritual metadata exactly as the live host provider
+      // publishes it: identifiers and descriptions only — never commands,
+      // prompts, pane lists, or project-root paths.
+      rituals: {
+        state: 'available',
+        rituals: [{
+          id: 'review-stack',
+          displayName: 'Review Stack',
+          description: 'Open implementation, review, and checks panes.',
+          scope: 'builtIn',
+        }, {
+          id: 'release-checklist',
+          displayName: 'Release checklist',
+          description: undefined,
+          scope: 'project',
+        }],
+      },
       worktrees: [{
         path: '/repo',
         head: '0123456789abcdef0123456789abcdef01234567',

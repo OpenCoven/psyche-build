@@ -12,12 +12,20 @@ import {
   normalizeWorkspaceWorktrees,
   readProjectWorktrees,
   readProjectWorktreesAsync,
+  unpublishedRituals,
   type GitWorktreeSnapshotInput,
   type ReadonlyWorkspaceSnapshot,
+  type RitualPublicationSnapshot,
   type WorkspacePaneInput,
   type WorkspaceProjectInput,
   type WorkspaceSnapshot,
 } from './snapshot.js';
+import type { RitualPublicationReadResult } from './ritualPublication.js';
+
+// Keep ritual fan-out aligned with the desktop's established hard project cap.
+export const MAX_WORKSPACE_RITUAL_PROJECT_READS = 10;
+export const MAX_WORKSPACE_RITUAL_READ_BYTES = 2 * 1024 * 1024;
+export const MAX_WORKSPACE_RITUAL_OUTPUT_BYTES = 256 * 1024;
 
 export interface BuildTuiWorkspaceSnapshotInput {
   revision: number;
@@ -27,6 +35,12 @@ export interface BuildTuiWorkspaceSnapshotInput {
   panes: readonly PsychePane[];
   covenSessionsByProject?: ReadonlyMap<string, readonly CovenSessionSummary[]>;
   worktreesByProjectRoot?: ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>;
+  /**
+   * Bounded ritual publications composed by the host for published project
+   * roots. Projects without an entry publish as `unavailable` — the host did
+   * not compose a listing, which must never read as "no rituals exist".
+   */
+  ritualsByProjectRoot?: ReadonlyMap<string, RitualPublicationSnapshot>;
   readWorktrees?: (projectRoot: string) => GitWorktreeSnapshotInput[];
 }
 
@@ -48,6 +62,17 @@ export interface TuiWorkspaceProviderOptions {
   loadWorktrees?: (
     projectRoot: string,
   ) => MaybePromise<readonly GitWorktreeSnapshotInput[]>;
+  /**
+   * Composes the bounded ritual publication for one published project root.
+   * Called only for roots the workspace actually publishes, so a client can
+   * never steer reads at arbitrary paths. When omitted, every project
+   * publishes as `unavailable`. The byte argument is the remaining
+   * workspace-wide filesystem read budget.
+   */
+  loadRituals?: (
+    projectRoot: string,
+    maxReadBytes: number,
+  ) => MaybePromise<RitualPublicationSnapshot | RitualPublicationReadResult>;
   worktreeCacheTtlMs?: number;
   onWorktreeReadError?: (projectRoot: string, error: unknown) => void;
   state?: TuiWorkspaceState;
@@ -123,6 +148,8 @@ export function createTuiWorkspaceProvider(
   const loadWorktrees = options.loadWorktrees ?? readProjectWorktreesAsync;
   let providerQueue: Promise<void> = Promise.resolve();
 
+  const loadRituals = options.loadRituals;
+
   const readSnapshot = async (): Promise<ReadonlyWorkspaceSnapshot> => {
     const [
       panes,
@@ -195,10 +222,18 @@ export function createTuiWorkspaceProvider(
       ),
     );
 
+    const ritualsByProjectRoot = loadRituals
+      ? await loadRitualPublications(
+        publishedProjects.map((project) => project.root),
+        loadRituals,
+      )
+      : undefined;
+
     return state.snapshot({
       ...workspaceInput,
       covenSessionsByProject: associatedCovenSessions,
       worktreesByProjectRoot: canonicalCovenOwnership.worktreesByProjectRoot,
+      ritualsByProjectRoot,
     });
   };
 
@@ -210,6 +245,79 @@ export function createTuiWorkspaceProvider(
     );
     return result;
   };
+}
+
+/**
+ * Compose publications in deterministic project order under workspace-wide
+ * project, filesystem-read, and serialized-output budgets. A failing loader
+ * degrades that project to `unavailable`; roots beyond a budget publish
+ * `limit-exceeded` without another store read.
+ */
+async function loadRitualPublications(
+  projectRoots: readonly string[],
+  loadRituals: (
+    projectRoot: string,
+    maxReadBytes: number,
+  ) => MaybePromise<RitualPublicationSnapshot | RitualPublicationReadResult>,
+): Promise<Map<string, RitualPublicationSnapshot>> {
+  const publications = new Map<string, RitualPublicationSnapshot>();
+  let remainingReadBytes = MAX_WORKSPACE_RITUAL_READ_BYTES;
+  let remainingOutputBytes = MAX_WORKSPACE_RITUAL_OUTPUT_BYTES;
+  let readsStarted = 0;
+
+  for (const projectRoot of projectRoots) {
+    if (
+      readsStarted >= MAX_WORKSPACE_RITUAL_PROJECT_READS
+      || remainingReadBytes <= 0
+      || remainingOutputBytes <= 0
+    ) {
+      publications.set(projectRoot, exceededRitualBudget());
+      continue;
+    }
+
+    readsStarted += 1;
+    try {
+      const loaded = await loadRituals(projectRoot, remainingReadBytes);
+      const publication = isRitualPublicationReadResult(loaded)
+        ? loaded.publication
+        : loaded;
+      const readBytes = isRitualPublicationReadResult(loaded) ? loaded.readBytes : 0;
+      if (
+        !Number.isSafeInteger(readBytes)
+        || readBytes < 0
+        || readBytes > remainingReadBytes
+      ) {
+        remainingReadBytes = 0;
+        publications.set(projectRoot, exceededRitualBudget());
+        continue;
+      }
+      remainingReadBytes -= readBytes;
+
+      const outputBytes = Buffer.byteLength(JSON.stringify(publication), 'utf8');
+      if (outputBytes > remainingOutputBytes) {
+        remainingOutputBytes = 0;
+        publications.set(projectRoot, exceededRitualBudget());
+        continue;
+      }
+      remainingOutputBytes -= outputBytes;
+      publications.set(projectRoot, publication);
+    } catch {
+      // A failing loader degrades only its own project; the read budget is
+      // untouched so later projects still get their store read.
+      publications.set(projectRoot, unpublishedRituals());
+    }
+  }
+  return publications;
+}
+
+function isRitualPublicationReadResult(
+  value: RitualPublicationSnapshot | RitualPublicationReadResult,
+): value is RitualPublicationReadResult {
+  return 'publication' in value;
+}
+
+function exceededRitualBudget(): RitualPublicationSnapshot {
+  return { state: 'limit-exceeded', rituals: [] };
 }
 
 export function normalizeCovenSessionsForPublication(
@@ -371,6 +479,8 @@ export function buildTuiWorkspaceSnapshot(
       id: project.root,
       root: project.root,
       title: project.title,
+      rituals: getResolvedMapValue(input.ritualsByProjectRoot ?? new Map(), project.root)
+        ?? unpublishedRituals(),
       worktrees: [
         ...(getResolvedMapValue(
           canonicalCovenOwnership.worktreesByProjectRoot,

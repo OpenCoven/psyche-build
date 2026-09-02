@@ -844,7 +844,7 @@ describe('MobileControlGateway ritual launch', () => {
       type: 'rituals.launch' as const,
       requestId: 'ritual-1',
       projectId: workspace().projects[0].id,
-      ritualId: 'daily-standup',
+      ritualId: 'review-stack',
       ...extra,
     };
   }
@@ -864,7 +864,7 @@ describe('MobileControlGateway ritual launch', () => {
       context(),
     )).resolves.toEqual({ type: 'ack', requestId: 'ritual-1', ok: true });
 
-    expect(calls).toEqual([[workspace().projects[0].id, 'daily-standup', { branch: 'main' }]]);
+    expect(calls).toEqual([[workspace().projects[0].id, 'review-stack', { branch: 'main' }]]);
     expect(changes).toHaveLength(1);
   });
 
@@ -889,6 +889,46 @@ describe('MobileControlGateway ritual launch', () => {
       launchRequest({ projectId: 'nope' }),
       context(),
     )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    expect(launches).toBe(0);
+  });
+
+  it('refuses a ritual the project did not publish, without launching', async () => {
+    let launches = 0;
+    const gateway = ritualGateway({
+      launchRitual: async () => { launches += 1; },
+    });
+
+    await expect(gateway.handle(
+      launchRequest({ ritualId: 'private-unpublished-ritual' }),
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    expect(launches).toBe(0);
+  });
+
+  it('refuses a ritual from a stale publication, without launching', async () => {
+    const currentWorkspace = workspace();
+    const currentProject = currentWorkspace.projects[0];
+    if (!currentProject) throw new Error('fixture must publish a project');
+    const staleWorkspace: ReadonlyWorkspaceSnapshot = {
+      ...currentWorkspace,
+      projects: [{
+        ...currentProject,
+        rituals: {
+          ...currentProject.rituals,
+          state: 'stale',
+        },
+      }, ...currentWorkspace.projects.slice(1)],
+    };
+    let launches = 0;
+    const gateway = ritualGateway({
+      workspaceSnapshot: () => ({ workspace: staleWorkspace, sequence: 1 }),
+      launchRitual: async () => { launches += 1; },
+    });
+
+    await expect(gateway.handle(launchRequest(), context()))
+      .rejects.toMatchObject({ code: 'unknown_target' });
 
     expect(launches).toBe(0);
   });

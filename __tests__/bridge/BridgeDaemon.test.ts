@@ -832,6 +832,78 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
+  it("serves legacy ritual lists from the canonical workspace publication", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "canonical-ritual-list-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace),
+      ritualProvider: () => [{
+        id: "private-ritual",
+        displayName: "Private ritual",
+        description: "Not published by the canonical workspace snapshot",
+        scope: "project",
+        projectId: "project-1",
+      }],
+      launchRitual: async () => {},
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const ritualList = await new Promise<any>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({
+          type: "listRituals",
+          payload: { projectId: null },
+        }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "ritualList") resolve(message);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(ritualList.payload).toEqual({
+      projectId: null,
+      rituals: [{
+        id: "review-stack",
+        displayName: "Review Stack",
+        description: "Open implementation, review, and checks panes.",
+        scope: "builtIn",
+        projectId: null,
+      }, {
+        id: "release-checklist",
+        displayName: "Release checklist",
+        description: null,
+        scope: "project",
+        projectId: "project-1",
+      }],
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
   it("broadcasts refreshed panes and projects after launchRitual succeeds", async () => {
     const tokenStore = new FakeTokenStore() as any;
     const knownToken = "ritual-launch-token";
@@ -864,7 +936,13 @@ describe("BridgeDaemon", () => {
       hubFactory: noopHubFactory,
       paneProvider: () => panes,
       projectProvider: () => projects,
-      ritualProvider: () => [],
+      ritualProvider: () => [{
+        id: "ritual.solo",
+        displayName: "Solo",
+        description: "One pane",
+        scope: "builtIn",
+        projectId: null,
+      }],
       launchRitual: async (projectId, ritualId, params) => {
         launchCalls.push({ projectId, ritualId, params });
         panes = [...panes, {
@@ -915,6 +993,139 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
+  it("refuses a legacy ritual launch that the host did not publish", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "ritual-scope-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    let launched = false;
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [{ id: "project-1", displayName: "psyche", attentionCount: 0 }],
+      workspaceProvider: () => structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace),
+      ritualProvider: () => [{
+        id: "private-ritual",
+        displayName: "Private ritual",
+        description: "Not published by the canonical workspace snapshot",
+        scope: "project",
+        projectId: "project-1",
+      }],
+      launchRitual: async () => {
+        launched = true;
+      },
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received = await new Promise<any>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({
+          type: "launchRitual",
+          payload: { projectId: "project-1", ritualId: "private-ritual", params: {} },
+        }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "error") resolve(message);
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received.payload?.code).toBe("ritual_failed");
+    expect(launched).toBe(false);
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("does not launch a ritual when the device is revoked during publication lookup", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "ritual-revocation-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    let resolveWorkspace!: (workspace: typeof WORKSPACE_SNAPSHOT_FIXTURE.workspace) => void;
+    let markWorkspaceReadStarted!: () => void;
+    const workspaceReadStarted = new Promise<void>((resolve) => {
+      markWorkspaceReadStarted = resolve;
+    });
+    const workspaceRead = new Promise<typeof WORKSPACE_SNAPSHOT_FIXTURE.workspace>((resolve) => {
+      resolveWorkspace = resolve;
+    });
+    const launchRitual = vi.fn(async () => {});
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => {
+        markWorkspaceReadStarted();
+        return workspaceRead;
+      },
+      ritualProvider: () => [],
+      launchRitual,
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "sync" } }));
+      });
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "pong" && message.payload.token === "sync") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    client.send(JSON.stringify({
+      type: "launchRitual",
+      payload: { projectId: "project-1", ritualId: "review-stack", params: {} },
+    }));
+    await workspaceReadStarted;
+
+    const closed = new Promise<void>((resolve) => {
+      client.on("close", () => resolve());
+    });
+    expect(await daemon.revokeDevice(knownToken)).toBe(true);
+    resolveWorkspace(structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace));
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    expect(launchRitual).not.toHaveBeenCalled();
+    await daemon.stop();
+  });
+
   it("does not report ritual_failed when post-launch state broadcast fails", async () => {
     const tokenStore = new FakeTokenStore() as any;
     const knownToken = "ritual-broadcast-failure-token";
@@ -937,7 +1148,13 @@ describe("BridgeDaemon", () => {
         throw new Error("pane provider failed");
       },
       projectProvider: () => [],
-      ritualProvider: () => [],
+      ritualProvider: () => [{
+        id: "ritual.solo",
+        displayName: "Solo",
+        description: "One pane",
+        scope: "builtIn",
+        projectId: null,
+      }],
       launchRitual: async () => {
         launched = true;
       },

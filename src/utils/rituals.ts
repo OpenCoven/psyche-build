@@ -10,6 +10,16 @@ import { getPaneDisplayName } from './paneTitle.js';
 import { sameSidebarProjectRoot } from './sidebarProjects.js';
 
 export const RITUAL_VERSION = 1;
+export const MAX_PROJECT_RITUAL_FILES = 100;
+export const MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES = MAX_PROJECT_RITUAL_FILES;
+export const MAX_PROJECT_RITUAL_FILE_BYTES = 64 * 1024;
+export const MAX_PROJECT_RITUAL_STORE_BYTES = 512 * 1024;
+export const MAX_PROJECT_RITUAL_MANIFEST_BYTES = 16 * 1024;
+export const MAX_PROJECT_RITUAL_READ_BYTES =
+  MAX_PROJECT_RITUAL_STORE_BYTES + MAX_PROJECT_RITUAL_MANIFEST_BYTES;
+export const MAX_PUBLISHED_RITUAL_ID_BYTES = 128;
+export const MAX_PUBLISHED_RITUAL_NAME_BYTES = 256;
+export const MAX_PUBLISHED_RITUAL_DESCRIPTION_BYTES = 1024;
 
 export type RitualScope = 'builtin' | 'project';
 export type RitualPaneKind = 'agent' | 'terminal';
@@ -393,6 +403,577 @@ export function listProjectRituals(projectRoot: string): RitualDefinition[] {
     .filter((ritual): ritual is RitualDefinition => !!ritual);
 }
 
+/**
+ * What the project's on-disk ritual store actually contains, with the failure
+ * classified instead of swallowed. Ritual publication needs the difference
+ * between "the project defines nothing" and "the host may not read the store"
+ * so a remote client can render the true state; listProjectRituals keeps its
+ * long-standing lenient contract for existing callers.
+ */
+export interface RitualStoreListing {
+  /** Every project ritual that parsed and normalized. */
+  rituals: RitualDefinition[];
+  /** Entries that exist but do not satisfy the supported ritual shape. */
+  incompatibleCount: number;
+  /** The host may not read the store (EACCES/EPERM somewhere in the read). */
+  denied: boolean;
+  /** The read failed for any other reason (unexpected fs or parse failure). */
+  failed: boolean;
+  /** The store exceeded its file-count, per-file, or aggregate byte limit. */
+  limitExceeded: boolean;
+  /** Bytes actually read from accepted regular files. */
+  bytesRead: number;
+}
+
+export interface RitualManifestListing {
+  defaultRitualId?: string;
+  /** The host may not read the manifest. */
+  denied: boolean;
+  /** The manifest read failed for another filesystem reason. */
+  failed: boolean;
+  /** The manifest exists but does not satisfy the supported shape. */
+  incompatible: boolean;
+  /** The manifest exceeds its byte or identifier limit. */
+  limitExceeded: boolean;
+  /** Bytes actually read from the accepted regular manifest file. */
+  bytesRead: number;
+}
+
+export function readProjectRitualStore(
+  projectRoot: string,
+  maxStoreBytes: number = MAX_PROJECT_RITUAL_STORE_BYTES,
+): RitualStoreListing {
+  const listing: RitualStoreListing = {
+    rituals: [],
+    incompatibleCount: 0,
+    denied: false,
+    failed: false,
+    limitExceeded: false,
+    bytesRead: 0,
+  };
+  const directoryChainRead = openRitualDirectoryChain(projectRoot, ['.psyche', 'rituals']);
+  if (directoryChainRead.missing) {
+    return listing;
+  }
+  if (
+    directoryChainRead.denied
+    || directoryChainRead.failed
+    || directoryChainRead.incompatible
+    || !directoryChainRead.chain
+  ) {
+    listing.denied = directoryChainRead.denied;
+    listing.failed = directoryChainRead.failed;
+    listing.incompatibleCount = directoryChainRead.incompatible ? 1 : 0;
+    return listing;
+  }
+
+  const directoryChain = directoryChainRead.chain;
+  try {
+    const directoryRead = readBoundedRitualEntries(directoryChain);
+    if (
+      directoryRead.denied
+      || directoryRead.failed
+      || directoryRead.incompatible
+      || directoryRead.limitExceeded
+    ) {
+      listing.denied = directoryRead.denied;
+      listing.failed = directoryRead.failed;
+      listing.incompatibleCount = directoryRead.incompatible ? 1 : 0;
+      listing.limitExceeded = directoryRead.limitExceeded;
+      return listing;
+    }
+
+    const aggregateLimit = Math.min(
+      MAX_PROJECT_RITUAL_STORE_BYTES,
+      normalizeReadBudget(maxStoreBytes),
+    );
+    let aggregateBytes = 0;
+    for (const entry of directoryRead.entries) {
+      const fileRead = readBoundedUtf8File(
+        path.join(directoryChain.leafPath, entry),
+        MAX_PROJECT_RITUAL_FILE_BYTES,
+        aggregateLimit - aggregateBytes,
+        directoryChain,
+      );
+      aggregateBytes += fileRead.bytes;
+      listing.bytesRead = aggregateBytes;
+      if (fileRead.content === undefined) {
+        if (fileRead.denied) {
+          listing.denied = true;
+        } else if (fileRead.limitExceeded) {
+          listing.limitExceeded = true;
+        } else if (fileRead.incompatible) {
+          listing.incompatibleCount += 1;
+        } else {
+          // A single unreadable entry must not mask the rest of the store, but
+          // it does mean the listing is not a faithful read.
+          listing.failed = true;
+        }
+        if (fileRead.aggregateLimitExceeded) {
+          break;
+        }
+        continue;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fileRead.content);
+      } catch {
+        // Malformed content is an unsupported entry, not a broken store read.
+        listing.incompatibleCount += 1;
+        continue;
+      }
+
+      const ritual = normalizeRitual(parsed, 'project');
+      if (ritual) {
+        listing.rituals.push(ritual);
+      } else {
+        listing.incompatibleCount += 1;
+      }
+    }
+  } finally {
+    applyRitualDirectoryCloseFailure(listing, closeRitualDirectoryChain(directoryChain));
+  }
+  return listing;
+}
+
+function readBoundedRitualEntries(directoryChain: RitualDirectoryChain): {
+  entries: string[];
+  missing: boolean;
+  denied: boolean;
+  failed: boolean;
+  incompatible: boolean;
+  limitExceeded: boolean;
+} {
+  const result = {
+    entries: [] as string[],
+    missing: false,
+    denied: false,
+    failed: false,
+    incompatible: false,
+    limitExceeded: false,
+  };
+  let directory: fs.Dir | undefined;
+  try {
+    assertRitualDirectoryChain(directoryChain);
+    directory = fs.opendirSync(directoryChain.leafPath);
+    assertRitualDirectoryChain(directoryChain);
+  } catch (error) {
+    try {
+      directory?.closeSync();
+    } catch {
+      // The path validation failure remains the authoritative classification.
+    }
+    result.missing = false;
+    result.denied = isPermissionError(error);
+    result.incompatible = isMissingError(error) || isUnsafeRitualPathError(error);
+    result.failed = !result.denied && !result.incompatible;
+    return result;
+  }
+  const openedDirectory = directory;
+
+  try {
+    let examinedEntries = 0;
+    while (true) {
+      const entry = openedDirectory.readSync();
+      if (!entry) break;
+      examinedEntries += 1;
+      if (examinedEntries > MAX_PROJECT_RITUAL_DIRECTORY_ENTRIES) {
+        result.entries = [];
+        result.limitExceeded = true;
+        break;
+      }
+      if (!entry.name.endsWith('.json')) continue;
+      if (result.entries.length >= MAX_PROJECT_RITUAL_FILES) {
+        result.entries = [];
+        result.limitExceeded = true;
+        break;
+      }
+      result.entries.push(entry.name);
+    }
+    assertRitualDirectoryChain(directoryChain);
+  } catch (error) {
+    result.denied = isPermissionError(error);
+    result.incompatible = isUnsafeRitualPathError(error);
+    result.failed = !result.denied && !result.incompatible;
+    result.entries = [];
+  } finally {
+    try {
+      openedDirectory.closeSync();
+    } catch (error) {
+      result.denied ||= isPermissionError(error);
+      result.incompatible ||= isUnsafeRitualPathError(error);
+      result.failed ||= !result.denied && !result.incompatible;
+      result.entries = [];
+    }
+  }
+
+  result.entries.sort();
+  return result;
+}
+
+function readBoundedUtf8File(
+  filePath: string,
+  maxFileBytes: number,
+  aggregateBytesRemaining: number,
+  directoryChain: RitualDirectoryChain,
+): {
+  content?: string;
+  bytes: number;
+  missing: boolean;
+  denied: boolean;
+  failed: boolean;
+  incompatible: boolean;
+  limitExceeded: boolean;
+  aggregateLimitExceeded: boolean;
+} {
+  const result = {
+    bytes: 0,
+    missing: false,
+    denied: false,
+    failed: false,
+    incompatible: false,
+    limitExceeded: false,
+    aggregateLimitExceeded: false,
+  } as {
+    content?: string;
+    bytes: number;
+    missing: boolean;
+    denied: boolean;
+    failed: boolean;
+    incompatible: boolean;
+    limitExceeded: boolean;
+    aggregateLimitExceeded: boolean;
+  };
+  let descriptor: number;
+  try {
+    assertRitualDirectoryChain(directoryChain);
+    descriptor = fs.openSync(filePath, ritualFileReadFlags());
+  } catch (error) {
+    result.missing = isMissingError(error);
+    result.denied = isPermissionError(error);
+    result.incompatible = isUnsafeRitualPathError(error);
+    result.failed = !result.missing && !result.denied && !result.incompatible;
+    return result;
+  }
+
+  try {
+    assertRitualDirectoryChain(directoryChain);
+    const openedStats = fs.fstatSync(descriptor, { bigint: true });
+    if (!openedStats.isFile()) {
+      result.incompatible = true;
+      return result;
+    }
+    assertOpenedRitualFileIdentity(filePath, openedStats);
+    const aggregateLimit = Math.max(0, aggregateBytesRemaining);
+    if (
+      openedStats.size > BigInt(maxFileBytes)
+      || openedStats.size > BigInt(aggregateLimit)
+    ) {
+      result.limitExceeded = true;
+      result.aggregateLimitExceeded = openedStats.size > BigInt(aggregateLimit);
+      return result;
+    }
+    const expectedBytes = Number(openedStats.size);
+    const buffer = Buffer.alloc(expectedBytes);
+    while (result.bytes < expectedBytes) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        buffer,
+        result.bytes,
+        expectedBytes - result.bytes,
+        result.bytes,
+      );
+      if (bytesRead === 0) {
+        result.failed = true;
+        return result;
+      }
+      result.bytes += bytesRead;
+    }
+    const currentStats = fs.fstatSync(descriptor, { bigint: true });
+    if (!currentStats.isFile()) {
+      result.incompatible = true;
+      return result;
+    }
+    if (currentStats.size !== openedStats.size) {
+      result.limitExceeded = currentStats.size > BigInt(maxFileBytes)
+        || currentStats.size > BigInt(aggregateLimit);
+      result.aggregateLimitExceeded = currentStats.size > BigInt(aggregateLimit);
+      result.failed = !result.limitExceeded;
+      return result;
+    }
+    assertRitualDirectoryChain(directoryChain);
+    assertOpenedRitualFileIdentity(filePath, currentStats);
+    result.content = buffer.toString('utf8');
+  } catch (error) {
+    result.denied = isPermissionError(error);
+    result.incompatible = isMissingError(error) || isUnsafeRitualPathError(error);
+    result.failed = !result.denied && !result.incompatible;
+  } finally {
+    try {
+      fs.closeSync(descriptor);
+    } catch (error) {
+      result.denied ||= isPermissionError(error);
+      result.failed ||= !result.denied;
+      result.content = undefined;
+    }
+  }
+  return result;
+}
+
+function normalizeReadBudget(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) return 0;
+  return value;
+}
+
+interface RitualDirectoryIdentity {
+  directoryPath: string;
+  realPath: string;
+  dev: bigint;
+  ino: bigint;
+  descriptor?: number;
+}
+
+interface RitualDirectoryChain {
+  directories: RitualDirectoryIdentity[];
+  leafPath: string;
+}
+
+// Node does not expose openat-style directory reads, so retain each verified
+// descriptor and re-check path identity around every path-based operation.
+function openRitualDirectoryChain(
+  projectRoot: string,
+  components: readonly string[],
+): {
+  chain?: RitualDirectoryChain;
+  missing: boolean;
+  denied: boolean;
+  failed: boolean;
+  incompatible: boolean;
+} {
+  const result = {
+    missing: false,
+    denied: false,
+    failed: false,
+    incompatible: false,
+  } as {
+    chain?: RitualDirectoryChain;
+    missing: boolean;
+    denied: boolean;
+    failed: boolean;
+    incompatible: boolean;
+  };
+  const directories: RitualDirectoryIdentity[] = [];
+  try {
+    const canonicalRoot = fs.realpathSync.native(path.resolve(projectRoot));
+    const directoryPaths = [canonicalRoot];
+    for (const component of components) {
+      directoryPaths.push(path.join(directoryPaths.at(-1)!, component));
+    }
+    for (const directoryPath of directoryPaths) {
+      directories.push(openRitualDirectory(directoryPath));
+    }
+    result.chain = {
+      directories,
+      leafPath: directoryPaths.at(-1)!,
+    };
+  } catch (error) {
+    result.missing = isMissingError(error);
+    result.denied = isPermissionError(error);
+    result.incompatible = isUnsafeRitualPathError(error);
+    result.failed = !result.missing && !result.denied && !result.incompatible;
+    closeRitualDirectoryChain({
+      directories,
+      leafPath: directories.at(-1)?.directoryPath ?? path.resolve(projectRoot),
+    });
+  }
+  return result;
+}
+
+function openRitualDirectory(directoryPath: string): RitualDirectoryIdentity {
+  const initialStats = fs.lstatSync(directoryPath, { bigint: true });
+  if (!initialStats.isDirectory() || initialStats.isSymbolicLink()) {
+    throw unsafeRitualPathError();
+  }
+
+  let descriptor: number | undefined;
+  try {
+    if (process.platform !== 'win32') {
+      descriptor = fs.openSync(directoryPath, ritualDirectoryReadFlags());
+      const openedStats = fs.fstatSync(descriptor, { bigint: true });
+      if (
+        !openedStats.isDirectory()
+        || openedStats.dev !== initialStats.dev
+        || openedStats.ino !== initialStats.ino
+      ) {
+        throw unsafeRitualPathError();
+      }
+    }
+
+    const realPath = fs.realpathSync.native(directoryPath);
+    if (!sameRitualPath(realPath, directoryPath)) {
+      throw unsafeRitualPathError();
+    }
+    const currentStats = fs.lstatSync(directoryPath, { bigint: true });
+    if (
+      !currentStats.isDirectory()
+      || currentStats.isSymbolicLink()
+      || currentStats.dev !== initialStats.dev
+      || currentStats.ino !== initialStats.ino
+    ) {
+      throw unsafeRitualPathError();
+    }
+    return {
+      directoryPath,
+      realPath,
+      dev: currentStats.dev,
+      ino: currentStats.ino,
+      ...(descriptor === undefined ? {} : { descriptor }),
+    };
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Preserve the validation failure that made this directory unsafe.
+      }
+    }
+    throw error;
+  }
+}
+
+function assertRitualDirectoryChain(directoryChain: RitualDirectoryChain): void {
+  for (const identity of directoryChain.directories) {
+    try {
+      if (identity.descriptor !== undefined) {
+        const openedStats = fs.fstatSync(identity.descriptor, { bigint: true });
+        if (
+          !openedStats.isDirectory()
+          || openedStats.dev !== identity.dev
+          || openedStats.ino !== identity.ino
+        ) {
+          throw unsafeRitualPathError();
+        }
+      }
+      const currentStats = fs.lstatSync(identity.directoryPath, { bigint: true });
+      if (
+        !currentStats.isDirectory()
+        || currentStats.isSymbolicLink()
+        || currentStats.dev !== identity.dev
+        || currentStats.ino !== identity.ino
+      ) {
+        throw unsafeRitualPathError();
+      }
+      const currentRealPath = fs.realpathSync.native(identity.directoryPath);
+      if (
+        !sameRitualPath(currentRealPath, identity.realPath)
+        || !sameRitualPath(currentRealPath, identity.directoryPath)
+      ) {
+        throw unsafeRitualPathError();
+      }
+    } catch (error) {
+      if (isPermissionError(error) || !isMissingError(error)) throw error;
+      throw unsafeRitualPathError();
+    }
+  }
+}
+
+function assertOpenedRitualFileIdentity(filePath: string, openedStats: fs.BigIntStats): void {
+  try {
+    const currentStats = fs.lstatSync(filePath, { bigint: true });
+    if (
+      !currentStats.isFile()
+      || currentStats.isSymbolicLink()
+      || currentStats.dev !== openedStats.dev
+      || currentStats.ino !== openedStats.ino
+    ) {
+      throw unsafeRitualPathError();
+    }
+  } catch (error) {
+    if (isPermissionError(error) || !isMissingError(error)) throw error;
+    throw unsafeRitualPathError();
+  }
+}
+
+function closeRitualDirectoryChain(directoryChain: RitualDirectoryChain): unknown {
+  let closeError: unknown;
+  for (const identity of [...directoryChain.directories].reverse()) {
+    if (identity.descriptor === undefined) continue;
+    try {
+      fs.closeSync(identity.descriptor);
+    } catch (error) {
+      closeError ??= error;
+    }
+  }
+  return closeError;
+}
+
+function applyRitualDirectoryCloseFailure(
+  listing: Pick<RitualStoreListing, 'denied' | 'failed' | 'rituals'>,
+  error: unknown,
+): void {
+  if (!error) return;
+  listing.denied ||= isPermissionError(error);
+  listing.failed ||= !listing.denied;
+  listing.rituals = [];
+}
+
+function sameRitualPath(left: string, right: string): boolean {
+  const normalizedLeft = path.normalize(path.resolve(left));
+  const normalizedRight = path.normalize(path.resolve(right));
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function ritualDirectoryReadFlags(): number {
+  let flags = fs.constants.O_RDONLY;
+  if (process.platform !== 'win32') {
+    if (typeof fs.constants.O_NOFOLLOW === 'number') {
+      flags |= fs.constants.O_NOFOLLOW;
+    }
+    if (typeof fs.constants.O_DIRECTORY === 'number') {
+      flags |= fs.constants.O_DIRECTORY;
+    }
+  }
+  return flags;
+}
+
+function ritualFileReadFlags(): number {
+  let flags = fs.constants.O_RDONLY;
+  if (process.platform !== 'win32') {
+    flags |= fs.constants.O_NONBLOCK;
+    if (typeof fs.constants.O_NOFOLLOW === 'number') {
+      flags |= fs.constants.O_NOFOLLOW;
+    }
+  }
+  return flags;
+}
+
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+}
+
+function isMissingError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+}
+
+function isUnsafeRitualPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'ELOOP'
+    || code === 'ENXIO'
+    || code === 'ENODEV'
+    || code === 'ENOTDIR'
+    || code === 'RITUAL_PATH_UNSAFE';
+}
+
+function unsafeRitualPathError(): NodeJS.ErrnoException {
+  return Object.assign(new Error('Ritual path contains an unsafe directory component'), {
+    code: 'RITUAL_PATH_UNSAFE',
+  });
+}
+
 export function listAvailableRituals(projectRoot: string): RitualDefinition[] {
   const ritualsById = new Map<string, RitualDefinition>();
   for (const ritual of getBuiltInRituals()) {
@@ -409,23 +990,102 @@ export function loadRitual(projectRoot: string, ritualId: string): RitualDefinit
     .find((ritual) => ritual.id === ritualId) || null;
 }
 
-function readProjectRitualManifest(projectRoot: string): ProjectRitualManifest {
-  const manifestPath = getProjectRitualManifestPath(projectRoot);
-  if (!fs.existsSync(manifestPath)) {
-    return { version: RITUAL_VERSION };
+export function readProjectRitualManifest(
+  projectRoot: string,
+  maxManifestBytes: number = MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+): RitualManifestListing {
+  const directoryChainRead = openRitualDirectoryChain(projectRoot, ['.psyche']);
+  if (
+    directoryChainRead.missing
+    || directoryChainRead.denied
+    || directoryChainRead.failed
+    || directoryChainRead.incompatible
+    || !directoryChainRead.chain
+  ) {
+    return {
+      denied: directoryChainRead.denied,
+      failed: directoryChainRead.failed,
+      incompatible: directoryChainRead.incompatible,
+      limitExceeded: false,
+      bytesRead: 0,
+    };
   }
 
+  const directoryChain = directoryChainRead.chain;
+  const manifestPath = path.join(directoryChain.leafPath, 'rituals.json');
+  const manifestLimit = Math.min(
+    MAX_PROJECT_RITUAL_MANIFEST_BYTES,
+    normalizeReadBudget(maxManifestBytes),
+  );
+  let fileRead: ReturnType<typeof readBoundedUtf8File> | undefined;
+  let readError: unknown;
   try {
-    const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
-    return {
-      version: RITUAL_VERSION,
-      ...(typeof parsed.defaultRitualId === 'string' && parsed.defaultRitualId.trim()
-        ? { defaultRitualId: parsed.defaultRitualId.trim() }
-        : {}),
-    };
-  } catch {
-    return { version: RITUAL_VERSION };
+    fileRead = readBoundedUtf8File(
+      manifestPath,
+      manifestLimit,
+      manifestLimit,
+      directoryChain,
+    );
+  } catch (error) {
+    readError = error;
   }
+  const closeError = closeRitualDirectoryChain(directoryChain);
+  if (readError) throw readError;
+  if (!fileRead) throw new Error('Ritual manifest read did not produce a result');
+  if (closeError) {
+    fileRead = {
+      bytes: fileRead.bytes,
+      missing: false,
+      denied: isPermissionError(closeError),
+      failed: !isPermissionError(closeError),
+      incompatible: false,
+      limitExceeded: false,
+      aggregateLimitExceeded: false,
+    };
+  }
+  const result: RitualManifestListing = {
+    denied: fileRead.denied,
+    failed: fileRead.failed,
+    incompatible: fileRead.incompatible,
+    limitExceeded: fileRead.limitExceeded,
+    bytesRead: fileRead.bytes,
+  };
+  if (fileRead.missing || fileRead.content === undefined) {
+    return result;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fileRead.content);
+  } catch {
+    result.incompatible = true;
+    return result;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    result.incompatible = true;
+    return result;
+  }
+
+  const manifest = parsed as Record<string, unknown>;
+  if (manifest.version !== RITUAL_VERSION) {
+    result.incompatible = true;
+    return result;
+  }
+  if (manifest.defaultRitualId === undefined) {
+    return result;
+  }
+  if (typeof manifest.defaultRitualId !== 'string' || !manifest.defaultRitualId.trim()) {
+    result.incompatible = true;
+    return result;
+  }
+
+  const defaultRitualId = manifest.defaultRitualId.trim();
+  if (Buffer.byteLength(defaultRitualId, 'utf8') > MAX_PUBLISHED_RITUAL_ID_BYTES) {
+    result.limitExceeded = true;
+    return result;
+  }
+  result.defaultRitualId = defaultRitualId;
+  return result;
 }
 
 export function getProjectDefaultRitualId(projectRoot: string): string | undefined {
