@@ -3,7 +3,6 @@
 **Status:** Reusable release gate; macOS `v0.0.1` published 2026-08-23  
 **Active stabilization owner:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)  
 **Executable evidence slice:** [#239](https://github.com/OpenCoven/psyche-build/issues/239)  
-**Active governance owner:** [#31](https://github.com/OpenCoven/psyche-build/issues/31)  
 **Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
 **Execution order:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
@@ -26,14 +25,15 @@ operate, recover, and remove the application.
 | Desktop-only release independence while retaining shared validation | **Complete** | #203 and protected run `32629730508` |
 | Stable GitHub Release and native Homebrew Cask | **Complete** | #194, `OpenCoven/homebrew-tap#2`, and native Apple Silicon/Intel lifecycle runs |
 | Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #196 executed through #239 |
-| Administrator-enforced required checks/review and removal of standing bypasses | **Open governance debt** | #31 |
+| Administrator-enforced required checks/review with one named PR-only owner bypass | **Complete** | [#31](https://github.com/OpenCoven/psyche-build/issues/31); sanitized ruleset/protection records, `GH013` direct-push rejection probe, and proof PR #283 (`63667f30`) |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
-| Versioned bounded support bundle and reusable recovery harness | **Planned post-release capability** | #199 and #243 |
+| Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
+| Reusable recovery harness and operator-observed failure scenarios | **Planned post-release capability** | #199 |
 
-The open #196/#239 and #31 rows do not make the already-delivered macOS artifact
-unreleased. They are explicit post-release correctness and governance
-obligations. Conversely, completed publication evidence does not invent the
-operator observations that remain open.
+The open #196/#239 row does not make the already-delivered macOS artifact
+unreleased. It is an explicit post-release correctness obligation. Conversely,
+completed publication evidence does not invent the operator-observed acceptance
+work that remains open.
 
 ## `v0.0.1` publication record
 
@@ -270,8 +270,10 @@ user context, not merely a development checkout.
 
 ## Current error and diagnostic surfaces
 
-The first release does not claim the versioned support bundle owned by #199 and
-#243. Do not invent a nonexistent command or schema to satisfy acceptance.
+The first release does not claim a support bundle. The v1 schema merged later
+under #243 (PR #278) without production collector wiring, and the reusable
+harness remains owned by #199. Do not invent a nonexistent command to satisfy
+acceptance.
 
 - [ ] Verify visible application errors identify the failed operation and a
   safe next action without dumping credentials, prompts, unrestricted terminal
@@ -283,7 +285,7 @@ The first release does not claim the versioned support bundle owned by #199 and
   local operator diagnostic and retain a reviewed/redacted summary rather than
   raw output.
 - [ ] Record the bounded support-bundle capability as explicitly deferred to
-  #199/#243.
+  #199 (schema delivered under #243; no production wiring in `v0.0.1`).
 
 ## Update, uninstall, and reinstall
 
@@ -390,10 +392,11 @@ observations. Close #196 when that manifest proves the supported ordinary and
 representative failure paths and every reusable gap is transferred to #199 or
 #243.
 
-Close #31 only after administrators are subject to required checks/review, no
-standing actor can silently bypass the protected path, and a successful proof
-PR plus sanitized before/after policy evidence is linked.
+#31 closed on 2026-08-30 after administrators became subject to required
+checks/review, the only remaining bypass was the single named PR-only owner
+exception, a direct-push probe was rejected, and proof PR #283 merged through
+the protected path with sanitized before/after policy evidence linked.
 
-#194 and #203 remain complete. Neither #196/#239 nor #31 requires republishing
+#194 and #203 remain complete. #196/#239 does not require republishing
 `v0.0.1` unless new evidence proves a defect in the immutable public artifacts
 or their supported installation path.

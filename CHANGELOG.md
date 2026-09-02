@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Documentation
+
+- Reconciled the roadmap, post-release execution contract, support matrix, and
+  release-acceptance snapshots to the 2026-09-02 delivery state: Stage 0
+  governance/tracker closure, delivered community and support-bundle outcomes,
+  merged iOS readiness, invite-authentication, ritual-publication, Coven
+  launch-adapter, and Vim contract slices, and the stale scheduled Beads mirror
+  sync. No support claim changed.
+
 ## [0.0.2] - 2026-08-28
 
 ### Changed

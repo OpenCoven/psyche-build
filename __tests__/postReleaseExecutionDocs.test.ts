@@ -8,7 +8,7 @@ const pullUrl = (pull: number): string =>
   `https://github.com/OpenCoven/psyche-build/pull/${pull}`;
 
 describe('post-release execution documentation', () => {
-  it('records the Stage 0 proof wave as delivered before the next P0 gate', async () => {
+  it('records the Stage 0 proof wave as closed with linked evidence before the active P0 gate', async () => {
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
@@ -20,17 +20,18 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toContain(pullUrl(245));
       expect(source, filePath).toContain('5f4b7b05');
       expect(source, filePath).toMatch(/#238[\s\S]{0,240}(?:delivered|completed)/i);
-      expect(source, filePath).toMatch(/#31[\s\S]{0,160}delivered by this wave/i);
-      expect(source, filePath).toMatch(/#237[\s\S]{0,160}delivered by this wave/i);
-      expect(source, filePath).toMatch(/#240[\s\S]{0,160}delivered by this wave/i);
-      expect(source, filePath).toContain('#196/#239 are the next P0 critical path');
-      expect(source, filePath).toMatch(/when this proof PR merges/i);
-      expect(source, filePath).toMatch(/linked remote evidence/i);
-      expect(source, filePath).toMatch(/proof PR/i);
+      expect(source, filePath).toMatch(/#240[\s\S]{0,120}closed on[\s\S]{0,40}2026-08-28/i);
+      expect(source, filePath).toMatch(/#237[\s\S]{0,120}closed on[\s\S]{0,40}2026-08-29/i);
+      expect(source, filePath).toMatch(/#31[\s\S]{0,120}closed on[\s\S]{0,40}2026-08-30/i);
+      expect(source, filePath).toContain(pullUrl(263));
+      expect(source, filePath).toContain(pullUrl(283));
+      expect(source, filePath).toContain(pullUrl(330));
+      expect(source, filePath).toContain('63667f30');
+      expect(source, filePath).toMatch(/GH013/);
+      expect(source, filePath).toContain('#196/#239 remain the active P0 critical path');
       expect(source, filePath).toMatch(/policy evidence/i);
-      expect(source, filePath).toMatch(/first apply/i);
-      expect(source, filePath).toMatch(/zero-operation run/i);
-      expect(source, filePath).toMatch(/owning issues/i);
+      expect(source, filePath).not.toMatch(/when this proof PR merges/i);
+      expect(source, filePath).not.toMatch(/delivered by this wave/i);
       const stale238Claims = source
         .split(/\n\s*\n/)
         .filter((paragraph) => /#238/.test(paragraph))
@@ -41,9 +42,37 @@ describe('post-release execution documentation', () => {
         );
       expect(stale238Claims, filePath).toEqual([]);
       expect(source, filePath).not.toMatch(
-        /(?:#31|#237|#240)[^\n]{0,220}(?:current blocker|precedes stabilization)/i,
+        /(?:#31|#237|#240)[^\n]{0,220}(?:current blocker|precedes stabilization|open governance debt)/i,
       );
       expect(source, filePath).not.toMatch(/while Stage 0 proceeds/i);
+    }
+  });
+
+  it('records the slices merged since 2026-08-28 against their owning outcomes without support claims', async () => {
+    const documents = await Promise.all(
+      ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of documents) {
+      for (const issue of [198, 242, 243, 244, 252, 279, 280]) {
+        expect(source, `${filePath} missing issue #${issue}`).toContain(issueUrl(issue));
+      }
+      for (const pull of [260, 261, 278, 321, 322, 323]) {
+        expect(source, `${filePath} missing pull request #${pull}`).toContain(pullUrl(pull));
+      }
+      expect(source, filePath).toMatch(
+        /#243[\s\S]{0,200}(?:delivered|closed)[\s\S]{0,200}(?:without production collector wiring|no production collector wiring|schema only|schema, bounds)/i,
+      );
+      expect(source, filePath).toMatch(/#198\/#244[\s\S]{0,120}delivered/i);
+      expect(source, filePath).toMatch(/PR #322[\s\S]{0,240}(?:publication only|execution and (?:mobile )?controls)/i);
+      expect(source, filePath).toMatch(/PR #323[\s\S]{0,240}(?:no pairing|physical acceptance)/i);
+      expect(source, filePath).toMatch(/0\.0\.2[\s\S]{0,120}unreleased candidate/i);
+      expect(source, filePath).toMatch(/scheduled Beads Project sync[\s\S]{0,160}failed/i);
+      expect(source, filePath).toMatch(/psyche-z7c\.4\.4[\s\S]{0,80}#230/);
+      expect(source, filePath).not.toMatch(/(?:iOS|TestFlight)[^\n]{0,120}(?:now supported|internal beta is (?:live|available))/i);
     }
   });
 
@@ -125,7 +154,7 @@ describe('post-release execution documentation', () => {
       }
       expect(source, filePath).toMatch(/#200\/#241[\s\S]{0,160}P1 dependency gate/i);
       expect(source, filePath).toMatch(/#199\/#243[\s\S]{0,160}P1 dependency gate/i);
-      expect(source, filePath).toMatch(/#198\/#244[\s\S]{0,160}P1 dependency gate/i);
+      expect(source, filePath).toMatch(/#198\/#244[\s\S]{0,160}(?:delivered|no longer sequences)/i);
       expect(source, filePath).toMatch(/#197[\s\S]{0,160}P1 dependency gate/i);
       expect(source, filePath).toMatch(/#201\/#253[\s\S]{0,160}P2 dependency gate/i);
       expect(source, filePath).toMatch(/#246[\s\S]{0,160}P2 dependency gate/i);
@@ -182,6 +211,10 @@ describe('post-release execution documentation', () => {
     expect(acceptance).toContain(issueUrl(239));
     expect(acceptance).toContain('**Complete**');
     expect(acceptance).toContain('**Open post-release stabilization debt**');
+    expect(acceptance).not.toContain('**Open governance debt**');
+    expect(acceptance).toMatch(/#31 closed on 2026-08-30/i);
+    expect(acceptance).toContain(issueUrl(31));
+    expect(acceptance).toMatch(/\| \*\*Complete\*\* \| \[#31\]/);
     expect(acceptance).toMatch(/completed publication evidence[\s\S]{0,180}operator-observed acceptance work/i);
   });
 
