@@ -39,6 +39,98 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(reopened, [makeHost()])
     }
 
+    func testSelectedHostSurvivesRestartWithoutFallingBackToServerIDOrder() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let alphabeticallyFirst = makeHost(serverID: "server-a")
+        let selected = makeHost(serverID: "server-z")
+        try await store.save(alphabeticallyFirst)
+        try await store.save(selected)
+
+        let reopened = PairedHostStore(secureStore: secureStore)
+        let hosts = try await reopened.hosts()
+        let reopenedSelection = try await reopened.selectedHost()
+
+        XCTAssertEqual(hosts, [alphabeticallyFirst, selected])
+        XCTAssertEqual(reopenedSelection, selected)
+    }
+
+    func testLegacySingleHostRecordRemainsAnUnambiguousSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let host = makeHost()
+        try secureStore.set(
+            JSONEncoder().encode([host.serverID: host]),
+            forKey: PairedHostStore.legacyKey
+        )
+
+        let reopened = PairedHostStore(secureStore: secureStore)
+
+        let selected = try await reopened.selectedHost()
+        XCTAssertEqual(selected, host)
+    }
+
+    func testLegacyMultiHostRecordMigratesThePreviousDeterministicSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let first = makeHost(serverID: "server-a")
+        let second = makeHost(serverID: "server-z")
+        try secureStore.set(
+            JSONEncoder().encode([
+                second.serverID: second,
+                first.serverID: first,
+            ]),
+            forKey: PairedHostStore.legacyKey
+        )
+
+        let migrated = PairedHostStore(secureStore: secureStore)
+        let migratedSelection = try await migrated.selectedHost()
+        XCTAssertEqual(migratedSelection, first)
+
+        try secureStore.removeValue(forKey: PairedHostStore.legacyKey)
+        let reopened = PairedHostStore(secureStore: secureStore)
+        let reopenedSelection = try await reopened.selectedHost()
+        XCTAssertEqual(reopenedSelection, first)
+    }
+
+    func testSelectedHostFailsClosedWhenSelectionDoesNotNameARecord() async throws {
+        let secureStore = InMemorySecureStore()
+        let host = makeHost()
+        try secureStore.set(
+            JSONEncoder().encode(PersistedPairedHostStateFixture(
+                records: [host.serverID: host],
+                selectedServerID: "missing-server"
+            )),
+            forKey: PairedHostStore.defaultKey
+        )
+        let store = PairedHostStore(secureStore: secureStore)
+
+        do {
+            _ = try await store.selectedHost()
+            XCTFail("An inconsistent selected-host binding must fail closed")
+        } catch {
+            XCTAssertEqual(error as? PairedHostStoreError, .corruptedRecord)
+        }
+    }
+
+    func testSelectedHostFailsClosedWhenRecordKeyContradictsServerIdentity() async throws {
+        let secureStore = InMemorySecureStore()
+        let host = makeHost(serverID: "actual-server")
+        try secureStore.set(
+            JSONEncoder().encode(PersistedPairedHostStateFixture(
+                records: ["selected-server": host],
+                selectedServerID: "selected-server"
+            )),
+            forKey: PairedHostStore.defaultKey
+        )
+        let store = PairedHostStore(secureStore: secureStore)
+
+        do {
+            _ = try await store.selectedHost()
+            XCTFail("A contradictory host record must fail closed")
+        } catch {
+            XCTAssertEqual(error as? PairedHostStoreError, .corruptedRecord)
+        }
+    }
+
     func testPersistsFingerprintsInOneCanonicalForm() async throws {
         let store = PairedHostStore(secureStore: InMemorySecureStore())
         let colonSeparated = fingerprint.uppercased().chunked(every: 2).joined(separator: ":")
@@ -188,6 +280,939 @@ final class PairedHostStoreTests: XCTestCase {
         guard case .indeterminate = result else {
             return XCTFail("Failed compensation must be indeterminate, got \(result)")
         }
+    }
+
+    func testReadinessPublicationPreservesSelectionUntilReadyHostIsSelected() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        let authorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(candidate))
+
+        let publication = await store.publishReadinessHost(
+            candidate,
+            policy: .replace,
+            claimedBy: claim,
+            authorizedBy: authorization
+        )
+
+        XCTAssertEqual(publication, .committed)
+        let selectedBeforeReadiness = try await store.selectedHost()
+        let persistedCandidate = try await store.host(withServerID: candidate.serverID)
+        XCTAssertEqual(selectedBeforeReadiness, previouslyReady)
+        XCTAssertEqual(persistedCandidate, candidate)
+
+        let generation = ConnectionGeneration(id: 1)
+        let selection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+
+        XCTAssertEqual(selection.result, .committed)
+        let transaction = try XCTUnwrap(selection.transaction)
+        let selectionAuthorization = try XCTUnwrap(selection.authorization)
+        let selectedWhilePromotionIsPending = try await store.selectedHost()
+        XCTAssertEqual(selectedWhilePromotionIsPending, previouslyReady)
+
+        XCTAssertTrue(selectionAuthorization.finalize {})
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: selectionAuthorization,
+            selectedBy: generation
+        )
+        XCTAssertEqual(completion, .committed)
+        let selectedAfterReadiness = try await store.selectedHost()
+        XCTAssertEqual(selectedAfterReadiness, candidate)
+    }
+
+    func testRestartPreservesPreviousAuthorityWhileReadySelectionIsPending() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        let authorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(candidate))
+        let publication = await store.publishReadinessHost(
+            candidate,
+            policy: .replace,
+            claimedBy: claim,
+            authorizedBy: authorization
+        )
+        XCTAssertEqual(publication, .committed)
+        let generation = ConnectionGeneration(id: 1)
+        let selection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        XCTAssertEqual(selection.result, .committed)
+
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let restartSelection = try await restarted.selectedHost()
+
+        XCTAssertEqual(restartSelection, previouslyReady)
+    }
+
+    func testPendingFirstHostSelectionCreatesNoRestartAuthority() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let candidate = makeHost(serverID: "server-z")
+        let authorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(candidate))
+        let publication = await store.publishReadinessHost(
+            candidate,
+            policy: .replace,
+            claimedBy: claim,
+            authorizedBy: authorization
+        )
+        XCTAssertEqual(publication, .committed)
+        let generation = ConnectionGeneration(id: 1)
+        let selection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        XCTAssertEqual(selection.result, .committed)
+
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let restartSelection = try await restarted.selectedHost()
+
+        XCTAssertNil(restartSelection)
+    }
+
+    func testRetiredGenerationCannotAdvanceReadyHostSelection() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        generation.invalidate()
+
+        let selection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+
+        XCTAssertEqual(selection.result, .notCommitted(reason: nil))
+        XCTAssertNil(selection.transaction)
+        let selected = try await store.selectedHost()
+        XCTAssertEqual(selected, previouslyReady)
+    }
+
+    func testRetiredSelectionCompensationCannotUndoANewerOwner() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let retired = ConnectionGeneration(id: 1)
+        let current = ConnectionGeneration(id: 2)
+
+        let retiredSelection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: retired
+        )
+        XCTAssertEqual(retiredSelection.result, .committed)
+        let retiredTransaction = try XCTUnwrap(retiredSelection.transaction)
+        let retiredAuthorization = try XCTUnwrap(retiredSelection.authorization)
+        retired.invalidate()
+        let currentSelection = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: current
+        )
+        XCTAssertEqual(currentSelection.result, .committed)
+        let currentTransaction = try XCTUnwrap(currentSelection.transaction)
+        let currentAuthorization = try XCTUnwrap(currentSelection.authorization)
+
+        let compensation = await store.compensateReadyHostSelection(
+            retiredTransaction,
+            authorizedBy: retiredAuthorization,
+            selectedBy: retired
+        )
+
+        XCTAssertEqual(compensation, .notCommitted(reason: nil))
+        XCTAssertTrue(currentAuthorization.finalize {})
+        let completion = await store.completeReadyHostSelection(
+            currentTransaction,
+            authorizedBy: currentAuthorization,
+            selectedBy: current
+        )
+        XCTAssertEqual(completion, .committed)
+        let selected = try await store.selectedHost()
+        XCTAssertEqual(selected, candidate)
+    }
+
+    func testExplicitRePairSupersedesPendingReadySelectionBeforeFinalization() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        let replacement = makeHost(
+            serverID: candidate.serverID,
+            fingerprint: otherFingerprint,
+            token: "replacement-token"
+        )
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+
+        try await store.replace(replacement)
+        var finalized = false
+        let allowed = authorization.finalize {
+            finalized = true
+        }
+        let compensation = await store.compensateReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+
+        XCTAssertFalse(allowed)
+        XCTAssertFalse(finalized)
+        XCTAssertEqual(compensation, .notCommitted(reason: nil))
+        XCTAssertEqual(selected, replacement)
+    }
+
+    func testExplicitRePairSupersedesAlreadySelectedReconnectBeforeFinalization() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let selected = makeHost(serverID: "server-a")
+        let replacement = makeHost(
+            serverID: selected.serverID,
+            fingerprint: otherFingerprint,
+            token: "replacement-token"
+        )
+        try await store.save(selected)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: selected.serverID,
+            for: generation
+        )
+        XCTAssertNil(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+
+        try await store.replace(replacement)
+        var finalized = false
+        let allowed = authorization.finalize {
+            finalized = true
+        }
+        let persisted = try await store.selectedHost()
+
+        XCTAssertFalse(allowed)
+        XCTAssertFalse(finalized)
+        XCTAssertEqual(persisted, replacement)
+    }
+
+    func testFailedExplicitSavePreservesFinalizedSelectionOwner() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-b")
+        let unrelated = makeHost(serverID: "server-c")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.throwBeforeMutation(.writeFailed))
+
+        do {
+            try await store.save(unrelated)
+            XCTFail("The explicit save should surface its write failure")
+        } catch {
+            XCTAssertEqual(
+                error as? FaultingTransactionSecureStoreError,
+                .writeFailed
+            )
+        }
+        let selectedAfterFailure = try await store.selectedHost()
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let restartSelection = try await restarted.selectedHost()
+
+        XCTAssertEqual(selectedAfterFailure, candidate)
+        XCTAssertEqual(completion, .committed)
+        XCTAssertEqual(restartSelection, candidate)
+    }
+
+    func testMutatingExplicitRePairRetiresStaleSelectionOwner() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-b")
+        let replacement = makeHost(
+            serverID: candidate.serverID,
+            fingerprint: otherFingerprint,
+            token: "replacement-token"
+        )
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let authorization = try XCTUnwrap(preparation.authorization)
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+
+        do {
+            try await store.replace(replacement)
+            XCTFail("The explicit re-pair should surface its ambiguous write")
+        } catch {
+            XCTAssertEqual(
+                error as? FaultingTransactionSecureStoreError,
+                .writeFailed
+            )
+        }
+        let allowed = authorization.finalize {}
+        let selected = try await store.selectedHost()
+
+        XCTAssertFalse(allowed)
+        XCTAssertEqual(selected, replacement)
+    }
+
+    func testRemovingUnrelatedPairPreservesFinalizedSelectionOwner() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-b")
+        let unrelated = makeHost(serverID: "server-c")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(unrelated)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+
+        try await store.remove(serverID: unrelated.serverID)
+        let selectedBeforeCleanup = try await store.selectedHost()
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let restartSelection = try await restarted.selectedHost()
+        let removedHost = try await store.host(withServerID: unrelated.serverID)
+
+        XCTAssertEqual(selectedBeforeCleanup, candidate)
+        XCTAssertEqual(completion, .committed)
+        XCTAssertEqual(restartSelection, candidate)
+        XCTAssertNil(removedHost)
+    }
+
+    func testRemovingPreviousPairPromotesFinalizedSelection() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-b")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+
+        try await store.remove(serverID: previouslyReady.serverID)
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let restartSelection = try await restarted.selectedHost()
+
+        guard case .indeterminate = completion else {
+            return XCTFail("Superseded completion must not claim verified rollback")
+        }
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restartSelection, candidate)
+    }
+
+    func testFinalizedSelectionCompletesAfterGenerationRetires() async throws {
+        let secureStore = InMemorySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+
+        generation.invalidate()
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let restartSelection = try await restarted.selectedHost()
+
+        XCTAssertEqual(completion, .committed)
+        XCTAssertEqual(restartSelection, candidate)
+    }
+
+    func testRetiredSelectionCannotSupersedeCurrentOwner() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let current = ConnectionGeneration(id: 2)
+        let currentPreparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: current
+        )
+        let currentTransaction = try XCTUnwrap(currentPreparation.transaction)
+        let currentAuthorization = try XCTUnwrap(currentPreparation.authorization)
+        let retired = ConnectionGeneration(id: 1)
+        retired.invalidate()
+
+        let retiredPreparation = await store.selectReadyHost(
+            serverID: previouslyReady.serverID,
+            for: retired
+        )
+
+        XCTAssertEqual(retiredPreparation.result, .notCommitted(reason: nil))
+        XCTAssertTrue(currentAuthorization.finalize {})
+        let completion = await store.completeReadyHostSelection(
+            currentTransaction,
+            authorizedBy: currentAuthorization,
+            selectedBy: current
+        )
+        XCTAssertEqual(completion, .committed)
+        let selected = try await store.selectedHost()
+        XCTAssertEqual(selected, candidate)
+    }
+
+    func testRetiredCompletionCannotClearNewerSelectionOwner() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let retired = ConnectionGeneration(id: 1)
+        let retiredPreparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: retired
+        )
+        let retiredTransaction = try XCTUnwrap(retiredPreparation.transaction)
+        let retiredAuthorization = try XCTUnwrap(retiredPreparation.authorization)
+        XCTAssertTrue(retiredAuthorization.finalize {})
+        retired.invalidate()
+
+        let current = ConnectionGeneration(id: 2)
+        let currentPreparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: current
+        )
+        XCTAssertNil(currentPreparation.transaction)
+        let currentAuthorization = try XCTUnwrap(currentPreparation.authorization)
+
+        let retiredCompletion = await store.completeReadyHostSelection(
+            retiredTransaction,
+            authorizedBy: retiredAuthorization,
+            selectedBy: retired
+        )
+
+        guard case .indeterminate = retiredCompletion else {
+            return XCTFail("A retired completion cannot verify the newer owner")
+        }
+        XCTAssertTrue(currentAuthorization.finalize {})
+        await store.acknowledgeReadyHostSelection(
+            authorizedBy: currentAuthorization,
+            selectedBy: current
+        )
+        let selected = try await store.selectedHost()
+        XCTAssertEqual(selected, candidate)
+    }
+
+    func testExplicitReplacementMakesFinalizedCompletionIndeterminate() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        let replacement = makeHost(
+            serverID: candidate.serverID,
+            fingerprint: otherFingerprint,
+            token: "replacement-token"
+        )
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+
+        try await store.replace(replacement)
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+
+        guard case .indeterminate = completion else {
+            return XCTFail("Superseded completion must not claim verified rollback")
+        }
+        XCTAssertEqual(selected, replacement)
+    }
+
+    func testReadySelectionCompletionFailureKeepsPreviousRestartAuthority() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        secureStore.enqueue(.succeed)
+
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        guard case .notCommitted = completion else {
+            return XCTFail("Completion should report its verified rollback")
+        }
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let selected = try await store.selectedHost()
+        let restartedSelection = try await restarted.selectedHost()
+
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restartedSelection, previouslyReady)
+    }
+
+    func testReadySelectionCompletionReadbackConfirmsPersistedCandidate() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restartedSelection = try await PairedHostStore(
+            secureStore: secureStore
+        ).selectedHost()
+
+        XCTAssertEqual(completion, .committed)
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restartedSelection, candidate)
+    }
+
+    func testFailedCompletionAndCompensationRecognizeUnchangedPendingSelection() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.throwBeforeMutation(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+        let restarted = try await PairedHostStore(
+            secureStore: secureStore
+        ).selectedHost()
+
+        guard case .notCommitted = completion else {
+            return XCTFail("Unchanged durable bytes should prove the completion did not commit")
+        }
+        XCTAssertEqual(selected, candidate)
+        XCTAssertEqual(restarted, previouslyReady)
+    }
+
+    func testRetiringSuccessorSelectionPreservesFinalizedProcessAuthority() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let retirement = ReadySelectionGenerationRetirementTrigger()
+        let store = PairedHostStore(
+            secureStore: secureStore,
+            readyHostSelectionCommitStart: {
+                retirement.retireIfArmed()
+            }
+        )
+        let previouslyReady = makeHost(serverID: "server-a")
+        let finalized = makeHost(serverID: "server-b")
+        let successor = makeHost(serverID: "server-c")
+        try await store.save(previouslyReady)
+        try await store.save(finalized)
+        try await store.save(successor)
+        try await store.save(previouslyReady)
+
+        let finalizedGeneration = ConnectionGeneration(id: 1)
+        let finalizedPreparation = await store.selectReadyHost(
+            serverID: finalized.serverID,
+            for: finalizedGeneration
+        )
+        let finalizedTransaction = try XCTUnwrap(finalizedPreparation.transaction)
+        let finalizedAuthorization = try XCTUnwrap(finalizedPreparation.authorization)
+        XCTAssertTrue(finalizedAuthorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        let completion = await store.completeReadyHostSelection(
+            finalizedTransaction,
+            authorizedBy: finalizedAuthorization,
+            selectedBy: finalizedGeneration
+        )
+        guard case .notCommitted = completion else {
+            return XCTFail("Completion should retain finalized process authority")
+        }
+
+        let successorGeneration = ConnectionGeneration(id: 2)
+        retirement.arm(successorGeneration)
+        let preparation = await store.selectReadyHost(
+            serverID: successor.serverID,
+            for: successorGeneration
+        )
+        let selected = try await store.selectedHost()
+
+        XCTAssertEqual(preparation.result, .notCommitted(reason: nil))
+        XCTAssertEqual(selected, finalized)
+    }
+
+    func testReadySelectionCompletionReadbackRejectsInconsistentState() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.replaceWith(Data("inconsistent".utf8)))
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+
+        guard case .indeterminate(let reason) = completion else {
+            return XCTFail("Inconsistent durable state must remain indeterminate")
+        }
+        XCTAssertTrue(reason.contains("did not match either valid state"))
+    }
+
+    func testIndeterminateCompletionReadRelinquishesFinalizedProcessOwner() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let previouslyReady = makeHost(serverID: "server-a")
+        let candidate = makeHost(serverID: "server-z")
+        try await store.save(previouslyReady)
+        try await store.save(candidate)
+        try await store.save(previouslyReady)
+        let generation = ConnectionGeneration(id: 1)
+        let preparation = await store.selectReadyHost(
+            serverID: candidate.serverID,
+            for: generation
+        )
+        let transaction = try XCTUnwrap(preparation.transaction)
+        let authorization = try XCTUnwrap(preparation.authorization)
+        XCTAssertTrue(authorization.finalize {})
+        secureStore.failNextRead(.compensationFailed)
+
+        let completion = await store.completeReadyHostSelection(
+            transaction,
+            authorizedBy: authorization,
+            selectedBy: generation
+        )
+        let selected = try await store.selectedHost()
+
+        guard case .indeterminate = completion else {
+            return XCTFail("Completion read failure must be indeterminate")
+        }
+        XCTAssertEqual(selected, previouslyReady)
+    }
+
+    func testSuccessorCompensationRestoresFinalizedInProcessAuthority() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let first = makeHost(serverID: "server-a")
+        let finalized = makeHost(serverID: "server-b")
+        let successor = makeHost(serverID: "server-c")
+        try await store.save(first)
+        try await store.save(finalized)
+        try await store.save(first)
+
+        let finalizedGeneration = ConnectionGeneration(id: 1)
+        let finalizedPreparation = await store.selectReadyHost(
+            serverID: finalized.serverID,
+            for: finalizedGeneration
+        )
+        let finalizedTransaction = try XCTUnwrap(finalizedPreparation.transaction)
+        let finalizedAuthorization = try XCTUnwrap(finalizedPreparation.authorization)
+        XCTAssertTrue(finalizedAuthorization.finalize {})
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        let completion = await store.completeReadyHostSelection(
+            finalizedTransaction,
+            authorizedBy: finalizedAuthorization,
+            selectedBy: finalizedGeneration
+        )
+        guard case .notCommitted = completion else {
+            return XCTFail("The finalized marker should remain pending")
+        }
+        let selectedAfterCleanupFailure = try await store.selectedHost()
+        XCTAssertEqual(selectedAfterCleanupFailure, finalized)
+
+        let publicationAuthorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(publicationAuthorization.claimHostPublication(successor))
+        let publication = await store.publishReadinessHost(
+            successor,
+            policy: .replace,
+            claimedBy: claim,
+            authorizedBy: publicationAuthorization
+        )
+        XCTAssertEqual(publication, .committed)
+        let successorGeneration = ConnectionGeneration(id: 2)
+        let successorPreparation = await store.selectReadyHost(
+            serverID: successor.serverID,
+            for: successorGeneration
+        )
+        let successorTransaction = try XCTUnwrap(successorPreparation.transaction)
+        let successorAuthorization = try XCTUnwrap(successorPreparation.authorization)
+
+        let compensation = await store.compensateReadyHostSelection(
+            successorTransaction,
+            authorizedBy: successorAuthorization,
+            selectedBy: successorGeneration
+        )
+        let restarted = PairedHostStore(secureStore: secureStore)
+        let selectedAfterCompensation = try await store.selectedHost()
+        let restartedSelection = try await restarted.selectedHost()
+
+        XCTAssertEqual(compensation, .committed)
+        XCTAssertEqual(selectedAfterCompensation, finalized)
+        XCTAssertEqual(restartedSelection, finalized)
+    }
+
+    func testCredentialRevocationDoesNotClearANewerBinding() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        let host = makeHost()
+        try await store.save(host)
+        try await store.updateToken("new-token", forServerID: host.serverID)
+
+        let result = await store.revokeToken(
+            forServerID: host.serverID,
+            expectedClientID: host.clientID,
+            expectedToken: host.token
+        )
+        let retained = try await store.host(withServerID: host.serverID)
+
+        XCTAssertEqual(result, .notCommitted(reason: nil))
+        XCTAssertEqual(retained?.token, "new-token")
+    }
+
+    func testReadinessPublicationRollsBackSelectedHostWithTheHostRecords() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let original = makeHost(serverID: "server-a")
+        try await store.save(original)
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        let replacement = makeHost(serverID: "server-z")
+        let authorization = HostReadinessFlowAuthorization()
+        let claim = try XCTUnwrap(authorization.claimHostPublication(replacement))
+
+        let result = await store.publishReadinessHost(
+            replacement,
+            policy: .replace,
+            claimedBy: claim,
+            authorizedBy: authorization
+        )
+
+        guard case .notCommitted = result else {
+            return XCTFail("Expected a proven compensation, got \(result)")
+        }
+        let hosts = try await store.hosts()
+        let selected = try await store.selectedHost()
+        XCTAssertEqual(hosts, [original])
+        XCTAssertEqual(selected, original)
+    }
+
+    func testReissuePersistsClientIDAndTokenAsOneCredentialBinding() async throws {
+        let store = PairedHostStore(secureStore: InMemorySecureStore())
+        try await store.save(makeHost())
+        let generation = ConnectionGeneration(id: 1)
+        let authorization = PairingPersistenceAuthorization()
+
+        let result = try await store.reissueToken(
+            "token-2",
+            clientID: "client-2",
+            forServerID: "server-1",
+            certificateFingerprint: fingerprint,
+            for: generation,
+            authorizedBy: authorization
+        )
+
+        XCTAssertEqual(result, .committed)
+        let persisted = try await store.selectedHost()
+        XCTAssertEqual(persisted?.clientID, "client-2")
+        XCTAssertEqual(persisted?.token, "token-2")
+    }
+
+    func testReissueCompensatesAMutateThenThrowCredentialWrite() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let original = makeHost()
+        try await store.save(original)
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        let generation = ConnectionGeneration(id: 1)
+        let authorization = PairingPersistenceAuthorization()
+
+        let result = try await store.reissueToken(
+            "token-2",
+            clientID: "client-2",
+            forServerID: "server-1",
+            certificateFingerprint: fingerprint,
+            for: generation,
+            authorizedBy: authorization
+        )
+
+        guard case .notCommitted = result else {
+            return XCTFail("Expected verified credential compensation, got \(result)")
+        }
+        let persisted = try await store.selectedHost()
+        XCTAssertEqual(persisted, original)
+    }
+
+    func testReissueReportsIndeterminateWhenCredentialCompensationFails() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        try await store.save(makeHost())
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.throwBeforeMutation(.compensationFailed))
+        let generation = ConnectionGeneration(id: 1)
+        let authorization = PairingPersistenceAuthorization()
+
+        let result = try await store.reissueToken(
+            "token-2",
+            clientID: "client-2",
+            forServerID: "server-1",
+            certificateFingerprint: fingerprint,
+            for: generation,
+            authorizedBy: authorization
+        )
+
+        guard case .indeterminate = result else {
+            return XCTFail("Failed credential compensation must be indeterminate, got \(result)")
+        }
+    }
+
+    func testReissueReportsIndeterminateWhenCredentialCompensationCannotBeVerified() async throws {
+        let secureStore = FaultingTransactionSecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        try await store.save(makeHost())
+        secureStore.enqueue(.mutateThenThrow(.writeFailed))
+        secureStore.enqueue(.replaceWith(Data("incorrect-compensation".utf8)))
+        let generation = ConnectionGeneration(id: 1)
+        let authorization = PairingPersistenceAuthorization()
+
+        let result = try await store.reissueToken(
+            "token-2",
+            clientID: "client-2",
+            forServerID: "server-1",
+            certificateFingerprint: fingerprint,
+            for: generation,
+            authorizedBy: authorization
+        )
+
+        guard case .indeterminate(let reason) = result else {
+            return XCTFail("Unverified credential compensation must be indeterminate")
+        }
+        XCTAssertTrue(reason.contains("could not be verified"))
     }
 
     func testSaveUpdatesEverythingElseAboutAKnownHost() async throws {
@@ -348,6 +1373,7 @@ final class PairedHostStoreTests: XCTestCase {
     private func makeHost(
         serverID: String = "server-1",
         fingerprint: String? = nil,
+        clientID: String = "client-1",
         token: String? = "token-1"
     ) -> PairedHost {
         PairedHost(
@@ -358,7 +1384,7 @@ final class PairedHostStoreTests: XCTestCase {
                 port: 4242,
                 certificateFingerprint: fingerprint ?? self.fingerprint
             ),
-            clientID: "client-1",
+            clientID: clientID,
             token: token
         )
     }
@@ -494,16 +1520,42 @@ private enum FaultingTransactionSecureStoreError: Error, Equatable {
     case compensationFailed
 }
 
+private final class ReadySelectionGenerationRetirementTrigger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: ConnectionGeneration?
+
+    func arm(_ generation: ConnectionGeneration) {
+        lock.withLock {
+            self.generation = generation
+        }
+    }
+
+    func retireIfArmed() {
+        let armed = lock.withLock {
+            defer { generation = nil }
+            return generation
+        }
+        armed?.invalidate()
+    }
+}
+
+private struct PersistedPairedHostStateFixture: Codable {
+    let records: [String: PairedHost]
+    let selectedServerID: String?
+}
+
 private final class FaultingTransactionSecureStore: SecureStore, @unchecked Sendable {
     enum WriteBehavior {
         case succeed
         case mutateThenThrow(FaultingTransactionSecureStoreError)
         case throwBeforeMutation(FaultingTransactionSecureStoreError)
+        case replaceWith(Data)
     }
 
     private let lock = NSLock()
     private var storage: [String: Data] = [:]
     private var writeBehaviors: [WriteBehavior] = []
+    private var nextReadError: FaultingTransactionSecureStoreError?
 
     func enqueue(_ behavior: WriteBehavior) {
         lock.withLock {
@@ -511,15 +1563,31 @@ private final class FaultingTransactionSecureStore: SecureStore, @unchecked Send
         }
     }
 
+    func failNextRead(_ error: FaultingTransactionSecureStoreError) {
+        lock.withLock {
+            nextReadError = error
+        }
+    }
+
     func hosts() -> [String: PairedHost]? {
         lock.withLock {
             guard let data = storage[PairedHostStore.defaultKey] else { return nil }
-            return try? JSONDecoder().decode([String: PairedHost].self, from: data)
+            let decoder = JSONDecoder()
+            if let state = try? decoder.decode(PersistedPairedHostStateFixture.self, from: data) {
+                return state.records
+            }
+            return try? decoder.decode([String: PairedHost].self, from: data)
         }
     }
 
     func data(forKey key: String) throws -> Data? {
-        lock.withLock { storage[key] }
+        try lock.withLock {
+            if let nextReadError {
+                self.nextReadError = nil
+                throw nextReadError
+            }
+            return storage[key]
+        }
     }
 
     func set(_ data: Data, forKey key: String) throws {
@@ -533,6 +1601,8 @@ private final class FaultingTransactionSecureStore: SecureStore, @unchecked Send
                 throw error
             case .throwBeforeMutation(let error):
                 throw error
+            case .replaceWith(let replacement):
+                storage[key] = replacement
             }
         }
     }
@@ -936,6 +2006,10 @@ final class HostReadinessMachineTests: XCTestCase {
             makeCandidate(sequence: sequence),
             for: flow
         )
+        let finalizationID = try machine.finalizeReadyHostSelection(
+            serverID: host.serverID
+        )
+        machine.acknowledgeReadyHostSelectionFinalization(finalizationID)
         return flow
     }
 
@@ -1039,12 +2113,73 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(host, for: flow)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: flow)
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
 
         let state = await machine.state
         XCTAssertEqual(state, .ready)
         XCTAssertEqual(recorder.calls, ["validate:7"])
         let presentation = await machine.presentation
         XCTAssertEqual(presentation, .live(hostID: "old-host", confirmedAt: fixedDate))
+    }
+
+    func testUnresolvedCompletionBlocksSuccessorFlowsAndQuarantinesAuthority() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let machine = makeMachine(recorder: recorder)
+        let oldHost = makeHost(serverID: "old-host", clientID: "client-old")
+        try await driveToReady(
+            machine,
+            recorder: recorder,
+            host: oldHost,
+            sequence: 5
+        )
+        let flow = try machine.beginPairing(expectedServerID: "new-host")
+        _ = try machine.markAuthenticated(for: flow)
+        try await machine.commitHostIdentity(
+            makeHost(serverID: "new-host"),
+            for: flow
+        )
+        try await machine.synchronizeWorkspace(
+            makeCandidate(sequence: 8),
+            for: flow
+        )
+        let finalizationID = try machine.finalizeReadyHostSelection(
+            serverID: "new-host"
+        )
+        _ = try machine.noteConnectionLost()
+        do {
+            _ = try machine.beginDiscovery()
+            XCTFail("Discovery must wait for ready-host selection completion")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(error, .flowAlreadyActive(serverID: "new-host"))
+        }
+        do {
+            _ = try machine.beginPairing(expectedServerID: "successor-host")
+            XCTFail("A successor flow must wait for ready-host selection completion")
+        } catch let error as HostReadinessError {
+            XCTAssertEqual(error, .flowAlreadyActive(serverID: "new-host"))
+        }
+
+        let quarantined = try machine.quarantineReadyHostSelectionFinalization(
+            finalizationID,
+            reason: "Completion outcome is indeterminate."
+        )
+
+        XCTAssertTrue(quarantined)
+        XCTAssertEqual(machine.state, .revoked)
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.presentation, .noState)
+        XCTAssertNil(recorder.workspaceStore.workspace)
+        XCTAssertEqual(recorder.workspaceStore.nowSections, [])
+        XCTAssertEqual(recorder.workspaceStore.sequence, 0)
+        XCTAssertNil(recorder.workspaceStore.lastConfirmedAt)
+        XCTAssertTrue(recorder.workspaceStore.isStale)
+        XCTAssertTrue(recorder.workspaceStore.needsFullSnapshot)
+        XCTAssertNil(recorder.workspaceStore.selectedProjectID)
+        XCTAssertNil(recorder.workspaceStore.primaryPaneID)
+        XCTAssertNil(recorder.workspaceStore.secondaryPaneID)
+        XCTAssertEqual(recorder.workspaceStore.drafts, [:])
+        XCTAssertEqual(machine.lastFailure?.boundary, .secureStore)
+        XCTAssertEqual(machine.lastFailure?.recovery, .indeterminate)
     }
 
     func testASecureStoreFailureNeverLeavesTheNewWorkspaceApplied() async throws {
@@ -1161,7 +2296,11 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(state, .degraded)
         XCTAssertEqual(presentation, .stale(hostID: "old-host", confirmedAt: fixedDate))
         let committed = await machine.committedHost
-        XCTAssertEqual(committed?.serverID, "new-host", "the commit succeeded, so authority moved")
+        XCTAssertEqual(
+            committed?.serverID,
+            "old-host",
+            "a pre-ready candidate must not replace the last ready authority"
+        )
         XCTAssertEqual(recorder.calls, ["validate:5", "validate:4"])
         XCTAssertEqual(recorder.workspaceStore.sequence, 5)
     }
@@ -1300,7 +2439,7 @@ final class HostReadinessMachineTests: XCTestCase {
         let state = await machine.state
         let committed = await machine.committedHost
         XCTAssertEqual(state, .reconnecting)
-        XCTAssertEqual(committed, makeHost(serverID: "new-host", clientID: "client-new"))
+        XCTAssertEqual(committed, oldHost)
         XCTAssertEqual(
             recorder.calls,
             ["validate:5"],
@@ -1341,6 +2480,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(staleResult, .notCommitted(reason: nil))
         XCTAssertEqual(freshResult, .committed)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
+        try machine.finalizeReadyHostSelection(serverID: freshHost.serverID)
 
         let state = await machine.state
         let committedHost = await machine.committedHost
@@ -1393,7 +2533,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(commitResult, .committed)
         XCTAssertEqual(revokedState, .revoked)
         XCTAssertEqual(persistedHost, host)
-        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertNil(machine.committedHost)
         XCTAssertEqual(machine.state, .revoked)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
@@ -1449,7 +2589,7 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(commitResult, .committed)
         XCTAssertEqual(secureStore.writeCount, 1)
         XCTAssertEqual(persistedHost, host)
-        XCTAssertEqual(machine.committedHost, host)
+        XCTAssertNil(machine.committedHost)
         XCTAssertEqual(machine.state, .revoked)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.boundary, .revocation)
@@ -1497,7 +2637,8 @@ final class HostReadinessMachineTests: XCTestCase {
         XCTAssertEqual(secondResult, .notCommitted(reason: nil))
         XCTAssertEqual(secureStore.writeCount, 1)
         XCTAssertEqual(persistedHost, firstHost)
-        XCTAssertEqual(machine.committedHost, firstHost)
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.authenticatedHost, firstHost)
         XCTAssertEqual(machine.state, .hostCommitted)
         XCTAssertEqual(machine.activeFlow, flow)
     }
@@ -1539,13 +2680,43 @@ final class HostReadinessMachineTests: XCTestCase {
         let persistedHost = try await pairedHostStore.host(withServerID: host.serverID)
 
         XCTAssertEqual(commitResult, .committed)
-        XCTAssertEqual(failedState, .reconnecting)
+        XCTAssertEqual(failedState, .unknown)
         XCTAssertEqual(persistedHost, host)
-        XCTAssertEqual(machine.committedHost, host)
-        XCTAssertEqual(machine.state, .reconnecting)
+        XCTAssertNil(machine.committedHost)
+        XCTAssertEqual(machine.state, .unknown)
         XCTAssertNil(machine.activeFlow)
         XCTAssertEqual(machine.lastFailure?.boundary, .transport)
         XCTAssertEqual(machine.lastFailure?.stateAtFailure, .hostCommitted)
+    }
+
+    func testStaleFlowTeardownAfterSynchronizationRollsBackProvisionalReadiness() async throws {
+        let recorder = ReadinessBoundaryRecorder()
+        let machine = makeMachine(recorder: recorder)
+        let oldHost = makeHost(serverID: "old-host", clientID: "client-old")
+        try await driveToReady(machine, recorder: recorder, host: oldHost, sequence: 5)
+        let previousWorkspace = recorder.workspaceStore.workspace
+
+        let flow = try machine.beginPairing(expectedServerID: "new-host")
+        _ = try machine.markAuthenticated(for: flow)
+        try await machine.commitHostIdentity(
+            makeHost(serverID: "new-host", clientID: "client-new"),
+            for: flow
+        )
+        try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: flow)
+
+        let state = try machine.reconcileConnectionLoss(
+            ownedFlow: flow,
+            reason: "Transport disconnected"
+        )
+
+        XCTAssertEqual(state, .reconnecting)
+        XCTAssertEqual(machine.committedHost, oldHost)
+        XCTAssertEqual(recorder.workspaceStore.sequence, 5)
+        XCTAssertEqual(recorder.workspaceStore.workspace, previousWorkspace)
+        XCTAssertEqual(
+            machine.presentation,
+            .stale(hostID: oldHost.serverID, confirmedAt: fixedDate)
+        )
     }
 
     func testAStaleWorkspaceApplyCannotOverwriteANewerAuthoritativeWorkspace() async throws {
@@ -1580,6 +2751,7 @@ final class HostReadinessMachineTests: XCTestCase {
             for: freshFlow
         )
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: freshFlow)
+        try machine.finalizeReadyHostSelection(serverID: "fresh-host")
 
         await staleApplyGate.release()
         do {
@@ -1746,6 +2918,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(host, for: flow)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: flow)
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
         recorder.workspaceStore.applyEvent(
             workspace: WorkspaceSnapshot(revision: 9, projects: []),
             sequence: 9,
@@ -1800,6 +2973,7 @@ final class HostReadinessMachineTests: XCTestCase {
         _ = try await machine.markAuthenticated(for: flow)
         try await machine.commitHostIdentity(makeHost(serverID: "new-host"), for: flow)
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 7), for: flow)
+        try machine.finalizeReadyHostSelection(serverID: "new-host")
 
         state = await machine.state
         presentation = await machine.presentation
@@ -1824,19 +2998,20 @@ final class HostReadinessMachineTests: XCTestCase {
         let degradedState = await machine.state
         XCTAssertEqual(degradedState, .degraded)
 
-        // Recovery runs the same spine against the committed authority, with
+        // Recovery runs the same spine against the last ready authority, with
         // the workspace boundary healthy again.
         let retry = try await machine.beginReconnection()
         _ = try await machine.markAuthenticated(for: retry)
         try await machine.commitHostIdentity(
-            makeHost(serverID: "new-host", clientID: "client-new"),
+            host,
             for: retry
         )
         try await machine.synchronizeWorkspace(makeCandidate(sequence: 8), for: retry)
+        try machine.finalizeReadyHostSelection(serverID: host.serverID)
 
         let state = await machine.state
         XCTAssertEqual(state, .ready)
         let presentation = await machine.presentation
-        XCTAssertEqual(presentation, .live(hostID: "new-host", confirmedAt: fixedDate))
+        XCTAssertEqual(presentation, .live(hostID: "old-host", confirmedAt: fixedDate))
     }
 }

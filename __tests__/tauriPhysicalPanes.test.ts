@@ -64,6 +64,9 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
 ) {
+  const invoke = dependencies.invoke as
+    | ((command: string, args: Record<string, unknown>) => Promise<unknown>)
+    | undefined;
   const resolvedDependencies = {
     createThreadPtyIoQueue: () => ({
       closed: false,
@@ -82,8 +85,22 @@ function compileFunction<T extends (...args: never[]) => unknown>(
     isPersistentThread: (thread: Record<string, any>) =>
       ['shell', 'psyche', 'coven-code', 'coven-attach'].includes(thread?.launch?.launchKind),
     nativeSessionRequest: (thread: Record<string, any>) => ({ id: thread.id }),
+    createNativeSessionForThread: (thread: Record<string, any>) => (
+      invoke
+        ? invoke('native_session_create', { request: { id: thread.id } })
+        : Promise.resolve()
+    ),
+    closingNativeProjectRoots: new Set<string>(),
+    projectNativeSessionCreateCount: () => 0,
+    beginWorkspaceSaveCriticalSection: async () => ({}),
+    flushWorkspaceSaveCriticalSection: async () => undefined,
+    finishWorkspaceSaveCriticalSection: async () => undefined,
+    waitForProjectCloseRetry: async () => undefined,
     invoke: async () => [],
     attachThreadClient: dependencies.spawnPty || (() => Promise.resolve(true)),
+    attachThreadClientAndResolveRecovery: dependencies.attachThreadClient
+      || dependencies.spawnPty
+      || (() => Promise.resolve(true)),
     paneLayoutFor: () => null,
     paneLayoutForThread: () => null,
     paneFocusEligible: () => true,
@@ -1424,7 +1441,6 @@ describe('Tauri physical terminal panes', () => {
       'reopenThread',
       'hideFilesPane',
       'reopenFilesPane',
-      'removeProject',
       'returnFromFileFocus',
       'revealFileForDecision',
       'closeFileTab',
@@ -1434,6 +1450,10 @@ describe('Tauri physical terminal panes', () => {
         'renderPaneWorkspace({ preserveTerminalFocus: false });',
       ]);
     }
+    expect(renderPaneWorkspaceCalls('removeProject')).toEqual([
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
+    ]);
 
     const preserveOnly = [
       'movePaneTo',
@@ -1469,7 +1489,7 @@ describe('Tauri physical terminal panes', () => {
     ]);
 
     const expectedCallCount =
-      transitionOnly.length + preserveOnly.length + 1 + 5 + 2 + 1 + 1;
+      transitionOnly.length + preserveOnly.length + 2 + 1 + 5 + 2 + 1 + 1;
     expect((mainJs.match(/renderPaneWorkspace\(/g) || []).length - 1).toBe(
       expectedCallCount,
     );
@@ -1479,7 +1499,7 @@ describe('Tauri physical terminal panes', () => {
       createThread.indexOf('refreshSidebar()'),
     );
     expect(functionSource('removeProject')).toMatch(
-      /threadIds\.map\(function \(tid\) \{[\s\S]*var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(tid, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*\}\)/,
+      /threadIds\.map\(function \(threadId\) \{[\s\S]*var preserveTerminalFocus = state\.activeProjectId !== id;[\s\S]*closeThread\(threadId, \{\s*focus: false,\s*preserveTerminalFocus: preserveTerminalFocus,\s*protectCovenRecovery: true,\s*persist: false,\s*\}\)/,
     );
   });
 
@@ -2789,6 +2809,7 @@ describe('Tauri physical terminal panes', () => {
     };
     const closeOptions: Array<Record<string, unknown> | undefined> = [];
     const nativeProjectCloseCalls: Array<Record<string, unknown>> = [];
+    const teardownEvents: string[] = [];
     const removeProject = compileFunction<(
       id: string,
     ) => Promise<boolean>>(functionSource('removeProject'), {
@@ -2807,11 +2828,13 @@ describe('Tauri physical terminal panes', () => {
         _id: string,
         options?: Record<string, unknown>,
       ) => {
+        teardownEvents.push('close-thread');
         closeOptions.push(options);
         return true;
       },
       invoke: async (command: string, args: Record<string, unknown>) => {
         expect(command).toBe('native_project_close');
+        teardownEvents.push('revoke-authority');
         nativeProjectCloseCalls.push(args);
       },
       fileViewEl: null,
@@ -2820,10 +2843,17 @@ describe('Tauri physical terminal panes', () => {
       setActiveProject: async () => true,
       renderPaneWorkspace: () => undefined,
       setStatus: () => undefined,
+      refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncPaneMetricsVisibility: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
+      projectNativeSessionCreateCount: () => 0,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => {
+        teardownEvents.push('persist-removal');
+      },
+      finishWorkspaceSaveCriticalSection: async () => undefined,
       refreshStatusController: () => undefined,
     });
 
@@ -2831,10 +2861,888 @@ describe('Tauri physical terminal panes', () => {
     expect(closeOptions).toEqual([{
       focus: false,
       preserveTerminalFocus: true,
+      protectCovenRecovery: true,
+      persist: false,
     }]);
+    expect(teardownEvents).toEqual([
+      'close-thread',
+      'persist-removal',
+      'revoke-authority',
+    ]);
     expect(nativeProjectCloseCalls).toEqual([{ root: '/repo/removed' }]);
     expect(state.activeProjectId).toBe(activeProject.id);
     expect(state.activeThreadId).toBe('active-thread');
+  });
+
+  it('keeps native authority when project thread teardown aborts', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      closing?: boolean;
+    } = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+    };
+    const thread = {
+      id: 'thread',
+      projectId: project.id,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: thread.id,
+      activeFileId: null,
+      projects: [project],
+      threads: [thread],
+      openFiles: [],
+    };
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => false,
+      invoke: async () => {
+        revokeAttempts += 1;
+      },
+      setStatus: () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => true,
+      saveWorkspaceSoon: () => undefined,
+      projectNativeSessionCreateCount: () => 0,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => undefined,
+      finishWorkspaceSaveCriticalSection: async () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(revokeAttempts).toBe(0);
+    expect(project.closing).toBe(false);
+    expect(state.projects).toEqual([project]);
+    expect(state.threads).toEqual([thread]);
+  });
+
+  it('keeps a durably removed project absent when native authority retries exhaust', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      lastActiveThreadId: string;
+      closing?: boolean;
+    } = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      lastActiveThreadId: 'thread',
+    };
+    const thread = {
+      id: 'thread',
+      projectId: project.id,
+      worktreePath: '/repo',
+      name: 'Shell',
+      kind: 'shell',
+      launch: { launchKind: 'shell' },
+      persistentLive: true,
+      spawning: false,
+      closeStarted: false,
+      closing: false,
+    };
+    const otherProject = {
+      id: 'other-project',
+      root: '/other',
+      name: 'Other',
+    };
+    const otherThread = {
+      id: 'other-thread',
+      projectId: otherProject.id,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: thread.id as string | null,
+      activeFileId: null,
+      projects: [project, otherProject],
+      threads: [thread, otherThread],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    const quarantines: Array<{ project: unknown; error: unknown }> = [];
+    let saves = 0;
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => {
+        thread.closeStarted = true;
+        thread.closing = true;
+        state.threads = [otherThread];
+        state.activeThreadId = null;
+        return true;
+      },
+      invoke: async () => {
+        revokeAttempts += 1;
+        state.activeProjectId = otherProject.id;
+        state.activeThreadId = otherThread.id;
+        throw new Error('native bridge unavailable');
+      },
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      projectNativeSessionCreateCount: () => 0,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => { saves += 1; },
+      finishWorkspaceSaveCriticalSection: async () => undefined,
+      waitForProjectCloseRetry: async () => undefined,
+      quarantineNativeProjectRevocation: (
+        quarantinedProject: unknown,
+        error: unknown,
+      ) => {
+        quarantines.push({ project: quarantinedProject, error });
+      },
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(saves).toBe(1);
+    expect(revokeAttempts).toBe(3);
+    expect(state.projects).toEqual([otherProject]);
+    expect(state.threads).toEqual([otherThread]);
+    expect(state.activeProjectId).toBe(otherProject.id);
+    expect(state.activeThreadId).toBe(otherThread.id);
+    expect(project.closing).toBe(true);
+    expect(quarantines).toEqual([{
+      project,
+      error: expect.objectContaining({ message: 'native bridge unavailable' }),
+    }]);
+    expect(statuses.at(-1)).toEqual([
+      'Repo was removed from the workspace, but native project authority revocation failed after 3 attempts and was queued for background retry: Error: native bridge unavailable',
+      'error',
+    ]);
+  });
+
+  it('releases a quarantined native project authority on a later background retry', async () => {
+    const pendingNativeProjectRevocations = new Map([[
+      '/repo',
+      {
+        root: '/repo',
+        name: 'Repo',
+        attempts: 3,
+        lastError: 'native bridge unavailable',
+      },
+    ]]);
+    const statuses: Array<[string, string]> = [];
+    const schedules: number[] = [];
+    const retryPendingNativeProjectRevocations = compileFunction<
+      () => Promise<boolean>
+    >(functionSource('retryPendingNativeProjectRevocations'), {
+      pendingNativeProjectRevocations,
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        expect(command).toBe('native_project_close');
+        expect(args).toEqual({ root: '/repo' });
+        return true;
+      },
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      schedulePendingNativeProjectRevocations: (delay: number) => {
+        schedules.push(delay);
+      },
+    });
+
+    await expect(retryPendingNativeProjectRevocations()).resolves.toBe(true);
+
+    expect(pendingNativeProjectRevocations.size).toBe(0);
+    expect(schedules).toEqual([]);
+    expect(statuses.at(-1)).toEqual([
+      'native project authority cleanup completed for Repo',
+      'ok',
+    ]);
+  });
+
+  it('keeps exhausted native authority cleanup reachable and schedules background retry', () => {
+    const pendingNativeProjectRevocations = new Map();
+    const schedules: number[] = [];
+    const quarantineNativeProjectRevocation = compileFunction<(
+      project: Record<string, any>,
+      error: unknown,
+    ) => void>(functionSource('quarantineNativeProjectRevocation'), {
+      pendingNativeProjectRevocations,
+      schedulePendingNativeProjectRevocations: (delay: number) => {
+        schedules.push(delay);
+      },
+    });
+
+    quarantineNativeProjectRevocation(
+      { root: '/repo', name: 'Repo' },
+      new Error('bridge unavailable'),
+    );
+
+    expect(pendingNativeProjectRevocations.get('/repo')).toMatchObject({
+      root: '/repo',
+      name: 'Repo',
+      attempts: 3,
+      lastError: 'Error: bridge unavailable',
+    });
+    expect(schedules).toEqual([1000]);
+  });
+
+  it('restores only the target project state when durable removal persistence fails', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      lastActiveThreadId: string;
+      closing?: boolean;
+    } = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      lastActiveThreadId: 'thread',
+    };
+    const thread = {
+      id: 'thread',
+      projectId: project.id,
+      worktreePath: '/repo',
+      name: 'Shell',
+      kind: 'shell',
+      launch: { launchKind: 'shell' },
+      persistentLive: true,
+      spawning: false,
+      closeStarted: false,
+      closing: false,
+    };
+    const otherProject = {
+      id: 'other-project',
+      root: '/other',
+      name: 'Other',
+    };
+    const otherThread = {
+      id: 'other-thread',
+      projectId: otherProject.id,
+    };
+    const unrelatedThread = {
+      id: 'new-other-thread',
+      projectId: otherProject.id,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: thread.id as string | null,
+      activeFileId: null,
+      projects: [project, otherProject],
+      threads: [thread, otherThread],
+      openFiles: [],
+    };
+    const focusSets = [{
+      id: 'focus-set',
+      name: 'Primary',
+      threadIds: [thread.id],
+    }];
+    const paneLayouts = new Map([[
+      `${project.id}\0/repo`,
+      {
+        root: { type: 'leaf', id: 'leaf-thread', threadId: thread.id },
+        focusedLeafId: 'leaf-thread',
+      },
+    ]]);
+    const statuses: Array<[string, string]> = [];
+    let flushAttempts = 0;
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (id: string) => state.projects.find((item) => item.id === id) || null,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => {
+        thread.closeStarted = true;
+        thread.closing = true;
+        state.threads = [otherThread, unrelatedThread];
+        state.activeThreadId = null;
+        focusSets.splice(0);
+        paneLayouts.clear();
+        return true;
+      },
+      invoke: async () => { revokeAttempts += 1; },
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      focusSets,
+      paneLayouts,
+      filesPanes: new Map(),
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      startCovenPolling: () => undefined,
+      setActiveProject: async (id: string) => {
+        state.activeProjectId = id;
+        state.activeThreadId = otherThread.id;
+        return true;
+      },
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      projectNativeSessionCreateCount: () => 0,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => {
+        flushAttempts += 1;
+        state.activeProjectId = otherProject.id;
+        state.activeThreadId = unrelatedThread.id;
+        throw new Error('disk full');
+      },
+      finishWorkspaceSaveCriticalSection: async () => {
+        flushAttempts += 1;
+      },
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(flushAttempts).toBe(2);
+    expect(revokeAttempts).toBe(0);
+    expect(state.projects).toEqual([project, otherProject]);
+    expect(state.threads).toEqual([thread, otherThread, unrelatedThread]);
+    expect(state.activeProjectId).toBe(otherProject.id);
+    expect(state.activeThreadId).toBe(unrelatedThread.id);
+    expect(thread).toMatchObject({
+      closeStarted: false,
+      closing: false,
+      persistentLive: false,
+      status: 'exited',
+      sidebarStatusKey: 'done',
+    });
+    expect(focusSets).toEqual([{
+      id: 'focus-set',
+      name: 'Primary',
+      threadIds: [thread.id],
+    }]);
+    expect(paneLayouts.get(`${project.id}\0/repo`)).toMatchObject({
+      focusedLeafId: 'leaf-thread',
+      root: { threadId: thread.id },
+    });
+    expect(project.closing).toBe(false);
+    expect(statuses.at(-1)).toEqual([
+      'failed to save removal of Repo; the project was restored: Error: disk full',
+      'error',
+    ]);
+  });
+
+  it('preserves newer Files focus when project removal persistence rolls back', async () => {
+    const project = { id: 'project', root: '/repo', name: 'Repo' };
+    const otherProject = { id: 'other-project', root: '/other', name: 'Other' };
+    const removedFile = {
+      id: 'removed-file',
+      projectId: project.id,
+      workspaceRoot: project.root,
+    };
+    const selectedFile = {
+      id: 'selected-file',
+      projectId: otherProject.id,
+      workspaceRoot: otherProject.root,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: removedFile.id as string | null,
+      projects: [project, otherProject],
+      threads: [],
+      openFiles: [removedFile, selectedFile],
+    };
+    const fileViewEl = { hidden: false };
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: (id: string) => state.projects.find((item) => item.id === id) || null,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => true,
+      projectNativeSessionCreateCount: () => 0,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => {
+        state.activeFileId = selectedFile.id;
+        fileViewEl.hidden = false;
+        throw new Error('disk full');
+      },
+      finishWorkspaceSaveCriticalSection: async () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async (id: string) => {
+        state.activeProjectId = id;
+        state.activeThreadId = null;
+        state.activeFileId = null;
+        return true;
+      },
+      setStatus: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl,
+      renderFileView: () => undefined,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(state.projects).toEqual([project, otherProject]);
+    expect(state.activeProjectId).toBe(otherProject.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(state.activeFileId).toBe(selectedFile.id);
+    expect(fileViewEl.hidden).toBe(false);
+  });
+
+  it('refuses project removal while a Coven launch outcome is unresolved', async () => {
+    const project = { id: 'project', root: '/repo', name: 'Repo' };
+    const recovery = {
+      id: 'recovery',
+      projectId: project.id,
+      worktreePath: '/repo',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: false,
+      },
+      covenLaunchOutcomeInFlight: Promise.resolve(),
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: recovery.id,
+      activeFileId: null,
+      projects: [project],
+      threads: [recovery],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    let closeAttempts = 0;
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => { closeAttempts += 1; return true; },
+      invoke: async () => { revokeAttempts += 1; return true; },
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(closeAttempts).toBe(0);
+    expect(revokeAttempts).toBe(0);
+    expect(state.projects).toEqual([project]);
+    expect(state.threads).toEqual([recovery]);
+    expect(statuses.at(-1)).toEqual([
+      'Repo cannot be closed while a Coven launch outcome is unresolved; inspect Coven before closing',
+      'error',
+    ]);
+  });
+
+  it('refuses project removal while a native session create is unsettled', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      closing?: boolean;
+    } = { id: 'project', root: '/repo', name: 'Repo' };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: null,
+      projects: [project],
+      threads: [],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    let dirtyGuardAttempts = 0;
+    let closeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => {
+        dirtyGuardAttempts += 1;
+        return true;
+      },
+      projectNativeSessionCreateCount: () => 1,
+      closeThread: async () => {
+        closeAttempts += 1;
+        return true;
+      },
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(dirtyGuardAttempts).toBe(0);
+    expect(closeAttempts).toBe(0);
+    expect(project.closing).toBeUndefined();
+    expect(statuses.at(-1)).toEqual([
+      'Repo cannot be closed while a native session is still being created',
+      'error',
+    ]);
+  });
+
+  it('quarantines authority when a native create appears after durable removal', async () => {
+    const project = { id: 'project', root: '/repo', name: 'Repo' };
+    const otherProject = { id: 'other', root: '/other', name: 'Other' };
+    const state = {
+      activeProjectId: project.id as string | null,
+      activeThreadId: null,
+      activeFileId: null,
+      projects: [project, otherProject],
+      threads: [],
+      openFiles: [],
+    };
+    let createChecks = 0;
+    let revokeAttempts = 0;
+    const quarantines: Array<{ project: unknown; error: unknown }> = [];
+    const removeProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('removeProject'), {
+        findProject: (id: string) =>
+          state.projects.find((candidate) => candidate.id === id) || null,
+        state,
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: false,
+        guardDirtyFiles: async () => true,
+        projectNativeSessionCreateCount: () => {
+          createChecks += 1;
+          return createChecks >= 5 ? 1 : 0;
+        },
+        covenDiscovery: {},
+        PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+        closeThread: async () => true,
+        beginWorkspaceSaveCriticalSection: async () => ({}),
+        flushWorkspaceSaveCriticalSection: async () => undefined,
+        finishWorkspaceSaveCriticalSection: async () => undefined,
+        startCovenPolling: () => undefined,
+        setActiveProject: async (id: string) => {
+          state.activeProjectId = id;
+          return true;
+        },
+        invoke: async () => { revokeAttempts += 1; },
+        quarantineNativeProjectRevocation: (
+          quarantinedProject: unknown,
+          error: unknown,
+        ) => { quarantines.push({ project: quarantinedProject, error }); },
+        setStatus: () => undefined,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncPaneMetricsVisibility: () => undefined,
+        syncProjectBrowser: () => undefined,
+        refreshStatusController: () => undefined,
+      },
+    );
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(createChecks).toBe(5);
+    expect(revokeAttempts).toBe(0);
+    expect(state.projects).toEqual([otherProject]);
+    expect(quarantines).toEqual([{
+      project,
+      error: expect.objectContaining({
+        message: 'native session create remained unsettled after durable project removal',
+      }),
+    }]);
+  });
+
+  it('blocks same-root picker reopening until durable removal revokes authority', async () => {
+    const project = { id: 'project', root: '/repo', name: 'Repo' };
+    const state = {
+      env: { home: '/home' },
+      activeProjectId: project.id as string | null,
+      activeThreadId: null,
+      activeFileId: null,
+      projects: [project],
+      threads: [],
+      openFiles: [],
+    };
+    const closingNativeProjectRoots = new Set<string>();
+    const pendingNativeProjectRevocations = new Map();
+    const persistenceStarted = deferred<void>();
+    const allowPersistence = deferred<void>();
+    let authorityOpen = true;
+    let pickerCalls = 0;
+    let closeCalls = 0;
+    let nextProjectId = 0;
+    const invoke = async (command: string) => {
+      if (command === 'native_project_open') {
+        pickerCalls += 1;
+        authorityOpen = true;
+        return project.root;
+      }
+      if (command === 'native_project_close') {
+        closeCalls += 1;
+        authorityOpen = false;
+        return true;
+      }
+      throw new Error(`unexpected command ${command}`);
+    };
+    const addProject = compileFunction<(
+      root: string,
+      options?: Record<string, unknown>,
+    ) => Promise<Record<string, any> | null>>(functionSource('addProject'), {
+      state,
+      canonicalProjectPath: async (root: string) => root,
+      closingNativeProjectRoots,
+      pendingNativeProjectRevocations,
+      settings: { maxProjects: 5 },
+      HARD_MAX_PROJECTS: 10,
+      showTerminalView: async () => true,
+      makeProjectId: () => `reopened-${nextProjectId += 1}`,
+      setActiveProject: async () => true,
+      setStatus: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshProjectWorktrees: async () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      startCovenPolling: () => undefined,
+      installAgentControlUi: () => undefined,
+    });
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'), {
+        state,
+        closingNativeProjectRoots,
+        invoke,
+        addProject,
+        writeToActive: () => undefined,
+      },
+    );
+    const removeProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('removeProject'), {
+        state,
+        closingNativeProjectRoots,
+        findProject: (id: string) =>
+          state.projects.find((candidate) => candidate.id === id) || null,
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: false,
+        guardDirtyFiles: async () => true,
+        projectNativeSessionCreateCount: () => 0,
+        covenDiscovery: {},
+        PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+        closeThread: async () => true,
+        beginWorkspaceSaveCriticalSection: async () => ({}),
+        flushWorkspaceSaveCriticalSection: async () => {
+          persistenceStarted.resolve();
+          await allowPersistence.promise;
+        },
+        finishWorkspaceSaveCriticalSection: async () => undefined,
+        startCovenPolling: () => undefined,
+        invoke,
+        setStatus: () => undefined,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncPaneMetricsVisibility: () => undefined,
+        syncProjectBrowser: () => undefined,
+        refreshStatusController: () => undefined,
+      },
+    );
+
+    const removal = removeProject(project.id);
+    await persistenceStarted.promise;
+    expect(state.projects).toEqual([]);
+
+    await openProjectPicker();
+
+    expect(state.projects).toEqual([]);
+    expect(authorityOpen).toBe(true);
+    expect(closeCalls).toBe(0);
+
+    allowPersistence.resolve();
+    await expect(removal).resolves.toBe(true);
+
+    expect(authorityOpen).toBe(false);
+    expect(closingNativeProjectRoots.size).toBe(0);
+    expect(closeCalls).toBe(1);
+
+    await openProjectPicker();
+
+    expect(authorityOpen).toBe(true);
+    expect(pickerCalls).toBe(2);
+    expect(closeCalls).toBe(1);
+    expect(state.projects).toEqual([
+      expect.objectContaining({
+        id: 'reopened-1',
+        root: project.root,
+        nativeAuthorityReady: true,
+      }),
+    ]);
+  });
+
+  it('refuses ordinary pane close while a Coven submission is unresolved', async () => {
+    const thread = {
+      id: 'recovery-thread',
+      projectId: 'project',
+      worktreePath: '/repo',
+      name: 'Codex CLI',
+      kind: 'coven-recovery',
+      launch: {
+        launchKind: 'coven-recovery',
+        recoveryRequired: false,
+      },
+      closeStarted: false,
+      closing: false,
+    };
+    const state = {
+      activeThreadId: thread.id,
+      threads: [thread],
+    };
+    const statuses: Array<[string, string]> = [];
+    let stopAttempts = 0;
+    const closeThread = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('closeThread'), {
+      findThread: () => thread,
+      state,
+      suspendGitRequests: () => undefined,
+      stageGitSurface: () => undefined,
+      markActiveSurface: () => undefined,
+      isPersistentThread: () => false,
+      noteStatusActivity: () => undefined,
+      forgetThreadInSets: () => undefined,
+      detachThreadPane: () => null,
+      stopThreadPty: async () => { stopAttempts += 1; return true; },
+      retainFileFocusAfterThreadRemoval: () => false,
+      syncThreadPaneMetadata: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      saveWorkspaceNow: async () => true,
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+    });
+
+    await expect(closeThread(thread.id)).resolves.toBe(false);
+
+    expect(state.threads).toEqual([thread]);
+    expect(thread.closeStarted).toBe(false);
+    expect(thread.closing).toBe(false);
+    expect(stopAttempts).toBe(0);
+    expect(statuses.at(-1)).toEqual([
+      'Codex CLI cannot be closed while its Coven launch outcome requires recovery; inspect Coven before closing',
+      'error',
+    ]);
+  });
+
+  it('allows an ordinary exited Coven attachment to close', async () => {
+    const thread = {
+      id: 'accepted-thread',
+      projectId: 'project',
+      worktreePath: '/repo',
+      name: 'Codex CLI',
+      kind: 'coven-attach',
+      launch: {
+        launchKind: 'coven-attach',
+        covenSessionId: 'session-accepted',
+        recoveryRequired: false,
+      },
+      persistentLive: false,
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      metricsGeneration: 0,
+    };
+    const state = {
+      activeThreadId: 'other',
+      threads: [thread],
+    };
+    let saves = 0;
+    const statuses: Array<[string, string]> = [];
+    const closeThread = compileFunction<(
+      id: string,
+      options?: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('closeThread'), {
+      findThread: () => thread,
+      state,
+      suspendGitRequests: () => undefined,
+      stageGitSurface: () => undefined,
+      markActiveSurface: () => undefined,
+      isPersistentThread: () => false,
+      noteStatusActivity: () => undefined,
+      forgetThreadInSets: () => undefined,
+      detachThreadPane: () => null,
+      stopThreadPty: async () => true,
+      retainFileFocusAfterThreadRemoval: () => false,
+      syncThreadPaneMetadata: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      saveWorkspaceNow: async () => { saves += 1; return true; },
+      setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+    });
+
+    await expect(closeThread(thread.id)).resolves.toBe(true);
+
+    expect(state.threads).toEqual([]);
+    expect(saves).toBe(1);
+    expect(thread.launch.recoveryRequired).toBe(false);
+    expect(statuses).toEqual([]);
   });
 
   it('refreshes the siderail after removing an inactive project with no local threads', async () => {
@@ -5393,4 +6301,334 @@ describe('Tauri physical terminal panes', () => {
       );
     });
   });
+  it('restores project focus-set membership when pane teardown rolls back', async () => {
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      closing: false,
+    };
+    const first = { id: 'first', projectId: project.id, worktreePath: '/repo' };
+    const second = { id: 'second', projectId: project.id, worktreePath: '/repo' };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: first.id,
+      activeFileId: null,
+      projects: [project],
+      threads: [first, second],
+      openFiles: [],
+    };
+    const focusSets = [{
+      id: 'set-1',
+      key: 'project\u0000/repo',
+      name: 'Set 1',
+      index: 1,
+      threadIds: [first.id],
+    }];
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      focusSets,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async (id: string) => {
+        if (id === first.id) {
+          state.threads = state.threads.filter(thread => thread.id !== id);
+          focusSets.splice(0, focusSets.length);
+          return true;
+        }
+        return false;
+      },
+      invoke: async () => true,
+      setStatus: () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceNow: async () => true,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(state.threads).toEqual([first, second]);
+    expect(focusSets).toEqual([{
+      id: 'set-1',
+      key: 'project\u0000/repo',
+      name: 'Set 1',
+      index: 1,
+      threadIds: [first.id],
+    }]);
+  });
+
+  it('restores a project without revoking authority when removal persistence fails', async () => {
+    const project: {
+      id: string;
+      root: string;
+      name: string;
+      closing?: boolean;
+    } = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+    };
+    const file = {
+      id: 'file',
+      projectId: project.id,
+      workspaceRoot: project.root,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: file.id,
+      projects: [project],
+      threads: [],
+      openFiles: [file],
+    };
+    const fileViewEl = { hidden: false };
+    const statuses: Array<[string, string]> = [];
+    let saveAttempts = 0;
+    let revokeAttempts = 0;
+    let fileRenderCount = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => true,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => {
+        saveAttempts += 1;
+        if (saveAttempts === 1) throw new Error('disk full');
+      },
+      finishWorkspaceSaveCriticalSection: async () => { saveAttempts += 1; },
+      invoke: async () => {
+        revokeAttempts += 1;
+      },
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl,
+      renderFileView: () => { fileRenderCount += 1; },
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(saveAttempts).toBe(2);
+    expect(revokeAttempts).toBe(0);
+    expect(project.closing).toBe(false);
+    expect(state.projects).toEqual([project]);
+    expect(state.openFiles).toEqual([file]);
+    expect(state.activeFileId).toBe(file.id);
+    expect(fileViewEl.hidden).toBe(false);
+    expect(fileRenderCount).toBe(1);
+    expect(statuses.at(-1)).toEqual([
+      'failed to save removal of Repo; the project was restored: Error: disk full',
+      'error',
+    ]);
+  });
+
+  it('keeps exited panes removed when native project authority revocation fails', async () => {
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      lastActiveThreadId: 'thread',
+      closing: false,
+    };
+    const thread = {
+      id: 'thread',
+      projectId: project.id,
+      worktreePath: '/repo',
+      name: 'Shell',
+      kind: 'shell',
+      launch: { launchKind: 'shell' },
+      persistentLive: true,
+      spawning: false,
+      closeStarted: false,
+      closing: false,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: thread.id as string | null,
+      activeFileId: null,
+      projects: [project],
+      threads: [thread],
+      openFiles: [],
+    };
+    const statuses: Array<[string, string]> = [];
+    let saves = 0;
+    let revokeAttempts = 0;
+    let quarantined = false;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => {
+        thread.closeStarted = true;
+        thread.closing = true;
+        state.threads = [];
+        state.activeThreadId = null;
+        return true;
+      },
+      invoke: async () => {
+        revokeAttempts += 1;
+        throw new Error('native bridge unavailable');
+      },
+      waitForProjectCloseRetry: async () => undefined,
+      quarantineNativeProjectRevocation: () => { quarantined = true; },
+      createThreadPtyIoQueue: () => ({ closed: false }),
+      setStatus: (message: string, level: string) => {
+        statuses.push([message, level]);
+      },
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      beginWorkspaceSaveCriticalSection: async () => ({}),
+      flushWorkspaceSaveCriticalSection: async () => { saves += 1; },
+      finishWorkspaceSaveCriticalSection: async () => { saves += 1; },
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+
+    expect(saves).toBe(2);
+    expect(revokeAttempts).toBe(3);
+    expect(quarantined).toBe(true);
+    expect(state.projects).toEqual([]);
+    expect(state.threads).toEqual([]);
+    expect(state.activeThreadId).toBeNull();
+    expect(statuses.at(-1)?.[0]).toContain(
+      'was removed from the workspace, but native project authority revocation failed after 3 attempts',
+    );
+  });
+
+  it('refuses project removal while a native project session is being created', async () => {
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      localSessionCreatesInFlight: 1,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: null,
+      projects: [project],
+      threads: [],
+      openFiles: [],
+    };
+    let revokeAttempts = 0;
+    const removeProject = compileFunction<(
+      id: string,
+    ) => Promise<boolean>>(functionSource('removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: false,
+      guardDirtyFiles: async () => true,
+      projectNativeSessionCreateCount: () => project.localSessionCreatesInFlight,
+      covenDiscovery: {},
+      PsycheSessions: { invalidateCovenRequests: (value: unknown) => value },
+      closeThread: async () => true,
+      invoke: async () => {
+        revokeAttempts += 1;
+      },
+      setStatus: () => undefined,
+      startCovenPolling: () => undefined,
+      setActiveProject: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncPaneMetricsVisibility: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => undefined,
+      fileViewEl: null,
+      terminalHost: null,
+    });
+
+    await expect(removeProject(project.id)).resolves.toBe(false);
+    expect(revokeAttempts).toBe(0);
+    expect(state.projects).toEqual([project]);
+  });
+
+  it('cancels shell creation when project teardown starts during terminal reveal', async () => {
+    const visible = deferred<boolean>();
+    const project = {
+      id: 'project',
+      root: '/repo',
+      name: 'Repo',
+      closing: false,
+    };
+    const statuses: Array<[string, string]> = [];
+    let spawnAttempts = 0;
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
+      {
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo' }),
+        showTerminalView: () => visible.promise,
+        spawnShellThread: () => {
+          spawnAttempts += 1;
+          return { kind: 'shell' };
+        },
+        setStatus: (message: string, level: string) => {
+          statuses.push([message, level]);
+        },
+      },
+    );
+
+    const pending = createTerminalPane();
+    await Promise.resolve();
+    project.closing = true;
+    visible.resolve(true);
+
+    await expect(pending).resolves.toBeNull();
+    expect(spawnAttempts).toBe(0);
+    expect(statuses.at(-1)).toEqual([
+      'Repo is closing; wait before starting a terminal',
+      'warn',
+    ]);
+  });
+
 });

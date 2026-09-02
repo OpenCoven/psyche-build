@@ -21,6 +21,7 @@ export interface DriftManagedIssue {
     | 'duplicate_bead_marker'
     | 'empty_bead_marker'
     | 'malformed_bead_marker'
+    | 'missing_bead_marker'
     | 'duplicate_render_hash_marker'
     | 'empty_render_hash_marker'
     | 'malformed_render_hash_marker'
@@ -36,6 +37,8 @@ export type TrackerDriftFindingKind =
   | 'source_status_metadata_mismatch'
   | 'source_priority_metadata_mismatch'
   | 'missing_render_hash'
+  | 'render_hash_mismatch'
+  | 'obsolete_blocker_metadata'
   | 'canonical_mapping_missing'
   | 'canonical_mapping_malformed'
   | 'canonical_mapping_unknown'
@@ -43,6 +46,7 @@ export type TrackerDriftFindingKind =
   | 'duplicate_bead_marker'
   | 'empty_bead_marker'
   | 'malformed_bead_marker'
+  | 'missing_bead_marker'
   | 'duplicate_render_hash_marker'
   | 'empty_render_hash_marker'
   | 'malformed_render_hash_marker';
@@ -73,4 +77,5 @@ export function validateTrackerDrift(
   beads: readonly DriftBead[],
   managedIssues: readonly DriftManagedIssue[],
   canonicalTargets: CanonicalTargets,
+  options?: { issueMarkers?: readonly string[] },
 ): TrackerDriftReport;

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// A host this device has completed pairing with. The server ID is the
@@ -29,6 +30,16 @@ public struct PairedHost: Codable, Sendable, Equatable, Identifiable {
     }
 
     public func withToken(_ token: String?) -> PairedHost {
+        PairedHost(
+            serverID: serverID,
+            serverName: serverName,
+            endpoint: endpoint,
+            clientID: clientID,
+            token: token
+        )
+    }
+
+    public func withCredentials(clientID: String, token: String?) -> PairedHost {
         PairedHost(
             serverID: serverID,
             serverName: serverName,
@@ -426,14 +437,15 @@ enum HostIdentityPublicationPolicy: Sendable {
 /// authority because each actual state owner revalidates the revocable flow
 /// authorization inside its publication transaction.
 @MainActor
-public final class HostReadinessMachine {
-    public private(set) var state: HostReadinessState
+public final class HostReadinessMachine: ObservableObject {
+    @Published public private(set) var state: HostReadinessState
     /// What the workspace surface may show. `stale` is semantically distinct
     /// from `live`: it is previously authoritative state, never current.
-    public private(set) var presentation: HostWorkspacePresentation
-    /// The host identity durably committed and currently authoritative.
-    /// Updated only after the secure-store commit succeeds.
-    public private(set) var committedHost: PairedHost?
+    @Published public private(set) var presentation: HostWorkspacePresentation
+    /// The last host whose workspace and reconnect selection both committed.
+    /// A newly authenticated host remains provisional until both boundaries
+    /// succeed.
+    @Published public private(set) var committedHost: PairedHost?
     public private(set) var lastFailure: HostReadinessFailure?
     public private(set) var activeFlow: HostReadinessFlow?
 
@@ -442,6 +454,18 @@ public final class HostReadinessMachine {
     private let validateSnapshot: @Sendable (HostReadinessSnapshotCandidate) async throws -> Void
     private let now: @Sendable () -> Date
     private var activeAuthorization: HostReadinessFlowAuthorization?
+    private var provisionalHost: PairedHost?
+    private var provisionalWorkspace: HostReadinessSnapshotCandidate?
+    private var readyHostSelectionFinalization: ReadyHostSelectionFinalization?
+
+    private struct ReadyHostSelectionFinalization {
+        let id: UUID
+        let candidateServerID: String
+    }
+
+    var authenticatedHost: PairedHost? {
+        provisionalHost ?? committedHost
+    }
 
     public init(
         committedHost: PairedHost? = nil,
@@ -459,6 +483,38 @@ public final class HostReadinessMachine {
         self.now = now
         state = .unknown
         presentation = .noState
+    }
+
+    /// The revocable publication authority of the flow that currently owns the
+    /// machine.
+    ///
+    /// A caller that must withdraw a flow's right to publish from a context
+    /// that cannot hop to the main actor — a pairing cancelled while a
+    /// secure-store write is already in flight — revokes this directly.
+    /// Revoking is exactly what a failure boundary does internally, and the
+    /// machine reconciles whatever durable outcome was recorded at its next
+    /// boundary call, so no authority is lost or invented by doing so.
+    func authorization(for flow: HostReadinessFlow) -> HostReadinessFlowAuthorization? {
+        guard activeFlow == flow else { return nil }
+        return activeAuthorization
+    }
+
+    /// Hydrates the machine with a host identity the paired-host store already
+    /// holds, so a relaunch can reconnect to the authority it committed in an
+    /// earlier session.
+    ///
+    /// This adopts durable state; it never creates authority. It is refused
+    /// while a flow owns the machine, and refused outright when it contradicts
+    /// an identity already committed in this session.
+    public func adoptPersistedHost(_ host: PairedHost) throws {
+        try requireIdle()
+        if let committedHost, committedHost.serverID != host.serverID {
+            throw HostReadinessError.wrongHostIdentity(
+                expected: committedHost.serverID,
+                actual: host.serverID
+            )
+        }
+        committedHost = host
     }
 
     /// Starts browsing for hosts. Discovery is not a readiness flow: nothing
@@ -497,8 +553,9 @@ public final class HostReadinessMachine {
         return try apply(.authenticationStarted)
     }
 
-    /// Persists the authoritative paired-host identity and selected-host
-    /// state BEFORE any workspace snapshot can be applied.
+    /// Persists the paired-host identity and credentials BEFORE any workspace
+    /// snapshot can be applied. Automatic reconnect selection remains on the
+    /// previously ready host until the first snapshot completes readiness.
     ///
     /// The paired-host store owns the transaction and revalidates flow
     /// authorization around its write and any compensation. A wrong host
@@ -548,7 +605,7 @@ public final class HostReadinessMachine {
             guard activeFlow == flow, state == .authenticating else {
                 return result
             }
-            committedHost = host
+            provisionalHost = host
             _ = try apply(.hostCommitSucceeded)
         case .notCommitted(let reason):
             guard activeFlow == flow, state == .authenticating else {
@@ -569,10 +626,9 @@ public final class HostReadinessMachine {
         return result
     }
 
-    /// Takes an already-fetched snapshot candidate through the remaining
-    /// readiness gates in the only order that can make it authoritative:
-    /// decode/revision validation, workspace acceptance, and only then
-    /// `ready`. Nothing else may label state ready.
+    /// Validates and stages an already-fetched snapshot while the flow still
+    /// owns publication authority. The candidate stays invisible until the
+    /// reconnect selection commits and finalization publishes both together.
     @discardableResult
     public func synchronizeWorkspace(
         _ candidate: HostReadinessSnapshotCandidate,
@@ -600,7 +656,7 @@ public final class HostReadinessMachine {
         guard let authorization = activeAuthorization else {
             throw HostReadinessError.supersededFlow
         }
-        let result = workspaceStore.publishReadinessSnapshot(
+        let result = workspaceStore.stageReadinessSnapshot(
             candidate,
             authorizedBy: authorization
         )
@@ -612,14 +668,10 @@ public final class HostReadinessMachine {
             guard try revokeActiveAuthorization(for: flow) else {
                 return result
             }
-            _ = try apply(.workspaceAccepted)
             lastFailure = nil
             activeFlow = nil
             activeAuthorization = nil
-            presentation = .live(
-                hostID: committedHost?.serverID ?? "",
-                confirmedAt: now()
-            )
+            provisionalWorkspace = candidate
         case .notCommitted(let reason):
             guard activeFlow == flow, state == .synchronizing else {
                 return result
@@ -637,6 +689,81 @@ public final class HostReadinessMachine {
             try failIndeterminate(.workspaceApply, reason: reason, for: flow)
         }
         return result
+    }
+
+    /// Publishes the staged workspace and promotes its provisional host after
+    /// reconnect selection is durable. The readiness flow is already closed,
+    /// so teardown can safely discard the pending pair before this call.
+    @discardableResult
+    func finalizeReadyHostSelection(serverID: String) throws -> UUID {
+        guard activeFlow == nil,
+              state == .synchronizing,
+              let provisionalHost,
+              let provisionalWorkspace,
+              readyHostSelectionFinalization == nil else {
+            throw HostReadinessError.supersededFlow
+        }
+        guard provisionalHost.serverID == serverID else {
+            throw HostReadinessError.wrongHostIdentity(
+                expected: provisionalHost.serverID,
+                actual: serverID
+            )
+        }
+        let previousWorkspaceState = workspaceStore.publishStagedReadinessSnapshot(
+            provisionalWorkspace
+        )
+        do {
+            _ = try apply(.workspaceAccepted)
+        } catch {
+            workspaceStore.restoreReadyHostPublication(previousWorkspaceState)
+            throw error
+        }
+        committedHost = provisionalHost
+        self.provisionalHost = nil
+        self.provisionalWorkspace = nil
+        presentation = .live(
+            hostID: serverID,
+            confirmedAt: now()
+        )
+        let finalization = ReadyHostSelectionFinalization(
+            id: UUID(),
+            candidateServerID: serverID
+        )
+        readyHostSelectionFinalization = finalization
+        return finalization.id
+    }
+
+    func acknowledgeReadyHostSelectionFinalization(_ id: UUID) {
+        guard readyHostSelectionFinalization?.id == id else { return }
+        readyHostSelectionFinalization = nil
+    }
+
+    @discardableResult
+    func quarantineReadyHostSelectionFinalization(
+        _ id: UUID,
+        reason: String
+    ) throws -> Bool {
+        guard let finalization = readyHostSelectionFinalization,
+              finalization.id == id else {
+            return false
+        }
+        readyHostSelectionFinalization = nil
+        workspaceStore.quarantineReadyHostPublication()
+        let from = state
+        committedHost = nil
+        presentation = .noState
+        provisionalHost = nil
+        provisionalWorkspace = nil
+        activeFlow = nil
+        activeAuthorization = nil
+        state = .revoked
+        lastFailure = HostReadinessFailure(
+            boundary: .secureStore,
+            reason: reason,
+            stateAtFailure: from,
+            recovery: .indeterminate
+        )
+        return true
     }
 
     /// The active flow failed at one boundary. Rolls the machine back
@@ -658,9 +785,38 @@ public final class HostReadinessMachine {
     /// the stored host again.
     @discardableResult
     public func noteConnectionLost() throws -> HostReadinessState {
+        if state == .synchronizing,
+           provisionalHost != nil,
+           provisionalWorkspace != nil {
+            provisionalHost = nil
+            provisionalWorkspace = nil
+            state = committedHost == nil ? .unknown : .reconnecting
+            relabelForFlowStart()
+            return state
+        }
         let destination = try apply(.connectionLost)
+        provisionalHost = nil
+        provisionalWorkspace = nil
         relabelForFlowStart()
         return destination
+    }
+
+    /// Resolves transport teardown against the machine's current owner in one
+    /// main-actor turn. A caller may hold a flow that synchronization already
+    /// closed; in that case connection loss rolls back provisional readiness
+    /// instead of suppressing a stale-flow error.
+    func reconcileConnectionLoss(
+        ownedFlow flow: HostReadinessFlow?,
+        reason: String?
+    ) throws -> HostReadinessState {
+        if let activeFlow {
+            guard activeFlow == flow else { return state }
+            return try rollback(.transport, reason: reason, for: activeFlow)
+        }
+        if state == .ready || provisionalWorkspace != nil {
+            return try noteConnectionLost()
+        }
+        return state
     }
 
     /// Trust was withdrawn — credential revocation or a wrong-host identity.
@@ -682,6 +838,8 @@ public final class HostReadinessMachine {
             reason: reason,
             stateAtFailure: from
         )
+        provisionalHost = nil
+        provisionalWorkspace = nil
         activeFlow = nil
         activeAuthorization = nil
         return destination
@@ -717,6 +875,8 @@ public final class HostReadinessMachine {
             reason: reason,
             stateAtFailure: state
         )
+        provisionalHost = nil
+        provisionalWorkspace = nil
         activeFlow = nil
         activeAuthorization = nil
         state = .revoked
@@ -745,6 +905,8 @@ public final class HostReadinessMachine {
             stateAtFailure: from,
             recovery: .indeterminate
         )
+        provisionalHost = nil
+        provisionalWorkspace = nil
         activeFlow = nil
         activeAuthorization = nil
         state = .revoked
@@ -754,9 +916,10 @@ public final class HostReadinessMachine {
     /// A flow-less event (discovery) may not start while a flow owns the
     /// machine.
     private func requireIdle() throws {
-        guard activeFlow == nil else {
+        guard activeFlow == nil, readyHostSelectionFinalization == nil else {
             throw HostReadinessError.flowAlreadyActive(
                 serverID: activeFlow?.expectedServerID
+                    ?? readyHostSelectionFinalization?.candidateServerID
             )
         }
     }
@@ -784,7 +947,7 @@ public final class HostReadinessMachine {
         case .pending, .notCommitted:
             return true
         case .committed(let host):
-            committedHost = host
+            provisionalHost = host
             if state == .authenticating {
                 _ = try apply(.hostCommitSucceeded)
             }
@@ -838,6 +1001,8 @@ public final class HostReadinessMachine {
             stateAtFailure: from,
             recovery: recovery
         )
+        provisionalHost = nil
+        provisionalWorkspace = nil
         activeFlow = nil
         activeAuthorization = nil
         state = destination

@@ -495,10 +495,11 @@ describe('Tauri project/worktree/pane rail', () => {
 
     const renderSessionList = functionSource(mainJs, 'renderSessionList');
     expect(renderSessionList).toContain('function armLocalClose()');
-    expect(renderSessionList).toContain(
-      'armSessionClose(row, close, thread.name, function () {',
-    );
+    expect(renderSessionList).toContain('armSessionClose(');
+    expect(renderSessionList).toContain('"inspected Coven recovery for " + thread.name');
     expect(renderSessionList).toContain('return requestThreadClose(thread);');
+    expect(renderSessionList).toContain('return resolveCovenLaunchRecovery(thread);');
+    expect(renderSessionList).toContain('resolvesCovenRecovery ? "Resolve" : "Close"');
     expect(renderSessionList).toContain('localSessionContextActions(');
     expect(renderSessionList).toContain('hide: function () { hideThread(thread.id); }');
   });

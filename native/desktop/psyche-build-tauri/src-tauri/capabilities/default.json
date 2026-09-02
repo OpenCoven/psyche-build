@@ -17,6 +17,7 @@
     "allow-pane-session-metrics",
     "allow-canonical-project-path",
     "allow-native-project-open",
+    "allow-native-project-reconcile",
     "allow-native-project-close",
     "allow-pty-write",
     "allow-pty-resize",

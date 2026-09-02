@@ -393,11 +393,53 @@ describe('native Files pane lifecycle', () => {
 
   it('opens and reuses a worktree Files pane without registering a fake thread', () => {
     const source = extractFunctionSource('openFileTab');
+    expect(source).toMatch(/if \(!project \|\| project\.closing\) return false/);
     expect(source).toMatch(/ensureFilesPane\(project, workspaceRoot\)/);
     expect(source).toMatch(/f\.workspaceRoot === workspaceRoot/);
     expect(source).toMatch(/filesPane\.activeFileId = file\.id/);
     expect(source).toMatch(/catch \(err\) \{[\s\S]*file\.error = String\(err\)/);
     expect(mainJs).not.toMatch(/state\.threads\.push\(filesPane\)/);
+  });
+
+  it('does not leave a partial file record when project teardown wins pane creation', async () => {
+    const project = { id: 'p', root: '/repo', closing: false };
+    const state = { openFiles: [] as Array<Record<string, unknown>> };
+    let reads = 0;
+    const openFileTab = compileFunction<(
+      path: string,
+      candidateProject: { id: string; root: string; closing: boolean },
+    ) => Promise<boolean>>(
+      'openFileTab',
+      {
+        activeProject: () => project,
+        activeWorkspaceRoot: () => '/repo',
+        state,
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: null,
+        ensureFilesPane: () => {
+          project.closing = true;
+          return null;
+        },
+        relativeToRoot: () => 'README.md',
+        window: {
+          PsycheCodeEditor: {
+            languageForPath: () => 'markdown',
+            createFileBuffer: () => ({}),
+          },
+        },
+        invoke: async () => {
+          reads += 1;
+          return {};
+        },
+        activateFileTabNow: () => true,
+        renderFileView: () => undefined,
+        fileCounter: 0,
+      },
+    );
+
+    await expect(openFileTab('/repo/README.md', project)).resolves.toBe(false);
+    expect(state.openFiles).toEqual([]);
+    expect(reads).toBe(0);
   });
 
   it('restores scoped Files selection on project/worktree switches and removes project panes', () => {

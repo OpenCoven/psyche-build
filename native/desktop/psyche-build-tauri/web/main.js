@@ -490,6 +490,7 @@
     return paneLayoutKey(projectId, workspaceRoot);
   }
   function ensureFilesPane(project, workspaceRoot) {
+    if (!project || project.closing) return null;
     var key = filesPaneKey(project.id, workspaceRoot);
     var existing = filesPanes.get(key);
     if (existing) {
@@ -1058,6 +1059,7 @@
   var settings = loadSettings();
   var projectAppearances = loadProjectAppearances();
   var isRestoringWorkspace = false;
+  var legacyWorkspaceMigration = { projectsPreserved: false };
   var saveWorkspaceTimer = 0;
 
   function terminalTheme() {
@@ -1257,14 +1259,15 @@
     return window.PsycheWorkspace || null;
   }
   var workspaceSaveQueue = Promise.resolve();
-  function saveWorkspaceNow() {
+  var workspaceSaveCriticalSection = null;
+  function queueWorkspaceSave() {
     if (isRestoringWorkspace) return workspaceSaveQueue;
-    var model = workspaceModel();
-    if (!model) return Promise.reject(new Error("workspace model is unavailable"));
-    var workspace = model.sanitizeWorkspaceV3(buildPersistedWorkspace());
-    if (!workspace) return Promise.reject(new Error("workspace state is invalid"));
     workspaceSaveQueue = workspaceSaveQueue.catch(function () {});
     workspaceSaveQueue = workspaceSaveQueue.then(function () {
+      var model = workspaceModel();
+      if (!model) throw new Error("workspace model is unavailable");
+      var workspace = model.sanitizeWorkspaceV3(buildPersistedWorkspace());
+      if (!workspace) throw new Error("workspace state is invalid");
       return invoke("workspace_save", { workspace: workspace });
     }).then(function () {
       return true;
@@ -1274,17 +1277,86 @@
     });
     return workspaceSaveQueue;
   }
+  function saveWorkspaceNow() {
+    if (isRestoringWorkspace) return workspaceSaveQueue;
+    if (workspaceSaveCriticalSection) {
+      workspaceSaveCriticalSection.requestVersion += 1;
+      return workspaceSaveCriticalSection.promise;
+    }
+    return queueWorkspaceSave();
+  }
   function saveWorkspaceSoon() {
-    if (isRestoringWorkspace) return;
+    if (isRestoringWorkspace) return workspaceSaveQueue;
+    if (workspaceSaveCriticalSection) {
+      workspaceSaveCriticalSection.requestVersion += 1;
+      return workspaceSaveCriticalSection.promise;
+    }
     if (saveWorkspaceTimer) cancelAnimationFrame(saveWorkspaceTimer);
     saveWorkspaceTimer = requestAnimationFrame(function () {
       saveWorkspaceTimer = 0;
       saveWorkspaceNow().catch(function () {});
     });
   }
+  async function beginWorkspaceSaveCriticalSection() {
+    if (workspaceSaveCriticalSection) {
+      throw new Error("workspace save critical section is already active");
+    }
+    if (saveWorkspaceTimer) {
+      cancelAnimationFrame(saveWorkspaceTimer);
+      saveWorkspaceTimer = 0;
+    }
+    var resolveDeferred;
+    var rejectDeferred;
+    var section = {
+      requestVersion: 0,
+      lastFlushedVersion: -1,
+      hasFlushed: false,
+      promise: new Promise(function (resolve, reject) {
+        resolveDeferred = resolve;
+        rejectDeferred = reject;
+      }),
+      resolve: resolveDeferred,
+      reject: rejectDeferred,
+    };
+    section.promise.catch(function () {});
+    workspaceSaveCriticalSection = section;
+    await workspaceSaveQueue.catch(function () {});
+    return section;
+  }
+  async function flushWorkspaceSaveCriticalSection(section) {
+    if (!section || workspaceSaveCriticalSection !== section) {
+      throw new Error("workspace save critical section is not active");
+    }
+    do {
+      var requestedVersion = section.requestVersion;
+      await queueWorkspaceSave();
+      section.lastFlushedVersion = requestedVersion;
+      section.hasFlushed = true;
+    } while (section.requestVersion !== section.lastFlushedVersion);
+    return true;
+  }
+  async function finishWorkspaceSaveCriticalSection(section) {
+    if (!section || workspaceSaveCriticalSection !== section) {
+      throw new Error("workspace save critical section is not active");
+    }
+    try {
+      while (!section.hasFlushed ||
+          section.requestVersion !== section.lastFlushedVersion) {
+        await flushWorkspaceSaveCriticalSection(section);
+      }
+      workspaceSaveCriticalSection = null;
+      section.resolve(true);
+      return true;
+    } catch (error) {
+      workspaceSaveCriticalSection = null;
+      section.reject(error);
+      throw error;
+    }
+  }
   async function readSavedWorkspace() {
     var model = workspaceModel();
     if (!model) return null;
+    legacyWorkspaceMigration.projectsPreserved = false;
     try {
       var saved = await invoke("workspace_load");
       if (saved) {
@@ -1298,7 +1370,15 @@
     }
     try {
       var legacy = JSON.parse(localStorage.getItem(LEGACY_WORKSPACE_STATE_KEY) || "null");
-      return legacy && Array.isArray(legacy.projects) ? model.importWorkspaceV2(legacy) : null;
+      if (legacy && Array.isArray(legacy.projects) && legacy.projects.length > 0) {
+        legacyWorkspaceMigration.projectsPreserved = true;
+        setStatus(
+          "Legacy projects were preserved but cannot be opened automatically; " +
+            "reopen them with the folder picker.",
+          "warn"
+        );
+      }
+      return null;
     } catch (_) {
       return null;
     }
@@ -1316,6 +1396,7 @@
       selectedWorktreePath: saved.selectedWorktreePath || saved.root,
       worktrees: Array.isArray(saved.worktreePresentation) ? saved.worktreePresentation : [],
       browsersByWorktree: {},
+      nativeAuthorityReady: false,
     };
     var savedBrowsers = saved.browsersByWorktree && typeof saved.browsersByWorktree === "object"
       ? saved.browsersByWorktree
@@ -2315,6 +2396,43 @@
     return request;
   }
 
+  var nativeSessionCreatesByProject = new Map();
+  function projectNativeSessionCreateCount(projectId) {
+    return nativeSessionCreatesByProject.get(projectId) || 0;
+  }
+  async function createNativeSessionForThread(thread, options) {
+    var projectId = thread && thread.projectId;
+    var project = projectId ? findProject(projectId) : null;
+    var preAdmission = options && options.mode === "pre-admission";
+    if (!project) {
+      throw new Error("project no longer exists");
+    }
+    if ((!preAdmission && !isLiveThread(thread)) ||
+        thread.closeStarted || thread.closing) {
+      throw new Error("thread is no longer live");
+    }
+    if (project.closing) {
+      throw new Error("project is closing");
+    }
+    if (projectId) {
+      nativeSessionCreatesByProject.set(
+        projectId,
+        projectNativeSessionCreateCount(projectId) + 1
+      );
+    }
+    try {
+      return await invoke("native_session_create", {
+        request: nativeSessionRequest(thread),
+      });
+    } finally {
+      if (projectId) {
+        var remaining = projectNativeSessionCreateCount(projectId) - 1;
+        if (remaining > 0) nativeSessionCreatesByProject.set(projectId, remaining);
+        else nativeSessionCreatesByProject.delete(projectId);
+      }
+    }
+  }
+
   // An exited pane is not an attachment you can focus, so it must not make a
   // row read as attached. main added that guard to isReusableCovenAttachment
   // alongside createCovenSessionRow; this branch replaced that render path with
@@ -2330,8 +2448,12 @@
   }
 
   async function createThread(opts) {
-    var id = makeThreadId();
     var project = opts.project || activeProject();
+    if (project && project.closing) {
+      setStatus(project.name + " is closing; no new pane can be created", "warn");
+      return null;
+    }
+    var id = makeThreadId();
     var sourceLaunch = opts.launch || {
       command: opts.command,
       args: opts.args || [],
@@ -2413,7 +2535,7 @@
     };
     if (isPersistentThread(thread) && !opts.deferStart) {
       try {
-        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+        await createNativeSessionForThread(thread, { mode: "pre-admission" });
       } catch (error) {
         setStatus(thread.name + " failed to start: " + String(error), "error");
         return null;
@@ -2435,13 +2557,13 @@
       await new Promise(function (resolve) { requestAnimationFrame(resolve); });
       if (!isLiveThread(thread)) return null;
       var started = isPersistentThread(thread)
-        ? await attachThreadClient(thread)
+        ? await attachThreadClientAndResolveRecovery(thread)
         : await spawnPty(thread);
       return started ? thread : null;
     }
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
-      if (isPersistentThread(thread)) attachThreadClient(thread);
+      if (isPersistentThread(thread)) attachThreadClientAndResolveRecovery(thread);
       else spawnPty(thread);
     });
     return thread;
@@ -2514,7 +2636,10 @@
 
   async function releaseCovenLaunchReservation(thread) {
     if (!thread) return false;
-    return closeThread(thread.id, { skipNativeSessionStop: true });
+    return closeThread(thread.id, {
+      skipNativeSessionStop: true,
+      protectCovenRecovery: false,
+    });
   }
 
   async function acceptCovenLaunchReservation(thread, options) {
@@ -2566,7 +2691,7 @@
       thread.launch.covenSessionId = options.sessionId;
       thread.launch.promptDigest = options.promptDigest || null;
       thread.launch.metricsProvider = options.harness || "coven";
-      thread.launch.recoveryRequired = false;
+      thread.launch.recoveryRequired = true;
       thread.status = "starting";
       thread.spawning = true;
       thread.finishedAt = null;
@@ -2606,7 +2731,7 @@
         return thread;
       }
       try {
-        await invoke("native_session_create", { request: nativeSessionRequest(thread) });
+        await createNativeSessionForThread(thread);
         thread.persistentLive = true;
       } catch (error) {
         thread.launch.recoveryRequired = true;
@@ -2637,7 +2762,33 @@
         surfaceClosedReservation();
         return thread;
       }
-      await attachThreadClient(thread);
+      var attached;
+      var attachmentError = null;
+      try {
+        attached = await attachThreadClient(thread);
+      } catch (error) {
+        attached = false;
+        attachmentError = error;
+      }
+      if (!attached) {
+        thread.launch.recoveryRequired = true;
+        thread.status = "failed";
+        thread.spawning = false;
+        thread.finishedAt = Date.now();
+        thread.sidebarStatusKey = "error";
+        setStatus(
+          thread.name +
+            " was accepted by Coven but its local attachment did not start" +
+            (attachmentError ? ": " + String(attachmentError) : "") + "; " +
+            "inspect Coven before closing",
+          "error"
+        );
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        return thread;
+      }
+      thread.launch.recoveryRequired = false;
       try {
         await saveWorkspaceNow();
       } catch (error) {
@@ -2676,16 +2827,16 @@
   async function createBrowserPane(project) {
     var options = arguments[1] || {};
     project = project || activeProject();
-    if (!project) return null;
+    if (!project || project.closing) return null;
     var worktreePath = options.worktreePath || activeWorkspaceRoot(project);
     var isCurrent = typeof options.isCurrent === "function"
       ? options.isCurrent
       : function () { return true; };
-    if (!worktreePath || !isCurrent()) return null;
+    if (!worktreePath || !isCurrent() || project.closing) return null;
     var sourceLayout = paneLayoutFor(project.id, worktreePath);
     var sourceMaximizedLeafId = sourceLayout && sourceLayout.maximizedLeafId;
     if (!(await showTerminalView())) return null;
-    if (!isCurrent()) return null;
+    if (!isCurrent() || project.closing) return null;
     var existing = findBrowserPane(project.id, worktreePath);
     if (existing) {
       if (browserPaneIsClosing(existing)) return null;
@@ -2693,7 +2844,7 @@
       return !isCurrent() || browserPaneIsClosing(existing) ? null : existing;
     }
     await new Promise(function (resolve) { requestAnimationFrame(resolve); });
-    if (!isCurrent()) return null;
+    if (!isCurrent() || project.closing) return null;
     existing = findBrowserPane(project.id, worktreePath);
     if (existing) {
       if (browserPaneIsClosing(existing)) return null;
@@ -2706,6 +2857,7 @@
       setStatus("Not enough space for another pane", "warn");
       return null;
     }
+    if (project.closing) return null;
     var pane = {
       id: id,
       projectId: project.id,
@@ -3094,9 +3246,36 @@
     });
   }
 
+  async function attachThreadClientAndResolveRecovery(thread) {
+    var attached = await attachThreadClient(thread);
+    if (!attached || !thread.launch ||
+        thread.launch.launchKind !== "coven-attach" ||
+        thread.launch.recoveryRequired !== true) {
+      return attached;
+    }
+    thread.launch.recoveryRequired = false;
+    try {
+      await saveWorkspaceNow();
+      setStatus(thread.name + " Coven recovery resolved after successful reattachment", "ok");
+    } catch (error) {
+      thread.launch.recoveryRequired = true;
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+      setStatus(
+        thread.name +
+          " reattached, but its recovery resolution is not durable; " +
+          "inspect Coven before closing: " + String(error),
+        "error"
+      );
+      saveWorkspaceSoon();
+    }
+    return true;
+  }
+
   async function retryThread(id) {
     var thread = findThread(id);
-    if (!thread || thread.startInFlight || thread.closeStarted) return false;
+    if (!thread || thread.startInFlight || thread.retryInFlight || thread.closeStarted) return false;
     if (thread.status !== "exited" && thread.status !== "failed") return false;
     if (thread.launch.launchKind === "coven-recovery") {
       setStatus(
@@ -3105,29 +3284,53 @@
       );
       return false;
     }
-    if (thread.launch.launchKind === "coven-attach") {
-      var project = findProject(thread.projectId);
-      await refreshCovenSessions();
-      var stillExists = project
-        && covenDiscovery.phase === "ready"
-        && covenSessionsForProject(project).some(function (session) {
-          return session.id === thread.launch.covenSessionId;
-        });
-      if (!stillExists) {
-        setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+    var finishRetry;
+    var retryInFlight = new Promise(function (resolve) {
+      finishRetry = resolve;
+    });
+    thread.retryInFlight = retryInFlight;
+    try {
+      if (thread.launch.launchKind === "coven-attach") {
+        await refreshCovenSessions();
+        if (!isLiveThread(thread) || thread.closeStarted) return false;
+        var project = findProject(thread.projectId);
+        var stillExists = project
+          && !project.closing
+          && covenDiscovery.phase === "ready"
+          && covenSessionsForProject(project).some(function (session) {
+            return session.id === thread.launch.covenSessionId;
+          });
+        if (!stillExists) {
+          setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+          return false;
+        }
+      }
+      if (typeof noteStatusActivity === "function") noteStatusActivity();
+      if (!isPersistentThread(thread)) return await spawnPty(thread);
+      if (thread.persistentLive) return await attachThreadClientAndResolveRecovery(thread);
+      try {
+        await createNativeSessionForThread(thread);
+      } catch (error) {
+        setStatus(thread.name + " failed to restart: " + String(error), "error");
         return false;
       }
+      if (!isLiveThread(thread) || thread.closeStarted) {
+        try {
+          await invoke("native_session_stop", { id: id });
+        } catch (cleanupError) {
+          setStatus(
+            thread.name + " restarted after local removal and cleanup failed: " +
+              String(cleanupError),
+            "error"
+          );
+        }
+        return false;
+      }
+      return await attachThreadClientAndResolveRecovery(thread);
+    } finally {
+      if (thread.retryInFlight === retryInFlight) thread.retryInFlight = null;
+      finishRetry();
     }
-    if (typeof noteStatusActivity === "function") noteStatusActivity();
-    if (!isPersistentThread(thread)) return spawnPty(thread);
-    if (thread.persistentLive) return attachThreadClient(thread);
-    try {
-      await invoke("native_session_create", { request: nativeSessionRequest(thread) });
-    } catch (error) {
-      setStatus(thread.name + " failed to restart: " + String(error), "error");
-      return false;
-    }
-    return attachThreadClient(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -5214,7 +5417,7 @@
     }
   }
 
-  function detachThreadPane(surface) {
+  function detachThreadPane(surface, options) {
     surface = surface && (typeof canvasSurfaceById === "function"
       ? canvasSurfaceById(surface.id)
       : surface);
@@ -5254,7 +5457,7 @@
     var removed = PsychePanes.removeLeaf(layout.root, leaf.id);
     if (!removed.root) {
       paneLayouts.delete(key);
-      saveWorkspaceSoon();
+      if (!options || options.persist !== false) saveWorkspaceSoon();
       return null;
     }
     layout.root = removed.root;
@@ -5270,7 +5473,7 @@
       layout.focusedLeafId = nextLeaf ? nextLeaf.id : null;
     }
     paneLayouts.set(key, layout);
-    saveWorkspaceSoon();
+    if (!options || options.persist !== false) saveWorkspaceSoon();
     return nextLeaf ? nextLeaf.threadId : null;
   }
 
@@ -5573,6 +5776,22 @@
   async function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    var protectCovenRecovery = !options || options.protectCovenRecovery !== false;
+    if (protectCovenRecovery && thread.covenLaunchOutcomeInFlight) {
+      await thread.covenLaunchOutcomeInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
+    if (protectCovenRecovery && thread.covenLaunchAcceptanceInFlight) {
+      await thread.covenLaunchAcceptanceInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
+    if (protectCovenRecovery && thread.retryInFlight) {
+      await thread.retryInFlight;
+      thread = findThread(id);
+      if (!thread || thread.closeStarted) return false;
+    }
     var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") {
       suspendGitRequests();
@@ -5583,9 +5802,21 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
-    var covenLaunchAcceptanceInFlight = thread.covenLaunchAcceptanceInFlight;
-    if (covenLaunchAcceptanceInFlight) {
-      await covenLaunchAcceptanceInFlight;
+    if (
+      protectCovenRecovery &&
+      thread.launch &&
+      (thread.launch.launchKind === "coven-recovery" ||
+        thread.launch.recoveryRequired === true)
+    ) {
+      thread.closeStarted = false;
+      thread.closing = false;
+      setStatus(
+        thread.name +
+          " cannot be closed while its Coven launch outcome requires recovery; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
     }
     if (isPersistentThread(thread) && !(options && options.skipNativeSessionStop)) {
       try {
@@ -5612,7 +5843,9 @@
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
-    var nextThreadId = detachThreadPane(thread);
+    var nextThreadId = detachThreadPane(thread, {
+      persist: !options || options.persist !== false,
+    });
     thread.terminalController = null;
     thread.term = null;
     if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
@@ -5659,7 +5892,7 @@
     }
     refreshSidebar();
     refreshTabs();
-    await saveWorkspaceNow();
+    if (!options || options.persist !== false) await saveWorkspaceNow();
     return true;
   }
 
@@ -5754,7 +5987,7 @@
     var thread = findThread(id);
     if (!thread || !thread.hidden) return false;
     var project = findProject(thread.projectId);
-    if (state.activeProjectId !== thread.projectId || !project ||
+    if (state.activeProjectId !== thread.projectId || !project || project.closing ||
         activeWorkspaceRoot(project) !== thread.worktreePath) return false;
     var placement = preparePanePlacement(thread.id, thread.projectId, thread.worktreePath);
     if (!placement) {
@@ -5824,12 +6057,21 @@
   function sessionCloseLabel(thread) {
     if (thread && thread.kind === "git") return "Close Git pane";
     if (thread && thread.kind === "web") return "Close Web pane";
+    if (thread && thread.launch &&
+        (thread.launch.launchKind === "coven-recovery" ||
+          thread.launch.recoveryRequired === true)) {
+      return "Resolve inspected Coven recovery" +
+        (thread.name ? " for " + thread.name : "");
+    }
     return "Stop and close" + (thread && thread.name ? " " + thread.name : "");
   }
 
   /** Context actions are capability-based: tool panes never receive PTY actions. */
   function localSessionContextActions(thread, memberships, callbacks) {
     var isTool = threadIsToolPane(thread);
+    var resolvesCovenRecovery = thread && thread.launch &&
+      (thread.launch.launchKind === "coven-recovery" ||
+        thread.launch.recoveryRequired === true);
     var actions = [{ label: "Focus", run: callbacks.focus }];
     if (!isTool && memberships.length) {
       actions.push({
@@ -5843,14 +6085,16 @@
     }
     if (!isTool) {
       actions.push({ label: "Rename…", run: callbacks.rename });
-      if (thread.status !== "exited") {
+      if (thread.status !== "exited" && !resolvesCovenRecovery) {
         actions.push({ label: "Duplicate", run: callbacks.duplicate });
         actions.push({ label: "Interrupt", run: callbacks.interrupt });
       }
     }
     actions.push({ label: "Hide", run: callbacks.hide });
     actions.push({
-      label: isTool ? sessionCloseLabel(thread) : "Stop and close",
+      label: isTool || resolvesCovenRecovery
+        ? sessionCloseLabel(thread)
+        : "Stop and close",
       danger: true,
       run: callbacks.close,
     });
@@ -7073,17 +7317,46 @@
     return Promise.resolve(closeThread(thread.id));
   }
 
-  function armSessionClose(host, close, label, onConfirm) {
+  async function resolveCovenLaunchRecovery(thread) {
+    if (!isLiveThread(thread) || !thread.launch ||
+        (thread.launch.launchKind !== "coven-recovery" &&
+          thread.launch.recoveryRequired !== true)) {
+      return false;
+    }
+    if (thread.covenLaunchOutcomeInFlight ||
+        thread.covenLaunchAcceptanceInFlight ||
+        thread.retryInFlight) {
+      setStatus(
+        thread.name + " Coven launch is still settling; wait before resolving recovery",
+        "warn"
+      );
+      return false;
+    }
+    var closed = await closeThread(thread.id, { protectCovenRecovery: false });
+    if (closed) {
+      setStatus(
+        thread.name + " Coven recovery marked resolved after confirmed inspection",
+        "ok"
+      );
+    }
+    return closed;
+  }
+
+  function armSessionClose(host, close, label, onConfirm, actionLabel) {
     disarmSessionClose();
     var expiresAt = Date.now() + SESSION_CLOSE_SECONDS * 1000;
+    var action = actionLabel || "Close";
     var confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "session-close-confirm";
     confirm.title = "Click to confirm — auto-cancels when the timer runs out";
     function paint() {
       var left = Math.ceil(Math.max(0, expiresAt - Date.now()) / 1000);
-      confirm.textContent = "Close · " + left;
-      confirm.setAttribute("aria-label", "Confirm closing " + label);
+      confirm.textContent = action + " · " + left;
+      confirm.setAttribute(
+        "aria-label",
+        "Confirm " + (action === "Close" ? "closing" : action.toLowerCase()) + " " + label
+      );
     }
     paint();
     confirm.addEventListener("click", async function (event) {
@@ -8364,9 +8637,25 @@
               close.setAttribute("tabindex", "-1");
               close.textContent = "×";
               function armLocalClose() {
-                armSessionClose(row, close, thread.name, function () {
-                  return requestThreadClose(thread);
-                });
+                var resolvesCovenRecovery = thread.launch &&
+                  (thread.launch.launchKind === "coven-recovery" ||
+                    thread.launch.recoveryRequired === true);
+                armSessionClose(
+                  row,
+                  close,
+                  resolvesCovenRecovery
+                    ? "inspected Coven recovery for " + thread.name
+                    : thread.name,
+                  function () {
+                    if (thread.launch &&
+                        (thread.launch.launchKind === "coven-recovery" ||
+                          thread.launch.recoveryRequired === true)) {
+                      return resolveCovenLaunchRecovery(thread);
+                    }
+                    return requestThreadClose(thread);
+                  },
+                  resolvesCovenRecovery ? "Resolve" : "Close"
+                );
               }
               close.addEventListener("click", function (event) {
                 event.stopPropagation();
@@ -8729,9 +9018,102 @@
     terminalHost.appendChild(empty);
   }
 
+  function waitForProjectCloseRetry(delay) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, delay);
+    });
+  }
+
+  var closingNativeProjectRoots = new Set();
+  var pendingNativeProjectRevocations = new Map();
+  var pendingNativeProjectRevocationTimer = 0;
+  function schedulePendingNativeProjectRevocations(delay) {
+    if (pendingNativeProjectRevocationTimer ||
+        pendingNativeProjectRevocations.size === 0) {
+      return;
+    }
+    pendingNativeProjectRevocationTimer = setTimeout(function () {
+      pendingNativeProjectRevocationTimer = 0;
+      retryPendingNativeProjectRevocations().catch(function (error) {
+        setStatus(
+          "native project authority background cleanup failed: " + String(error),
+          "error"
+        );
+      });
+    }, delay);
+  }
+  function quarantineNativeProjectRevocation(project, error) {
+    if (!project || !project.root) return;
+    closingNativeProjectRoots.add(project.root);
+    pendingNativeProjectRevocations.set(project.root, {
+      root: project.root,
+      name: project.name || project.root,
+      attempts: 3,
+      lastError: String(error),
+    });
+    schedulePendingNativeProjectRevocations(1000);
+  }
+  async function retryPendingNativeProjectRevocations() {
+    var entries = Array.from(pendingNativeProjectRevocations.values());
+    for (var index = 0; index < entries.length; index += 1) {
+      var entry = entries[index];
+      try {
+        await invoke("native_project_close", { root: entry.root });
+        pendingNativeProjectRevocations.delete(entry.root);
+        closingNativeProjectRoots.delete(entry.root);
+        setStatus(
+          "native project authority cleanup completed for " + entry.name,
+          "ok"
+        );
+      } catch (error) {
+        entry.attempts += 1;
+        entry.lastError = String(error);
+      }
+    }
+    if (pendingNativeProjectRevocations.size > 0) {
+      var attempts = Math.max.apply(null, Array.from(
+        pendingNativeProjectRevocations.values(),
+        function (entry) { return entry.attempts; }
+      ));
+      var delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, attempts - 3)));
+      schedulePendingNativeProjectRevocations(delay);
+      return false;
+    }
+    return true;
+  }
+
   async function removeProject(id) {
     var project = findProject(id);
-    if (!project) return false;
+    if (!project || project.closing) return false;
+    function hasUnresolvedCovenLaunch() {
+      return state.threads.some(function (thread) {
+        return thread.projectId === id
+          && thread.launch
+          && (thread.covenLaunchOutcomeInFlight ||
+            thread.covenLaunchAcceptanceInFlight ||
+            thread.retryInFlight ||
+            thread.launch.launchKind === "coven-recovery" ||
+            thread.launch.recoveryRequired === true);
+      });
+    }
+    function refuseUnsettledNativeCreate() {
+      if (projectNativeSessionCreateCount(id) === 0) return false;
+      setStatus(
+        project.name + " cannot be closed while a native session is still being created",
+        "error"
+      );
+      return true;
+    }
+    if (refuseUnsettledNativeCreate()) return false;
+    if (hasUnresolvedCovenLaunch()) {
+      setStatus(
+        project.name +
+          " cannot be closed while a Coven launch outcome is unresolved; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
     var projectOpenFiles = state.openFiles.filter(function (file) {
       return file.projectId === id;
     });
@@ -8744,71 +9126,378 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
+    project = findProject(id);
+    if (!project || project.closing) return false;
+    if (hasUnresolvedCovenLaunch()) {
+      setStatus(
+        project.name +
+          " cannot be closed because its Coven launch outcome became unresolved; " +
+          "inspect Coven before closing",
+        "error"
+      );
+      return false;
+    }
+    if (refuseUnsettledNativeCreate()) return false;
+    project.closing = true;
+    if (hasUnresolvedCovenLaunch() || refuseUnsettledNativeCreate()) {
+      project.closing = false;
+      return false;
+    }
+    if (project.root) closingNativeProjectRoots.add(project.root);
+
+    var saveSection;
+    try {
+      saveSection = await beginWorkspaceSaveCriticalSection();
+    } catch (error) {
+      if (project.root) closingNativeProjectRoots.delete(project.root);
+      project.closing = false;
+      setStatus(
+        "failed to prepare workspace persistence for " + project.name + ": " + String(error),
+        "error"
+      );
+      return false;
+    }
+
+    var projectIndex = state.projects.indexOf(project);
+    var activeProjectIdSnapshot = state.activeProjectId;
+    var activeThreadIdSnapshot = state.activeThreadId;
+    var activeFileIdSnapshot = state.activeFileId;
+    var lastActiveThreadIdSnapshot = project.lastActiveThreadId;
+    var threadSnapshot = state.threads.map(function (thread, index) {
+      return thread.projectId === id ? { thread: thread, index: index } : null;
+    }).filter(Boolean);
+    var originalThreadIds = new Set(threadSnapshot.map(function (entry) {
+      return entry.thread.id;
+    }));
+    var openFileSnapshot = state.openFiles.map(function (file, index) {
+      return file.projectId === id ? { file: file, index: index } : null;
+    }).filter(Boolean);
     var projectFilesPanes = [];
     if (typeof filesPanes !== "undefined") {
-      filesPanes.forEach(function (filesPane) {
-        if (filesPane.projectId === id) projectFilesPanes.push(filesPane);
+      filesPanes.forEach(function (filesPane, key) {
+        if (filesPane.projectId === id) {
+          projectFilesPanes.push({
+            key: key,
+            pane: filesPane,
+            activeFileId: filesPane.activeFileId,
+            previousFocusedSessionId: filesPane.previousFocusedSessionId,
+            hidden: filesPane.hidden,
+          });
+        }
       });
     }
+    var paneLayoutSnapshot = [];
+    if (typeof paneLayouts !== "undefined") {
+      paneLayouts.forEach(function (layout, key) {
+        if (key.indexOf(id + "\u0000") === 0) {
+          paneLayoutSnapshot.push([
+            key,
+            JSON.parse(JSON.stringify(layout)),
+          ]);
+        }
+      });
+    }
+    var focusSetSnapshot = [];
+    if (typeof focusSets !== "undefined") {
+      focusSets.forEach(function (set, index) {
+        if (set.threadIds.some(function (threadId) {
+          return originalThreadIds.has(threadId);
+        })) {
+          focusSetSnapshot.push({
+            index: index,
+            set: Object.assign({}, set, { threadIds: set.threadIds.slice() }),
+          });
+        }
+      });
+    }
+    var transactionSelection = null;
+
+    function restoreProjectState() {
+      if (state.projects.indexOf(project) === -1) {
+        state.projects.splice(
+          Math.max(0, Math.min(projectIndex, state.projects.length)),
+          0,
+          project
+        );
+      }
+      var restoredThreads = state.threads.slice();
+      threadSnapshot.forEach(function (entry) {
+        if (restoredThreads.some(function (thread) {
+          return thread.id === entry.thread.id;
+        })) {
+          return;
+        }
+        var thread = entry.thread;
+        thread.closeStarted = false;
+        thread.closing = false;
+        thread.persistentLive = false;
+        thread.spawning = false;
+        thread.status = thread.launch &&
+          (thread.launch.launchKind === "coven-recovery" ||
+            thread.launch.recoveryRequired === true)
+          ? "failed"
+          : "exited";
+        thread.sidebarStatusKey = thread.status === "failed" ? "error" : "done";
+        thread.finishedAt = Date.now();
+        thread.term = null;
+        thread.host = null;
+        thread.pane = null;
+        thread.terminalController = null;
+        thread.ptyStarted = false;
+        thread.ptyGeneration = null;
+        if (typeof createThreadPtyIoQueue === "function") {
+          thread.ptyIoQueue = createThreadPtyIoQueue();
+        }
+        restoredThreads.splice(
+          Math.max(0, Math.min(entry.index, restoredThreads.length)),
+          0,
+          thread
+        );
+      });
+      state.threads = restoredThreads;
+      var restoredFiles = state.openFiles.slice();
+      openFileSnapshot.forEach(function (entry) {
+        if (restoredFiles.some(function (file) { return file.id === entry.file.id; })) return;
+        restoredFiles.splice(
+          Math.max(0, Math.min(entry.index, restoredFiles.length)),
+          0,
+          entry.file
+        );
+      });
+      state.openFiles = restoredFiles;
+      if (typeof filesPanes !== "undefined") {
+        projectFilesPanes.forEach(function (entry) {
+          entry.pane.activeFileId = entry.activeFileId;
+          entry.pane.previousFocusedSessionId = entry.previousFocusedSessionId;
+          entry.pane.hidden = entry.hidden;
+          entry.pane.pane = null;
+          entry.pane.host = null;
+          filesPanes.set(entry.key, entry.pane);
+        });
+      }
+      if (typeof paneLayouts !== "undefined") {
+        Array.from(paneLayouts.keys()).forEach(function (key) {
+          if (key.indexOf(id + "\u0000") === 0) paneLayouts.delete(key);
+        });
+        paneLayoutSnapshot.forEach(function (entry) {
+          paneLayouts.set(entry[0], JSON.parse(JSON.stringify(entry[1])));
+        });
+      }
+      if (typeof focusSets !== "undefined") {
+        var restoredSetIds = new Set(focusSetSnapshot.map(function (entry) {
+          return entry.set.id;
+        }));
+        for (var setIndex = focusSets.length - 1; setIndex >= 0; setIndex -= 1) {
+          if (restoredSetIds.has(focusSets[setIndex].id)) focusSets.splice(setIndex, 1);
+        }
+        focusSetSnapshot.forEach(function (entry) {
+          focusSets.splice(
+            Math.max(0, Math.min(entry.index, focusSets.length)),
+            0,
+            entry.set
+          );
+        });
+      }
+      var selectionStillOwnedByRemoval = state.activeProjectId === id ||
+        (transactionSelection &&
+          state.activeProjectId === transactionSelection.projectId &&
+          state.activeThreadId === transactionSelection.threadId &&
+          state.activeFileId === transactionSelection.fileId);
+      if (selectionStillOwnedByRemoval && activeProjectIdSnapshot === id) {
+        if (typeof assignActiveProjectId === "function") assignActiveProjectId(id);
+        else Object.assign(state, { activeProjectId: id });
+        state.activeThreadId = originalThreadIds.has(activeThreadIdSnapshot)
+          ? activeThreadIdSnapshot
+          : null;
+        state.activeFileId = openFileSnapshot.some(function (entry) {
+          return entry.file.id === activeFileIdSnapshot;
+        }) ? activeFileIdSnapshot : null;
+      }
+      project.lastActiveThreadId = lastActiveThreadIdSnapshot;
+      project.closing = false;
+      if (project.root) closingNativeProjectRoots.delete(project.root);
+      renderPaneWorkspace({ preserveTerminalFocus: false });
+      var restoredActiveFile = state.activeProjectId === id
+        ? state.openFiles.find(function (file) {
+          return file.id === state.activeFileId && file.projectId === id;
+        })
+        : null;
+      if (restoredActiveFile && fileViewEl) {
+        fileViewEl.hidden = false;
+        if (typeof renderFileView === "function") renderFileView();
+      }
+      refreshSidebar();
+      refreshTabs();
+      syncProjectBrowser();
+    }
+
+    async function failBeforeCommit(message) {
+      restoreProjectState();
+      try {
+        await finishWorkspaceSaveCriticalSection(saveSection);
+      } catch (saveError) {
+        message += "; restored workspace persistence also failed: " + String(saveError);
+      }
+      setStatus(message, "error");
+      return false;
+    }
+
     covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
-    // Close every thread that belongs to this project.
-    var threadIds = state.threads
-      .filter(function (t) { return t.projectId === id; })
-      .map(function (t) { return t.id; });
-    var closeResults = await Promise.all(threadIds.map(function (tid) {
+    var threadIds = threadSnapshot.map(function (entry) { return entry.thread.id; });
+    var closeResults = await Promise.allSettled(threadIds.map(function (threadId) {
       var preserveTerminalFocus = state.activeProjectId !== id;
-      return closeThread(tid, {
+      return closeThread(threadId, {
         focus: false,
         preserveTerminalFocus: preserveTerminalFocus,
+        protectCovenRecovery: true,
+        persist: false,
       });
     }));
-    if (closeResults.some(function (closed) { return closed === false; })) return false;
-    if (project.root) {
-      try {
-        await invoke("native_project_close", { root: project.root });
-      } catch (error) {
-        setStatus("failed to revoke project authority for " + project.name + ": " + String(error), "error");
-        return false;
-      }
-    }
-    // Its file tabs go with it — they are scoped to the project.
-    var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
-    state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
-    projectFilesPanes.forEach(function (filesPane) {
-      if (typeof removeFilesPaneNow === "function") removeFilesPaneNow(filesPane);
+    var closeFailure = closeResults.find(function (result) {
+      return result.status === "rejected" || result.value === false;
     });
-    var restoredTerminalView = false;
-    if (dropped.some(function (f) { return f.id === state.activeFileId; })) {
+    if (closeFailure) {
+      return failBeforeCommit(
+        "failed to close every pane for " + project.name +
+          (closeFailure.status === "rejected"
+            ? ": " + String(closeFailure.reason)
+            : "")
+      );
+    }
+    if (projectNativeSessionCreateCount(id) !== 0) {
+      return failBeforeCommit(
+        project.name + " could not be closed because a native session create is unsettled"
+      );
+    }
+
+    state.projects = state.projects.filter(function (candidate) {
+      return candidate.id !== id;
+    });
+    state.openFiles = state.openFiles.filter(function (file) {
+      return file.projectId !== id;
+    });
+    projectFilesPanes.forEach(function (entry) {
+      if (typeof removeFilesPaneNow === "function") removeFilesPaneNow(entry.pane);
+      else if (typeof filesPanes !== "undefined") filesPanes.delete(entry.key);
+    });
+    var removedActiveFile = openFileSnapshot.some(function (entry) {
+      return entry.file.id === state.activeFileId;
+    });
+    if (removedActiveFile) {
       state.activeFileId = null;
       if (fileViewEl) fileViewEl.hidden = true;
       if (terminalHost) terminalHost.hidden = false;
-      restoredTerminalView = true;
     }
-    // Remove the project from state.
-    state.projects = state.projects.filter(function (p) { return p.id !== id; });
-    startCovenPolling();
-    var shouldRefreshSidebar = threadIds.length === 0;
     var sidebarRefreshedByActiveProjectHandoff = false;
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
-      // Force setActiveProject to do its restore work even though the id
-      // matches — clear first.
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(null);
       else Object.assign(state, { activeProjectId: null });
+      state.activeThreadId = null;
       if (next) {
-        shouldRefreshSidebar = false;
         sidebarRefreshedByActiveProjectHandoff = await setActiveProject(next.id);
+        if (!sidebarRefreshedByActiveProjectHandoff) {
+          return failBeforeCommit("failed to select a remaining project after closing " + project.name);
+        }
       } else {
-        state.activeThreadId = null;
         renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
+      transactionSelection = {
+        projectId: state.activeProjectId,
+        threadId: state.activeThreadId,
+        fileId: state.activeFileId,
+      };
     }
-    if (shouldRefreshSidebar && !sidebarRefreshedByActiveProjectHandoff) refreshSidebar();
+    if (!sidebarRefreshedByActiveProjectHandoff) refreshSidebar();
     else refreshTabs();
-    if (restoredTerminalView) syncPaneMetricsVisibility();
+    if (removedActiveFile) syncPaneMetricsVisibility();
     syncProjectBrowser();
-    saveWorkspaceSoon();
+
+    try {
+      await flushWorkspaceSaveCriticalSection(saveSection);
+    } catch (error) {
+      restoreProjectState();
+      var restoreSaveError = null;
+      try {
+        await finishWorkspaceSaveCriticalSection(saveSection);
+      } catch (saveError) {
+        restoreSaveError = saveError;
+      }
+      setStatus(
+        "failed to save removal of " + project.name + "; the project was restored: " +
+          String(error) +
+          (restoreSaveError
+            ? "; restored workspace persistence also failed: " + String(restoreSaveError)
+            : ""),
+        "error"
+      );
+      return false;
+    }
+    var finalWorkspaceSaveError = null;
+    try {
+      await finishWorkspaceSaveCriticalSection(saveSection);
+    } catch (error) {
+      finalWorkspaceSaveError = error;
+    }
+    startCovenPolling();
+
+    if (projectNativeSessionCreateCount(id) !== 0) {
+      var unsettledCreateError = new Error(
+        "native session create remained unsettled after durable project removal"
+      );
+      quarantineNativeProjectRevocation(project, unsettledCreateError);
+      setStatus(
+        project.name +
+          " was removed from the workspace, but native authority revocation was deferred " +
+          "because a native session create is still unsettled and cleanup was queued",
+        "error"
+      );
+      if (typeof refreshStatusController === "function") refreshStatusController();
+      return false;
+    }
+    if (project.root) {
+      var revokeError = null;
+      for (var attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await invoke("native_project_close", { root: project.root });
+          revokeError = null;
+          break;
+        } catch (error) {
+          revokeError = error;
+          if (attempt < 3) {
+            await waitForProjectCloseRetry(attempt === 1 ? 50 : 150);
+          }
+        }
+      }
+      if (revokeError) {
+        quarantineNativeProjectRevocation(project, revokeError);
+        setStatus(
+          project.name +
+            " was removed from the workspace, but native project authority revocation " +
+            "failed after 3 attempts and was queued for background retry: " +
+            String(revokeError) +
+            (finalWorkspaceSaveError
+              ? "; final workspace persistence also failed: " +
+                String(finalWorkspaceSaveError)
+              : ""),
+          "error"
+        );
+        if (typeof refreshStatusController === "function") refreshStatusController();
+        return false;
+      }
+      closingNativeProjectRoots.delete(project.root);
+    }
+    if (finalWorkspaceSaveError) {
+      setStatus(
+        project.name +
+          " was removed and native authority was revoked, but final workspace " +
+          "persistence failed: " + String(finalWorkspaceSaveError),
+        "error"
+      );
+      if (typeof refreshStatusController === "function") refreshStatusController();
+      return false;
+    }
     if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
@@ -9200,7 +9889,7 @@
 
   async function openFileTab(path, project) {
     project = project || activeProject();
-    if (!project) return;
+    if (!project || project.closing) return false;
     var workspaceRoot = activeWorkspaceRoot(project);
     var existing = state.openFiles.filter(function (f) {
       return f.path === path && f.projectId === project.id &&
@@ -9210,6 +9899,7 @@
     if (fileNavigationInFlight || fileDecisionInFlight) return false;
 
     var filesPane = ensureFilesPane(project, workspaceRoot);
+    if (!filesPane) return false;
     fileCounter += 1;
     var rel = relativeToRoot(workspaceRoot, path);
     var file = {
@@ -11980,6 +12670,7 @@
   }
   function createBrowserTab(project, url, activate, worktreePath) {
     project = project || activeProject();
+    if (!project || project.closing) return null;
     worktreePath = worktreePath || activeWorkspaceRoot(project);
     var pane = project && findBrowserPane(project.id, worktreePath);
     if (browserPaneIsClosing(pane)) return null;
@@ -12638,12 +13329,20 @@
       setStatus("Open a project before starting a terminal", "warn");
       return null;
     }
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting a terminal", "warn");
+      return null;
+    }
     var worktree = selectedWorktree(project);
     if (!worktree || !worktree.path) {
       setStatus("Select an available worktree before starting a terminal", "warn");
       return null;
     }
     if (!(await showTerminalView())) return null;
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting a terminal", "warn");
+      return null;
+    }
     return spawnShellThread(project);
   }
 
@@ -14040,8 +14739,9 @@
       var previousRoot = project.root;
       var canonicalRoot = await canonicalProjectPath(previousRoot);
       if (!canonicalRoot) return null;
+      project = migrateProjectRoot(project, previousRoot, canonicalRoot);
       return {
-        project: migrateProjectRoot(project, previousRoot, canonicalRoot),
+        project: project,
         sourceId: savedProject.id || project.id,
       };
     }));
@@ -14211,7 +14911,7 @@
         } catch (error) {
           console.warn("[native_session_capture] failed for " + thread.id + ": " + String(error));
         }
-        attachThreadClient(thread);
+        attachThreadClientAndResolveRecovery(thread);
       }
     }
     var active = saved.activeThreadId && findThread(saved.activeThreadId);
@@ -14225,17 +14925,62 @@
     return reconciled;
   }
 
-  async function addProject(rootPath) {
+  async function addProject(rootPath, options) {
     if (!rootPath) return null;
-    rootPath = await canonicalProjectPath(rootPath);
-    if (!rootPath) return null;
+    if (!(options && options.nativeAuthorityReady === true)) {
+      rootPath = await canonicalProjectPath(rootPath);
+      if (!rootPath) return null;
+    }
+    if (options) options.canonicalRoot = rootPath;
+    function blockedByNativeProjectRevocation() {
+      if (closingNativeProjectRoots.has(rootPath)) {
+        if (options) options.blockedByClosing = true;
+        setStatus(
+          "project is still closing for " + rootPath +
+            "; retry after native authority revocation completes",
+          "error"
+        );
+        return true;
+      }
+      if (pendingNativeProjectRevocations.has(rootPath)) {
+        if (options) options.blockedByClosing = true;
+        setStatus(
+          "project authority cleanup is still pending for " + rootPath +
+            "; retry after background cleanup completes",
+          "error"
+        );
+        return true;
+      }
+      return false;
+    }
+    if (blockedByNativeProjectRevocation()) return null;
     var existing = state.projects.find(function (p) { return p.root === rootPath; });
-    if (existing) return (await setActiveProject(existing.id)) ? existing : null;
+    if (existing) {
+      if (options && options.nativeAuthorityReady === true) {
+        existing.nativeAuthorityReady = true;
+      }
+      return (await setActiveProject(existing.id)) ? existing : null;
+    }
     if (state.projects.length >= settings.maxProjects) { setStatus("project limit reached (" + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ")", "warn"); return null; }
     if (!(await showTerminalView())) return null;
+    if (blockedByNativeProjectRevocation()) return null;
+    existing = state.projects.find(function (p) { return p.root === rootPath; });
+    if (existing) {
+      if (options && options.nativeAuthorityReady === true) {
+        existing.nativeAuthorityReady = true;
+      }
+      return (await setActiveProject(existing.id)) ? existing : null;
+    }
+    if (state.projects.length >= settings.maxProjects) {
+      setStatus(
+        "project limit reached (" + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ")",
+        "warn"
+      );
+      return null;
+    }
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
-    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
+    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {}, nativeAuthorityReady: !!(options && options.nativeAuthorityReady === true) };
     state.projects.push(project);
     if (typeof assignActiveProjectId === "function") assignActiveProjectId(project.id);
     else Object.assign(state, { activeProjectId: project.id });
@@ -14253,24 +14998,37 @@
 
   async function openProjectPicker() {
     var selected = null;
+    var admission = {
+      nativeAuthorityReady: true,
+      blockedByClosing: false,
+    };
     try {
       var defaultPath = (state.env && state.env.home) || undefined;
       selected = await invoke("native_project_open", {
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      await addProject(selected);
+      await addProject(selected, admission);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     } finally {
+      var cleanupRoot = admission.canonicalRoot || selected;
       if (
         selected &&
         typeof selected === "string" &&
-        !state.projects.some(function (project) { return project.root === selected; })
+        !admission.blockedByClosing &&
+        !closingNativeProjectRoots.has(cleanupRoot) &&
+        !state.projects.some(function (project) {
+          return project.root === cleanupRoot;
+        })
       ) {
         try {
-          await invoke("native_project_close", { root: selected });
+          await invoke("native_project_close", { root: cleanupRoot });
         } catch (cleanupError) {
+          quarantineNativeProjectRevocation(
+            { root: cleanupRoot, name: cleanupRoot },
+            cleanupError
+          );
           writeToActive(
             "\r\n\x1b[31m[open-project cleanup]\x1b[0m failed to revoke native project authority: " +
               cleanupError + "\r\n"
@@ -14661,6 +15419,10 @@
       setStatus("Open a project before starting an agent", "warn");
       return null;
     }
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting an agent", "warn");
+      return null;
+    }
     var worktree = selectedWorktree(project);
     if (!worktree || !worktree.path) {
       setStatus("Select an available worktree before starting an agent", "warn");
@@ -14702,6 +15464,10 @@
       return null;
     }
     var promptDigest = await covenPromptDigest(userPrompt);
+    if (project.closing) {
+      setStatus(project.name + " is closing; wait before starting an agent", "warn");
+      return null;
+    }
     var reservation;
     try {
       reservation = await reserveCovenLaunchThread({
@@ -14716,47 +15482,64 @@
       return null;
     }
     if (!reservation) return null;
-    // The composer prompt rides the daemon launch request body only. It is
-    // never placed in process argv and never stored on the launch model; the
-    // pane attaches to the canonical Coven session returned by the daemon.
-    var launchResult = await invoke("coven_launch_session", {
-      request: {
-        projectRoot: project.root,
-        cwd: worktree.path,
-        harness: entry.harness,
-        prompt: userPrompt,
-        title: entry.label,
-      },
-    }).catch(function () {
-      return {
-        status: "effect_unknown",
-        message: "Coven launch outcome is unknown; inspect Coven sessions before retrying",
-      };
-    });
-    if (!launchResult) {
-      await markCovenLaunchRecoveryRequired(
-        reservation,
-        "Coven launch outcome is unknown; inspect Coven sessions before retrying"
-      );
-      return reservation;
-    }
-    if (covenLaunchOutcome(launchResult) !== "accepted") {
-      if (launchResult.status === "effect_unknown") {
-        var recoveryMessage = covenLaunchFailureStatus(entry, launchResult);
-        await markCovenLaunchRecoveryRequired(reservation, recoveryMessage);
-        setStatus(recoveryMessage, "error");
-        return reservation;
-      }
+    if (project.closing) {
       await releaseCovenLaunchReservation(reservation);
-      setStatus(covenLaunchFailureStatus(entry, launchResult), "error");
+      setStatus(project.name + " is closing; Coven launch was not submitted", "warn");
       return null;
     }
-    return acceptCovenLaunchReservation(reservation, {
-      name: entry.label,
-      sessionId: launchResult.sessionId,
-      promptDigest: promptDigest,
-      harness: launchResult.harness || entry.harness || "coven",
+    var finishLaunchOutcome;
+    var launchOutcomeInFlight = new Promise(function (resolve) {
+      finishLaunchOutcome = resolve;
     });
+    reservation.covenLaunchOutcomeInFlight = launchOutcomeInFlight;
+    try {
+      // The composer prompt rides the daemon launch request body only. It is
+      // never placed in process argv and never stored on the launch model; the
+      // pane attaches to the canonical Coven session returned by the daemon.
+      var launchResult = await invoke("coven_launch_session", {
+        request: {
+          projectRoot: project.root,
+          cwd: worktree.path,
+          harness: entry.harness,
+          prompt: userPrompt,
+          title: entry.label,
+        },
+      }).catch(function () {
+        return {
+          status: "effect_unknown",
+          message: "Coven launch outcome is unknown; inspect Coven sessions before retrying",
+        };
+      });
+      if (!launchResult) {
+        await markCovenLaunchRecoveryRequired(
+          reservation,
+          "Coven launch outcome is unknown; inspect Coven sessions before retrying"
+        );
+        return reservation;
+      }
+      if (covenLaunchOutcome(launchResult) !== "accepted") {
+        if (launchResult.status === "effect_unknown") {
+          var recoveryMessage = covenLaunchFailureStatus(entry, launchResult);
+          await markCovenLaunchRecoveryRequired(reservation, recoveryMessage);
+          setStatus(recoveryMessage, "error");
+          return reservation;
+        }
+        await releaseCovenLaunchReservation(reservation);
+        setStatus(covenLaunchFailureStatus(entry, launchResult), "error");
+        return null;
+      }
+      return await acceptCovenLaunchReservation(reservation, {
+        name: entry.label,
+        sessionId: launchResult.sessionId,
+        promptDigest: promptDigest,
+        harness: launchResult.harness || entry.harness || "coven",
+      });
+    } finally {
+      if (reservation.covenLaunchOutcomeInFlight === launchOutcomeInFlight) {
+        reservation.covenLaunchOutcomeInFlight = null;
+      }
+      finishLaunchOutcome();
+    }
   }
 
   function covenCliLaunch(project, worktreePath) {
@@ -14901,7 +15684,6 @@
     if (typeof statusController !== "undefined" && statusController) statusController.start();
     flushDeferredStatusMessages();
     var saved = await readSavedWorkspace();
-    var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
     isRestoringWorkspace = true;
     try {
@@ -14917,29 +15699,38 @@
         } else {
           Object.assign(state, { activeProjectId: restored.activeProjectId });
         }
+        await invoke("native_project_reconcile", {
+          roots: state.projects.map(function (savedProject) { return savedProject.root; }),
+        });
+        state.projects.forEach(function (savedProject) {
+          savedProject.nativeAuthorityReady = true;
+        });
         project = activeProject();
         await Promise.all(state.projects.map(function (savedProject) {
           return refreshProjectWorktrees(savedProject);
         }));
+      } else {
+        await invoke("native_project_reconcile", { roots: [] });
       }
       var liveSessionIds = [];
-      try {
-        liveSessionIds = await invoke("native_session_list");
-      } catch (error) {
-        setStatus("native session discovery failed: " + String(error), "error");
+      if (!legacyWorkspaceMigration.projectsPreserved) {
+        try {
+          liveSessionIds = await invoke("native_session_list");
+        } catch (error) {
+          setStatus("native session discovery failed: " + String(error), "error");
+        }
       }
       if (saved) await restorePersistedSessions(saved, liveSessionIds);
     } finally {
       isRestoringWorkspace = false;
     }
-    if (!project) project = await addProject(bootRoot);
     if (project) {
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
     }
     renderPaneWorkspace({ preserveTerminalFocus: false });
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills();
-    await saveWorkspaceNow();
+    if (!legacyWorkspaceMigration.projectsPreserved) await saveWorkspaceNow();
     startCovenPolling();
     installAgentControlUi();
     if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
