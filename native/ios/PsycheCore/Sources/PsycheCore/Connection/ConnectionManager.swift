@@ -1111,24 +1111,17 @@ public actor ConnectionManager {
                     )
                 }
                 guard isActive(session: session, generation: generation) else {
-                    if let transaction = selection.transaction {
-                        await compensateRetiredReadyHostSelection(
-                            transaction,
-                            authorizedBy: authorization,
-                            selectedBy: generation
-                        )
-                    } else {
-                        await pairedHostStore.cancelReadyHostSelection(
-                            authorizedBy: authorization,
-                            selectedBy: generation
-                        )
-                    }
+                    await rollBackReadyHostSelection(
+                        selection.transaction,
+                        authorizedBy: authorization,
+                        selectedBy: generation
+                    )
                     return nil
                 }
                 await readyHostSelectionFinalizationStart()
-                let publication: ReadyHostSelectionPublication?
+                let finalizationID: UUID
                 do {
-                    publication = try await MainActor.run {
+                    let publication = try await MainActor.run {
                         try generation.withValidity {
                             var finalizationID: UUID?
                             let finalized = try authorization.finalize {
@@ -1137,96 +1130,64 @@ public actor ConnectionManager {
                                 )
                             }
                             guard finalized, let finalizationID else {
-                                return .superseded
+                                return ReadyHostSelectionPublication.superseded
                             }
                             return .finalized(finalizationID)
                         }
                     }
-                    guard let publication else {
-                        if let transaction = selection.transaction {
-                            await compensateRetiredReadyHostSelection(
-                                transaction,
-                                authorizedBy: authorization,
-                                selectedBy: generation
-                            )
-                        } else {
-                            await pairedHostStore.cancelReadyHostSelection(
-                                authorizedBy: authorization,
-                                selectedBy: generation
-                            )
-                        }
+                    switch publication {
+                    case nil:
+                        await rollBackReadyHostSelection(
+                            selection.transaction,
+                            authorizedBy: authorization,
+                            selectedBy: generation
+                        )
                         return nil
-                    }
-                    guard case .finalized = publication else {
+                    case .superseded:
                         return ConnectionManagerError.hostIdentityNotCommitted(
                             "Ready-host selection was superseded before workspace publication."
                         )
+                    case .finalized(let id):
+                        finalizationID = id
                     }
                 } catch {
-                    if let transaction = selection.transaction {
-                        await compensateRetiredReadyHostSelection(
-                            transaction,
-                            authorizedBy: authorization,
-                            selectedBy: generation
-                        )
-                    } else {
-                        await pairedHostStore.cancelReadyHostSelection(
-                            authorizedBy: authorization,
-                            selectedBy: generation
-                        )
-                    }
-                    guard isActive(session: session, generation: generation) else {
-                        return nil
-                    }
-                    return error
-                }
-                guard case .finalized(let finalizationID) = publication else {
-                    return ConnectionManagerError.hostIdentityNotCommitted(
-                        "Ready-host selection was superseded before workspace publication."
+                    await rollBackReadyHostSelection(
+                        selection.transaction,
+                        authorizedBy: authorization,
+                        selectedBy: generation
                     )
+                    return isActive(session: session, generation: generation) ? error : nil
                 }
+                let completion: HostReadinessTransactionResult
                 if let transaction = selection.transaction {
-                    let completion = await pairedHostStore.completeReadyHostSelection(
+                    completion = await pairedHostStore.completeReadyHostSelection(
                         transaction,
                         authorizedBy: authorization,
                         selectedBy: generation
                     )
-                    switch completion {
-                    case .committed:
-                        await MainActor.run {
-                            machine.acknowledgeReadyHostSelectionFinalization(
-                                finalizationID
-                            )
-                        }
-                    case .notCommitted:
-                        await MainActor.run {
-                            machine.acknowledgeReadyHostSelectionFinalization(
-                                finalizationID
-                            )
-                        }
-                    case .indeterminate(let reason):
-                        let error = ConnectionManagerError
-                            .hostIdentityIndeterminate(reason)
-                        await MainActor.run {
-                            _ = try? machine.quarantineReadyHostSelectionFinalization(
-                                finalizationID,
-                                reason: error.localizedDescription
-                            )
-                        }
-                        return error
-                    }
                 } else {
                     await pairedHostStore.acknowledgeReadyHostSelection(
                         authorizedBy: authorization,
                         selectedBy: generation
                     )
+                    completion = .committed
+                }
+                switch completion {
+                case .committed, .notCommitted:
                     await MainActor.run {
-                        machine.acknowledgeReadyHostSelectionFinalization(
-                            finalizationID
+                        machine.acknowledgeReadyHostSelectionFinalization(finalizationID)
+                    }
+                    return nil
+                case .indeterminate(let reason):
+                    let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
+                    await MainActor.run {
+                        _ = try? machine.quarantineReadyHostSelectionFinalization(
+                            finalizationID,
+                            reason: error.localizedDescription
                         )
                     }
+                    return error
                 }
-                return nil
             case .notCommitted(let reason):
                 guard let reason else { return nil }
                 return ConnectionManagerError.hostIdentityNotCommitted(reason)
@@ -1243,6 +1204,28 @@ public actor ConnectionManager {
         case .indeterminate(let reason):
             clearReadinessFlow()
             return ConnectionManagerError.workspaceApplyIndeterminate(reason)
+        }
+    }
+
+    /// Gives back a committed selection that never reached publication. A
+    /// selection that moved the durable host is compensated; one that merely
+    /// re-confirmed the existing host only needs its authorization released.
+    private func rollBackReadyHostSelection(
+        _ transaction: PairedHostStore.ReadyHostSelectionTransaction?,
+        authorizedBy authorization: ReadyHostSelectionAuthorization,
+        selectedBy generation: ConnectionGeneration
+    ) async {
+        if let transaction {
+            await compensateRetiredReadyHostSelection(
+                transaction,
+                authorizedBy: authorization,
+                selectedBy: generation
+            )
+        } else {
+            await pairedHostStore.cancelReadyHostSelection(
+                authorizedBy: authorization,
+                selectedBy: generation
+            )
         }
     }
 
