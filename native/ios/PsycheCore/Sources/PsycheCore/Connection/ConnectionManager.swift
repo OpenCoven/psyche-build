@@ -1099,111 +1099,119 @@ public actor ConnectionManager {
                     "Ready workspace has no committed host identity."
                 )
             }
-            let selection = await pairedHostStore.selectReadyHost(
+            return await publishReadyHostSelection(
                 serverID: readyHostID,
-                for: generation
+                for: session,
+                generation: generation
             )
-            switch selection.result {
-            case .committed:
-                guard let authorization = selection.authorization else {
-                    return ConnectionManagerError.readinessUnavailable(
-                        "Ready-host selection has no publication authorization."
-                    )
-                }
-                guard isActive(session: session, generation: generation) else {
-                    await rollBackReadyHostSelection(
-                        selection.transaction,
-                        authorizedBy: authorization,
-                        selectedBy: generation
-                    )
-                    return nil
-                }
-                await readyHostSelectionFinalizationStart()
-                let finalizationID: UUID
-                do {
-                    let publication = try await MainActor.run {
-                        try generation.withValidity {
-                            var finalizationID: UUID?
-                            let finalized = try authorization.finalize {
-                                finalizationID = try machine.finalizeReadyHostSelection(
-                                    serverID: readyHostID
-                                )
-                            }
-                            guard finalized, let finalizationID else {
-                                return ReadyHostSelectionPublication.superseded
-                            }
-                            return .finalized(finalizationID)
-                        }
-                    }
-                    switch publication {
-                    case nil:
-                        await rollBackReadyHostSelection(
-                            selection.transaction,
-                            authorizedBy: authorization,
-                            selectedBy: generation
-                        )
-                        return nil
-                    case .superseded:
-                        return ConnectionManagerError.hostIdentityNotCommitted(
-                            "Ready-host selection was superseded before workspace publication."
-                        )
-                    case .finalized(let id):
-                        finalizationID = id
-                    }
-                } catch {
-                    await rollBackReadyHostSelection(
-                        selection.transaction,
-                        authorizedBy: authorization,
-                        selectedBy: generation
-                    )
-                    return isActive(session: session, generation: generation) ? error : nil
-                }
-                let completion: HostReadinessTransactionResult
-                if let transaction = selection.transaction {
-                    completion = await pairedHostStore.completeReadyHostSelection(
-                        transaction,
-                        authorizedBy: authorization,
-                        selectedBy: generation
-                    )
-                } else {
-                    await pairedHostStore.acknowledgeReadyHostSelection(
-                        authorizedBy: authorization,
-                        selectedBy: generation
-                    )
-                    completion = .committed
-                }
-                switch completion {
-                case .committed, .notCommitted:
-                    await MainActor.run {
-                        machine.acknowledgeReadyHostSelectionFinalization(finalizationID)
-                    }
-                    return nil
-                case .indeterminate(let reason):
-                    let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
-                    await MainActor.run {
-                        _ = try? machine.quarantineReadyHostSelectionFinalization(
-                            finalizationID,
-                            reason: error.localizedDescription
-                        )
-                    }
-                    return error
-                }
-            case .notCommitted(let reason):
-                guard let reason else { return nil }
-                return ConnectionManagerError.hostIdentityNotCommitted(reason)
-            case .indeterminate(let reason):
-                let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
-                await MainActor.run {
-                    _ = try? machine.revoke(reason: error.localizedDescription)
-                }
-                return error
-            }
         case .notCommitted(let reason):
             clearReadinessFlow()
             return ConnectionManagerError.workspaceNotAccepted(reason)
         case .indeterminate(let reason):
             clearReadinessFlow()
             return ConnectionManagerError.workspaceApplyIndeterminate(reason)
+        }
+    }
+
+    /// Persists the ready host as the reconnect selection and publishes it
+    /// through the readiness machine. Returns the error that must tear the
+    /// connection down, or `nil` when publication succeeded or this flow was
+    /// harmlessly superseded.
+    private func publishReadyHostSelection(
+        serverID readyHostID: String,
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) async -> (any Error)? {
+        let machine = hostReadiness
+        switch await pairedHostStore.selectReadyHost(serverID: readyHostID, for: generation) {
+        case .notCommitted(let reason):
+            guard let reason else { return nil }
+            return ConnectionManagerError.hostIdentityNotCommitted(reason)
+        case .indeterminate(let reason):
+            let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
+            await MainActor.run {
+                _ = try? machine.revoke(reason: error.localizedDescription)
+            }
+            return error
+        case .committed(let transaction, let authorization):
+            guard isActive(session: session, generation: generation) else {
+                await rollBackReadyHostSelection(
+                    transaction,
+                    authorizedBy: authorization,
+                    selectedBy: generation
+                )
+                return nil
+            }
+            await readyHostSelectionFinalizationStart()
+            let finalizationID: UUID
+            do {
+                let publication = try await MainActor.run {
+                    try generation.withValidity {
+                        var finalizationID: UUID?
+                        let finalized = try authorization.finalize {
+                            finalizationID = try machine.finalizeReadyHostSelection(
+                                serverID: readyHostID
+                            )
+                        }
+                        guard finalized, let finalizationID else {
+                            return ReadyHostSelectionPublication.superseded
+                        }
+                        return .finalized(finalizationID)
+                    }
+                }
+                switch publication {
+                case nil:
+                    await rollBackReadyHostSelection(
+                        transaction,
+                        authorizedBy: authorization,
+                        selectedBy: generation
+                    )
+                    return nil
+                case .superseded:
+                    return ConnectionManagerError.hostIdentityNotCommitted(
+                        "Ready-host selection was superseded before workspace publication."
+                    )
+                case .finalized(let id):
+                    finalizationID = id
+                }
+            } catch {
+                await rollBackReadyHostSelection(
+                    transaction,
+                    authorizedBy: authorization,
+                    selectedBy: generation
+                )
+                return isActive(session: session, generation: generation) ? error : nil
+            }
+            let completion: HostReadinessTransactionResult
+            if let transaction {
+                completion = await pairedHostStore.completeReadyHostSelection(
+                    transaction,
+                    authorizedBy: authorization,
+                    selectedBy: generation
+                )
+            } else {
+                await pairedHostStore.acknowledgeReadyHostSelection(
+                    authorizedBy: authorization,
+                    selectedBy: generation
+                )
+                completion = .committed
+            }
+            switch completion {
+            case .committed, .notCommitted:
+                await MainActor.run {
+                    machine.acknowledgeReadyHostSelectionFinalization(finalizationID)
+                }
+                return nil
+            case .indeterminate(let reason):
+                let error = ConnectionManagerError.hostIdentityIndeterminate(reason)
+                await MainActor.run {
+                    _ = try? machine.quarantineReadyHostSelectionFinalization(
+                        finalizationID,
+                        reason: error.localizedDescription
+                    )
+                }
+                return error
+            }
         }
     }
 

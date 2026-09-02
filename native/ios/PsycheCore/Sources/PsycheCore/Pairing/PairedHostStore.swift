@@ -82,13 +82,30 @@ public actor PairedHostStore {
         let previousServerID: String?
     }
 
-    struct ReadyHostSelectionPreparation: Sendable {
-        let result: HostReadinessTransactionResult
-        let transaction: ReadyHostSelectionTransaction?
-        let authorization: ReadyHostSelectionAuthorization?
+    /// A committed selection always carries the authorization that gates its
+    /// publication, and a transaction only when the durable host changed.
+    enum ReadyHostSelectionPreparation: Sendable {
+        case committed(
+            transaction: ReadyHostSelectionTransaction?,
+            authorization: ReadyHostSelectionAuthorization
+        )
+        case notCommitted(reason: String?)
+        case indeterminate(reason: String)
 
-        static func notCommitted(reason: String?) -> Self {
-            Self(result: .notCommitted(reason: reason), transaction: nil, authorization: nil)
+        var result: HostReadinessTransactionResult {
+            switch self {
+            case .committed: .committed
+            case .notCommitted(let reason): .notCommitted(reason: reason)
+            case .indeterminate(let reason): .indeterminate(reason: reason)
+            }
+        }
+
+        var transaction: ReadyHostSelectionTransaction? {
+            if case .committed(let transaction, _) = self { transaction } else { nil }
+        }
+
+        var authorization: ReadyHostSelectionAuthorization? {
+            if case .committed(_, let authorization) = self { authorization } else { nil }
         }
     }
 
@@ -421,11 +438,14 @@ public actor PairedHostStore {
                 return compensation
             }
         } ?? .notCommitted(reason: nil)
-        return ReadyHostSelectionPreparation(
-            result: result,
-            transaction: result == .committed ? transaction : nil,
-            authorization: result == .committed ? authorization : nil
-        )
+        switch result {
+        case .committed:
+            return .committed(transaction: transaction, authorization: authorization)
+        case .notCommitted(let reason):
+            return .notCommitted(reason: reason)
+        case .indeterminate(let reason):
+            return .indeterminate(reason: reason)
+        }
     }
 
     /// Clears the provisional marker after the workspace and host became live
