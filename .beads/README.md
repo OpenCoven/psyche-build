@@ -38,6 +38,10 @@ failed inside `bd --readonly export` with `schema version mismatch` until the
 schema cursor was rolled back per the upstream
 [recovery guide](https://github.com/gastownhall/beads/blob/v1.2.2/docs/RECOVERY-1.2.1.md)
 and the versioned `events` audit table was re-tracked ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
+The re-tracked table restores the 1,361 rows in the last versioned snapshot.
+Three known writes made after `events` became ignored retain their Dolt commits
+and final source state, but their clone-local event rows are unavailable; treat
+that as a bounded three-write audit gap, not an uninterrupted journal.
 
 Before running `bd` on a clone that has been idle, confirm `bd version`
 reports the pinned release. If `bd` reports a schema version mismatch, do not
@@ -72,6 +76,13 @@ change:
 
 Do not publish a different Dolt state after the Git review, and do not use a
 generated GitHub body to reconstruct or repair Beads.
+
+Use plain issue references when a PR title, body, or commit message mentions a
+generated mirror. Never place any GitHub-supported closing keyword—including
+`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or
+`resolved`—before a generated mirror reference: merging the PR would change the
+mirror outside the synchronizer. Publish the reviewed Beads source, then let
+the protected sync reconcile the mirror.
 
 ## Sole migrator rule
 

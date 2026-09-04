@@ -183,6 +183,16 @@ describe('post-release execution documentation', () => {
     expect(beads).toMatch(/merge the Git PR[\s\S]{0,120}tracked audit\/config\/code/i);
     expect(beads).toMatch(/publish the exact reviewed Dolt commit/i);
     expect(beads).toMatch(/run the protected sync/i);
+    expect(beads).toMatch(
+      /1,361 rows[\s\S]{0,240}bounded three-write audit gap[\s\S]{0,80}not an uninterrupted journal/i,
+    );
+    expect(beads).toMatch(/Use plain issue references[\s\S]{0,120}generated mirror/i);
+    expect(beads).toMatch(
+      /Never place any GitHub-supported closing keyword[\s\S]{0,240}closed[\s\S]{0,240}before a generated mirror reference/i,
+    );
+    expect(beads).toMatch(
+      /Publish the reviewed Beads source[\s\S]{0,80}then let[\s\S]{0,80}protected sync reconcile the mirror/i,
+    );
     expect(beads).not.toMatch(
       /(?:edit|change|repair) generated GitHub bodies directly/i,
     );
