@@ -105,19 +105,37 @@ describe('tracker drift validation', () => {
     expect(report.managedMirrorCount).toBe(1);
   });
 
-  it('still requires a mirror for an active Bead and for a previously mirrored closed Bead', () => {
-    const openReport = validateTrackerDrift(
+  it('still reports a missing mirror for an active Bead', () => {
+    const report = validateTrackerDrift(
       [bead({ id: 'psyche-open-unmirrored', status: 'open', priority: 1, externalRef: 'gh-200' })],
       [],
       canonicalTargets,
     );
 
-    expect(openReport.findings).toEqual([
+    expect(report.findings).toEqual([
       {
         kind: 'missing_mirror',
         beadId: 'psyche-open-unmirrored',
         sourceStatus: 'open',
         sourcePriority: 1,
+      },
+    ]);
+  });
+
+  it('keeps validating a closed Bead that does have a mirror', () => {
+    const report = validateTrackerDrift(
+      [bead({ id: 'psyche-test', status: 'closed' })],
+      [issue({ state: 'open' })],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toEqual([
+      {
+        kind: 'state_mismatch',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+        sourceStatus: 'closed',
+        mirrorState: 'open',
       },
     ]);
   });
