@@ -89,6 +89,57 @@ function outputBuffer(): { write: (value: string) => boolean; value: () => strin
 }
 
 describe('tracker drift validation', () => {
+  it('does not require a mirror for a closed Bead the synchronizer never publishes', () => {
+    const report = validateTrackerDrift(
+      [
+        bead({ id: 'psyche-closed-unmirrored', status: 'closed', externalRef: null }),
+        bead({ id: 'psyche-test' }),
+      ],
+      [issue()],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toEqual([]);
+    expect(report.result).toBe('pass');
+    expect(report.sourceCount).toBe(2);
+    expect(report.managedMirrorCount).toBe(1);
+  });
+
+  it('still reports a missing mirror for an active Bead', () => {
+    const report = validateTrackerDrift(
+      [bead({ id: 'psyche-open-unmirrored', status: 'open', priority: 1, externalRef: 'gh-200' })],
+      [],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toEqual([
+      {
+        kind: 'missing_mirror',
+        beadId: 'psyche-open-unmirrored',
+        sourceStatus: 'open',
+        sourcePriority: 1,
+      },
+    ]);
+  });
+
+  it('keeps validating a closed Bead that does have a mirror', () => {
+    const report = validateTrackerDrift(
+      [bead({ id: 'psyche-test', status: 'closed' })],
+      [issue({ state: 'open' })],
+      canonicalTargets,
+    );
+
+    expect(report.findings).toEqual([
+      {
+        kind: 'state_mismatch',
+        beadId: 'psyche-test',
+        issueNumber: 206,
+        sourceStatus: 'closed',
+        mirrorState: 'open',
+      },
+    ]);
+  });
+
   it('passes a reconciled closed Bead and closed generated mirror', () => {
     const report = validateTrackerDrift([bead()], [issue()], canonicalTargets);
 
@@ -225,7 +276,7 @@ describe('tracker drift validation', () => {
   it('detects missing, duplicate, orphan, and unverifiable generated mirrors', () => {
     const report = validateTrackerDrift(
       [
-        bead({ id: 'psyche-missing' }),
+        bead({ id: 'psyche-missing', status: 'open' }),
         bead({ id: 'psyche-test' }),
       ],
       [
@@ -246,7 +297,7 @@ describe('tracker drift validation', () => {
 
   it('retains only bounded identifiers and counts omitted findings', () => {
     const beads = Array.from({ length: TRACKER_DRIFT_FINDING_LIMIT + 25 }, (_, index) =>
-      bead({ id: `psyche-missing-${String(index).padStart(3, '0')}` }));
+      bead({ id: `psyche-missing-${String(index).padStart(3, '0')}`, status: 'open' }));
 
     const report = validateTrackerDrift(beads, [], canonicalTargets);
 

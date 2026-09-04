@@ -48,7 +48,7 @@ The validator composes two contracts rather than replacing the synchronizer:
 2. The drift validator compares every public Bead with its managed GitHub mirror and detects:
    - missing, malformed, or unknown canonical mappings;
    - canonical target priority disagreement;
-   - missing mirrors;
+   - missing mirrors for active Beads;
    - orphan mirrors;
    - duplicate managed Bead IDs;
    - missing, duplicate, empty, or malformed managed Bead markers;
@@ -61,6 +61,14 @@ The validator composes two contracts rather than replacing the synchronizer:
    - generated `Source priority` disagreement;
    - missing render-hash evidence;
    - valid-looking render hashes that do not match the canonical managed body.
+
+The synchronizer publishes a managed issue only for a Bead that is active or
+already mirrored; a closed Bead that was never published stays in the public
+Project README's closed history instead. The drift validator applies the same
+rule, so an absent mirror is drift only for an active Bead. Requiring an issue
+for every closed Bead would report permanent findings that the supported
+synchronizer can never repair, which is why the check counts fewer managed
+mirrors than source Beads.
 
 Generated issue and render-hash comments use the exact lowercase marker and
 field spelling emitted by the synchronizer. Case variants and other
@@ -102,7 +110,7 @@ Output is JSON and intentionally contains only bounded control-plane fields:
   "schemaVersion": 1,
   "result": "pass",
   "sourceCount": 111,
-  "managedMirrorCount": 111,
+  "managedMirrorCount": 27,
   "canonicalOutcomeCount": 26,
   "findingCount": 0,
   "findings": [],

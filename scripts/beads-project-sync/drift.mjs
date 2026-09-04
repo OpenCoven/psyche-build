@@ -271,12 +271,19 @@ export function validateTrackerDrift(beads, managedIssues, canonicalTargets, opt
   for (const bead of beads) {
     const issue = mirrorsByBeadId.get(bead.id);
     if (issue == null) {
-      findings.push({
-        kind: 'missing_mirror',
-        beadId: bead.id,
-        sourceStatus: bead.status,
-        sourcePriority: bead.priority,
-      });
+      // The synchronizer publishes a mirror only for a Bead that is active or
+      // already mirrored; closed Beads that were never published stay in the
+      // Project README's closed history instead. Requiring an issue for them
+      // would report permanent drift the supported synchronizer can never
+      // repair, so the absent mirror is only drift for an active Bead.
+      if (bead.status !== 'closed') {
+        findings.push({
+          kind: 'missing_mirror',
+          beadId: bead.id,
+          sourceStatus: bead.status,
+          sourcePriority: bead.priority,
+        });
+      }
       continue;
     }
 
