@@ -125,7 +125,7 @@ gates.
 | [#252](https://github.com/OpenCoven/psyche-build/issues/252) — closed 2026-08-28 | [PR #260](https://github.com/OpenCoven/psyche-build/pull/260) (`4d9f3184`) | Root agent entrypoint and deterministic bootstrap/check contract |
 | [#198](https://github.com/OpenCoven/psyche-build/issues/198) — closed 2026-08-31 | [PR #321](https://github.com/OpenCoven/psyche-build/pull/321) (`3c188481`) plus #270–#273 | Clean-checkout contributor loop, repository map, and live community-profile evidence |
 | [#243](https://github.com/OpenCoven/psyche-build/issues/243) — closed 2026-09-01 | [PR #278](https://github.com/OpenCoven/psyche-build/pull/278) (`69769cc5`) | Versioned, bounded, fail-closed support-bundle v1 schema and safe fixture; no production collector wiring, CLI, or UI |
-| [#199](https://github.com/OpenCoven/psyche-build/issues/199) | [PR #283](https://github.com/OpenCoven/psyche-build/pull/283) (`63667f30`), [PR #281](https://github.com/OpenCoven/psyche-build/pull/281) (`91ed042c`) | Visible stale-identity and corrupt-config recovery; debug-authorized rendering stress harness (closes generated #230) |
+| [#199](https://github.com/OpenCoven/psyche-build/issues/199) | [PR #283](https://github.com/OpenCoven/psyche-build/pull/283) (`63667f30`), [PR #281](https://github.com/OpenCoven/psyche-build/pull/281) (`91ed042c`) | Visible stale-identity and corrupt-config recovery; debug-authorized rendering stress harness (generated #230 was closed with it) |
 | [#196](https://github.com/OpenCoven/psyche-build/issues/196) | [PR #336](https://github.com/OpenCoven/psyche-build/pull/336) (`7018ce53`) | Linearized desktop project lifecycle, persistence, and native-authority transactions; interactive packaged acceptance still required |
 | [#279](https://github.com/OpenCoven/psyche-build/issues/279) | [PR #324](https://github.com/OpenCoven/psyche-build/pull/324) (`1642ab52`), [PR #328](https://github.com/OpenCoven/psyche-build/pull/328) (`0917ecbd`) | Capability-negotiated Coven launches with no prompt in argv or persisted launch metadata; serialized revocation and recovery |
 | [#241](https://github.com/OpenCoven/psyche-build/issues/241) | [PR #326](https://github.com/OpenCoven/psyche-build/pull/326), [PR #329](https://github.com/OpenCoven/psyche-build/pull/329), [PR #335](https://github.com/OpenCoven/psyche-build/pull/335), [PR #337](https://github.com/OpenCoven/psyche-build/pull/337), [PR #338](https://github.com/OpenCoven/psyche-build/pull/338); behavior-preserving [PR #339](https://github.com/OpenCoven/psyche-build/pull/339) and [PR #341](https://github.com/OpenCoven/psyche-build/pull/341) | Readiness core, production `ConnectionManager` composition, fenced ready-host selection, and quarantine of indeterminate authority; simulator evidence only |
@@ -265,17 +265,18 @@ pushes remain platform-blocked for `BunsDev`; all other actors require
 approval, and the owner path is an explicit PR-only bypass/admin merge after
 exact-head checks and resolved conversations, never a self-approval claim.
 
-One control-state regression is under repair: the
+One control-state regression was opened and resolved in this window: the
 scheduled Beads Project sync failed on every scheduled run from 2026-08-30
 until 2026-09-02 after an accidental Beads v1.2.1 binary on one checkout
-migrated the shared Dolt schema;
-the cursor was rolled back per the upstream recovery guide on 2026-09-02. The
-public mirror stays stale until the first unattended apply succeeds, and the
-read-only validator still reports the `psyche-z7c.4.4`/#230 state mismatch.
-Repair is source-first through Beads and the supported synchronizer; generated
-mirror bodies are never the place to repair it.
-[#342](https://github.com/OpenCoven/psyche-build/issues/342) owns the repair
-under #195.
+migrated the shared Dolt schema and published it. The cursor was rolled back
+per the upstream recovery guide, the versioned `events` audit table was
+re-tracked, `psyche-z7c.4.4` was closed source-first, and the synchronizer
+regenerated its #230 mirror from that corrected source. Scheduled applies have
+succeeded since 2026-09-03 and the read-only validator exits `0`. Repair stayed
+source-first through Beads and the supported synchronizer; generated mirror
+bodies were never the place to repair it.
+[#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the
+evidence under #195.
 
 ## Stage 1 — close the supported release stabilization baseline
 
