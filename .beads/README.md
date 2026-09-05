@@ -33,10 +33,21 @@ the pull request merges and closes the referenced issue directly, changing
 managed mirror state outside the synchronizer and outside the authoritative
 Bead.
 
-This is easy to trigger while *describing* mirror state. Prose such as "the
-scheduled apply closes #230" reads as narration but is an executable closing
-directive. Write "the scheduled apply closes the #230 mirror", "closes issue
-#230 from source", or simply "#230" instead.
+This is easy to trigger while *describing* mirror state. Narrating that a
+scheduled apply will close a mirror, with the keyword immediately before the
+number, is an executable closing directive rather than a description.
+
+Do not try to defuse a closing keyword by inserting a word such as `the` or
+`issue` between it and the number. Whether GitHub's parser tolerates that
+filler is an undocumented detail that can change, and a rule that depends on it
+is not a rule. Keep closing keywords away from mirror references entirely
+(`#NNN` stands for the mirror's number):
+
+- put the reference first — "`#NNN` is closed by the scheduled apply";
+- use a neutral verb — "the scheduled apply reconciles `#NNN`", "the
+  synchronizer publishes the closed state to `#NNN`", "mirror `#NNN` then
+  reflects the closed Bead";
+- or write the bare reference — "`#NNN`".
 
 Observed on 2026-09-04: merging [PR #346](https://github.com/OpenCoven/psyche-build/pull/346)
 auto-closed mirror #230 through such a phrase minutes before the synchronizer
