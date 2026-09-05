@@ -326,6 +326,7 @@ Current scenarios:
 | `unwritable-state-storage` | `.psyche` made read-only after its runtime subdirectory exists | `persistence-failure-surfaced`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 | `duplicate-command-retry` | The same command replayed after the control journal is reopened | `effect-executed-exactly-once`, `retry-reconciles-canonical-outcome`, `reconciliation-survives-restart`, `uncommitted-work-untouched` |
 | `stale-owner-epoch` | A valid capability lease asserted with the pre-restart owner epoch | `stale-epoch-assertion-rejected`, `current-epoch-assertion-accepted` |
+| `interrupted-cleanup-recovery-marker` | Cleanup abandoned after publishing its recovery marker | `worktree-retained-after-interruption`, `recovery-marker-discoverable`, `recovery-marker-names-the-worktree`, `recovery-marker-carries-operator-instructions`, `uncommitted-work-untouched` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -362,9 +363,17 @@ client that never observed the restart would present, and expects
 accepted — a deliberate positive control, because a change that rejected every
 assertion would satisfy the rejection invariant while breaking all authority.
 
-The remaining #199 scenarios — unavailable providers, interrupted cleanup, and
-upgrade recovery — are not yet implemented and must not be implied by a
-passing run.
+`interrupted-cleanup-recovery-marker` covers the #196 and #239 requirement
+that a close or cleanup never silently discards the only copy of uncommitted
+work, and that an interrupted cleanup leaves an explicit reconciliation action.
+Its scope is deliberately narrow: it proves the durable-evidence half — the
+worktree and its uncommitted file survive, and the published marker names the
+worktree and carries operator instructions. It does **not** interrupt
+`WorktreeCleanupService` mid-flight, so it must not be read as covering the
+full cleanup path.
+
+The remaining #199 scenarios — unavailable providers and upgrade recovery —
+are not yet implemented and must not be implied by a passing run.
 
 ## Failure-oriented acceptance — #239
 

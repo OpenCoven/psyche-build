@@ -22,6 +22,10 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'reconciliation-survives-restart',
   'stale-epoch-assertion-rejected',
   'current-epoch-assertion-accepted',
+  'worktree-retained-after-interruption',
+  'recovery-marker-discoverable',
+  'recovery-marker-names-the-worktree',
+  'recovery-marker-carries-operator-instructions',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -30,6 +34,7 @@ const DIGEST_IDS: readonly RecoveryDigestId[] = [
   'configAfter',
   'workAfter',
   'effectLog',
+  'worktreeWorkAfter',
 ];
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -109,6 +114,20 @@ describe('disposable recovery harness', () => {
     // Positive control: rejecting every assertion would satisfy the rejection
     // invariant while breaking all authority, so acceptance is asserted too.
     expect(byId.get('current-epoch-assertion-accepted')).toBe(true);
+  });
+
+  it('retains an abandoned worktree and leaves an actionable recovery marker', async () => {
+    const report = await runRecoveryHarness(['interrupted-cleanup-recovery-marker']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('cleanup_recoverable');
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    expect(byId.get('worktree-retained-after-interruption')).toBe(true);
+    expect(byId.get('recovery-marker-discoverable')).toBe(true);
+    // A marker that does not name the worktree, or carries no instructions,
+    // is not a reconciliation action — it is a silent cleanup with a file.
+    expect(byId.get('recovery-marker-names-the-worktree')).toBe(true);
+    expect(byId.get('recovery-marker-carries-operator-instructions')).toBe(true);
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {
