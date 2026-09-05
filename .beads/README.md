@@ -23,6 +23,30 @@ and affected issue identifiers out of public updates.
 
 Psyche Build currently standardizes automation on Beads CLI **1.2.2**.
 
+## Never use closing keywords for a generated mirror
+
+Reference a generated mirror issue as a bare `#<number>` only. Never write a
+GitHub closing keyword (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
+`resolve`, `resolves`, `resolved`) before a mirror's number in a pull-request
+body, pull-request title, or commit message. GitHub acts on those keywords when
+the pull request merges and closes the referenced issue directly, changing
+managed mirror state outside the synchronizer and outside the authoritative
+Bead.
+
+This is easy to trigger while *describing* mirror state. Prose such as "the
+scheduled apply closes #230" reads as narration but is an executable closing
+directive. Write "the scheduled apply closes the #230 mirror", "closes issue
+#230 from source", or simply "#230" instead.
+
+Observed on 2026-09-04: merging [PR #346](https://github.com/OpenCoven/psyche-build/pull/346)
+auto-closed mirror #230 through such a phrase minutes before the synchronizer
+would have closed it from the corrected Bead. The end state was the intended
+one, but the mirror had been closed by GitHub automation rather than by the
+supported source-first path ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
+
+A mirror closed this way is not repaired by reopening it by hand. Correct the
+Bead if it is wrong, then let the synchronizer publish the true state.
+
 ## Beads CLI fleet rule
 
 Every checkout, worktree, container, and automation runner that touches this
