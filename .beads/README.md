@@ -44,15 +44,16 @@ is not a rule. Keep closing keywords away from mirror references entirely
 
 - put the reference first — "`#NNN` is closed by the scheduled apply";
 - use a neutral verb — "the scheduled apply reconciles `#NNN`", "the
-  synchronizer publishes the closed state to `#NNN`", "mirror `#NNN` then
-  reflects the closed Bead";
+  synchronizer publishes the Bead's state to `#NNN`", "mirror `#NNN` then
+  reflects the source";
 - or write the bare reference — "`#NNN`".
 
-Observed on 2026-09-04: merging [PR #346](https://github.com/OpenCoven/psyche-build/pull/346)
-auto-closed mirror #230 through such a phrase minutes before the synchronizer
-would have closed it from the corrected Bead. The end state was the intended
-one, but the mirror had been closed by GitHub automation rather than by the
-supported source-first path ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
+Observed on 2026-09-04: mirror #230 was closed by GitHub when
+[PR #346](https://github.com/OpenCoven/psyche-build/pull/346) merged carrying
+such a phrase in its body, minutes before the synchronizer would have published
+the same state from the corrected Bead. The end state was the intended one, but
+the mirror had been changed by GitHub automation rather than by the supported
+source-first path ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
 
 A mirror closed this way is not repaired by reopening it by hand. Correct the
 Bead if it is wrong, then let the synchronizer publish the true state.
