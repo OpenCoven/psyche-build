@@ -26,7 +26,14 @@ export function readDesktopCommandSurface(): string {
 
   const sources = new Map<string, string>();
   for (const entry of entries) {
-    sources.set(entry, readFileSync(resolve(directory, entry), 'utf8'));
+    // Normalize line endings. Several callers slice Rust source with
+    // `indexOf('\n}\n')`, and `.gitattributes` does not pin `*.rs` to LF, so a
+    // CRLF checkout would make those slices silently miss. Assertions here are
+    // about Rust structure, never about line-ending bytes.
+    sources.set(
+      entry,
+      readFileSync(resolve(directory, entry), 'utf8').replace(/\r\n/gu, '\n'),
+    );
   }
 
   const registrations = [...sources.entries()]
