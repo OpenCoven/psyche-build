@@ -193,6 +193,11 @@ applying this procedure and update both the payload and this documentation if
 an enabled method changes. Classic linear-history enforcement still prevents a
 merge commit from landing on `main`, while squash and rebase remain usable.
 
+The ruleset payload no longer names an actor, so nothing interpolates the owner
+ID. The identity preflight below remains as an operator guard: it stops the
+procedure when the account running it is not the expected owner, before any
+policy mutation.
+
 ```sh
 expected_bunsdev_id=68980965
 bunsdev_id="$(gh api users/BunsDev --jq .id)"
@@ -204,7 +209,7 @@ fi
 gh api repos/OpenCoven/psyche-build \
   --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
 
-main_ruleset_payload="$(jq -cn --argjson bunsdev_id "$bunsdev_id" '{
+main_ruleset_payload="$(jq -cn '{
   name: "Main pull request governance",
   target: "branch",
   enforcement: "active",
@@ -250,7 +255,7 @@ fi
 
 verified_main_ruleset="$(gh api "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id")"
 printf '%s\n' "$verified_main_ruleset" |
-  jq -e --argjson bunsdev_id "$bunsdev_id" '
+  jq -e '
     .name == "Main pull request governance" and
     .target == "branch" and
     .enforcement == "active" and
