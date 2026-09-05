@@ -15,12 +15,16 @@
  */
 
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
+import {
+  listWorktreeRecoveryMarkers,
+  writeWorktreeRecoveryMarker,
+} from '../services/WorktreeRecoveryMarker.js';
 import {
   ProjectPaneConfigError,
   acquireProjectPaneConfigLock,
@@ -34,14 +38,16 @@ export type RecoveryScenarioId =
   | 'stale-pane-config-lock'
   | 'unwritable-state-storage'
   | 'duplicate-command-retry'
-  | 'stale-owner-epoch';
+  | 'stale-owner-epoch'
+  | 'interrupted-cleanup-recovery-marker';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
   | 'pane-config-lock-held-by-dead-owner'
   | 'state-directory-made-read-only'
   | 'command-replayed-after-journal-restart'
-  | 'lease-asserted-with-pre-restart-owner-epoch';
+  | 'lease-asserted-with-pre-restart-owner-epoch'
+  | 'cleanup-abandoned-after-marker-publication';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -51,6 +57,7 @@ export type RecoveryClassification =
   | 'injection_ineffective'
   | 'outcome_reconciled'
   | 'owner_restart_fenced'
+  | 'cleanup_recoverable'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -68,7 +75,11 @@ export type RecoveryInvariantId =
   | 'retry-reconciles-canonical-outcome'
   | 'reconciliation-survives-restart'
   | 'stale-epoch-assertion-rejected'
-  | 'current-epoch-assertion-accepted';
+  | 'current-epoch-assertion-accepted'
+  | 'worktree-retained-after-interruption'
+  | 'recovery-marker-discoverable'
+  | 'recovery-marker-names-the-worktree'
+  | 'recovery-marker-carries-operator-instructions';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -76,7 +87,8 @@ export type RecoveryDigestId =
   | 'configInjected'
   | 'configAfter'
   | 'workAfter'
-  | 'effectLog';
+  | 'effectLog'
+  | 'worktreeWorkAfter';
 
 export interface RecoveryInvariantResult {
   readonly id: RecoveryInvariantId;
@@ -127,7 +139,13 @@ async function createDisposableWorkspace(): Promise<{
   workPath: string;
   dispose: () => Promise<void>;
 }> {
-  const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-recovery-'));
+  // The product canonicalizes project and worktree paths, and on macOS the
+  // system temp directory is a symlink (`/var` -> `/private/var`). Canonicalize
+  // here so a scenario comparing a stored path against its own path is
+  // comparing like with like rather than failing on the symlink form.
+  const projectRoot = await realpath(
+    await mkdtemp(path.join(tmpdir(), 'psyche-recovery-')),
+  );
   await mkdir(path.join(projectRoot, '.psyche'), { recursive: true });
   await writeFile(
     projectPaneConfigPath(projectRoot),
@@ -500,6 +518,80 @@ async function runStaleOwnerEpoch(): Promise<RecoveryScenarioEvidence> {
   );
 }
 
+/**
+ * #196 and #239 require that a close or cleanup never silently discards the
+ * only copy of uncommitted work, and that an interrupted cleanup leaves an
+ * explicit reconciliation action rather than an unexplained missing worktree.
+ *
+ * Scope, stated precisely: this drives the durable-evidence half of that
+ * contract — the recovery marker is published, the worktree and its
+ * uncommitted file survive, and the marker names the worktree and carries
+ * operator instructions. It does not interrupt `WorktreeCleanupService`
+ * mid-flight, so it must not be read as covering the full cleanup path.
+ */
+async function runInterruptedCleanupRecoveryMarker(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const worktreePath = path.join(workspace.projectRoot, 'worktree-pane-1');
+    await mkdir(worktreePath, { recursive: true });
+    const worktreeWorkPath = path.join(worktreePath, 'uncommitted-in-worktree.txt');
+    await writeFile(worktreeWorkPath, 'the only copy of this worktree work\n', 'utf8');
+    const worktreeWorkBefore = digest(await readFile(worktreeWorkPath));
+    const workBefore = digest(await readFile(workspace.workPath));
+
+    // Cleanup publishes its recovery marker and is then abandoned, which is
+    // the state a crash between marker publication and worktree removal
+    // leaves behind.
+    await writeWorktreeRecoveryMarker({
+      projectRoot: workspace.projectRoot,
+      worktreePath,
+      pane: { id: 'harness-pane', paneId: '%1', slug: 'harness-pane' },
+      operation: 'cleanup',
+      reason: 'harness interrupted cleanup',
+    });
+
+    const markers = await listWorktreeRecoveryMarkers(workspace.projectRoot);
+    const marker = markers.find((entry) => entry.worktreePath === worktreePath);
+
+    let worktreeWorkAfter: string | undefined;
+    try {
+      worktreeWorkAfter = digest(await readFile(worktreeWorkPath));
+    } catch {
+      worktreeWorkAfter = undefined;
+    }
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    const retained = worktreeWorkAfter === worktreeWorkBefore;
+    const discoverable = markers.length > 0;
+    const namesWorktree = marker !== undefined;
+    const actionable = typeof marker?.operatorInstructions === 'string'
+      && marker.operatorInstructions.length > 0;
+
+    return evidence(
+      'interrupted-cleanup-recovery-marker',
+      'cleanup-abandoned-after-marker-publication',
+      retained && discoverable && namesWorktree && actionable
+        ? 'cleanup_recoverable'
+        : 'unexpected_success',
+      [
+        { id: 'worktree-retained-after-interruption', held: retained },
+        { id: 'recovery-marker-discoverable', held: discoverable },
+        { id: 'recovery-marker-names-the-worktree', held: namesWorktree },
+        { id: 'recovery-marker-carries-operator-instructions', held: actionable },
+        { id: 'uncommitted-work-untouched', held: workAfter === workBefore },
+      ],
+      {
+        workAfter,
+        ...(worktreeWorkAfter ? { worktreeWorkAfter } : {}),
+      },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -508,6 +600,7 @@ const SCENARIOS: Readonly<
   'unwritable-state-storage': runUnwritableStateStorage,
   'duplicate-command-retry': runDuplicateCommandRetry,
   'stale-owner-epoch': runStaleOwnerEpoch,
+  'interrupted-cleanup-recovery-marker': runInterruptedCleanupRecoveryMarker,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
