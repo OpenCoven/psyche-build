@@ -25,13 +25,12 @@ Psyche Build currently standardizes automation on Beads CLI **1.2.2**.
 
 ## Never use closing keywords for a generated mirror
 
-Reference a generated mirror issue as a bare `#<number>` only. Never write a
-GitHub closing keyword (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
-`resolve`, `resolves`, `resolved`) before a mirror's number in a pull-request
-body, pull-request title, or commit message. GitHub acts on those keywords when
-the pull request merges and closes the referenced issue directly, changing
-managed mirror state outside the synchronizer and outside the authoritative
-Bead.
+Use plain issue references when a PR title, body, or commit message mentions a
+generated mirror. Never place any GitHub-supported closing keyword—including
+`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or
+`resolved`—before a generated mirror reference: merging the PR would change the
+mirror outside the synchronizer and outside the authoritative Bead. Publish the
+reviewed Beads source, then let the protected sync reconcile the mirror.
 
 This is easy to trigger while *describing* mirror state. Narrating that a
 scheduled apply will close a mirror, with the keyword immediately before the
@@ -45,15 +44,16 @@ is not a rule. Keep closing keywords away from mirror references entirely
 
 - put the reference first — "`#NNN` is closed by the scheduled apply";
 - use a neutral verb — "the scheduled apply reconciles `#NNN`", "the
-  synchronizer publishes the closed state to `#NNN`", "mirror `#NNN` then
-  reflects the closed Bead";
+  synchronizer publishes the Bead's state to `#NNN`", "mirror `#NNN` then
+  reflects the source";
 - or write the bare reference — "`#NNN`".
 
-Observed on 2026-09-04: merging [PR #346](https://github.com/OpenCoven/psyche-build/pull/346)
-auto-closed mirror #230 through such a phrase minutes before the synchronizer
-would have closed it from the corrected Bead. The end state was the intended
-one, but the mirror had been closed by GitHub automation rather than by the
-supported source-first path ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
+Observed on 2026-09-04: mirror #230 was closed by GitHub when
+[PR #346](https://github.com/OpenCoven/psyche-build/pull/346) merged carrying
+such a phrase in its body, minutes before the synchronizer would have published
+the same state from the corrected Bead. The end state was the intended one, but
+the mirror had been changed by GitHub automation rather than by the supported
+source-first path ([#342](https://github.com/OpenCoven/psyche-build/issues/342)).
 
 A mirror closed this way is not repaired by reopening it by hand. Correct the
 Bead if it is wrong, then let the synchronizer publish the true state.
@@ -112,12 +112,9 @@ change:
 Do not publish a different Dolt state after the Git review, and do not use a
 generated GitHub body to reconstruct or repair Beads.
 
-Use plain issue references when a PR title, body, or commit message mentions a
-generated mirror. Never place any GitHub-supported closing keyword—including
-`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or
-`resolved`—before a generated mirror reference: merging the PR would change the
-mirror outside the synchronizer. Publish the reviewed Beads source, then let
-the protected sync reconcile the mirror.
+The PR in step 3 names a generated mirror, so keep GitHub closing keywords away
+from that reference; see
+[Never use closing keywords for a generated mirror](#never-use-closing-keywords-for-a-generated-mirror).
 
 ## Sole migrator rule
 

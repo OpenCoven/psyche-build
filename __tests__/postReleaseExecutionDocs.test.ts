@@ -186,12 +186,12 @@ describe('post-release execution documentation', () => {
     expect(beads).toMatch(
       /1,361 rows[\s\S]{0,240}bounded three-write audit gap[\s\S]{0,80}not an uninterrupted journal/i,
     );
-    expect(beads).toMatch(/Use plain issue references[\s\S]{0,120}generated mirror/i);
+    expect(beads).toMatch(/Use\s+plain\s+issue\s+references[\s\S]{0,120}generated\s+mirror/i);
     expect(beads).toMatch(
-      /Never place any GitHub-supported closing keyword[\s\S]{0,240}closed[\s\S]{0,240}before a generated mirror reference/i,
+      /Never\s+place\s+any\s+GitHub-supported\s+closing\s+keyword[\s\S]{0,240}closed[\s\S]{0,240}before\s+a\s+generated\s+mirror\s+reference/i,
     );
     expect(beads).toMatch(
-      /Publish the reviewed Beads source[\s\S]{0,80}then let[\s\S]{0,80}protected sync reconcile the mirror/i,
+      /Publish\s+the\s+reviewed\s+Beads\s+source[\s\S]{0,80}then\s+let[\s\S]{0,80}protected\s+sync\s+reconcile\s+the\s+mirror/i,
     );
     expect(beads).not.toMatch(
       /(?:edit|change|repair) generated GitHub bodies directly/i,
