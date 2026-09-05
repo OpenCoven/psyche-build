@@ -19,6 +19,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
 import {
   ProjectPaneConfigError,
   acquireProjectPaneConfigLock,
@@ -30,12 +31,14 @@ import {
 export type RecoveryScenarioId =
   | 'corrupt-pane-config'
   | 'stale-pane-config-lock'
-  | 'unwritable-state-storage';
+  | 'unwritable-state-storage'
+  | 'duplicate-command-retry';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
   | 'pane-config-lock-held-by-dead-owner'
-  | 'state-directory-made-read-only';
+  | 'state-directory-made-read-only'
+  | 'command-replayed-after-journal-restart';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -43,6 +46,7 @@ export type RecoveryClassification =
   | 'lock_taken_over'
   | 'persistence_failed'
   | 'injection_ineffective'
+  | 'outcome_reconciled'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -55,14 +59,18 @@ export type RecoveryInvariantId =
   | 'stale-lease-released'
   | 'persisted-config-unchanged'
   | 'persisted-config-readable'
-  | 'persistence-failure-surfaced';
+  | 'persistence-failure-surfaced'
+  | 'effect-executed-exactly-once'
+  | 'retry-reconciles-canonical-outcome'
+  | 'reconciliation-survives-restart';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
   | 'configBefore'
   | 'configInjected'
   | 'configAfter'
-  | 'workAfter';
+  | 'workAfter'
+  | 'effectLog';
 
 export interface RecoveryInvariantResult {
   readonly id: RecoveryInvariantId;
@@ -355,12 +363,70 @@ async function runUnwritableStateStorage(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * Listed unproven in #239: a duplicate retry must reconcile the canonical
+ * outcome rather than repeat the effect. The journal is reopened between the
+ * two attempts, so a pass proves durable reconciliation rather than an
+ * in-memory cache hit that a restart would lose.
+ */
+async function runDuplicateCommandRetry(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    await mkdir(path.join(workspace.projectRoot, '.psyche', 'runtime'), { recursive: true });
+    const idempotencyKey = 'harness-duplicate-retry';
+    const effectPath = path.join(workspace.projectRoot, 'effect-log.txt');
+    let effectCount = 0;
+
+    // Models the real reconciliation path: consult the journal first, perform
+    // the effect only when no canonical outcome exists, then record it.
+    const attempt = async (journal: ControlJournal) => {
+      const existing = await journal.loadOutcome(idempotencyKey);
+      if (existing) return existing;
+      effectCount += 1;
+      await writeFile(effectPath, `effect ${effectCount}\n`, 'utf8');
+      const outcome = { status: 'succeeded' as const, value: { applied: true } };
+      await journal.storeOutcome(idempotencyKey, outcome);
+      return outcome;
+    };
+
+    const first = await ControlJournal.open(workspace.projectRoot, 1);
+    const firstOutcome = await attempt(first);
+
+    // Reopen rather than reuse: durability is the property under test.
+    const second = await ControlJournal.open(workspace.projectRoot, 1);
+    const retriedOutcome = await attempt(second);
+    const reloaded = await second.loadOutcome(idempotencyKey);
+
+    const workAfter = digest(await readFile(workspace.workPath));
+    const sameOutcome = exactCommandOutcomeDigest(firstOutcome)
+      === exactCommandOutcomeDigest(retriedOutcome);
+
+    return evidence(
+      'duplicate-command-retry',
+      'command-replayed-after-journal-restart',
+      effectCount === 1 ? 'outcome_reconciled' : 'unexpected_success',
+      [
+        { id: 'effect-executed-exactly-once', held: effectCount === 1 },
+        { id: 'retry-reconciles-canonical-outcome', held: sameOutcome },
+        { id: 'reconciliation-survives-restart', held: reloaded !== undefined },
+        { id: 'uncommitted-work-untouched', held: workAfter === digest('the only copy of this work\n') },
+      ],
+      { effectLog: digest(await readFile(effectPath)), workAfter },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
   'corrupt-pane-config': runCorruptPaneConfig,
   'stale-pane-config-lock': runStalePaneConfigLock,
   'unwritable-state-storage': runUnwritableStateStorage,
+  'duplicate-command-retry': runDuplicateCommandRetry,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
