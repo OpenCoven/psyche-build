@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const provider = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/control_provider.rs',
@@ -9,10 +10,7 @@ const platform = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/platform/mod.rs',
   import.meta.url,
 ), 'utf8');
-const lib = readFileSync(new URL(
-  '../native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
-  import.meta.url,
-), 'utf8');
+const lib = readDesktopCommandSurface();
 const nativeFocus = readFileSync(new URL(
   '../native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs',
   import.meta.url,

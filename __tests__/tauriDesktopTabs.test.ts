@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -8,10 +9,7 @@ const mainJs = readFileSync(
   'utf8',
 ).replace(/\r\n/g, '\n');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
-const tauriLib = readFileSync(
-  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
-  'utf8',
-).replace(/\r\n/g, '\n');
+const tauriLib = readDesktopCommandSurface();
 const nativeFocus = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs'),
   'utf8',

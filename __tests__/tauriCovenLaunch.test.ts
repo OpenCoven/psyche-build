@@ -8,12 +8,10 @@ import {
   routePtyBatch,
 } from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
 import { withFilesScopeSelectionHelper } from './tauriMainHarness';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const repoRoot = process.cwd();
-const libRs = readFileSync(
-  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
-  'utf8',
-);
+const libRs = readDesktopCommandSurface();
 const mainJs = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
