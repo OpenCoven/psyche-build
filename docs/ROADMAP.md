@@ -213,7 +213,7 @@ Deferred P2 trains
 | [#241 — atomic iOS readiness](https://github.com/OpenCoven/psyche-build/issues/241) | P1 | iOS | Readiness core (#326), production composition (#329), and ready-selection hardening (#335/#337/#338) are merged; discovery/reconnect UX, lifecycle acceptance, physical-device, and real-Keychain partial-write evidence remain open |
 | [#280 — single-use iOS invite authentication](https://github.com/OpenCoven/psyche-build/issues/280) | P1 | iOS | The protocol/fixture slice merged in PR #323; desktop issuer, iOS credential exchange, QR/deep-link UX, physical acceptance, and distribution evidence remain open |
 | [#242 — production ritual path](https://github.com/OpenCoven/psyche-build/issues/242) | P1 | iOS | Publication merged in PR #322; the registered execution path, canonical receipts, and capability-gated controls remain open |
-| [#199 — operations, diagnostics, and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and reusable failure harnesses recover deterministically; #278, #281, and #283 are merged inputs, and operator-observed harness scenarios remain open |
+| [#199 — operations, diagnostics, and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and reusable failure harnesses recover deterministically; the harness is delivered through PRs #354-#359 with CI-retained evidence, and the support-bundle production surface plus provider/upgrade scenarios remain open |
 | [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Reliability | **Delivered** — closed 2026-09-01 by PR #278 (`69769cc5`); schema, bounds, redaction, and fixture only |
 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Community | **Delivered** — closed 2026-08-31 by PR #321 (`3c188481`) with a credential-free clean-checkout run and live community-profile evidence |
 | [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Community | **Delivered** — closed 2026-08-28 by PR #261 (`267b8809`) |
@@ -328,16 +328,29 @@ identities.
 
 **Owner:** #199 (#243 delivered).
 
-#199/#243 retains its P1 dependency gate for the remaining harness work: the
-#243 schema slice is delivered through PR #278, while reusable failure harnesses
-follow observed #239 cases.
+#199/#243 retains its P1 dependency gate for the scenarios that remain:
+unavailable providers and upgrade recovery still follow observed #239 operator
+cases rather than being inferred.
+
+The #243 schema slice is delivered through PR #278, and the reusable
+disposable failure-injection and recovery harness is delivered through
+PRs #354-#359. It covers six scenarios against the real production paths —
+corrupt pane config, stale config lease, unwritable state storage, duplicate
+command retry, stale owner epoch, and interrupted-cleanup recovery evidence —
+runs from a clean checkout as `pnpm recovery:harness`, and runs in the Quality
+CI job with its report retained as a build artifact.
 
 The merged support-bundle v1 contract is versioned, deterministic, bounded by
 time, count, record, and total size, cancellable, and redacts by default. It
-has no production collector wiring, CLI, or UI yet. Turn #239 observations into
-reusable disposable failure-injection and recovery scenarios, and integrate
-only focused, safe portions of former PR #190 that materially improve the
-bounded contract.
+has no production collector wiring, CLI, or UI yet.
+
+#199 remains open. The harness covers the failure classes reachable without a
+running application; unavailable providers, upgrade recovery, and full
+mid-flight cleanup interruption are deliberately uncovered, and the
+support-bundle production surface is unbuilt. Those follow observed #239
+operator cases rather than being inferred, and only focused, safe portions of
+former PR #190 should be integrated where they materially improve the bounded
+contract.
 
 ## Stage 4 — contributor and security readiness (delivered)
 

@@ -110,7 +110,7 @@ only where the concurrency rules explicitly permit it.
 | 4 | #200 discovery, reconnect, and physical same-LAN acceptance | P1 | A physical iPhone preserves authoritative host/workspace state through restart, suspension, network interruption, revocation, and reconnect |
 | 5 | [#242 — production ritual publication and execution](https://github.com/OpenCoven/psyche-build/issues/242) | P1 | PR #322 merged publication only; the registered execution path must return canonical state/receipts before capability-gated controls appear |
 | 6 | #200 internal TestFlight | P1 | One immutable distributed build repeats the physical connection, action, reconnect, host-restart, and revocation matrix |
-| 7 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) ([#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P1 | Reusable recovery harnesses built from observed #239 cases replace maintainer-only inference; the v1 schema is delivered without production collector wiring |
+| 7 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) ([#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P1 | The recovery harness is delivered through PRs #354-#359 and retains evidence in CI; the v1 schema has no production collector wiring, and provider/upgrade scenarios stay gated on observed #239 cases |
 | 8 | [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Stable lifecycle, persistence, pane/process, browser/Git, and UI-state seams are extracted without public-contract drift |
 | 9 | [#201 — OpenCoven identity and Threads convergence](https://github.com/OpenCoven/psyche-build/issues/201) with [#253 — Psyche compatibility canary](https://github.com/OpenCoven/psyche-build/issues/253) and [#279 — Coven launch adapter](https://github.com/OpenCoven/psyche-build/issues/279) | P2 | A pinned profile and incremental adapters preserve protocol-owned identity without blocking supported-product work |
 | 10 | [#246 — cross-platform Vim and keyboard-mode parity](https://github.com/OpenCoven/psyche-build/issues/246) | P2 | Opt-in shared semantics preserve terminal passthrough and earn evidence independently on each claimed platform; the shared v1 fixture contract is merged |
@@ -249,10 +249,16 @@ same-LAN beta; it does not block that beta.
 
 ## Stage 3 — operations and contributor readiness
 
-#199/#243 retains its P1 dependency gate for the remaining #199 work:
-support-bundle schema and redaction landed through PR #278, and #243 closed
-with it,
-while reusable recovery harnesses follow observed #239 cases.
+#199/#243 retains its P1 dependency gate for the scenarios that remain:
+unavailable providers and upgrade recovery still follow observed #239 operator
+cases rather than being inferred.
+
+Support-bundle schema and redaction landed through PR #278, and #243 closed
+with it. The reusable disposable failure-injection and recovery harness landed
+through PRs #354-#359: six scenarios driving the real production paths, a
+`pnpm recovery:harness` entry point that runs from a clean checkout, and a
+Quality CI step that retains each run's report as a build artifact. Every
+invariant was proved load-bearing by reintroducing the defect it guards.
 
 The merged bundle contract is versioned, deterministic, bounded by
 time/count/record/total size, cancellable, and automatically redacts
@@ -261,6 +267,12 @@ environment variables, infrastructure details, and full user paths. It has no
 production collector wiring, persistence, CLI, or UI. PR #281 delivered the
 debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
+
+#199 remains open for the failure classes the harness deliberately does not
+cover — unavailable providers, upgrade recovery, and interrupting
+`WorktreeCleanupService` mid-flight — plus the support-bundle production
+surface. The first two need observed #239 operator cases or two real installed
+builds, so they stay gated rather than inferred.
 
 #198/#244 is delivered. PR #261 landed the minimum security, ownership,
 support, issue, PR, conduct, and protected-data floor, and PR #321 closed the
