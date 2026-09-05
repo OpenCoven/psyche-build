@@ -321,13 +321,21 @@ Current scenarios:
 
 | Scenario | Injected failure | Invariants |
 |---|---|---|
-| `corrupt-pane-config` | Pane config replaced with invalid JSON | Classified `config_corrupt`; corrupt bytes preserved; uncommitted work untouched |
-| `stale-pane-config-lock` | Lease held by an unreachable owner | Stale lease taken over; persisted config unchanged and still readable; uncommitted work untouched |
+| `corrupt-pane-config` | Pane config replaced with invalid JSON | `failure-classified-as-corrupt`, `corrupt-bytes-preserved`, `uncommitted-work-untouched` |
+| `stale-pane-config-lock` | Lease held by an unreachable owner | `stale-lease-taken-over`, `stale-lease-released`, `persisted-config-unchanged`, `persisted-config-readable`, `uncommitted-work-untouched` |
 
-The emitted report is bounded and sanitized by construction: enumerated
-identifiers, booleans, and SHA-256 digests only. No path, file content,
-project name, or raw error message is retained, so a report can be attached to
-a public outcome without a redaction pass.
+`stale-lease-released` is verified by reacquiring the lease rather than by
+trusting `release()` to have returned. A lease still held by the live harness
+process is not stale, so a second acquisition blocks and times out instead of
+taking over, which is what makes an unreleased lock observable.
+
+The emitted report is bounded and sanitized by construction. Every field is a
+member of a closed union declared in the harness module, a boolean, or a
+SHA-256 digest, including invariant identifiers and digest keys. The types are
+the enforcement: there is no field a future change could set to a path, a
+file's contents, or a raw error message without first widening a union. A
+report can therefore be attached to a public outcome without a redaction
+pass.
 
 The remaining #199 scenarios — unavailable providers, interrupted cleanup,
 duplicate command retry, old owner epochs, unwritable state, and upgrade

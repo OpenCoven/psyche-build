@@ -7,10 +7,11 @@
  * test: the point is to observe what actually happens to bytes on disk when a
  * failure is injected, which unit tests with mocked services cannot show.
  *
- * Evidence is bounded and sanitized by construction. Records carry enumerated
- * identifiers, booleans, and content digests only. No absolute path, file
- * content, project name, credential, or raw error message is retained, so a
- * report can be attached to a public outcome without a redaction pass.
+ * Every field in the emitted evidence is either a member of a closed union
+ * declared in this file, a boolean, or a SHA-256 digest. The types are the
+ * enforcement, not a convention: there is no field a future change could set
+ * to a path, a file's contents, or a raw error message without first widening
+ * a union here.
  */
 
 import { createHash } from 'node:crypto';
@@ -25,7 +26,6 @@ import {
   readProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
 
-/** Scenario identifiers are enumerated so evidence can never leak free text. */
 export type RecoveryScenarioId =
   | 'corrupt-pane-config'
   | 'stale-pane-config-lock';
@@ -41,8 +41,25 @@ export type RecoveryClassification =
   | 'unexpected_success'
   | 'unexpected_error';
 
+/** Closed set of invariant identifiers; no free-text invariant label exists. */
+export type RecoveryInvariantId =
+  | 'failure-classified-as-corrupt'
+  | 'corrupt-bytes-preserved'
+  | 'uncommitted-work-untouched'
+  | 'stale-lease-taken-over'
+  | 'stale-lease-released'
+  | 'persisted-config-unchanged'
+  | 'persisted-config-readable';
+
+/** Closed set of digest keys, so digest maps cannot carry derived names. */
+export type RecoveryDigestId =
+  | 'configBefore'
+  | 'configInjected'
+  | 'configAfter'
+  | 'workAfter';
+
 export interface RecoveryInvariantResult {
-  readonly name: string;
+  readonly id: RecoveryInvariantId;
   readonly held: boolean;
 }
 
@@ -52,8 +69,8 @@ export interface RecoveryScenarioEvidence {
   readonly injection: RecoveryInjectionId;
   readonly classification: RecoveryClassification;
   readonly invariants: readonly RecoveryInvariantResult[];
-  /** sha256 digests prove preservation without retaining content. */
-  readonly digests: Readonly<Record<string, string>>;
+  /** SHA-256 digests prove preservation without retaining content. */
+  readonly digests: Readonly<Partial<Record<RecoveryDigestId, string>>>;
   readonly outcome: 'passed' | 'failed';
   readonly elapsedMs: number;
 }
@@ -111,7 +128,7 @@ function evidence(
   injection: RecoveryInjectionId,
   classification: RecoveryClassification,
   invariants: readonly RecoveryInvariantResult[],
-  digests: Readonly<Record<string, string>>,
+  digests: Readonly<Partial<Record<RecoveryDigestId, string>>>,
   startedAt: number,
 ): RecoveryScenarioEvidence {
   return {
@@ -157,9 +174,9 @@ async function runCorruptPaneConfig(): Promise<RecoveryScenarioEvidence> {
       'pane-config-replaced-with-invalid-json',
       classification,
       [
-        { name: 'failure is classified as corrupt', held: classification === 'config_corrupt' },
-        { name: 'corrupt bytes are preserved, not overwritten', held: configAfter === corruptBytes },
-        { name: 'uncommitted work is untouched', held: workAfter === workBefore },
+        { id: 'failure-classified-as-corrupt', held: classification === 'config_corrupt' },
+        { id: 'corrupt-bytes-preserved', held: configAfter === corruptBytes },
+        { id: 'uncommitted-work-untouched', held: workAfter === workBefore },
       ],
       { configInjected: digest(corruptBytes), configAfter: digest(configAfter), workAfter },
       startedAt,
@@ -200,7 +217,8 @@ async function runStalePaneConfigLock(): Promise<RecoveryScenarioEvidence> {
     const workBefore = digest(await readFile(workspace.workPath));
 
     let classification: RecoveryClassification = 'unexpected_error';
-    let acquired = false;
+    let takenOver = false;
+    let released = false;
     try {
       const lock = await acquireProjectPaneConfigLock(workspace.projectRoot, {
         // The owner pid is deliberately unreachable; state it explicitly so the
@@ -209,11 +227,22 @@ async function runStalePaneConfigLock(): Promise<RecoveryScenarioEvidence> {
         timeoutMs: 2_000,
         pollIntervalMs: 25,
       });
-      acquired = true;
+      takenOver = true;
       classification = 'lock_taken_over';
       await lock.release();
+
+      // Prove the release actually freed the lease rather than trusting the
+      // call to have worked. A lease still held by this live process is not
+      // stale, so a second acquisition would block and time out instead of
+      // taking over — which is exactly the failure this check must catch.
+      const reacquired = await acquireProjectPaneConfigLock(workspace.projectRoot, {
+        timeoutMs: 1_000,
+        pollIntervalMs: 25,
+      });
+      released = true;
+      await reacquired.release();
     } catch {
-      classification = 'unexpected_error';
+      classification = takenOver ? 'lock_taken_over' : 'unexpected_error';
     }
 
     const configAfter = digest(await readFile(configPath));
@@ -231,10 +260,11 @@ async function runStalePaneConfigLock(): Promise<RecoveryScenarioEvidence> {
       'pane-config-lock-held-by-dead-owner',
       classification,
       [
-        { name: 'stale lease is taken over', held: acquired },
-        { name: 'persisted config is unchanged', held: configAfter === configBefore },
-        { name: 'persisted config remains readable', held: stillReadable },
-        { name: 'uncommitted work is untouched', held: workAfter === workBefore },
+        { id: 'stale-lease-taken-over', held: takenOver },
+        { id: 'stale-lease-released', held: released },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'persisted-config-readable', held: stillReadable },
+        { id: 'uncommitted-work-untouched', held: workAfter === workBefore },
       ],
       { configBefore, configAfter, workAfter },
       startedAt,

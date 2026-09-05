@@ -4,8 +4,9 @@
  * evidence report to stdout. Exits non-zero when any scenario invariant fails,
  * so the command can gate retained acceptance evidence for #199.
  *
- * The report carries enumerated identifiers, booleans, and content digests
- * only; it is safe to attach to a public outcome without a redaction pass.
+ * Every field in the report is a member of a closed union declared in the
+ * harness module, a boolean, or a SHA-256 digest, so it is safe to attach to a
+ * public outcome without a redaction pass.
  */
 
 import { runRecoveryHarness } from '../src/diagnostics/recoveryHarness.js';
