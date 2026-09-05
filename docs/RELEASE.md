@@ -168,13 +168,22 @@ gh api --method POST \
 ```
 
 Protect `main` by layering an active branch ruleset over classic branch
-protection. The ruleset owns the pull-request and review requirement and gives
-only `BunsDev` a PR-only bypass. Classic protection continues to own the two
-strict GitHub Actions checks, administrator enforcement, linear history,
+protection. The ruleset owns the pull-request requirement and review-thread
+resolution and carries **no bypass actor**. Classic protection continues to own
+the two strict GitHub Actions checks, administrator enforcement, linear history,
 conversation resolution, and the force-push/deletion prohibitions. Classic
 `bypass_pull_request_allowances` must not be configured for `BunsDev`: that
 classic allowance can bypass the pull-request requirement and permit a direct
 push.
+
+OpenCoven has a single member, so an approving review can never be obtained:
+GitHub does not allow an author to approve their own pull request. A standing
+`required_approving_review_count` of 1 therefore forced an administrative
+bypass on every merge, which recorded ordinary work as an override and made the
+bypass — not the review — the operative policy. The requirement is set to 0 and
+the bypass actor removed, so merges are legitimate rather than overrides.
+Restore an approval requirement when the organization gains a second member who
+can review.
 
 First resolve and pin the named actor. The recorded GitHub user ID for
 `BunsDev` is `68980965`; stop if the live identity differs. The repository
@@ -199,7 +208,7 @@ main_ruleset_payload="$(jq -cn --argjson bunsdev_id "$bunsdev_id" '{
   name: "Main pull request governance",
   target: "branch",
   enforcement: "active",
-  bypass_actors: [{actor_id: $bunsdev_id, actor_type: "User", bypass_mode: "pull_request"}],
+  bypass_actors: [],
   conditions: {
     ref_name: {
       include: ["refs/heads/main"],
@@ -210,11 +219,12 @@ main_ruleset_payload="$(jq -cn --argjson bunsdev_id "$bunsdev_id" '{
     type: "pull_request",
     parameters: {
       allowed_merge_methods: ["merge", "squash", "rebase"],
-      dismiss_stale_reviews_on_push: true,
+      dismiss_stale_reviews_on_push: false,
       dismissal_restriction: {enabled: false, allowed_actors: []},
       require_code_owner_review: false,
-      require_last_push_approval: true,
-      required_approving_review_count: 1,
+      require_extra_approval_for_unattributed_changes: false,
+      require_last_push_approval: false,
+      required_approving_review_count: 0,
       required_review_thread_resolution: true
     }
   }]
@@ -246,30 +256,27 @@ printf '%s\n' "$verified_main_ruleset" |
     .enforcement == "active" and
     .conditions.ref_name.include == ["refs/heads/main"] and
     .conditions.ref_name.exclude == [] and
-    .bypass_actors == [{
-      actor_id: $bunsdev_id,
-      actor_type: "User",
-      bypass_mode: "pull_request"
-    }] and
+    .bypass_actors == [] and
     (.rules | length == 1) and
     .rules[0].type == "pull_request" and
     .rules[0].parameters.allowed_merge_methods == ["merge", "squash", "rebase"] and
-    .rules[0].parameters.dismiss_stale_reviews_on_push == true and
+    .rules[0].parameters.dismiss_stale_reviews_on_push == false and
     .rules[0].parameters.dismissal_restriction == {
       enabled: false,
       allowed_actors: []
     } and
     .rules[0].parameters.require_code_owner_review == false and
-    .rules[0].parameters.require_last_push_approval == true and
-    .rules[0].parameters.required_approving_review_count == 1 and
+    .rules[0].parameters.require_extra_approval_for_unattributed_changes == false and
+    .rules[0].parameters.require_last_push_approval == false and
+    .rules[0].parameters.required_approving_review_count == 0 and
     .rules[0].parameters.required_review_thread_resolution == true
   ' >/dev/null
 ```
 
 Only after that ruleset verification succeeds, replace the complete classic
 branch-protection document. Setting `required_pull_request_reviews` to `null`
-explicitly removes the classic review requirement so it cannot layer a second
-approval gate over the PR-only ruleset bypass. Preserve every other protection;
+explicitly removes the classic review requirement so it cannot layer an
+approval gate over the bypass-free ruleset. Preserve every other protection;
 the GitHub Actions integration pin is preserved on each required check:
 
 ```sh
@@ -362,13 +369,7 @@ gh api repos/OpenCoven/psyche-build/branches/main/protection |
 
 verified_main_ruleset="$(gh api "repos/OpenCoven/psyche-build/rulesets/$main_ruleset_id")"
 printf '%s\n' "$verified_main_ruleset" |
-  jq -e --argjson bunsdev_id "$bunsdev_id" '
-    .bypass_actors == [{
-      actor_id: $bunsdev_id,
-      actor_type: "User",
-      bypass_mode: "pull_request"
-    }]
-  ' >/dev/null
+  jq -e '.bypass_actors == []' >/dev/null
 
 git fetch origin main
 probe_sha="$(
@@ -406,18 +407,17 @@ fi
 printf '%s\n' "$probe_stderr"
 ```
 
-The `pull_request` bypass mode keeps direct pushes platform-blocked for
-`BunsDev`; force pushes and deletions are also prohibited. All other actors
-must obtain the required approval. GitHub cannot create an author
-self-approval review. Independent review remains preferred, but it is not
-required for a `BunsDev` owner-authored administrative PR when no independent
-reviewer is available. In that case, `BunsDev` uses the explicit PR-only bypass
-for an admin merge, not a direct push or a claimed self-approval. Before that
-admin merge, verify that the exact-head required checks are terminal and
-successful and verify resolved conversations. Keep the recorded override reason
-and exact SHA in the PR or linked incident/change record, and retain audit
-evidence for the checks, conversation state, merge override, and resulting
-merge.
+Direct pushes to `main` remain platform-blocked by the pull-request
+requirement; force pushes and deletions are also prohibited. GitHub cannot
+create an author self-approval review, and OpenCoven has one member, so no
+approving review is obtainable — the ruleset requires none and grants no
+bypass. What still gates every merge is the exact-head required checks,
+administrator enforcement, linear history, and resolved review threads.
+Independent or automated review remains preferred: resolve every review thread
+on its merits rather than clearing it to unblock a merge. Before merging,
+verify that the exact-head required checks are terminal and successful and that
+conversations are resolved, and retain that evidence with the exact SHA in the
+PR. Restore an approval requirement when a second member can review.
 
 ## Emergency change procedure for #31
 
@@ -431,17 +431,18 @@ incident-scoped procedure:
   additional change requires a new recorded decision.
 - Confirm the required exact-head checks are terminal and successful and all
   conversations are resolved before using the merge override.
-- Use only the existing PR-only `BunsDev` bypass through a pull request and an
-  explicit admin merge. The incident must not add another standing bypass actor,
-  team, app, administrator, or user, and it permits no new actor or bypass mode.
+- Merge through a pull request. The ruleset carries no bypass actor, so an
+  urgent change still uses the ordinary protected path; an administrative merge
+  is permitted only when a required check is itself broken, and the incident
+  must not add a standing bypass actor, team, app, administrator, or user.
 - Record the merge override, its reason, the exact SHA, and the resulting merge
   in the incident/change record.
 - Retain sanitized before/after settings, exact-head check evidence,
   conversation-resolution evidence, the merge audit records, and the incident
   result.
 - Complete a post-event review covering the change, override, outcome, and any
-  follow-up. Restore any incident-specific policy change; retain the existing
-  PR-only `BunsDev` bypass without adding or changing an actor or mode.
+  follow-up. Restore any incident-specific policy change and leave the ruleset
+  with no standing bypass actor or mode.
 
 An emergency is not authority to weaken the normal release environment,
 immutable-tag ruleset, administrator enforcement, direct-push rejection,

@@ -194,7 +194,7 @@ describe('release documentation contract', () => {
     expect(runbook).not.toContain('protected-branch deployment policy');
   });
 
-  it('layers classic checks with a PR-only owner ruleset bypass', async () => {
+  it('layers classic checks with a bypass-free main ruleset', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 
     expect(runbook).toContain('expected_bunsdev_id=68980965');
@@ -203,15 +203,13 @@ describe('release documentation contract', () => {
     expect(runbook).toContain('target: "branch"');
     expect(runbook).toContain('enforcement: "active"');
     expect(runbook).toContain('include: ["refs/heads/main"]');
-    expect(runbook).toContain(
-      'bypass_actors: [{actor_id: $bunsdev_id, actor_type: "User", bypass_mode: "pull_request"}]',
-    );
+    expect(runbook).toContain('bypass_actors: []');
     expect(runbook).toContain('type: "pull_request"');
     expect(runbook).toContain('allowed_merge_methods: ["merge", "squash", "rebase"]');
-    expect(runbook).toContain('dismiss_stale_reviews_on_push: true');
+    expect(runbook).toContain('dismiss_stale_reviews_on_push: false');
     expect(runbook).toContain('require_code_owner_review: false');
-    expect(runbook).toContain('require_last_push_approval: true');
-    expect(runbook).toContain('required_approving_review_count: 1');
+    expect(runbook).toContain('require_last_push_approval: false');
+    expect(runbook).toContain('required_approving_review_count: 0');
     expect(runbook).toContain('required_review_thread_resolution: true');
     expect(runbook).toContain(
       'dismissal_restriction: {enabled: false, allowed_actors: []}',
@@ -222,11 +220,9 @@ describe('release documentation contract', () => {
     )?.[1];
     expect(mainRulesetPayload, 'missing main governance ruleset payload').toBeDefined();
     expect(mainRulesetPayload!.match(/bypass_actors:/g)).toHaveLength(1);
-    expect(mainRulesetPayload!.match(/actor_type:\s*"User"/g)).toHaveLength(1);
-    expect(mainRulesetPayload).not.toMatch(
-      /actor_type:\s*"(?:Team|Integration|RepositoryRole|OrganizationAdmin|DeployKey)"/,
-    );
-    expect(mainRulesetPayload).not.toMatch(/bypass_mode:\s*"(?:always|exempt)"/);
+    expect(mainRulesetPayload).toMatch(/bypass_actors:\s*\[\]/);
+    expect(mainRulesetPayload).not.toMatch(/actor_type:/);
+    expect(mainRulesetPayload).not.toMatch(/bypass_mode:/);
 
     expect(runbook).toMatch(
       /select\(\.name == "Main pull request governance" and \.target == "branch"\)/,
@@ -324,23 +320,34 @@ describe('release documentation contract', () => {
     );
   });
 
-  it('documents the recorded owner bypass without claiming self-approval', async () => {
+  it('documents the bypass-free solo-organization policy without weakening the gates', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 
     expect(runbook).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
     expect(runbook).toMatch(
-      /independent review[\s\S]{0,120}preferred[\s\S]{0,120}not\s+required[\s\S]{0,160}BunsDev[\s\S]{0,160}owner-authored administrative PR/i,
+      /single member[\s\S]{0,200}approving review can never be obtained/i,
     );
-    expect(runbook).toMatch(/direct pushes[\s\S]{0,120}platform-blocked/i);
     expect(runbook).toMatch(
-      /PR-only bypass[\s\S]{0,240}admin merge[\s\S]{0,500}exact[- ]head[\s\S]{0,160}(?:terminal\s+and\s+successful|successful\s+required\s+checks)/i,
+      /requirement is set to 0[\s\S]{0,120}bypass actor removed/i,
     );
-    expect(runbook).toMatch(/resolved conversations/i);
-    expect(runbook).toMatch(/recorded[\s\S]{0,100}override reason[\s\S]{0,100}exact\s+SHA/i);
-    expect(runbook).toMatch(/retain(?:ed)?[\s\S]{0,100}audit\s+evidence/i);
+    expect(runbook).toMatch(
+      /Restore an approval requirement[\s\S]{0,120}second member/i,
+    );
+    expect(runbook).toMatch(/direct pushes[\s\S]{0,140}platform-blocked/i);
+    expect(runbook).toMatch(
+      /(?:review|automated review) remains preferred[\s\S]{0,200}on its merits/i,
+    );
+    expect(runbook).toMatch(
+      /exact[- ]head required checks[\s\S]{0,160}terminal and successful/i,
+    );
+    expect(runbook).toMatch(/conversations are resolved/i);
+    expect(runbook).toMatch(/retain that evidence[\s\S]{0,80}exact SHA/i);
+    expect(runbook).toMatch(
+      /Classic\s+`bypass_pull_request_allowances`\s+must\s+not\s+be\s+configured/i,
+    );
   });
 
-  it('keeps emergency changes within the single approved standing owner bypass', async () => {
+  it('keeps emergency changes inside the protected path with no standing bypass', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
     const emergencyHeading = /^## Emergency change procedure for #31\s*$/im.exec(runbook);
     expect(emergencyHeading, 'missing the #31 emergency-change procedure').not.toBeNull();
@@ -357,8 +364,8 @@ describe('release documentation contract', () => {
     expect(procedure).toMatch(/sanitized before\/after settings/i);
     expect(procedure).toMatch(/post-event review/i);
     expect(procedure).toMatch(/must not add[\s\S]{0,100}standing\s+bypass\s+actor/i);
-    expect(procedure).toMatch(/existing\s+PR-only[\s\S]{0,100}BunsDev`?\s+bypass/i);
-    expect(procedure).toMatch(/no new actor or bypass\s+mode/i);
+    expect(procedure).toMatch(/no standing bypass actor or mode/i);
+    expect(procedure).toMatch(/ruleset carries no bypass actor/i);
 
     expect(procedure).not.toMatch(/bypass_mode:\s*"(?:always|exempt)"/);
   });
