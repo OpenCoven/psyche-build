@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const covenSessionsSourcePath = resolve(
   process.cwd(),
@@ -49,7 +50,7 @@ describe('Tauri Coven session native contract', () => {
   test('wires bare Coven CLI and attach launch seams', async () => {
     const [mainSource, libSource] = await Promise.all([
       readFile(mainSourcePath, 'utf8'),
-      readFile(libSourcePath, 'utf8'),
+      Promise.resolve(readDesktopCommandSurface()),
     ]);
     const codeStart = mainSource.indexOf('function covenCliLaunch');
     const codeEnd = mainSource.indexOf('async function spawnCovenThread', codeStart);
@@ -81,7 +82,7 @@ describe('Tauri Coven session native contract', () => {
   test('registers non-blocking Coven discovery under the coven_sessions command', async () => {
     const [covenSessionsSource, libSource] = await Promise.all([
       readFile(covenSessionsSourcePath, 'utf8'),
-      readFile(libSourcePath, 'utf8'),
+      Promise.resolve(readDesktopCommandSurface()),
     ]);
 
     expect(covenSessionsSource).toMatch(
@@ -121,7 +122,7 @@ describe('Tauri Coven session native contract', () => {
   test('registers a non-blocking native Coven session kill command', async () => {
     const [covenSessionsSource, libSource] = await Promise.all([
       readFile(covenSessionsSourcePath, 'utf8'),
-      readFile(libSourcePath, 'utf8'),
+      Promise.resolve(readDesktopCommandSurface()),
     ]);
 
     expect(covenSessionsSource).toMatch(

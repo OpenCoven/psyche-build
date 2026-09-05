@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 import {
   createPtyClient,
   disposePtyClient,
@@ -8,10 +9,7 @@ import {
   type PtyDataBatch,
 } from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
 
-const source = readFileSync(
-  resolve(process.cwd(), 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
-  'utf8',
-);
+const source = readDesktopCommandSurface();
 const transportSource = readFileSync(
   resolve(process.cwd(), 'native/desktop/psyche-build-tauri/src-tauri/src/pty_transport.rs'),
   'utf8',

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const libSourcePath = resolve(
   process.cwd(),
@@ -44,7 +45,7 @@ function functionBody(source: string, functionName: string): string {
 describe('Tauri workspace metrics native contract', () => {
   test('wires PTY identity retention and the async metrics command', async () => {
     const [libSource, cargoToml, mainSource, covenSessions] = await Promise.all([
-      readFile(libSourcePath, 'utf8'),
+      Promise.resolve(readDesktopCommandSurface()),
       readFile(cargoTomlPath, 'utf8'),
       readFile(mainSourcePath, 'utf8'),
       readFile(covenSessionsPath, 'utf8'),

@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const repoRoot = process.cwd();
 const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
-const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
+const nativeLib = readDesktopCommandSurface();
 const nativeFocus = readFileSync(join(webRoot, 'src-tauri/src/browser_focus.rs'), 'utf8');
 
 describe('terminal project browser links', () => {
