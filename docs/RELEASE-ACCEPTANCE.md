@@ -297,6 +297,42 @@ acceptance.
 - [ ] Reinstall and verify prior state is safely restored or deliberately
   quarantined with a recovery path.
 
+## Disposable recovery harness
+
+The reusable harness owned by [#199](https://github.com/OpenCoven/psyche-build/issues/199)
+runs the failure scenarios already observed under #239. From a clean checkout:
+
+```bash
+pnpm recovery:harness
+```
+
+Each scenario builds a throwaway project workspace outside the repository,
+injects one bounded failure, drives the real production recovery path, and
+asserts the invariants that failure must preserve. It exits non-zero when any
+invariant fails, so the command gates evidence rather than merely reporting.
+
+Nothing in the harness mocks the code under test. That is the point: the
+pre-#283 defect reported a corrupt config correctly *and* replaced the bytes,
+so a test asserting only the thrown error passes while the user's pane layout
+is destroyed. The harness compares content digests before and after, which is
+what makes the data-loss invariant observable.
+
+Current scenarios:
+
+| Scenario | Injected failure | Invariants |
+|---|---|---|
+| `corrupt-pane-config` | Pane config replaced with invalid JSON | Classified `config_corrupt`; corrupt bytes preserved; uncommitted work untouched |
+| `stale-pane-config-lock` | Lease held by an unreachable owner | Stale lease taken over; persisted config unchanged and still readable; uncommitted work untouched |
+
+The emitted report is bounded and sanitized by construction: enumerated
+identifiers, booleans, and SHA-256 digests only. No path, file content,
+project name, or raw error message is retained, so a report can be attached to
+a public outcome without a redaction pass.
+
+The remaining #199 scenarios — unavailable providers, interrupted cleanup,
+duplicate command retry, old owner epochs, unwritable state, and upgrade
+recovery — are not yet implemented and must not be implied by a passing run.
+
 ## Failure-oriented acceptance — #239
 
 Use disposable data and fail closed.
