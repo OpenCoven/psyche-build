@@ -216,11 +216,18 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('- name: Install tmux');
     expect(workflow).toContain('brew install tmux');
     expect(workflow.indexOf('brew install tmux')).toBeLessThan(workflow.indexOf('pnpm test'));
+    // `tee` would otherwise report success for a failing harness, so the
+    // pipeline must run under pipefail and the evidence must be retained.
+    expect(workflow).toMatch(
+      /set -euo pipefail\n\s+pnpm --silent recovery:harness \| tee/,
+    );
+    expect(workflow).toContain('name: recovery-harness-${{ github.run_id }}-${{ github.run_attempt }}');
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
       'pnpm docs:focus:check',
       'pnpm --dir docs build',
       'pnpm test',
+      'pnpm --silent recovery:harness',
       'pnpm typecheck',
       'pnpm build',
       'pnpm smoke:pack',
