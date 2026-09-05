@@ -139,9 +139,10 @@ and deferred as of this reconciliation.
 on every scheduled run from 2026-08-30 until 2026-09-02 because a checkout
 running the accidental Beads v1.2.1 release migrated the shared Dolt schema to
 v65 and pushed it; the pinned 1.2.2 CLI could not open it. The schema cursor
-was rolled back to v53 following the upstream recovery guide, the versioned
-`events` audit table was re-tracked from pre-migration history, and both were
-published on 2026-09-02 and 2026-09-04 with all 111 Beads preserved. Scheduled
+was rolled back to v53 following the upstream recovery guide and published on
+2026-09-02; the versioned `events` audit table was re-tracked from
+pre-migration history and published on 2026-09-04 together with the
+source-first Bead close. All 111 Beads were preserved. Scheduled
 applies have succeeded since 2026-09-03, the `psyche-z7c.4.4` Bead was closed
 source-first, the synchronizer regenerated the #230 mirror body from that
 corrected source, and the read-only validator exits `0` with zero findings.
