@@ -15,29 +15,34 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
   ProjectPaneConfigError,
   acquireProjectPaneConfigLock,
+  mutateProjectPaneConfig,
   projectPaneConfigPath,
   readProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
 
 export type RecoveryScenarioId =
   | 'corrupt-pane-config'
-  | 'stale-pane-config-lock';
+  | 'stale-pane-config-lock'
+  | 'unwritable-state-storage';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
-  | 'pane-config-lock-held-by-dead-owner';
+  | 'pane-config-lock-held-by-dead-owner'
+  | 'state-directory-made-read-only';
 
 export type RecoveryClassification =
   | 'config_corrupt'
   | 'config_unreadable'
   | 'lock_taken_over'
+  | 'persistence_failed'
+  | 'injection_ineffective'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -49,7 +54,8 @@ export type RecoveryInvariantId =
   | 'stale-lease-taken-over'
   | 'stale-lease-released'
   | 'persisted-config-unchanged'
-  | 'persisted-config-readable';
+  | 'persisted-config-readable'
+  | 'persistence-failure-surfaced';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -274,11 +280,87 @@ async function runStalePaneConfigLock(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * Listed unproven in #239: unwritable state storage must not be reported as a
+ * successful persist. The `.psyche` directory is made read-only after its
+ * runtime subdirectory exists, so the lease can still be acquired and the
+ * failure isolates to the config write rather than to lock setup.
+ */
+async function runUnwritableStateStorage(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  const stateDir = path.join(workspace.projectRoot, '.psyche');
+  let restored = false;
+  try {
+    await mkdir(path.join(stateDir, 'runtime'), { recursive: true });
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+    const workBefore = digest(await readFile(workspace.workPath));
+
+    await chmod(stateDir, 0o500);
+
+    // A process running as root ignores the mode bits, which would defeat the
+    // injection. Prove the directory is genuinely unwritable before drawing
+    // any conclusion, so an ineffective setup is never reported as a product
+    // failure.
+    const probePath = path.join(stateDir, '.harness-write-probe');
+    let injectionEffective = false;
+    try {
+      await writeFile(probePath, 'probe', 'utf8');
+      await rm(probePath, { force: true });
+    } catch {
+      injectionEffective = true;
+    }
+
+    let classification: RecoveryClassification = injectionEffective
+      ? 'unexpected_success'
+      : 'injection_ineffective';
+    if (injectionEffective) {
+      try {
+        await mutateProjectPaneConfig(
+          workspace.projectRoot,
+          (config) => {
+            config.panes = [];
+          },
+          { timeoutMs: 2_000, pollIntervalMs: 25 },
+        );
+      } catch {
+        classification = 'persistence_failed';
+      }
+    }
+
+    await chmod(stateDir, 0o700);
+    restored = true;
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    return evidence(
+      'unwritable-state-storage',
+      'state-directory-made-read-only',
+      classification,
+      [
+        { id: 'persistence-failure-surfaced', held: classification === 'persistence_failed' },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'uncommitted-work-untouched', held: workAfter === workBefore },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    if (!restored) {
+      await chmod(stateDir, 0o700).catch(() => undefined);
+    }
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
   'corrupt-pane-config': runCorruptPaneConfig,
   'stale-pane-config-lock': runStalePaneConfigLock,
+  'unwritable-state-storage': runUnwritableStateStorage,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
