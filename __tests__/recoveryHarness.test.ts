@@ -16,6 +16,7 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'stale-lease-released',
   'persisted-config-unchanged',
   'persisted-config-readable',
+  'persistence-failure-surfaced',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -65,6 +66,18 @@ describe('disposable recovery harness', () => {
     const released = scenario.invariants
       .find((invariant) => invariant.id === 'stale-lease-released');
     expect(released?.held).toBe(true);
+  });
+
+  it('reports an unwritable state directory as a failed persist', async () => {
+    const report = await runRecoveryHarness(['unwritable-state-storage']);
+    const [scenario] = report.scenarios;
+
+    // `injection_ineffective` means the harness could not make the directory
+    // unwritable — running as root, for instance — and must not be read as the
+    // product silently succeeding.
+    expect(scenario.classification).not.toBe('injection_ineffective');
+    expect(scenario.classification).toBe('persistence_failed');
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {
