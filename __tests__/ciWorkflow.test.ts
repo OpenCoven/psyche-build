@@ -222,6 +222,16 @@ describe('pull request CI workflow contract', () => {
       /set -euo pipefail\n\s+pnpm --silent recovery:harness \| tee/,
     );
     expect(workflow).toContain('name: recovery-harness-${{ github.run_id }}-${{ github.run_attempt }}');
+    // Retention must survive a failing harness, and a missing report must fail
+    // the job rather than warn; otherwise a green run can carry no evidence.
+    const qualityJob = workflowJobSource(workflow, 'quality');
+    expect(qualityJob).toMatch(
+      /- name: Upload recovery harness evidence\n\s+if: always\(\)/,
+    );
+    expect(qualityJob).toMatch(
+      /path: \$\{\{ runner\.temp \}\}\/recovery-harness\.json[\s\S]{0,400}if-no-files-found: error/,
+    );
+    expect(qualityJob).not.toMatch(/if-no-files-found: (?:warn|ignore)/);
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
       'pnpm docs:focus:check',

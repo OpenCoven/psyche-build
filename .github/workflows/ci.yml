@@ -76,7 +76,11 @@ jobs:
         with:
           name: recovery-harness-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/recovery-harness.json
-          if-no-files-found: warn
+          # This step exists to enforce #199's retained-evidence requirement,
+          # so a missing report is a failure rather than a warning. `warn`
+          # would let a moved path or renamed temp variable silently produce a
+          # green run with no evidence.
+          if-no-files-found: error
           retention-days: 14
 
   desktop-web:
