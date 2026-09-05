@@ -502,6 +502,12 @@ describe('support bundle v1', () => {
     expect(bundle.errors.some((error) => error.recoveryRequired === true)).toBe(true);
   });
 
+  // Deliberately no `maxElapsedMs`: this case asserts the shape contract for a
+  // collector that returns a non-promise, and it asserts the collector was
+  // invoked. A short budget can expire before dispatch on a loaded runner,
+  // leaving `called` false and failing the test for a reason unrelated to what
+  // it covers. Timing behavior is covered by the two cases above, whose
+  // assertions get more reliable as the runner slows, not less.
   it('rejects collectors that do not return a promise', async () => {
     let called = false;
     const bundle = await collectSupportBundle([{
@@ -510,7 +516,7 @@ describe('support bundle v1', () => {
         called = true;
         return { lifecycle: { state: 'ready' } };
       }) as never,
-    }], { maxElapsedMs: 5 });
+    }]);
 
     expect(called).toBe(true);
     expect(bundle.status).toBe('recovery_required');
