@@ -311,6 +311,13 @@ injects one bounded failure, drives the real production recovery path, and
 asserts the invariants that failure must preserve. It exits non-zero when any
 invariant fails, so the command gates evidence rather than merely reporting.
 
+The Quality CI job runs the same command on every pull request and uploads the
+report as the `recovery-harness-<run>-<attempt>` artifact, so a run's evidence
+is retained without anyone remembering to ask for it. The step runs under
+`set -euo pipefail`; without it `tee` would return success for a failing
+harness. The upload is unconditional, so a failed run still produces a report
+recording which invariant failed rather than no evidence at all.
+
 Nothing in the harness mocks the code under test. That is the point: the
 pre-#283 defect reported a corrupt config correctly *and* replaced the bytes,
 so a test asserting only the thrown error passes while the user's pane layout

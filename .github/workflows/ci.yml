@@ -60,6 +60,29 @@ jobs:
       - name: Run repository tests
         run: pnpm test
 
+      # The suite already asserts the harness outcomes. This additionally
+      # exercises the CLI entry point and produces the retained evidence
+      # report #199 requires. `--silent` keeps pnpm's banner out of the JSON,
+      # and pipefail keeps `tee` from masking a failing harness exit code.
+      - name: Run recovery harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --silent recovery:harness | tee "$RUNNER_TEMP/recovery-harness.json"
+
+      - name: Upload recovery harness evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recovery-harness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recovery-harness.json
+          # This step exists to enforce #199's retained-evidence requirement,
+          # so a missing report is a failure rather than a warning. `warn`
+          # would let a moved path or renamed temp variable silently produce a
+          # green run with no evidence.
+          if-no-files-found: error
+          retention-days: 14
+
   desktop-web:
     name: Desktop web
     needs: changes
