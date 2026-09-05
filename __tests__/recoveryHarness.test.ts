@@ -17,6 +17,9 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'persisted-config-unchanged',
   'persisted-config-readable',
   'persistence-failure-surfaced',
+  'effect-executed-exactly-once',
+  'retry-reconciles-canonical-outcome',
+  'reconciliation-survives-restart',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -24,6 +27,7 @@ const DIGEST_IDS: readonly RecoveryDigestId[] = [
   'configInjected',
   'configAfter',
   'workAfter',
+  'effectLog',
 ];
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -78,6 +82,19 @@ describe('disposable recovery harness', () => {
     expect(scenario.classification).not.toBe('injection_ineffective');
     expect(scenario.classification).toBe('persistence_failed');
     expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+  });
+
+  it('reconciles a duplicate retry instead of repeating the effect', async () => {
+    const report = await runRecoveryHarness(['duplicate-command-retry']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('outcome_reconciled');
+    // The journal is reopened between attempts, so this proves durable
+    // reconciliation rather than an in-memory cache a restart would lose.
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    expect(byId.get('effect-executed-exactly-once')).toBe(true);
+    expect(byId.get('retry-reconciles-canonical-outcome')).toBe(true);
+    expect(byId.get('reconciliation-survives-restart')).toBe(true);
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {

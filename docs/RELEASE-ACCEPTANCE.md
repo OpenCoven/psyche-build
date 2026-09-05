@@ -324,6 +324,7 @@ Current scenarios:
 | `corrupt-pane-config` | Pane config replaced with invalid JSON | `failure-classified-as-corrupt`, `corrupt-bytes-preserved`, `uncommitted-work-untouched` |
 | `stale-pane-config-lock` | Lease held by an unreachable owner | `stale-lease-taken-over`, `stale-lease-released`, `persisted-config-unchanged`, `persisted-config-readable`, `uncommitted-work-untouched` |
 | `unwritable-state-storage` | `.psyche` made read-only after its runtime subdirectory exists | `persistence-failure-surfaced`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
+| `duplicate-command-retry` | The same command replayed after the control journal is reopened | `effect-executed-exactly-once`, `retry-reconciles-canonical-outcome`, `reconciliation-survives-restart`, `uncommitted-work-untouched` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -347,9 +348,14 @@ directory is genuinely unwritable and reports `injection_ineffective` when it
 is not — a process running as root ignores the mode bits, and that must never
 be read as the product silently succeeding. Do not run the harness as root.
 
-The remaining #199 scenarios — unavailable providers, interrupted cleanup,
-duplicate command retry, old owner epochs, and upgrade recovery — are not yet
-implemented and must not be implied by a passing run.
+`duplicate-command-retry` covers the #239 item requiring that duplicate
+retries reconcile a canonical outcome rather than duplicate an effect. The
+control journal is reopened between the two attempts, so a pass proves durable
+reconciliation rather than an in-memory cache that a restart would lose.
+
+The remaining #199 scenarios — unavailable providers, interrupted cleanup, old
+owner epochs, and upgrade recovery — are not yet implemented and must not be
+implied by a passing run.
 
 ## Failure-oriented acceptance — #239
 
