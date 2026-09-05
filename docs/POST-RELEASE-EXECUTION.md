@@ -135,21 +135,29 @@ exact-head checks and resolved conversations, never a self-approval claim.
 mirrors, and live PR disposition agree on what is delivered, active, blocked,
 and deferred as of this reconciliation.
 
-**Control-state regression under repair:** the scheduled Beads Project sync
-failed on every scheduled run from 2026-08-30 until 2026-09-02 because a
-checkout running the accidental Beads v1.2.1 release migrated the shared Dolt
-schema to v65 and pushed it; the pinned 1.2.2 CLI could not open it. The
-schema cursor was rolled back to v53 and pushed on 2026-09-02 following the
-upstream recovery guide, with all 111 Beads preserved. The public mirror stays
-stale until the first unattended apply succeeds, and the read-only validator
-still reports the `psyche-z7c.4.4`/#230 `state_mismatch` (the Bead is open
-while PR #281 closed its mirror) plus the resulting source-status drift. Repair
-remains source-first: close the Bead through the reviewed Beads workflow, let
-the restored scheduled apply publish it, and retain the zero-operation report.
-Generated mirror bodies are never edited to repair this.
-[#342](https://github.com/OpenCoven/psyche-build/issues/342) owns the repair
-under #195, including the Beads CLI fleet rule in
-[`.beads/README.md`](../.beads/README.md).
+**Resolved control-state regression:** the scheduled Beads Project sync failed
+on every scheduled run from 2026-08-30 until 2026-09-02 because a checkout
+running the accidental Beads v1.2.1 release migrated the shared Dolt schema to
+v65 and pushed it; the pinned 1.2.2 CLI could not open it. The schema cursor
+was rolled back to v53 following the upstream recovery guide, the versioned
+`events` audit table was re-tracked from pre-migration history, and both were
+published on 2026-09-02 and 2026-09-04 with all 111 Beads preserved. Scheduled
+applies have succeeded since 2026-09-03, the `psyche-z7c.4.4` Bead was closed
+source-first, the synchronizer regenerated the #230 mirror body from that
+corrected source, and the read-only validator exits `0` with zero findings.
+Generated mirror bodies were never edited to repair this.
+
+Two contract improvements came out of it and are enforced now: the synchronizer
+reports schema skew as a bounded `Beads schema version skew` diagnostic instead
+of an unclassified failure, and the drift validator scopes missing-mirror drift
+to active Beads so it stops reporting findings the synchronizer cannot repair.
+The Beads CLI fleet rule and the closing-keyword rule in
+[`.beads/README.md`](../.beads/README.md) record the two recurrence risks:
+any clone running a non-pinned CLI can re-migrate the shared schema, and a
+GitHub closing keyword before a mirror reference can change mirror state
+outside the synchronizer.
+[#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the full
+evidence under #195.
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
@@ -241,7 +249,8 @@ same-LAN beta; it does not block that beta.
 ## Stage 3 — operations and contributor readiness
 
 #199/#243 retains its P1 dependency gate for the remaining #199 work:
-support-bundle schema and redaction landed through PR #278 and closed #243,
+support-bundle schema and redaction landed through PR #278, and #243 closed
+with it,
 while reusable recovery harnesses follow observed #239 cases.
 
 The merged bundle contract is versioned, deterministic, bounded by
