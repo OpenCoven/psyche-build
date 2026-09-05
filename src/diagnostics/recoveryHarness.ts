@@ -376,6 +376,7 @@ async function runDuplicateCommandRetry(): Promise<RecoveryScenarioEvidence> {
     await mkdir(path.join(workspace.projectRoot, '.psyche', 'runtime'), { recursive: true });
     const idempotencyKey = 'harness-duplicate-retry';
     const effectPath = path.join(workspace.projectRoot, 'effect-log.txt');
+    const workBefore = digest(await readFile(workspace.workPath));
     let effectCount = 0;
 
     // Models the real reconciliation path: consult the journal first, perform
@@ -401,16 +402,23 @@ async function runDuplicateCommandRetry(): Promise<RecoveryScenarioEvidence> {
     const workAfter = digest(await readFile(workspace.workPath));
     const sameOutcome = exactCommandOutcomeDigest(firstOutcome)
       === exactCommandOutcomeDigest(retriedOutcome);
+    const executedOnce = effectCount === 1;
+    const survivedRestart = reloaded !== undefined;
+
+    // Reconciliation means all three held. Reporting it on the effect count
+    // alone would let the classification claim success while the retry
+    // returned a different outcome or the restart lookup found nothing.
+    const reconciled = executedOnce && sameOutcome && survivedRestart;
 
     return evidence(
       'duplicate-command-retry',
       'command-replayed-after-journal-restart',
-      effectCount === 1 ? 'outcome_reconciled' : 'unexpected_success',
+      reconciled ? 'outcome_reconciled' : 'unexpected_success',
       [
-        { id: 'effect-executed-exactly-once', held: effectCount === 1 },
+        { id: 'effect-executed-exactly-once', held: executedOnce },
         { id: 'retry-reconciles-canonical-outcome', held: sameOutcome },
-        { id: 'reconciliation-survives-restart', held: reloaded !== undefined },
-        { id: 'uncommitted-work-untouched', held: workAfter === digest('the only copy of this work\n') },
+        { id: 'reconciliation-survives-restart', held: survivedRestart },
+        { id: 'uncommitted-work-untouched', held: workAfter === workBefore },
       ],
       { effectLog: digest(await readFile(effectPath)), workAfter },
       startedAt,
