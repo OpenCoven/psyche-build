@@ -20,6 +20,8 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'effect-executed-exactly-once',
   'retry-reconciles-canonical-outcome',
   'reconciliation-survives-restart',
+  'stale-epoch-assertion-rejected',
+  'current-epoch-assertion-accepted',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -95,6 +97,18 @@ describe('disposable recovery harness', () => {
     expect(byId.get('effect-executed-exactly-once')).toBe(true);
     expect(byId.get('retry-reconciles-canonical-outcome')).toBe(true);
     expect(byId.get('reconciliation-survives-restart')).toBe(true);
+  });
+
+  it('fences a lease asserted with a pre-restart owner epoch', async () => {
+    const report = await runRecoveryHarness(['stale-owner-epoch']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('owner_restart_fenced');
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    expect(byId.get('stale-epoch-assertion-rejected')).toBe(true);
+    // Positive control: rejecting every assertion would satisfy the rejection
+    // invariant while breaking all authority, so acceptance is asserted too.
+    expect(byId.get('current-epoch-assertion-accepted')).toBe(true);
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {

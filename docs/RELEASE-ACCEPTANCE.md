@@ -325,6 +325,7 @@ Current scenarios:
 | `stale-pane-config-lock` | Lease held by an unreachable owner | `stale-lease-taken-over`, `stale-lease-released`, `persisted-config-unchanged`, `persisted-config-readable`, `uncommitted-work-untouched` |
 | `unwritable-state-storage` | `.psyche` made read-only after its runtime subdirectory exists | `persistence-failure-surfaced`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 | `duplicate-command-retry` | The same command replayed after the control journal is reopened | `effect-executed-exactly-once`, `retry-reconciles-canonical-outcome`, `reconciliation-survives-restart`, `uncommitted-work-untouched` |
+| `stale-owner-epoch` | A valid capability lease asserted with the pre-restart owner epoch | `stale-epoch-assertion-rejected`, `current-epoch-assertion-accepted` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -353,9 +354,17 @@ retries reconcile a canonical outcome rather than duplicate an effect. The
 control journal is reopened between the two attempts, so a pass proves durable
 reconciliation rather than an in-memory cache that a restart would lose.
 
-The remaining #199 scenarios — unavailable providers, interrupted cleanup, old
-owner epochs, and upgrade recovery — are not yet implemented and must not be
-implied by a passing run.
+`stale-owner-epoch` covers the #199 "old owner epochs" case: an actor holding
+authority from before an owner restart must not be able to act after it. It
+asserts a currently-valid lease using the pre-restart epoch, which is what a
+client that never observed the restart would present, and expects
+`owner_restarted`. The scenario also asserts that the *current* epoch is still
+accepted — a deliberate positive control, because a change that rejected every
+assertion would satisfy the rejection invariant while breaking all authority.
+
+The remaining #199 scenarios — unavailable providers, interrupted cleanup, and
+upgrade recovery — are not yet implemented and must not be implied by a
+passing run.
 
 ## Failure-oriented acceptance — #239
 

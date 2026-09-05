@@ -19,6 +19,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
 import {
   ProjectPaneConfigError,
@@ -32,13 +33,15 @@ export type RecoveryScenarioId =
   | 'corrupt-pane-config'
   | 'stale-pane-config-lock'
   | 'unwritable-state-storage'
-  | 'duplicate-command-retry';
+  | 'duplicate-command-retry'
+  | 'stale-owner-epoch';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
   | 'pane-config-lock-held-by-dead-owner'
   | 'state-directory-made-read-only'
-  | 'command-replayed-after-journal-restart';
+  | 'command-replayed-after-journal-restart'
+  | 'lease-asserted-with-pre-restart-owner-epoch';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -47,6 +50,7 @@ export type RecoveryClassification =
   | 'persistence_failed'
   | 'injection_ineffective'
   | 'outcome_reconciled'
+  | 'owner_restart_fenced'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -62,7 +66,9 @@ export type RecoveryInvariantId =
   | 'persistence-failure-surfaced'
   | 'effect-executed-exactly-once'
   | 'retry-reconciles-canonical-outcome'
-  | 'reconciliation-survives-restart';
+  | 'reconciliation-survives-restart'
+  | 'stale-epoch-assertion-rejected'
+  | 'current-epoch-assertion-accepted';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -428,6 +434,72 @@ async function runDuplicateCommandRetry(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * Listed in #199 as "old owner epochs": an actor holding authority from before
+ * an owner restart must not be able to act after it. The scenario asserts a
+ * currently-valid lease using the pre-restart epoch, which is what a client
+ * that never observed the restart would present.
+ *
+ * The current-epoch assertion is a deliberate positive control. Without it a
+ * change that rejected every assertion would pass the rejection invariant
+ * while breaking all authority.
+ */
+async function runStaleOwnerEpoch(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const target = { kind: 'project' as const, id: 'harness-project' };
+  const grant = {
+    requestId: 'harness-request',
+    actorId: 'harness-actor',
+    taskId: 'harness-task',
+    grantedBy: 'harness',
+    grants: [{ target, capabilities: ['pane.observe' as const] }],
+    ttlMs: 60_000,
+  };
+  const assertion = {
+    revision: 1,
+    actorId: grant.actorId,
+    taskId: grant.taskId,
+    target,
+    capability: 'pane.observe' as const,
+  };
+
+  // The owner has restarted, so the live store runs at the newer epoch while a
+  // stale client still believes it is talking to the previous one.
+  const restartedEpoch = 2;
+  const preRestartEpoch = 1;
+  const store = new CapabilityLeaseStore(() => new Date(), restartedEpoch);
+  const lease = store.grant(grant);
+
+  let staleRejectedCode: string | undefined;
+  try {
+    store.assert({ ...assertion, leaseId: lease.id, ownerEpoch: preRestartEpoch });
+  } catch (error) {
+    staleRejectedCode = (error as { code?: string }).code;
+  }
+
+  let currentAccepted = false;
+  try {
+    store.assert({ ...assertion, leaseId: lease.id, ownerEpoch: restartedEpoch });
+    currentAccepted = true;
+  } catch {
+    currentAccepted = false;
+  }
+
+  const staleRejected = staleRejectedCode === 'owner_restarted';
+
+  return evidence(
+    'stale-owner-epoch',
+    'lease-asserted-with-pre-restart-owner-epoch',
+    staleRejected && currentAccepted ? 'owner_restart_fenced' : 'unexpected_success',
+    [
+      { id: 'stale-epoch-assertion-rejected', held: staleRejected },
+      { id: 'current-epoch-assertion-accepted', held: currentAccepted },
+    ],
+    {},
+    startedAt,
+  );
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -435,6 +507,7 @@ const SCENARIOS: Readonly<
   'stale-pane-config-lock': runStalePaneConfigLock,
   'unwritable-state-storage': runUnwritableStateStorage,
   'duplicate-command-retry': runDuplicateCommandRetry,
+  'stale-owner-epoch': runStaleOwnerEpoch,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
