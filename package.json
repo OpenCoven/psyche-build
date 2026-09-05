@@ -79,6 +79,7 @@
     "beads:project:e2e": "node scripts/verify-beads-graphql-e2e.mjs",
     "beads:project:sync": "node scripts/sync-beads-project.mjs --apply",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
+    "recovery:harness": "tsx scripts/run-recovery-harness.ts",
     "ios:project:generate": "xcodegen generate --spec native/ios/project.yml --project native/ios",
     "ios:project:check": "pnpm ios:project:generate && git diff --exit-code -- native/ios/Psyche.xcodeproj native/ios/PsycheApp/Resources/Info.plist",
     "release:version": "node scripts/release-version.mjs --set",

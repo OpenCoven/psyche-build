@@ -297,6 +297,50 @@ acceptance.
 - [ ] Reinstall and verify prior state is safely restored or deliberately
   quarantined with a recovery path.
 
+## Disposable recovery harness
+
+The reusable harness owned by [#199](https://github.com/OpenCoven/psyche-build/issues/199)
+runs the failure scenarios already observed under #239. From a clean checkout:
+
+```bash
+pnpm recovery:harness
+```
+
+Each scenario builds a throwaway project workspace outside the repository,
+injects one bounded failure, drives the real production recovery path, and
+asserts the invariants that failure must preserve. It exits non-zero when any
+invariant fails, so the command gates evidence rather than merely reporting.
+
+Nothing in the harness mocks the code under test. That is the point: the
+pre-#283 defect reported a corrupt config correctly *and* replaced the bytes,
+so a test asserting only the thrown error passes while the user's pane layout
+is destroyed. The harness compares content digests before and after, which is
+what makes the data-loss invariant observable.
+
+Current scenarios:
+
+| Scenario | Injected failure | Invariants |
+|---|---|---|
+| `corrupt-pane-config` | Pane config replaced with invalid JSON | `failure-classified-as-corrupt`, `corrupt-bytes-preserved`, `uncommitted-work-untouched` |
+| `stale-pane-config-lock` | Lease held by an unreachable owner | `stale-lease-taken-over`, `stale-lease-released`, `persisted-config-unchanged`, `persisted-config-readable`, `uncommitted-work-untouched` |
+
+`stale-lease-released` is verified by reacquiring the lease rather than by
+trusting `release()` to have returned. A lease still held by the live harness
+process is not stale, so a second acquisition blocks and times out instead of
+taking over, which is what makes an unreleased lock observable.
+
+The emitted report is bounded and sanitized by construction. Every field is a
+member of a closed union declared in the harness module, a boolean, or a
+SHA-256 digest, including invariant identifiers and digest keys. The types are
+the enforcement: there is no field a future change could set to a path, a
+file's contents, or a raw error message without first widening a union. A
+report can therefore be attached to a public outcome without a redaction
+pass.
+
+The remaining #199 scenarios — unavailable providers, interrupted cleanup,
+duplicate command retry, old owner epochs, unwritable state, and upgrade
+recovery — are not yet implemented and must not be implied by a passing run.
+
 ## Failure-oriented acceptance — #239
 
 Use disposable data and fail closed.
