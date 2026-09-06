@@ -2,10 +2,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+
 const repoRoot = process.cwd();
 const tauriRoot = join(repoRoot, 'native', 'desktop', 'psyche-build-tauri', 'src-tauri');
 const cargoToml = readFileSync(join(tauriRoot, 'Cargo.toml'), 'utf8');
-const tauriLib = readFileSync(join(tauriRoot, 'src', 'lib.rs'), 'utf8');
+// Follows the composition root wherever it lives. The ordering asserted below
+// is the contract; which file holds `run()` is not.
+const tauriLib = readDesktopCommandSurface();
 const tauriConfig = JSON.parse(readFileSync(join(tauriRoot, 'tauri.conf.json'), 'utf8')) as {
   plugins?: Record<string, { enabled?: boolean }>;
 };

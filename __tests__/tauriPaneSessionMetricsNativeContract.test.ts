@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const libSourcePath = resolve(
   process.cwd(),
@@ -30,7 +31,7 @@ function functionBody(source: string, functionName: string): string {
 
 describe('Tauri pane session metrics native contract', () => {
   test('loads Coven metrics off the IPC thread and preserves validation', async () => {
-    const libSource = await readFile(libSourcePath, 'utf8');
+    const libSource = readDesktopCommandSurface();
 
     expect(libSource).toMatch(
       /#\[tauri::command\][\s\S]*?async\s+fn\s+pane_session_metrics\s*\([\s\S]*?project_root\s*:\s*String\s*,[\s\S]*?cwd\s*:\s*String\s*,[\s\S]*?session_id\s*:\s*String\s*,?[\s\S]*?\)\s*->\s*Result<PaneSessionMetrics,\s*String>/,
