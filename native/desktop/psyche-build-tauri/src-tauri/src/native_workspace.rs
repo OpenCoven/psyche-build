@@ -25,6 +25,11 @@ mod workspace_artifact_sweep;
 mod workspace_paths;
 mod workspace_publish;
 mod workspace_restore;
+#[cfg(test)]
+mod workspace_test_hooks;
+
+#[cfg(test)]
+use workspace_test_hooks::*;
 
 use workspace_artifact_io::{
     read_bounded_workspace_file, read_workspace_artifact_bytes, validate_workspace_artifact_bytes,
@@ -208,14 +213,6 @@ where
         &mut sync_directory,
     )?;
     cleanup_rollback_candidates(&workspace_dir, parent, &file_name, &mut sync_directory)?;
-    load_workspace_from_locked_in(&workspace_dir, path)
-}
-
-#[cfg(test)]
-fn load_workspace_from_locked(path: &Path) -> Result<Option<Value>, String> {
-    let Some(workspace_dir) = SecureWorkspaceDir::open_for_load(path)? else {
-        return Ok(None);
-    };
     load_workspace_from_locked_in(&workspace_dir, path)
 }
 
@@ -643,14 +640,6 @@ fn prepare_workspace_parent_fallback(
         sync_created_directory(&directory)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn workspace_file_exists(path: &Path) -> Result<bool, String> {
-    let Some(workspace_dir) = SecureWorkspaceDir::open_for_load(path)? else {
-        return Ok(false);
-    };
-    workspace_file_exists_in(&workspace_dir, path)
 }
 
 fn workspace_file_exists_in(
@@ -2926,19 +2915,6 @@ enum LockMode {
     Exclusive,
 }
 
-#[cfg(test)]
-fn sync_parent_directory_standalone(parent: &Path) -> Result<(), String> {
-    let path = parent.join("workspace-v3.json");
-    let workspace_dir = SecureWorkspaceDir::open_for_load(&path)?
-        .ok_or_else(|| format!("workspace parent '{}' is missing", parent.display()))?;
-    workspace_dir.sync()
-}
-
-#[cfg(test)]
-fn sync_parent_directory(_parent: &Path) -> Result<(), String> {
-    Ok(())
-}
-
 fn sync_workspace_directory(
     workspace_dir: &SecureWorkspaceDir,
     _parent: &Path,
@@ -2972,62 +2948,6 @@ impl Drop for TempFileGuard<'_> {
             let _ = unlink_workspace_path(self.workspace_dir, &self.path, "workspace temp");
         }
     }
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_hook<F, G, H>(
-    path: &Path,
-    value: &Value,
-    before_rename: F,
-    mut sync_transaction_directory: G,
-    mut restore_workspace_backup: H,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-    G: FnMut(&Path) -> Result<(), String>,
-    H: FnMut(&Path, &Path) -> Result<(), String>,
-{
-    save_workspace_to_inner(
-        path,
-        value,
-        before_rename,
-        |_| Ok(()),
-        |_| Ok(()),
-        move |workspace_dir, parent| {
-            sync_transaction_directory(parent)?;
-            workspace_dir.sync()
-        },
-        move |workspace_dir, backup, destination| {
-            restore_workspace_backup(backup, destination)?;
-            restore_workspace_backup_in(workspace_dir, backup, destination)
-        },
-        create_rollback_backup_in,
-        create_rollback_backup_in,
-        rename_workspace_path_in,
-    )
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_hook_before_publication<F>(
-    path: &Path,
-    value: &Value,
-    before_publication: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-{
-    save_workspace_to_inner(
-        path,
-        value,
-        |_| Ok(()),
-        before_publication,
-        |_| Ok(()),
-        sync_workspace_directory,
-        restore_workspace_backup_in,
-        create_rollback_backup_in,
-        create_rollback_backup_in,
-        rename_workspace_path_in,
-    )
 }
 
 #[cfg(test)]
@@ -3212,328 +3132,6 @@ fn run_marker_file_fault(
             }
         }
     })
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_marker_file_fault(
-    path: &Path,
-    value: &Value,
-    mode: MarkerFileFaultMode,
-) -> (Result<(), String>, usize) {
-    MARKER_FILE_FAULT.with(|fault| {
-        assert!(
-            fault.borrow().is_none(),
-            "marker file fault already installed"
-        );
-        *fault.borrow_mut() = Some(MarkerFileFaultPlan {
-            mode,
-            armed: false,
-            failures: 0,
-        });
-    });
-
-    let result = save_workspace_to(path, value);
-    let failures = MARKER_FILE_FAULT.with(|fault| {
-        fault
-            .borrow_mut()
-            .take()
-            .expect("marker file fault must remain installed")
-            .failures
-    });
-    (result, failures)
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_marker_and_directory_faults<G, I>(
-    path: &Path,
-    value: &Value,
-    mode: MarkerFileFaultMode,
-    mut sync_transaction_directory: G,
-    mut recreate_pending_rollback: I,
-) -> (Result<(), String>, usize)
-where
-    G: FnMut(&Path) -> Result<(), String>,
-    I: FnMut(&Path, &Path) -> Result<(), String>,
-{
-    MARKER_FILE_FAULT.with(|fault| {
-        assert!(
-            fault.borrow().is_none(),
-            "marker file fault already installed"
-        );
-        *fault.borrow_mut() = Some(MarkerFileFaultPlan {
-            mode,
-            armed: false,
-            failures: 0,
-        });
-    });
-
-    let result = save_workspace_to_inner(
-        path,
-        value,
-        |_| Ok(()),
-        |_| Ok(()),
-        |_| Ok(()),
-        move |workspace_dir, parent| {
-            sync_transaction_directory(parent)?;
-            workspace_dir.sync()
-        },
-        restore_workspace_backup_in,
-        create_rollback_backup_in,
-        move |workspace_dir, source, destination| {
-            recreate_pending_rollback(source, destination)?;
-            create_rollback_backup_in(workspace_dir, source, destination)
-        },
-        rename_workspace_path_in,
-    );
-    let failures = MARKER_FILE_FAULT.with(|fault| {
-        fault
-            .borrow_mut()
-            .take()
-            .expect("marker file fault must remain installed")
-            .failures
-    });
-    (result, failures)
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_swap_after_final_verification_before_rename(
-    path: &Path,
-    value: &Value,
-    replacement: Vec<u8>,
-) -> Result<(), String> {
-    POST_VERIFICATION_PRE_RENAME_REPLACEMENT.with(|pending| {
-        assert!(
-            pending.borrow().is_none(),
-            "post-verification pre-rename fault already installed"
-        );
-        *pending.borrow_mut() = Some(replacement);
-    });
-
-    let result = save_workspace_to(path, value);
-    let missed = POST_VERIFICATION_PRE_RENAME_REPLACEMENT
-        .with(|pending| pending.borrow_mut().take().is_some());
-    if missed {
-        Err("expected post-verification pre-rename fault point was not reached".to_string())
-    } else {
-        result
-    }
-}
-
-#[cfg(test)]
-fn with_restore_candidate_swap<T>(
-    replacement: Vec<u8>,
-    operation: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    POST_RESTORE_VERIFICATION_PRE_RENAME_REPLACEMENT.with(|pending| {
-        assert!(
-            pending.borrow().is_none(),
-            "post-restore-verification pre-rename fault already installed"
-        );
-        *pending.borrow_mut() = Some(replacement);
-    });
-
-    let result = operation();
-    let missed = POST_RESTORE_VERIFICATION_PRE_RENAME_REPLACEMENT
-        .with(|pending| pending.borrow_mut().take().is_some());
-    if missed {
-        Err("expected post-restore-verification pre-rename fault point was not reached".to_string())
-    } else {
-        result
-    }
-}
-
-#[cfg(test)]
-fn with_restore_candidate_swap_and_trusted_retry_failure<T>(
-    replacement: Vec<u8>,
-    failure: RestoreCandidateFileOperation,
-    operation: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    TRUSTED_RESTORE_CANDIDATE_FAILURE.with(|pending| {
-        assert!(
-            pending.borrow().is_none(),
-            "trusted restore candidate fault already installed"
-        );
-        *pending.borrow_mut() = Some(failure);
-    });
-
-    let result = with_restore_candidate_swap(replacement, operation);
-    let missed = TRUSTED_RESTORE_CANDIDATE_FAILURE.with(|pending| pending.borrow_mut().take());
-    if let Some(missed) = missed {
-        return Err(format!(
-            "expected trusted restore candidate {missed:?} fault point was not reached"
-        ));
-    }
-    result
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_post_initial_forward_sync_fault(
-    path: &Path,
-    value: &Value,
-    fault: PostInitialForwardSyncFault,
-) -> Result<(), String> {
-    POST_INITIAL_FORWARD_SYNC_FAULT.with(|pending| {
-        assert!(
-            pending.borrow().is_none(),
-            "post-initial-forward-sync fault already installed"
-        );
-        *pending.borrow_mut() = Some(fault);
-    });
-
-    let result = save_workspace_to(path, value);
-    let missed =
-        POST_INITIAL_FORWARD_SYNC_FAULT.with(|pending| pending.borrow_mut().take().is_some());
-    if missed {
-        Err("expected post-initial-forward-sync fault point was not reached".to_string())
-    } else {
-        result
-    }
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_hook_with_recreation_fault<G, I>(
-    path: &Path,
-    value: &Value,
-    mut sync_transaction_directory: G,
-    mut recreate_pending_rollback: I,
-) -> Result<(), String>
-where
-    G: FnMut(&Path) -> Result<(), String>,
-    I: FnMut(&Path, &Path) -> Result<(), String>,
-{
-    save_workspace_to_inner(
-        path,
-        value,
-        |_| Ok(()),
-        |_| Ok(()),
-        |_| Ok(()),
-        move |workspace_dir, parent| {
-            sync_transaction_directory(parent)?;
-            workspace_dir.sync()
-        },
-        restore_workspace_backup_in,
-        create_rollback_backup_in,
-        move |workspace_dir, source, destination| {
-            recreate_pending_rollback(source, destination)?;
-            create_rollback_backup_in(workspace_dir, source, destination)
-        },
-        rename_workspace_path_in,
-    )
-}
-
-#[cfg(test)]
-fn load_workspace_from_test_hook<F>(
-    path: &Path,
-    before_exclusive_recovery: F,
-) -> Result<Option<Value>, String>
-where
-    F: FnOnce() -> Result<(), String>,
-{
-    load_workspace_from_inner(path, before_exclusive_recovery)
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_hook_with_backup<F, G, H, I>(
-    path: &Path,
-    value: &Value,
-    before_rename: F,
-    mut sync_transaction_directory: G,
-    mut restore_workspace_backup: H,
-    create_rollback_backup: I,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-    G: FnMut(&Path) -> Result<(), String>,
-    H: FnMut(&Path, &Path) -> Result<(), String>,
-    I: FnOnce(&Path, &Path) -> Result<(), String>,
-{
-    save_workspace_to_inner(
-        path,
-        value,
-        before_rename,
-        |_| Ok(()),
-        |_| Ok(()),
-        move |workspace_dir, parent| {
-            sync_transaction_directory(parent)?;
-            workspace_dir.sync()
-        },
-        move |workspace_dir, backup, destination| {
-            restore_workspace_backup(backup, destination)?;
-            restore_workspace_backup_in(workspace_dir, backup, destination)
-        },
-        move |workspace_dir, source, backup| {
-            create_rollback_backup(source, backup)?;
-            create_rollback_backup_in(workspace_dir, source, backup)
-        },
-        create_rollback_backup_in,
-        rename_workspace_path_in,
-    )
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_hook_with_ops<F, G, H, I, J>(
-    path: &Path,
-    value: &Value,
-    before_rename: F,
-    mut sync_transaction_directory: G,
-    mut restore_workspace_backup: H,
-    create_rollback_backup: I,
-    mut rename_workspace_path: J,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-    G: FnMut(&Path) -> Result<(), String>,
-    H: FnMut(&Path, &Path) -> Result<(), String>,
-    I: FnOnce(&Path, &Path) -> Result<(), String>,
-    J: FnMut(&Path, &Path) -> Result<(), String>,
-{
-    save_workspace_to_inner(
-        path,
-        value,
-        before_rename,
-        |_| Ok(()),
-        |_| Ok(()),
-        move |workspace_dir, parent| {
-            sync_transaction_directory(parent)?;
-            workspace_dir.sync()
-        },
-        move |workspace_dir, backup, destination| {
-            restore_workspace_backup(backup, destination)?;
-            restore_workspace_backup_in(workspace_dir, backup, destination)
-        },
-        move |workspace_dir, source, backup| {
-            create_rollback_backup(source, backup)?;
-            create_rollback_backup_in(workspace_dir, source, backup)
-        },
-        create_rollback_backup_in,
-        move |workspace_dir, source, destination| {
-            rename_workspace_path(source, destination)?;
-            rename_workspace_path_in(workspace_dir, source, destination)
-        },
-    )
-}
-
-#[cfg(test)]
-fn workspace_save_to_test_hook_with_parent_sync<G>(
-    path: &Path,
-    value: &Value,
-    sync_created_directory: G,
-) -> Result<(), String>
-where
-    G: FnMut(&Path) -> Result<(), String>,
-{
-    save_workspace_to_inner(
-        path,
-        value,
-        |_| Ok(()),
-        |_| Ok(()),
-        sync_created_directory,
-        sync_workspace_directory,
-        restore_workspace_backup_in,
-        create_rollback_backup_in,
-        create_rollback_backup_in,
-        rename_workspace_path_in,
-    )
 }
 
 #[cfg(unix)]
