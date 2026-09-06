@@ -483,140 +483,20 @@ where
         );
     }
 
-    let commit_error = match commit_result {
-        Ok(()) => match declare_absent_forward_commit(
-            &workspace_dir,
-            transaction_pending_path,
-            transaction_committed_path,
-        ) {
-            Ok(()) => {
-                return finish_initial_workspace_forward(
-                    &workspace_dir,
-                    &temp_file,
-                    &bytes,
-                    path,
-                    parent,
-                    transaction_pending_path,
-                    transaction_committed_path,
-                    forward_path.as_path(),
-                    &mut sync_parent_directory,
-                )
-            }
-            Err(error) => {
-                if let Err(reset_error) = declare_absent_rollback(
-                    &workspace_dir,
-                    transaction_pending_path,
-                    transaction_committed_path,
-                ) {
-                    let forward_error = commit_initial_workspace_forward(
-                        &workspace_dir,
-                        &temp_file,
-                        &bytes,
-                        path,
-                        parent,
-                        transaction_pending_path,
-                        transaction_committed_path,
-                        forward_path.as_path(),
-                        &mut sync_parent_directory,
-                    );
-                    return match forward_error {
-                        Ok(()) => Ok(()),
-                        Err(forward_error) => resolve_initial_workspace_after_marker_failure(
-                            &workspace_dir,
-                            &temp_file,
-                            &bytes,
-                            path,
-                            parent,
-                            transaction_pending_path,
-                            transaction_committed_path,
-                            forward_path.as_path(),
-                            format!(
-                                "{error}; {reset_error}; forward resolution failed: {forward_error}"
-                            ),
-                            &mut sync_parent_directory,
-                        ),
-                    };
-                }
-                return match durably_restore_initial_absence(
-                    &workspace_dir,
-                    path,
-                    parent,
-                    transaction_pending_path,
-                    transaction_committed_path,
-                    &mut sync_parent_directory,
-                    &mut restore_workspace_backup,
-                ) {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => resolve_initial_workspace_after_marker_failure(
-                        &workspace_dir,
-                        &temp_file,
-                        &bytes,
-                        path,
-                        parent,
-                        transaction_pending_path,
-                        transaction_committed_path,
-                        forward_path.as_path(),
-                        format!("{error}; restore reset absent rollback failed: {rollback_error}"),
-                        &mut sync_parent_directory,
-                    ),
-                };
-            }
-        },
-        Err(error) => error,
-    };
-
-    match rollback_workspace_after_failed_save(
+    finish_initial_workspace_transaction(
         &workspace_dir,
+        &temp_file,
+        &bytes,
         path,
         parent,
         transaction_pending_path,
         transaction_committed_path,
+        forward_path.as_path(),
+        commit_result,
         &mut sync_parent_directory,
         &mut restore_workspace_backup,
         &mut rename_workspace_path,
-    ) {
-        Ok(()) => Err(commit_error),
-        Err(rollback_error) => {
-            match durably_restore_initial_absence(
-                &workspace_dir,
-                path,
-                parent,
-                transaction_pending_path,
-                transaction_committed_path,
-                &mut sync_parent_directory,
-                &mut restore_workspace_backup,
-            ) {
-                Ok(()) => Err(format!("{commit_error}; {rollback_error}")),
-                Err(retry_error) => match commit_initial_workspace_forward(
-                    &workspace_dir,
-                    &temp_file,
-                    &bytes,
-                    path,
-                    parent,
-                    transaction_pending_path,
-                    transaction_committed_path,
-                    forward_path.as_path(),
-                    &mut sync_parent_directory,
-                ) {
-                    Ok(()) => Ok(()),
-                    Err(forward_error) => resolve_initial_workspace_after_marker_failure(
-                        &workspace_dir,
-                        &temp_file,
-                        &bytes,
-                        path,
-                        parent,
-                        transaction_pending_path,
-                        transaction_committed_path,
-                        forward_path.as_path(),
-                        format!(
-                            "{commit_error}; {rollback_error}; {retry_error}; forward resolution failed: {forward_error}"
-                        ),
-                        &mut sync_parent_directory,
-                    ),
-                },
-            }
-        }
-    }
+    )
 }
 
 struct SecureWorkspaceDir {
@@ -1976,6 +1856,168 @@ fn durably_restore_initial_absence(
             error
         )
     })
+}
+
+/// Finishes a save that created the workspace where none existed.
+///
+/// The twin of `finish_prior_workspace_transaction`, for the branch where
+/// `had_workspace` was false. Both run after `mark_rollback_committed_with`
+/// and both take its `commit_result` rather than deciding the commit
+/// themselves; the difference is what a failure has to restore. With a prior
+/// workspace there are bytes to put back, so that function takes them. Here
+/// there was no file, so recovery is a choice between durably restoring the
+/// absence and completing the forward commit — which is why this one needs
+/// `rename_workspace_path` and does not need `recreate_pending_rollback`.
+///
+/// This was inlined in `save_workspace_to_inner` while its counterpart was a
+/// named function, so the two halves of one decision could not be read side
+/// by side.
+fn finish_initial_workspace_transaction(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    expected_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    commit_result: Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let commit_error = match commit_result {
+        Ok(()) => {
+            match declare_absent_forward_commit(workspace_dir, pending_path, committed_path) {
+                Ok(()) => {
+                    return finish_initial_workspace_forward(
+                        workspace_dir,
+                        source_file,
+                        expected_bytes,
+                        path,
+                        parent,
+                        pending_path,
+                        committed_path,
+                        forward_path,
+                        sync_parent_directory,
+                    )
+                }
+                Err(error) => {
+                    if let Err(reset_error) =
+                        declare_absent_rollback(workspace_dir, pending_path, committed_path)
+                    {
+                        let forward_error = commit_initial_workspace_forward(
+                            workspace_dir,
+                            source_file,
+                            expected_bytes,
+                            path,
+                            parent,
+                            pending_path,
+                            committed_path,
+                            forward_path,
+                            sync_parent_directory,
+                        );
+                        return match forward_error {
+                            Ok(()) => Ok(()),
+                            Err(forward_error) => resolve_initial_workspace_after_marker_failure(
+                                workspace_dir,
+                                source_file,
+                                expected_bytes,
+                                path,
+                                parent,
+                                pending_path,
+                                committed_path,
+                                forward_path,
+                                format!(
+                                "{error}; {reset_error}; forward resolution failed: {forward_error}"
+                            ),
+                                sync_parent_directory,
+                            ),
+                        };
+                    }
+                    return match durably_restore_initial_absence(
+                        workspace_dir,
+                        path,
+                        parent,
+                        pending_path,
+                        committed_path,
+                        sync_parent_directory,
+                        restore_workspace_backup,
+                    ) {
+                        Ok(()) => Err(error),
+                        Err(rollback_error) => resolve_initial_workspace_after_marker_failure(
+                            workspace_dir,
+                            source_file,
+                            expected_bytes,
+                            path,
+                            parent,
+                            pending_path,
+                            committed_path,
+                            forward_path,
+                            format!(
+                                "{error}; restore reset absent rollback failed: {rollback_error}"
+                            ),
+                            sync_parent_directory,
+                        ),
+                    };
+                }
+            }
+        }
+        Err(error) => error,
+    };
+
+    match rollback_workspace_after_failed_save(
+        workspace_dir,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        sync_parent_directory,
+        restore_workspace_backup,
+        rename_workspace_path,
+    ) {
+        Ok(()) => Err(commit_error),
+        Err(rollback_error) => {
+            match durably_restore_initial_absence(
+                workspace_dir,
+                path,
+                parent,
+                pending_path,
+                committed_path,
+                sync_parent_directory,
+                restore_workspace_backup,
+            ) {
+                Ok(()) => Err(format!("{commit_error}; {rollback_error}")),
+                Err(retry_error) => match commit_initial_workspace_forward(
+                    workspace_dir,
+                    source_file,
+                    expected_bytes,
+                    path,
+                    parent,
+                    pending_path,
+                    committed_path,
+                    forward_path,
+                    sync_parent_directory,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(forward_error) => resolve_initial_workspace_after_marker_failure(
+                        workspace_dir,
+                        source_file,
+                        expected_bytes,
+                        path,
+                        parent,
+                        pending_path,
+                        committed_path,
+                        forward_path,
+                        format!(
+                            "{commit_error}; {rollback_error}; {retry_error}; forward resolution failed: {forward_error}"
+                        ),
+                        sync_parent_directory,
+                    ),
+                },
+            }
+        }
+    }
 }
 
 fn finish_prior_workspace_transaction(
