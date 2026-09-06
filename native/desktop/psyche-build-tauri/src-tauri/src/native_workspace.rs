@@ -424,8 +424,20 @@ struct PublishedWorkspace<'a> {
 ///
 /// Extracted from `save_workspace_to_inner` so the publication sequence can be
 /// read as one unit: stage, open the rollback transaction, verify, rename,
-/// sync. Every failure after the transaction opens rolls back before
-/// returning, so a caller that propagates the error is not left mid-write.
+/// sync.
+///
+/// Rollback is guaranteed from the point the pending marker is durable, not
+/// from the point the transaction opens. Once the first `sync_parent_directory`
+/// succeeds, every later failure — the inode check, the rename, the final sync
+/// — calls `rollback_workspace_after_failed_save` before returning. Before that
+/// sync, failures return without rolling back: `create_forward_rollback_in` and
+/// the sync itself propagate directly.
+///
+/// That asymmetry is the design, not a gap. A marker that was never synced may
+/// not have reached the disk, so there is nothing a rollback here could rely on
+/// having found. Whatever did land is resolved by
+/// `recover_pending_rollback_state`, which runs at the start of the next save
+/// before anything is written.
 ///
 /// `TempFileGuard` lives and dies inside this function. It unlinks the temp
 /// file unless committed, and the commit happens here after the rename, so the
