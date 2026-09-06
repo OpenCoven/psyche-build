@@ -19,13 +19,18 @@ and picking a seam by intuition risks a refactor that looks like progress
 while leaving the stated scope untouched.
 
 The per-slice contract also caps a slice at roughly 800 non-generated changed
-lines. The module's production half is 5,409 lines, so slice 2 is necessarily
+lines. The module's production half is 5,450 lines, so slice 2 is necessarily
 several extractions, and their order matters.
 
 ## Measured shape
 
 `native_workspace.rs` is 8,586 lines: **5,450 production** and **3,136 test**.
 The production half holds **131 functions**.
+
+Two line counts appear below and measure different spans. Production is lines
+1-5,450, ending where the test module begins. The per-concern table sums
+function bodies, which total 5,409 lines; the 41-line difference is the
+imports, type definitions, and constants that precede the first function.
 
 Mapping each function to the concern it serves:
 
@@ -65,7 +70,7 @@ independently of recovery.
 
 ## Proposed extraction order
 
-Each step is independently reviewable, preserves public behaviour, and stays
+Each step is independently reviewable, preserves public behavior, and stays
 inside the slice cap.
 
 1. **Filesystem primitives → `secure_fs.rs`** (~574 lines, 20 functions).
