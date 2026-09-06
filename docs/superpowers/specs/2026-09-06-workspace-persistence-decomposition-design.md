@@ -170,9 +170,8 @@ bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
 ## Proposed extraction order
 
 Each step is independently reviewable and preserves public behavior. Steps 1
-to 3 have been measured against the current source and landed. Steps 4 to 6
-are still estimates from the original concern map and must be re-derived
-before each is started.
+to 4 have landed; step 5 is measured but not yet started. Step 6 is still an
+estimate from the original concern map and must be re-derived before it is.
 
 Two kinds of error have shown up so far, and only the first is caught by
 measuring. A dependency closure gives the right *size*; it does not give the
@@ -184,6 +183,7 @@ steps 2 and 3 had to drop members after reading the bodies:
 |---|---:|---:|---:|---|
 | 2 | 7 fns | 16 fns | 13 fns | 3 do filesystem I/O through `secure_fs` |
 | 3 | 14 fns | 18 fns | 14 fns | 4 are artifact helpers shared with load, save and recovery |
+| 5 | 11 fns | 22 fns | 11 fns | 11 are shared with load or recovery |
 
 So the closure is where a step starts, not where it ends. Read the bodies
 before moving them.
@@ -237,12 +237,52 @@ before moving them.
    decided. Six of the fourteen are `#[cfg(test)]` test doubles and fault
    hooks.
 
-4. **Split `save_workspace_to_inner`** before moving publication. Separating
-   the fault-injection hooks and transaction finishing from the publication
-   sequence is a prerequisite for step 5, not an optional cleanup.
+4. **Split `save_workspace_to_inner`.** **Landed in #372 and #373**, as two
+   seams. 384 lines to 165.
 
-5. **Atomic publication → `workspace_publish.rs`** (~864 lines, 11 functions),
-   once step 4 has reduced the largest body.
+   Unlike every other step, this one could not be sized by measuring a
+   closure — it needed a seam chosen, so three were costed and presented
+   before cutting:
+
+   | Seam | Crossing values | Residual | Taken |
+   |---|---:|---:|---|
+   | A: initial-workspace finish (tail) | 3 closures, 8 bindings | 264 | #372 |
+   | B: validate/lock/recover (head) | 4 closures, 9 out — needs a context struct | 323 | no |
+   | C: stage + verify + publish | 16 in, 5 out | 165 | #373 |
+
+   A was taken first because the file already drew that seam: the
+   `had_workspace` branch called a named function while its twin was 134
+   lines inline. C is the wide one and its interface says so, but it is what
+   step 5 needs, and the alternative was leaving publication inside a
+   264-line function.
+
+   Both were verified as pure moves rather than asserted: the original block,
+   with call-site bindings renamed and run through `rustfmt`, is byte-for-byte
+   the extracted function. That check is not ceremony — `cargo fmt`
+   legitimately reflows a `match` arm once shorter parameter names change the
+   line widths, so a plain diff shows changes that are not semantic ones.
+
+5. **Atomic publication → `native_workspace/workspace_publish.rs`** (479
+   lines, 11 functions, measured after step 4 landed).
+
+   The closure of the publication seeds is 22 functions and 869 lines, which
+   is almost exactly the original estimate of ~864 — and almost exactly wrong
+   in the same way as steps 2 and 3. Eleven of those 22 are shared with the
+   load path or the recovery layer, `sync_parent_directory` most starkly with
+   **sixteen callers outside the set**. The publication-only set is 11
+   functions, which is what the estimate said; the line count was double
+   because the closure counted the layers beneath.
+
+   Two subtrees, three entry points: `stage_and_publish_workspace` from the
+   save path, and `mark_rollback_committed` from the recovery layer.
+
+   This step also has a hazard the earlier ones did not. Several names in
+   these bodies — `sync_parent_directory`, `create_rollback_backup`,
+   `recreate_pending_rollback` — are **closure parameters in some of these
+   functions and free functions elsewhere in the module**. A dependency scan
+   that does not track parameter shadowing will propose importing the free
+   function, which is a different item under a different `cfg`. The import
+   list has to come from the compiler, not from a name match.
 
 6. **Recovery decisions → `workspace_recovery.rs`** (~2,372 lines, 49
    functions), last and probably as several slices of its own. It is the
