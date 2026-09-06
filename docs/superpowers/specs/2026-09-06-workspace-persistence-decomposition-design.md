@@ -120,9 +120,10 @@ matching import list either way.
 
 Move it as a **child module** (`native_workspace/secure_fs.rs`, declared from
 `native_workspace.rs`) with `pub(super)` visibility rather than a sibling with
-`pub(crate)`. Edition 2021 supports that layout, and it keeps sixteen security
-primitives visible only to their parent instead of widening them crate-wide —
-which the original plan would have done as an unremarked side effect.
+`pub(crate)`. Edition 2021 supports that layout, and it keeps all fourteen
+security primitives visible only to their parent instead of widening them
+crate-wide — which the original plan would have done as an unremarked side
+effect.
 
 Carry each moved function's `use` statements with it. The trial move relocated
 bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
@@ -133,9 +134,9 @@ Each step is independently reviewable, preserves public behavior, and stays
 inside the slice cap.
 
 1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (408 lines, 14
-   functions, dependency-closed). Superseded the original "filesystem
-   primitives, ~574 lines, 20 functions" step, which was not closed and would
-   not compile. See the correction above.
+   functions, dependency-closed). This supersedes the original "filesystem
+   primitives, ~574 lines, 20 functions" step, which was not dependency-closed
+   and would not compile. See the correction above.
 
 2. **Path derivation → `workspace_paths.rs`** (~173 lines, 7 functions).
    Pure functions deriving temp, lock, rollback, and restore-candidate paths.
