@@ -20,9 +20,15 @@ use std::ffi::CString;
 use std::os::fd::AsRawFd;
 
 mod secure_fs;
+mod workspace_artifact_io;
 mod workspace_paths;
 mod workspace_publish;
 mod workspace_restore;
+
+use workspace_artifact_io::{
+    read_bounded_workspace_file, read_workspace_artifact_bytes, validate_workspace_artifact_bytes,
+    verify_opened_workspace_artifact, verify_workspace_artifact_bytes,
+};
 
 #[cfg(test)]
 use workspace_publish::open_temp_file;
@@ -837,90 +843,6 @@ fn create_absent_rollback_marker_in(
     )?;
     marker_guard.commit();
     Ok(())
-}
-
-fn read_workspace_artifact_bytes(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    let Some(mut file) = open_existing_regular_file(workspace_dir, path, context, false)? else {
-        return Err(format!("{context} '{}' is missing", path.display()));
-    };
-    read_bounded_workspace_file(&mut file, path, context)
-}
-
-fn read_bounded_workspace_file(
-    file: &mut File,
-    path: &Path,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("inspect {context} '{}': {}", path.display(), error))?;
-    if metadata.len() > WORKSPACE_DOCUMENT_SIZE_LIMIT {
-        return Err(format!(
-            "{context} '{}' is too large: {} bytes (limit {})",
-            path.display(),
-            metadata.len(),
-            WORKSPACE_DOCUMENT_SIZE_LIMIT
-        ));
-    }
-
-    let capacity = usize::try_from(metadata.len()).map_err(|_| {
-        format!(
-            "{context} '{}' is too large for this platform",
-            path.display()
-        )
-    })?;
-    let mut bytes = Vec::with_capacity(capacity);
-    Read::by_ref(file)
-        .take(WORKSPACE_DOCUMENT_SIZE_LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read {context} '{}': {}", path.display(), error))?;
-    if bytes.len() as u64 > WORKSPACE_DOCUMENT_SIZE_LIMIT {
-        return Err(format!(
-            "{context} '{}' exceeded the {} byte limit while reading",
-            path.display(),
-            WORKSPACE_DOCUMENT_SIZE_LIMIT
-        ));
-    }
-    Ok(bytes)
-}
-
-fn verify_workspace_artifact_bytes(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    expected_bytes: &[u8],
-    context: &str,
-) -> Result<(), String> {
-    let actual = read_workspace_artifact_bytes(workspace_dir, path, context)?;
-    if actual != expected_bytes {
-        return Err(format!("{context} '{}' changed contents", path.display()));
-    }
-    Ok(())
-}
-
-fn verify_opened_workspace_artifact(
-    workspace_dir: &SecureWorkspaceDir,
-    file: &File,
-    path: &Path,
-    expected_bytes: &[u8],
-    context: &str,
-) -> Result<(), String> {
-    verify_opened_regular_file(workspace_dir, file, path, context)?;
-    verify_workspace_artifact_bytes(workspace_dir, path, expected_bytes, context)
-}
-
-fn validate_workspace_artifact_bytes(
-    bytes: &[u8],
-    path: &Path,
-    context: &str,
-) -> Result<(), String> {
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("parse {context} '{}': {}", path.display(), error))?;
-    validate_workspace(&value)
-        .map_err(|error| format!("validate {context} '{}': {}", path.display(), error))
 }
 
 fn write_absent_marker(
