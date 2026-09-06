@@ -175,12 +175,16 @@ estimates from the original concern map and must be re-derived from the call
 graph before each is started — step 2 shows why: its function count was more
 than double the estimate even though its line count was close.
 
-1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (734 lines, 20
-   functions, dependency-closed). **Landed in #366.** The move took 735 lines
-   out of the parent and needed only 14 of the 20 to be `pub(super)`; the other
-   six turned out to be unreachable from the parent, so the extraction narrowed
-   the security surface rather than merely relocating it. This supersedes the
-   original "filesystem primitives, ~574 lines, 20 functions" step. That step
+1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (734 lines of
+   function bodies, 20 functions, dependency-closed). **Landed in #366.** Three
+   different line counts describe this move and they are not meant to agree:
+   734 is the set's function bodies, the parent shrank by a net 751 (766
+   deleted, 15 added for `mod secure_fs;` and the two `cfg`-split import
+   groups), and the new file is 810 including its header. Only 14 of the 20
+   needed to be `pub(super)`; the other six turned out to be unreachable from
+   the parent, so the extraction narrowed the security surface rather than
+   merely relocating it. This supersedes the original "filesystem primitives,
+   ~574 lines, 20 functions" step. That step
    named the same number of functions but a different set of them, one that was
    not dependency-closed and would not compile. See the correction above.
 
