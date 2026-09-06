@@ -1,6 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import {
+  assertUnambiguousFunction,
+  readNativeWorkspaceSurface,
+} from './support/nativeWorkspaceSurface.js';
 
 const sourcePath = resolve(
   process.cwd(),
@@ -8,6 +12,9 @@ const sourcePath = resolve(
 );
 
 function functionBody(source: string, name: string): string {
+  // The surface spans every module, so confirm this name resolves to one
+  // definition before slicing a body out of it.
+  assertUnambiguousFunction(name);
   const signature = new RegExp(`\\bfn\\s+${name}(?:<[^>]*>)?\\s*\\(`).exec(source);
   const start = signature?.index ?? -1;
   expect(start).toBeGreaterThanOrEqual(0);
@@ -23,7 +30,7 @@ function functionBody(source: string, name: string): string {
 
 describe('Tauri native workspace security contract', () => {
   test('checks the injected caller webview before workspace I/O', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const load = functionBody(source, 'workspace_load');
     const save = functionBody(source, 'workspace_save');
     const guard = functionBody(source, 'ensure_trusted_workspace_caller');
@@ -41,7 +48,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('holds shared and exclusive OS locks with explicit unlock', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const openLock = functionBody(source, 'open_workspace_lock');
 
     expect(source).toMatch(/LockMode::Shared\s*=>\s*libc::LOCK_SH/);
@@ -56,7 +63,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('acquires workspace locks before inspecting recovery artifacts', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const load = functionBody(source, 'load_workspace_from_inner');
     const save = functionBody(source, 'save_workspace_to_inner');
 
@@ -69,7 +76,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('validates the complete workspace before filesystem mutation', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const save = functionBody(source, 'save_workspace_to_inner');
 
     const validation = save.indexOf('validate_workspace(value)');
@@ -86,7 +93,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('pins HOME and traverses app storage with descriptor-relative syscalls', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const prepare = functionBody(source, 'prepare_for_save');
     const component = functionBody(source, 'open_directory_component');
 
@@ -107,7 +114,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('keeps every workspace artifact operation relative to the pinned directory', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
 
     expect(functionBody(source, 'open_existing_regular_file')).toContain('libc::openat');
     expect(functionBody(source, 'open_new_workspace_file')).toContain('libc::openat');
@@ -118,7 +125,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('keeps distinct publication fault boundaries around the final temp inode check', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const save = functionBody(source, 'save_workspace_to_inner');
     const publish = functionBody(source, 'publish_opened_workspace_file');
 
@@ -142,7 +149,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('pins rollback restore candidates across the exact check-to-rename window', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
 
     expect(source).toContain('run_post_restore_verification_pre_rename_fault');
     const restore = functionBody(source, 'restore_workspace_backup_in');
@@ -168,7 +175,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('requires directory durability before initial forward certification succeeds', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const commit = functionBody(source, 'commit_initial_workspace_forward');
     const finish = functionBody(source, 'finish_initial_workspace_forward');
     const certify = functionBody(source, 'certify_initial_forward_recovery');
@@ -187,7 +194,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('revalidates normal initial-save success after its final directory sync', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const finish = functionBody(source, 'finish_initial_workspace_forward');
     const resolve = functionBody(source, 'resolve_initial_workspace_after_marker_failure');
 
@@ -202,7 +209,7 @@ describe('Tauri native workspace security contract', () => {
   });
 
   test('uses durable recovery decisions for API results and restart repair', async () => {
-    const source = await readFile(sourcePath, 'utf8');
+    const source = readNativeWorkspaceSurface();
     const initial = functionBody(source, 'resolve_initial_workspace_after_marker_failure');
     const prior = functionBody(source, 'resolve_prior_workspace_after_commit_failure');
     const resolvePrior = functionBody(source, 'resolve_prior_workspace_durable_decision');
