@@ -170,8 +170,8 @@ bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
 ## Proposed extraction order
 
 Each step is independently reviewable and preserves public behavior. Steps 1
-to 4 have landed; step 5 is measured but not yet started. Step 6 is still an
-estimate from the original concern map and must be re-derived before it is.
+to 5 have landed. Step 6 is still an estimate from the original concern map
+and must be re-derived before it is started.
 
 Two kinds of error have shown up so far, and only the first is caught by
 measuring. A dependency closure gives the right *size*; it does not give the
@@ -263,7 +263,7 @@ before moving them.
    line widths, so a plain diff shows changes that are not semantic ones.
 
 5. **Atomic publication → `native_workspace/workspace_publish.rs`** (479
-   lines, 11 functions, measured after step 4 landed).
+   lines, 11 functions). **Landed in #376.**
 
    The closure of the publication seeds is 22 functions and 869 lines, which
    is almost exactly the original estimate of ~864 — and almost exactly wrong
@@ -282,7 +282,12 @@ before moving them.
    functions and free functions elsewhere in the module**. A dependency scan
    that does not track parameter shadowing will propose importing the free
    function, which is a different item under a different `cfg`. The import
-   list has to come from the compiler, not from a name match.
+   list has to come from the compiler, not from a name match. That is how it
+   was done: the extraction carried a temporary `use super::*;`, which was
+   then removed so the compiler could enumerate the names. It disagreed with
+   the scan — what these functions call is `create_rollback_backup_in`, not
+   the `create_rollback_backup` a name match proposes. The `cfg` gate contract
+   then verified the gating.
 
 6. **Recovery decisions → `workspace_recovery.rs`** (~2,372 lines, 49
    functions), last and probably as several slices of its own. It is the
