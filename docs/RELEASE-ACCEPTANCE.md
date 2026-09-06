@@ -1,6 +1,7 @@
 # Psyche Build release acceptance
 
-**Status:** Reusable release gate; macOS `v0.0.1` published 2026-08-23  
+**Status:** Reusable release gate; macOS `v0.0.1` and `v0.0.2` published
+
 **Active stabilization owner:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)  
 **Executable evidence slice:** [#239](https://github.com/OpenCoven/psyche-build/issues/239)  
 **Bounded operator runbook:** [OPERATOR-ACCEPTANCE-SLICE.md](./OPERATOR-ACCEPTANCE-SLICE.md)  
@@ -26,15 +27,38 @@ operate, recover, and remove the application.
 | Desktop-only release independence while retaining shared validation | **Complete** | #203 and protected run `32629730508` |
 | Stable GitHub Release and native Homebrew Cask | **Complete** | #194, `OpenCoven/homebrew-tap#2`, and native Apple Silicon/Intel lifecycle runs |
 | Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #196 executed through #239 |
-| Administrator-enforced required checks/review with one named PR-only owner bypass | **Complete** | [#31](https://github.com/OpenCoven/psyche-build/issues/31); sanitized ruleset/protection records, `GH013` direct-push rejection probe, and proof PR #283 (`63667f30`) |
+| Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
-| Reusable recovery harness and operator-observed failure scenarios | **Planned post-release capability** | #199 |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; six bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
+| Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
 
 The open #196/#239 row does not make the already-delivered macOS artifact
 unreleased. It is an explicit post-release correctness obligation. Conversely,
 completed publication evidence does not invent the operator-observed acceptance
 work that remains open.
+
+## `v0.0.2` publication is separate from acceptance
+
+The [v0.0.2 release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2)
+was published on 2026-08-31 from verified signed tag source
+`a4546f45bb0ee05cfbb388a0fc5f9e951596be51`.
+[Release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717)
+completed shared verification, both signed/notarized DMG jobs, publication,
+and tap notification; iOS upload was skipped. Its dispatch workflow SHA
+`63667f300bbdccea4dfede4e9e19fedb90876356` is not the release tag source.
+
+The Homebrew Cask still selects `v0.0.1` as of 2026-09-06, at tap commit
+[`d080d361`](https://github.com/OpenCoven/homebrew-tap/blob/d080d3618f0dc02239f75625d34518b8c61209e1/Casks/psyche-build.rb).
+Do not label a fresh Cask install as `v0.0.2`, infer a successful tap update
+from its notification job, or transfer `v0.0.1` lifecycle evidence to the newer
+DMGs. A separate exact-artifact record is required for `v0.0.2` operator
+acceptance and upgrade/rollback observations.
+
+#196 was reopened on 2026-09-06 after a quoted closing phrase in PR #350
+changed issue state without new acceptance evidence. #239 remains open; its
+latest update records 15 evidence digests and `terminal_state: incomplete`.
+Neither release publication nor issue closure can replace that manifest.
 
 ## `v0.0.1` publication record
 
@@ -301,7 +325,9 @@ acceptance.
 ## Disposable recovery harness
 
 The reusable harness owned by [#199](https://github.com/OpenCoven/psyche-build/issues/199)
-runs the failure scenarios already observed under #239. From a clean checkout:
+runs source-level regressions for observed failures and additional bounded
+failure classes. It is not packaged GUI acceptance and does not complete #239.
+From a clean checkout:
 
 ```bash
 pnpm recovery:harness
@@ -349,9 +375,10 @@ file's contents, or a raw error message without first widening a union. A
 report can therefore be attached to a public outcome without a redaction
 pass.
 
-`unwritable-state-storage` covers the "unwritable or full state storage" item
-that #239 records as unproven: it asserts a failed persist surfaces as an error
-rather than being reported as success. The directory is made read-only only
+`unwritable-state-storage` covers a source-level unwritable-directory failure:
+it asserts a failed persist surfaces as an error rather than being reported as
+success. Full-volume failure and the packaged GUI path remain unproven under
+#239. The directory is made read-only only
 after its runtime subdirectory exists, so the lease can still be acquired and
 the failure isolates to the config write. The harness first proves the
 directory is genuinely unwritable and reports `injection_ineffective` when it
@@ -472,16 +499,20 @@ it repairs. The full candidate gate then runs again.
 
 ## Closure decisions
 
-Close [#239](https://github.com/OpenCoven/psyche-build/issues/239) when its
-sanitized manifest contains exact-source smoke and all required operator
-observations. Close #196 when that manifest proves the supported ordinary and
-representative failure paths and every reusable gap is transferred to #199 or
-#243.
+[#239](https://github.com/OpenCoven/psyche-build/issues/239) is eligible for
+closure when its sanitized manifest contains exact-source smoke and all
+required operator observations. #196 is eligible when that manifest proves
+the supported ordinary and representative failure paths and every reusable
+gap is transferred to #199 or #243. Do not use closing-keyword syntax in PR
+prose that only discusses these gates; a quoted phrase can close an issue
+without proving its outcome.
 
-#31 closed on 2026-08-30 after administrators became subject to required
-checks/review, the only remaining bypass was the single named PR-only owner
-exception, a direct-push probe was rejected, and proof PR #283 merged through
-the protected path with sanitized before/after policy evidence linked.
+#31 closed on 2026-08-30 with administrator enforcement, direct-push rejection,
+and protected proof PR #283. Its 2026-09-05 correction and PR #351 supersede
+the original named-owner bypass claim: the active ruleset now has no bypass
+actors and zero required approving reviews, while exact-head checks and
+review-thread resolution remain enforced. This is not a waiver of independent
+R3/R4 review or release acceptance.
 
 #194 and #203 remain complete. #196/#239 does not require republishing
 `v0.0.1` unless new evidence proves a defect in the immutable public artifacts

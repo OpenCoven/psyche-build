@@ -2,7 +2,7 @@
 
 **Status:** Active post-release roadmap  
 **Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-09-02
+**Last reconciled:** 2026-09-06
 
 **Portfolio control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)  
 **Execution contract:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
@@ -46,10 +46,14 @@ For `v0.0.1`:
 - cloud execution, team collaboration, marketplace behavior, remote/off-LAN
   continuity, and complete Threads/AgentFS convergence remain **Planned**.
 
-Repository `package.json` and `CHANGELOG.md` identify `0.0.2`, but that is an
-unreleased candidate. No immutable publication, assets, install/upgrade
-evidence, or owning support transition exists for it, so it changes none of the
-claims above.
+The [v0.0.2 release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2)
+was published on 2026-08-31 from signed tag source
+`a4546f45bb0ee05cfbb388a0fc5f9e951596be51`, with both macOS DMGs and
+`SHA256SUMS`. [Release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717)
+completed desktop publication and skipped TestFlight. The Homebrew Cask still
+selects `v0.0.1`; a successful tap notification is not proof of a Cask update.
+Publication does not complete #239's operator acceptance, prove an upgrade
+path, or change iOS availability. Keep the two releases' evidence separate.
 
 ### Delivered release evidence
 
@@ -92,7 +96,7 @@ The Stage 0 control-state wave is closed:
   source-first and no open generated issue carried `priority:P0`.
 - [#31](https://github.com/OpenCoven/psyche-build/issues/31) closed on
   2026-08-30 with retained policy evidence: administrator-enforced required
-  checks, the single named PR-only owner bypass, a `GH013` direct-push
+  checks, a subsequently corrected bypass description, a `GH013` direct-push
   rejection probe, and proof
   [PR #283](https://github.com/OpenCoven/psyche-build/pull/283) merged through
   the protected path as `63667f30`.
@@ -100,13 +104,16 @@ The Stage 0 control-state wave is closed:
 The owning issues link that evidence. Documentation and tests alone were not
 treated as proof of those remote state transitions.
 
-For #31, the retained policy evidence proves administrator enforcement plus a
-single named PR-only owner bypass, `BunsDev`. Direct pushes remain
-platform-blocked for `BunsDev`, all other actors require one approval, and the
-retained evidence includes direct-push rejection proof. GitHub cannot create an
-author self-approval review. When independent review is unavailable, `BunsDev`
-uses the explicit PR-only bypass for an admin merge only after exact-head
-checks succeed and conversations are resolved; this is not self-approval.
+The #31 correction and [PR #351](https://github.com/OpenCoven/psyche-build/pull/351)
+(`23cace08`) supersede the original named-owner bypass claim. As of 2026-09-05,
+the active `main` ruleset has no bypass actors and zero required approving
+reviews. GitHub cannot create an author self-approval review. Administrator
+enforcement, strict exact-head checks, linear history, and conversation/review
+thread resolution remain required; direct pushes remain platform-blocked.
+The historical direct-push rejection proof remains valid. Ordinary merges use
+no admin override. Independent R3/R4 review remains a contributor requirement,
+and an approval requirement should return when an independent reviewer is
+available. [RELEASE.md](./RELEASE.md) owns the current policy procedure.
 
 [PR #247](https://github.com/OpenCoven/psyche-build/pull/247) hardened the
 supported desktop Git surface so repository-controlled signature-verification
@@ -133,6 +140,8 @@ gates.
 | [#242](https://github.com/OpenCoven/psyche-build/issues/242) | [PR #322](https://github.com/OpenCoven/psyche-build/pull/322) (`efa8cc0a`) | Bounded, sanitized ritual publication through the live workspace provider with explicit degraded states; execution and controls not included |
 | [#246](https://github.com/OpenCoven/psyche-build/issues/246) | [PR #327](https://github.com/OpenCoven/psyche-build/pull/327) (`2111db7e`) | Shared Vim v1 fixture contract and fail-closed loader under `protocol-fixtures/vim/v1/`; no platform adapter or parity claim |
 | [#195](https://github.com/OpenCoven/psyche-build/issues/195) | [PR #330](https://github.com/OpenCoven/psyche-build/pull/330) (`c2a8da8d`) | Fail-closed tracker drift validation with bounded, sanitized findings |
+| [#197](https://github.com/OpenCoven/psyche-build/issues/197) | [PR #362](https://github.com/OpenCoven/psyche-build/pull/362) (`10eed172`), [PR #366](https://github.com/OpenCoven/psyche-build/pull/366) (`081d1f95`), [PR #369](https://github.com/OpenCoven/psyche-build/pull/369) (`4cee937f`), [PR #370](https://github.com/OpenCoven/psyche-build/pull/370) (`a7927dae`), [PR #371](https://github.com/OpenCoven/psyche-build/pull/371) (`5464c931`), [PR #372](https://github.com/OpenCoven/psyche-build/pull/372) (`60eeb6cc`) | Composition root, secure filesystem, path vocabulary, restore helpers, module cfg guards, and initial-workspace transaction finishing; source decomposition, not packaged acceptance |
+| [#197](https://github.com/OpenCoven/psyche-build/issues/197) | [PR #373](https://github.com/OpenCoven/psyche-build/pull/373) (`81a9c754`) | Stage/verify/publish function boundary and named `PublishedWorkspace` result; commit/rollback context remains explicit, atomic publication is not yet a separate module |
 
 ## Tracker and identity contract
 
@@ -217,7 +226,7 @@ Deferred P2 trains
 | [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Reliability | **Delivered** — closed 2026-09-01 by PR #278 (`69769cc5`); schema, bounds, redaction, and fixture only |
 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Community | **Delivered** — closed 2026-08-31 by PR #321 (`3c188481`) with a credential-free clean-checkout run and live community-profile evidence |
 | [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Community | **Delivered** — closed 2026-08-28 by PR #261 (`267b8809`) |
-| [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Concentrated entry points compose independently testable capabilities without public/persisted contract drift; still in design/inventory mode behind #196/#199 |
+| [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Early lifecycle and persistence extractions are merged; publication/recovery decomposition and packaged acceptance remain, with stable #196/#199 contracts still required |
 | [#201 — OpenCoven identity and Threads](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | OpenCoven | A cross-device reference flow preserves protocol-owned identity through execution, evidence, disconnect, and resume |
 | [#253 — Psyche compatibility canary and adapters](https://github.com/OpenCoven/psyche-build/issues/253) | P2 | OpenCoven | Pin a consumable protocol profile and introduce bounded canaries/adapters without blocking supported-product work; the pin waits on `OpenCoven/psyche#11` and `#12` |
 | [#279 — Coven launch adapter](https://github.com/OpenCoven/psyche-build/issues/279) | P2 | OpenCoven | Capability-negotiated launches keep prompts out of argv and persisted metadata (PRs #324/#328/#336 merged); live restart/reconnect recovery, canonical runtime receipts, and migration/rollback evidence remain open, and receipt semantics wait on #253 |
@@ -226,7 +235,8 @@ Deferred P2 trains
 ## Pull-request disposition
 
 This is a reconciliation snapshot. The PR and owning outcome remain the live
-status sources. At reconciliation there is no open pull request.
+status sources; use the [live PR list](https://github.com/OpenCoven/psyche-build/pulls)
+for current work rather than treating this historical disposition table as a queue.
 
 | Pull request | Train | Disposition | Required replacement gate |
 |---|---|---|---|
@@ -259,11 +269,10 @@ as of this reconciliation.
 
 #238 remains delivered through PR #245 / `5f4b7b05`. #240 closed through PR
 #263, #237 closed after source-first reconciliation, and #31 closed with the
-policy evidence recorded above. Keep the source-first sync, protected
-environments, canonical mapping, and bounded drift validation intact. Direct
-pushes remain platform-blocked for `BunsDev`; all other actors require
-approval, and the owner path is an explicit PR-only bypass/admin merge after
-exact-head checks and resolved conversations, never a self-approval claim.
+policy evidence recorded above and corrected by PR #351. Keep the source-first
+sync, protected environments, canonical mapping, and bounded drift validation
+intact. Direct pushes remain platform-blocked; ordinary PR merges require
+exact-head checks and resolved conversations, with no standing bypass.
 
 One control-state regression was opened and resolved in this window: the
 scheduled Beads Project sync failed on every scheduled run from 2026-08-30
@@ -315,8 +324,12 @@ Every representative failure must terminate deterministically or enter an
 explicit `recovery_required` state. Transfer reusable infrastructure gaps to
 #199 without reopening the completed #194 release.
 
-The #239 manifest verifies 15 retained evidence digests and still reports
-`terminal_state: incomplete`. PRs #283 and #336 merged current-source
+The latest #239 evidence update records 15 retained evidence digests and
+`terminal_state: incomplete`. #196 was reopened on 2026-09-06 after PR #350's
+quoted closing phrase changed its tracker state without acceptance evidence.
+That closure was not completion of the outcome.
+
+PRs #283 and #336 merged current-source
 remediation for the observed recovery defects; that does not replace the
 released `v0.0.1` partial/failed classifications until it is released and
 re-observed.
@@ -394,7 +407,11 @@ retained settings evidence when claiming the policy is enforced.
 **Depends on:** stable #196/#199 seams.
 
 #197 retains its P1 dependency gate: implementation waits for stable #196/#199
-contracts.
+contracts at each extracted boundary, not for a blanket claim that all
+acceptance is complete. Early lifecycle and persistence extractions have
+landed as recorded above; #197 is not merely an inventory exercise anymore.
+The [slice 2 design record](./superpowers/specs/2026-09-06-workspace-persistence-decomposition-design.md)
+explains the measured boundaries, not a separate executable backlog.
 
 Extraction order:
 
@@ -407,6 +424,13 @@ Extraction order:
 Each PR preserves public commands, protocol schemas, persisted formats, errors,
 security boundaries, generated outputs, user-visible behavior, and rollback.
 This is not a framework rewrite or a visual redesign program.
+
+PR #372 splits initial-workspace transaction finishing; PR #373 subsequently
+extracts stage/verify/publish with a named `PublishedWorkspace` result. Moving
+atomic publication into a separate module remains a distinct slice that must
+preserve the open file and rollback context crossing that boundary. Neither
+source decomposition nor the recovery harness substitutes for #239's packaged
+operator observations.
 
 ## Stage 6 — converge on OpenCoven-native identity and execution
 

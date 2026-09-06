@@ -38,6 +38,13 @@ contains signed and notarized Apple Silicon and Intel DMGs plus `SHA256SUMS`.
 The Homebrew Cask installs only `Psyche Build.app`; it does not install the
 Node CLI.
 
+The [v0.0.2 DMGs](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2)
+were published on 2026-08-31 through
+[release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717).
+The Homebrew Cask still selects `v0.0.1` as of 2026-09-06. Publication does not
+complete operator acceptance or prove an upgrade path; keep the two artifacts'
+evidence separate as described in [release acceptance](./docs/RELEASE-ACCEPTANCE.md).
+
 The iOS companion remains an independently gated internal-beta track under
 [#200](https://github.com/OpenCoven/psyche-build/issues/200). This repository
 does not currently claim a live TestFlight build, public App Store release, or
