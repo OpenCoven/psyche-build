@@ -19,7 +19,7 @@ import { resolve } from 'node:path';
 const SRC_DIRECTORY = 'native/desktop/psyche-build-tauri/src-tauri/src';
 
 /** Free functions only; impl methods are indented and may legitimately repeat. */
-const FREE_FUNCTION = /^(?:pub\(crate\) )?(?:pub )?(?:async )?fn ([a-z_0-9]+)/gmu;
+const FREE_FUNCTION = /^(?:pub(?:\([a-z()]+\))? )?(?:unsafe )?(?:async )?fn ([a-z_0-9]+)/gmu;
 
 export function readNativeWorkspaceSurface(): string {
   return loadModules().sources.join('\n');
@@ -45,6 +45,27 @@ export function assertUnambiguousFunction(name: string): void {
   }
 }
 
+/**
+ * Rust sources under `directory`, recursively, as paths relative to it.
+ *
+ * #197 slice 2 moves functions into child modules such as
+ * `native_workspace/secure_fs.rs`. A flat scan would stop seeing those bodies
+ * the moment they moved, so the security contract would report a missing
+ * function instead of an unguarded one — a failure that looks like a broken
+ * test rather than a broken defence.
+ */
+function rustFilesUnder(directory: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      found.push(...rustFilesUnder(resolve(directory, entry.name)).map((n) => `${entry.name}/${n}`));
+    } else if (entry.name.endsWith('.rs')) {
+      found.push(entry.name);
+    }
+  }
+  return found;
+}
+
 let cached: { sources: string[]; owners: Map<string, string[]> } | undefined;
 
 /**
@@ -56,7 +77,7 @@ let cached: { sources: string[]; owners: Map<string, string[]> } | undefined;
 function loadModules(): { sources: string[]; owners: Map<string, string[]> } {
   if (cached !== undefined) return cached;
   const directory = resolve(process.cwd(), SRC_DIRECTORY);
-  const entries = readdirSync(directory).filter((entry) => entry.endsWith('.rs')).sort();
+  const entries = rustFilesUnder(directory).sort();
 
   const owners = new Map<string, string[]>();
   const sources: string[] = [];
