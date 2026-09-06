@@ -1,15 +1,8 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   assertUnambiguousFunction,
   readNativeWorkspaceSurface,
 } from './support/nativeWorkspaceSurface.js';
-
-const sourcePath = resolve(
-  process.cwd(),
-  'native/desktop/psyche-build-tauri/src-tauri/src/native_workspace.rs',
-);
 
 function functionBody(source: string, name: string): string {
   // The surface spans every module, so confirm this name resolves to one

@@ -45,7 +45,16 @@ export function assertUnambiguousFunction(name: string): void {
   }
 }
 
+let cached: { sources: string[]; owners: Map<string, string[]> } | undefined;
+
+/**
+ * Parsed once per process. The contract calls `functionBody` roughly two dozen
+ * times, and re-reading every module each time would re-parse `lib.rs` alone
+ * on every call. Test files do not change mid-run, so a process-lifetime cache
+ * is safe.
+ */
 function loadModules(): { sources: string[]; owners: Map<string, string[]> } {
+  if (cached !== undefined) return cached;
   const directory = resolve(process.cwd(), SRC_DIRECTORY);
   const entries = readdirSync(directory).filter((entry) => entry.endsWith('.rs')).sort();
 
@@ -64,5 +73,6 @@ function loadModules(): { sources: string[]; owners: Map<string, string[]> } {
       owners.set(match[1], files);
     }
   }
-  return { sources, owners };
+  cached = { sources, owners };
+  return cached;
 }
