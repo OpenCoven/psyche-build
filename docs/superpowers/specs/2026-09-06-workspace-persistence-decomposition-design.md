@@ -169,20 +169,36 @@ bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
 
 ## Proposed extraction order
 
-Each step is independently reviewable and preserves public behavior. Step 1 is
-the only one whose size has been measured against the current source; the
-remaining estimates are from the original concern map and should be re-derived
-from the call graph before each is started.
+Each step is independently reviewable and preserves public behavior. Steps 1
+and 2 have been measured against the current source. Steps 3 to 6 are still
+estimates from the original concern map and must be re-derived from the call
+graph before each is started — step 2 shows why: its function count was more
+than double the estimate even though its line count was close.
 
-1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (734 lines, 20
-   functions, dependency-closed). This supersedes the original "filesystem
-   primitives, ~574 lines, 20 functions" step. That step named the same number
-   of functions but a different set of them, one that was not
-   dependency-closed and would not compile. See the correction above.
+1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (734 lines of
+   function bodies, 20 functions, dependency-closed). **Landed in #366.** Three
+   different line counts describe this move and they are not meant to agree:
+   734 is the set's function bodies, the parent shrank by a net 751 (766
+   deleted, 15 added for `mod secure_fs;` and the two `cfg`-split import
+   groups), and the new file is 810 including its header. Only 14 of the 20
+   needed to be `pub(super)`; the other six turned out to be unreachable from
+   the parent, so the extraction narrowed the security surface rather than
+   merely relocating it. This supersedes the original "filesystem primitives,
+   ~574 lines, 20 functions" step. That step
+   named the same number of functions but a different set of them, one that was
+   not dependency-closed and would not compile. See the correction above.
 
-2. **Path derivation → `workspace_paths.rs`** (~173 lines, 7 functions).
-   Pure functions deriving temp, lock, rollback, and restore-candidate paths.
-   No I/O, so it is a mechanical move.
+2. **Path derivation → `workspace_paths.rs`** (160 lines, 16 functions,
+   dependency-closed, measured after step 1 landed). Pure functions deriving
+   temp, lock, rollback, and restore-candidate paths. Nine functions in the
+   parent call into the set.
+
+   The original estimate said 7 functions. The closure is 16 because
+   `validate_workspace_artifact_paths` pulls in `validate_rollback_candidates`
+   and `workspace_rollback_candidate_prefix`, and because the estimate counted
+   the `workspace_*_path` family as one item rather than the eleven separate
+   three-line functions it is. The line count was close by coincidence, not
+   because the set was understood.
 
 3. **Restore and backup → `workspace_restore.rs`** (~458 lines, 14 functions).
    Cohesive and only reachable through recovery entry points.
@@ -210,6 +226,13 @@ belong with load and validation rather than a module of their own.
   bodies by reading this file, so it must follow the functions rather than the
   path, exactly as the desktop contract tests were taught to follow the
   composition root in #361.
+- **`cfg` gating crosses the module boundary.** Import parent items by name,
+  never with `use super::*;`, and gate each import exactly as the parent gates
+  the declaration. Step 1 imported the `#[cfg(unix)]` type `PinnedDirectory`
+  unconditionally and broke the Windows build with `E0432`. No host check on
+  macOS or Linux can catch that class of error, because both satisfy
+  `cfg(unix)`; only the Windows leg of CI can. Treat a green host build as
+  silent on `cfg` correctness.
 - **Visibility widening.** Most of these functions are private to the module.
   Moving them to sibling modules requires `pub(crate)`, which widens their
   reachable surface. That is a real change to a security-sensitive layer and
