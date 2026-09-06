@@ -328,129 +328,30 @@ where
     )?;
     validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
 
-    let temp_path = workspace_temp_path(parent, &file_name);
-    let mut temp_file = open_temp_file_in(&workspace_dir, &temp_path)?;
-    let mut temp_guard = TempFileGuard::new(&workspace_dir, temp_path.clone());
-
-    temp_file.write_all(&bytes).map_err(|e| {
-        format!(
-            "write workspace temp '{}': {}",
-            temp_guard.path.display(),
-            e
-        )
-    })?;
-    temp_file.flush().map_err(|e| {
-        format!(
-            "flush workspace temp '{}': {}",
-            temp_guard.path.display(),
-            e
-        )
-    })?;
-    temp_file
-        .sync_all()
-        .map_err(|e| format!("sync workspace temp '{}': {}", temp_guard.path.display(), e))?;
-
-    before_rename(temp_guard.path.as_path())?;
-
-    let had_workspace = workspace_file_exists_in(&workspace_dir, path)?;
-    let (transaction_pending_path, transaction_committed_path, prior_workspace_bytes) =
-        if had_workspace {
-            create_rollback_backup(&workspace_dir, path, pending_path.as_path())?;
-            (
-                pending_path.as_path(),
-                committed_path.as_path(),
-                Some(read_workspace_artifact_bytes(
-                    &workspace_dir,
-                    pending_path.as_path(),
-                    "workspace pending rollback",
-                )?),
-            )
-        } else {
-            create_absent_rollback_marker_in(&workspace_dir, absent_pending_path.as_path())?;
-            (
-                absent_pending_path.as_path(),
-                absent_committed_path.as_path(),
-                None,
-            )
-        };
-    create_forward_rollback_in(
+    let PublishedWorkspace {
+        file: temp_file,
+        had_workspace,
+        pending_path: transaction_pending_path,
+        committed_path: transaction_committed_path,
+        prior_bytes: prior_workspace_bytes,
+    } = stage_and_publish_workspace(
         &workspace_dir,
-        &temp_file,
-        temp_guard.path.as_path(),
-        forward_path.as_path(),
-    )?;
-    if let Err(error) = sync_parent_directory(&workspace_dir, parent) {
-        return Err(format!(
-            "publish pending workspace rollback '{}': {}",
-            transaction_pending_path.display(),
-            error
-        ));
-    }
-
-    if let Err(identity_error) = verify_opened_regular_file(
-        &workspace_dir,
-        &temp_file,
-        temp_guard.path.as_path(),
-        "workspace temp",
-    ) {
-        let restore_error = rollback_workspace_after_failed_save(
-            &workspace_dir,
-            path,
-            parent,
-            transaction_pending_path,
-            transaction_committed_path,
-            &mut sync_parent_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
-        );
-        if let Err(restore_error) = restore_error {
-            return Err(format!("{identity_error}; {restore_error}"));
-        }
-        return Err(identity_error);
-    }
-
-    if let Err(replace_error) = publish_opened_workspace_file(
-        &workspace_dir,
-        &temp_file,
-        temp_guard.path.as_path(),
         path,
-        "workspace temp",
-        "workspace",
+        parent,
+        &file_name,
+        &bytes,
+        pending_path.as_path(),
+        committed_path.as_path(),
+        absent_pending_path.as_path(),
+        absent_committed_path.as_path(),
+        forward_path.as_path(),
+        before_rename,
         before_publication,
+        create_rollback_backup,
+        &mut sync_parent_directory,
+        &mut restore_workspace_backup,
         &mut rename_workspace_path,
-    ) {
-        let restore_error = rollback_workspace_after_failed_save(
-            &workspace_dir,
-            path,
-            parent,
-            transaction_pending_path,
-            transaction_committed_path,
-            &mut sync_parent_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
-        );
-        if let Err(restore_error) = restore_error {
-            return Err(format!("{replace_error}; {restore_error}"));
-        }
-        return Err(replace_error);
-    }
-    temp_guard.commit();
-
-    if let Err(save_error) = sync_parent_directory(&workspace_dir, parent) {
-        if let Err(restore_error) = rollback_workspace_after_failed_save(
-            &workspace_dir,
-            path,
-            parent,
-            transaction_pending_path,
-            transaction_committed_path,
-            &mut sync_parent_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
-        ) {
-            return Err(format!("{save_error}; {restore_error}"));
-        }
-        return Err(save_error);
-    }
+    )?;
 
     let commit_result = mark_rollback_committed_with(
         &workspace_dir,
@@ -497,6 +398,196 @@ where
         &mut restore_workspace_backup,
         &mut rename_workspace_path,
     )
+}
+
+/// What a published save hands to its commit phase.
+///
+/// The publication sequence has to tell the commit phase four things it cannot
+/// re-derive: which rollback marker the transaction opened (a prior workspace
+/// and an absent one use different pairs), whether there was a prior workspace
+/// at all, its bytes if so, and the temp file still open for the identity
+/// checks that follow. Returning them as one named value keeps the seam
+/// readable; as a tuple it is five anonymous positions.
+struct PublishedWorkspace<'a> {
+    /// The published file, still open, for post-publication verification.
+    file: File,
+    /// Whether a workspace existed before this save.
+    had_workspace: bool,
+    /// The rollback marker this transaction opened, and its committed name.
+    pending_path: &'a Path,
+    committed_path: &'a Path,
+    /// The prior document, retained only when there was one to restore.
+    prior_bytes: Option<Vec<u8>>,
+}
+
+/// Writes the new document to a temp file and publishes it over the workspace.
+///
+/// Extracted from `save_workspace_to_inner` so the publication sequence can be
+/// read as one unit: stage, open the rollback transaction, verify, rename,
+/// sync.
+///
+/// Rollback is guaranteed from the point the pending marker is durable, not
+/// from the point the transaction opens. Once the first `sync_parent_directory`
+/// succeeds, every later failure — the inode check, the rename, the final sync
+/// — calls `rollback_workspace_after_failed_save` before returning. Before that
+/// sync, failures return without rolling back: `create_forward_rollback_in` and
+/// the sync itself propagate directly.
+///
+/// That asymmetry is the design, not a gap. A marker that was never synced may
+/// not have reached the disk, so there is nothing a rollback here could rely on
+/// having found. Whatever did land is resolved by
+/// `recover_pending_rollback_state`, which runs at the start of the next save
+/// before anything is written.
+///
+/// `TempFileGuard` lives and dies inside this function. It unlinks the temp
+/// file unless committed, and the commit happens here after the rename, so the
+/// guard never crosses the boundary and the cleanup point is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn stage_and_publish_workspace<'a>(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    parent: &Path,
+    file_name: &str,
+    bytes: &[u8],
+    pending_path: &'a Path,
+    committed_path: &'a Path,
+    absent_pending_path: &'a Path,
+    absent_committed_path: &'a Path,
+    forward_path: &Path,
+    before_rename: impl FnOnce(&Path) -> Result<(), String>,
+    before_publication: impl FnOnce(&Path) -> Result<(), String>,
+    create_rollback_backup: impl FnOnce(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<PublishedWorkspace<'a>, String> {
+    let temp_path = workspace_temp_path(parent, file_name);
+    let mut temp_file = open_temp_file_in(workspace_dir, &temp_path)?;
+    let mut temp_guard = TempFileGuard::new(workspace_dir, temp_path.clone());
+
+    temp_file.write_all(bytes).map_err(|e| {
+        format!(
+            "write workspace temp '{}': {}",
+            temp_guard.path.display(),
+            e
+        )
+    })?;
+    temp_file.flush().map_err(|e| {
+        format!(
+            "flush workspace temp '{}': {}",
+            temp_guard.path.display(),
+            e
+        )
+    })?;
+    temp_file
+        .sync_all()
+        .map_err(|e| format!("sync workspace temp '{}': {}", temp_guard.path.display(), e))?;
+
+    before_rename(temp_guard.path.as_path())?;
+
+    let had_workspace = workspace_file_exists_in(workspace_dir, path)?;
+    let (transaction_pending_path, transaction_committed_path, prior_workspace_bytes) =
+        if had_workspace {
+            create_rollback_backup(workspace_dir, path, pending_path)?;
+            (
+                pending_path,
+                committed_path,
+                Some(read_workspace_artifact_bytes(
+                    workspace_dir,
+                    pending_path,
+                    "workspace pending rollback",
+                )?),
+            )
+        } else {
+            create_absent_rollback_marker_in(workspace_dir, absent_pending_path)?;
+            (absent_pending_path, absent_committed_path, None)
+        };
+    create_forward_rollback_in(
+        workspace_dir,
+        &temp_file,
+        temp_guard.path.as_path(),
+        forward_path,
+    )?;
+    if let Err(error) = sync_parent_directory(workspace_dir, parent) {
+        return Err(format!(
+            "publish pending workspace rollback '{}': {}",
+            transaction_pending_path.display(),
+            error
+        ));
+    }
+
+    if let Err(identity_error) = verify_opened_regular_file(
+        workspace_dir,
+        &temp_file,
+        temp_guard.path.as_path(),
+        "workspace temp",
+    ) {
+        let restore_error = rollback_workspace_after_failed_save(
+            workspace_dir,
+            path,
+            parent,
+            transaction_pending_path,
+            transaction_committed_path,
+            sync_parent_directory,
+            restore_workspace_backup,
+            rename_workspace_path,
+        );
+        if let Err(restore_error) = restore_error {
+            return Err(format!("{identity_error}; {restore_error}"));
+        }
+        return Err(identity_error);
+    }
+
+    if let Err(replace_error) = publish_opened_workspace_file(
+        workspace_dir,
+        &temp_file,
+        temp_guard.path.as_path(),
+        path,
+        "workspace temp",
+        "workspace",
+        before_publication,
+        rename_workspace_path,
+    ) {
+        let restore_error = rollback_workspace_after_failed_save(
+            workspace_dir,
+            path,
+            parent,
+            transaction_pending_path,
+            transaction_committed_path,
+            sync_parent_directory,
+            restore_workspace_backup,
+            rename_workspace_path,
+        );
+        if let Err(restore_error) = restore_error {
+            return Err(format!("{replace_error}; {restore_error}"));
+        }
+        return Err(replace_error);
+    }
+    temp_guard.commit();
+
+    if let Err(save_error) = sync_parent_directory(workspace_dir, parent) {
+        if let Err(restore_error) = rollback_workspace_after_failed_save(
+            workspace_dir,
+            path,
+            parent,
+            transaction_pending_path,
+            transaction_committed_path,
+            sync_parent_directory,
+            restore_workspace_backup,
+            rename_workspace_path,
+        ) {
+            return Err(format!("{save_error}; {restore_error}"));
+        }
+        return Err(save_error);
+    }
+
+    Ok(PublishedWorkspace {
+        file: temp_file,
+        had_workspace,
+        pending_path: transaction_pending_path,
+        committed_path: transaction_committed_path,
+        prior_bytes: prior_workspace_bytes,
+    })
 }
 
 struct SecureWorkspaceDir {

@@ -79,10 +79,18 @@ describe('Tauri native workspace security contract', () => {
       'WorkspaceFileLock::exclusive',
       'recover_pending_rollback_state',
       'cleanup_rollback_candidates',
-      'open_temp_file_in',
     ]) {
       expect(validation).toBeLessThan(save.indexOf(mutation));
     }
+
+    // #197 slice 2 moved staging and publication into their own function, so
+    // `open_temp_file_in` is no longer in this body. The invariant is not that
+    // the call sits in one function; it is that nothing is written before the
+    // document validates. Assert it across the seam instead of dropping it:
+    // validation precedes the call, and the call is what stages the file.
+    const publication = save.indexOf('stage_and_publish_workspace');
+    expect(publication).toBeGreaterThan(validation);
+    expect(functionBody(source, 'stage_and_publish_workspace')).toContain('open_temp_file_in');
   });
 
   test('pins HOME and traverses app storage with descriptor-relative syscalls', async () => {
@@ -119,7 +127,10 @@ describe('Tauri native workspace security contract', () => {
 
   test('keeps distinct publication fault boundaries around the final temp inode check', async () => {
     const source = readNativeWorkspaceSurface();
-    const save = functionBody(source, 'save_workspace_to_inner');
+    // The staging sequence moved out of `save_workspace_to_inner` in #197
+    // slice 2; the ordering it guarantees did not, so this reads the body that
+    // now performs it rather than relaxing the assertion.
+    const save = functionBody(source, 'stage_and_publish_workspace');
     const publish = functionBody(source, 'publish_opened_workspace_file');
 
     const tempSync = save.indexOf('.sync_all()');
