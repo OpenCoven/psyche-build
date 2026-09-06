@@ -10,7 +10,7 @@
 //! out what state a workspace was left in. That is the recovery layer, still
 //! in the parent, which calls `mark_rollback_committed` once it has decided.
 //!
-//! Eleven of the twenty-two functions in this set\'s dependency closure stayed
+//! Eleven of the twenty-two functions in this set's dependency closure stayed
 //! behind. `sync_parent_directory` alone has sixteen callers outside
 //! publication, and the artifact read helpers are shared with the load path.
 //! They are layers beneath publication rather than parts of it.
