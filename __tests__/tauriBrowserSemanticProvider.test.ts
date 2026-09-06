@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { installBrowserAutomation } from '../native/desktop/psyche-build-tauri/web/control/browser-automation.mjs';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const root = new URL('../native/desktop/psyche-build-tauri/', import.meta.url);
 const main = readFileSync(new URL('web/main.js', root), 'utf8');
 const html = readFileSync(new URL('web/index.html', root), 'utf8');
 const packageJson = readFileSync(new URL('package.json', root), 'utf8');
-const lib = readFileSync(new URL('src-tauri/src/lib.rs', root), 'utf8');
+const lib = readDesktopCommandSurface();
 const tauriBuild = readFileSync(new URL('src-tauri/build.rs', root), 'utf8');
 
 function functionSource(source: string, name: string): string {

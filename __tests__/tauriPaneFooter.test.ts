@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const repoRoot = process.cwd();
 const tauriRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
@@ -15,7 +16,7 @@ const cargoToml = readFileSync(join(tauriRoot, 'src-tauri/Cargo.toml'), 'utf8');
 const defaultCapability = JSON.parse(
   readFileSync(join(tauriRoot, 'src-tauri/capabilities/default.json'), 'utf8')
 ) as { permissions: string[] };
-const nativeLib = readFileSync(join(tauriRoot, 'src-tauri/src/lib.rs'), 'utf8');
+const nativeLib = readDesktopCommandSurface();
 
 const {
   FOOTER_TIERS,

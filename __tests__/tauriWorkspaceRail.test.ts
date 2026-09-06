@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 
 const root = process.cwd();
 const indexHtml = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/index.html'), 'utf8');
@@ -9,7 +10,7 @@ const styles = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/st
 const packagedTitlebarMark = readFileSync(
   join(root, 'native/desktop/psyche-build-tauri/web/assets/opencoven-mark.png'),
 );
-const tauri = readFileSync(join(root, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const tauri = readDesktopCommandSurface();
 const sessionModel = readFileSync(
   join(root, 'native/desktop/psyche-build-tauri/web/sessions/session-model.mjs'),
   'utf8',
