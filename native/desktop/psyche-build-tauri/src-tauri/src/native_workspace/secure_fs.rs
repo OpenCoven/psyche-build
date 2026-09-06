@@ -7,10 +7,12 @@
 //! makes the boundary meaningful rather than cosmetic.
 //!
 //! The set is closed, not independent. It still borrows two types from the
-//! parent, `SecureWorkspaceDir` and `PinnedDirectory`, which carry the pinned
-//! directory descriptors these syscalls resolve names against. Those imports
-//! are named explicitly rather than glob-imported, so the remaining coupling
-//! is visible at the top of the file instead of being asserted in a comment.
+//! parent: `SecureWorkspaceDir`, and `PinnedDirectory` on Unix only, which
+//! carry the pinned directory descriptors these syscalls resolve names
+//! against. Those imports are named explicitly rather than glob-imported, so
+//! the remaining coupling is visible at the top of the file instead of being
+//! asserted in a comment — and so a `cfg` mismatch fails the build on the
+//! platform it affects rather than being absorbed by a glob.
 //!
 //! They stay `pub(super)`. All twenty were private to `native_workspace`
 //! before the move, and widening a symlink defence to `pub(crate)` as a side
@@ -34,7 +36,9 @@ use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-use super::{PinnedDirectory, SecureWorkspaceDir};
+#[cfg(unix)]
+use super::PinnedDirectory;
+use super::SecureWorkspaceDir;
 
 #[cfg(unix)]
 pub(super) fn c_name(name: &OsStr) -> Result<CString, String> {
