@@ -170,10 +170,23 @@ bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
 ## Proposed extraction order
 
 Each step is independently reviewable and preserves public behavior. Steps 1
-and 2 have been measured against the current source. Steps 3 to 6 are still
-estimates from the original concern map and must be re-derived from the call
-graph before each is started — step 2 shows why: its function count was more
-than double the estimate even though its line count was close.
+to 3 have been measured against the current source and landed. Steps 4 to 6
+are still estimates from the original concern map and must be re-derived
+before each is started.
+
+Two kinds of error have shown up so far, and only the first is caught by
+measuring. A dependency closure gives the right *size*; it does not give the
+right *membership*, because a closure pulls in whatever the seed functions
+happen to call, including shared code that belongs to a lower layer. Both
+steps 2 and 3 had to drop members after reading the bodies:
+
+| Step | Estimated | Closure | Moved | Dropped because |
+|---|---:|---:|---:|---|
+| 2 | 7 fns | 16 fns | 13 fns | 3 do filesystem I/O through `secure_fs` |
+| 3 | 14 fns | 18 fns | 14 fns | 4 are artifact helpers shared with load, save and recovery |
+
+So the closure is where a step starts, not where it ends. Read the bodies
+before moving them.
 
 1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (734 lines of
    function bodies, 20 functions, dependency-closed). **Landed in #366.** Three
@@ -188,20 +201,41 @@ than double the estimate even though its line count was close.
    named the same number of functions but a different set of them, one that was
    not dependency-closed and would not compile. See the correction above.
 
-2. **Path derivation → `workspace_paths.rs`** (160 lines, 16 functions,
-   dependency-closed, measured after step 1 landed). Pure functions deriving
-   temp, lock, rollback, and restore-candidate paths. Nine functions in the
-   parent call into the set.
+2. **Path derivation → `native_workspace/workspace_paths.rs`** (91 lines, 13
+   functions). **Landed in #369.**
 
-   The original estimate said 7 functions. The closure is 16 because
-   `validate_workspace_artifact_paths` pulls in `validate_rollback_candidates`
-   and `workspace_rollback_candidate_prefix`, and because the estimate counted
-   the `workspace_*_path` family as one item rather than the eleven separate
-   three-line functions it is. The line count was close by coincidence, not
-   because the set was understood.
+   Measured as a closure of 16 functions and 160 lines, but three of those —
+   `validate_workspace_artifact_paths`, `validate_rollback_candidates` and
+   `rollback_candidate_paths` — consult the filesystem through `secure_fs` and
+   take a `SecureWorkspaceDir`. Moving them would have produced a module whose
+   name claimed a purity it did not have, so they stayed in the parent and the
+   module keeps a property that can be checked: **it performs no I/O**.
 
-3. **Restore and backup → `workspace_restore.rs`** (~458 lines, 14 functions).
-   Cohesive and only reachable through recovery entry points.
+   It is also the only module here that borrows nothing from its parent. It
+   owns `WORKSPACE_FILE_RELATIVE` and `TEMP_COUNTER`, which had no users
+   outside the set, and contains no `use super::` at all — which makes it
+   structurally immune to the `cfg` mismatch described below.
+
+   `workspace_path_from_home` was `pub(crate)` with no caller outside the set
+   and is now private. `workspace_default_path` is re-exported from the parent
+   so `native_workspace::workspace_default_path` still resolves for `lib.rs`.
+
+3. **Rollback backup and restore → `native_workspace/workspace_restore.rs`**
+   (471 lines, 14 functions). The one estimate that was close: the original
+   concern map said ~458 lines and 14 functions, and 14 is what moved.
+
+   The closure was 18. The four dropped — `read_bounded_workspace_file`,
+   `read_workspace_artifact_bytes`, `verify_opened_workspace_artifact` and
+   `verify_workspace_artifact_bytes` — are shared artifact helpers used by the
+   load path, the save path and the recovery layer; one has ten callers
+   outside the set. They are a layer beneath restore rather than part of it,
+   and are the natural seed for a future `workspace_artifact_io` step that
+   this record does not yet schedule.
+
+   The module executes restores; it does not decide them. Marker inspection
+   stays with the recovery layer in step 6, which calls in here once it has
+   decided. Six of the fourteen are `#[cfg(test)]` test doubles and fault
+   hooks.
 
 4. **Split `save_workspace_to_inner`** before moving publication. Separating
    the fault-injection hooks and transaction finishing from the publication
@@ -233,6 +267,14 @@ belong with load and validation rather than a module of their own.
   macOS or Linux can catch that class of error, because both satisfy
   `cfg(unix)`; only the Windows leg of CI can. Treat a green host build as
   silent on `cfg` correctness.
+
+  Two refinements from step 3. A declaration's gate is not always the line
+  above it: `RestoreCandidateFileOperation` carries `#[cfg(test)]` above a
+  `#[derive(...)]`, and the thread-locals the fault hooks use are gated on the
+  enclosing `thread_local!` block rather than on the statics themselves. And
+  `cargo check` does not compile `cfg(test)` code at all — step 3 was green
+  under `cargo check` while `cargo check --tests` failed on three errors. Run
+  both.
 - **Visibility widening.** Most of these functions are private to the module.
   Moving them to sibling modules requires `pub(crate)`, which widens their
   reachable surface. That is a real change to a security-sensitive layer and
