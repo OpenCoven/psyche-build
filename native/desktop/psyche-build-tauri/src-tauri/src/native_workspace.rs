@@ -9,7 +9,6 @@ use std::fs::OpenOptions;
 use std::io::Seek;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -21,6 +20,16 @@ use std::ffi::CString;
 use std::os::fd::AsRawFd;
 
 mod secure_fs;
+mod workspace_paths;
+
+pub(crate) use workspace_paths::workspace_default_path;
+use workspace_paths::{
+    absent_rollback_marker_path, workspace_absent_rollback_committed_path,
+    workspace_absent_rollback_pending_path, workspace_forward_rollback_path, workspace_lock_path,
+    workspace_restore_candidate_path, workspace_rollback_candidate_path,
+    workspace_rollback_candidate_prefix, workspace_rollback_committed_path,
+    workspace_rollback_pending_path, workspace_temp_path,
+};
 
 #[cfg(unix)]
 use secure_fs::{
@@ -35,25 +44,18 @@ use secure_fs::{
 };
 
 const WORKSPACE_VERSION: i64 = 3;
-const WORKSPACE_FILE_RELATIVE: &str = ".psyche/macos-app/workspace-v3.json";
 const WORKSPACE_DOCUMENT_SIZE_LIMIT: u64 = 16 * 1024 * 1024;
 const ABSENT_ROLLBACK_MARKER: &[u8] = b"psyche-workspace-absent-rollback-v1\n";
 const ABSENT_FORWARD_MARKER: &[u8] = b"psyche-workspace-forward-commit-v1\n";
 const ABSENT_MARKER_SIZE_LIMIT: u64 = 128;
 const WORKSPACE_RECOVERY_DECISION_ATTEMPTS: usize = 3;
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static WORKSPACE_IO_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceRecoveryDecision {
     Rollback,
     Forward,
-}
-
-pub(crate) fn workspace_path_from_home() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
-    Ok(Path::new(&home).join(WORKSPACE_FILE_RELATIVE))
 }
 
 pub(crate) fn validate_workspace(value: &Value) -> Result<(), String> {
@@ -941,92 +943,6 @@ fn open_temp_file(path: &Path) -> Result<File, String> {
 
 fn open_temp_file_in(workspace_dir: &SecureWorkspaceDir, path: &Path) -> Result<File, String> {
     open_new_workspace_file(workspace_dir, path, "temp")
-}
-
-fn workspace_temp_path(parent: &Path, file_name: &str) -> PathBuf {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(
-        ".{}.psyche-save-{}-{}",
-        file_name,
-        std::process::id(),
-        counter
-    ))
-}
-
-fn workspace_lock_path(parent: &Path, file_name: &str) -> PathBuf {
-    parent.join(format!(".{file_name}.psyche-lock"))
-}
-
-fn workspace_rollback_pending_path(parent: &Path, file_name: &str) -> PathBuf {
-    parent.join(format!(".{file_name}.psyche-rollback.pending"))
-}
-
-fn workspace_rollback_committed_path(parent: &Path, file_name: &str) -> PathBuf {
-    parent.join(format!(".{file_name}.psyche-rollback.committed"))
-}
-
-fn workspace_absent_rollback_pending_path(parent: &Path, file_name: &str) -> PathBuf {
-    parent.join(format!(".{file_name}.psyche-rollback.absent.pending"))
-}
-
-fn workspace_absent_rollback_committed_path(parent: &Path, file_name: &str) -> PathBuf {
-    parent.join(format!(".{file_name}.psyche-rollback.absent.committed"))
-}
-
-fn workspace_forward_rollback_path(parent: &Path, file_name: &str) -> PathBuf {
-    parent.join(format!(".{file_name}.psyche-rollback.forward"))
-}
-
-fn workspace_rollback_candidate_prefix(file_name: &str) -> String {
-    format!(".{file_name}.psyche-rollback.candidate-")
-}
-
-fn workspace_rollback_candidate_path(pending_path: &Path) -> Result<PathBuf, String> {
-    let parent = pending_path.parent().ok_or_else(|| {
-        format!(
-            "workspace rollback path has no parent directory: {}",
-            pending_path.display()
-        )
-    })?;
-    let pending_name = pending_path
-        .file_name()
-        .ok_or_else(|| {
-            format!(
-                "workspace rollback path has no file name: {}",
-                pending_path.display()
-            )
-        })?
-        .to_string_lossy();
-    let prefix = pending_name
-        .strip_suffix("absent.pending")
-        .or_else(|| pending_name.strip_suffix("pending"))
-        .ok_or_else(|| {
-            format!(
-                "workspace pending rollback has an unexpected name: {}",
-                pending_path.display()
-            )
-        })?;
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(
-        "{prefix}candidate-{}-{}",
-        std::process::id(),
-        counter
-    )))
-}
-
-fn workspace_restore_candidate_path(path: &Path) -> Result<PathBuf, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("workspace path has no file name: {}", path.display()))?
-        .to_string_lossy();
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(
-        ".{file_name}.psyche-restore-{}-{counter}",
-        std::process::id()
-    )))
 }
 
 fn cleanup_rollback_candidates(
@@ -3994,15 +3910,6 @@ fn restore_prior_workspace_state(
     }
 }
 
-fn absent_rollback_marker_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.ends_with(".psyche-rollback.absent.pending")
-                || name.ends_with(".psyche-rollback.absent.committed")
-        })
-}
-
 struct WorkspaceFileLock {
     file: File,
 }
@@ -4717,10 +4624,6 @@ where
         create_rollback_backup_in,
         rename_workspace_path_in,
     )
-}
-
-pub(crate) fn workspace_default_path() -> Result<PathBuf, String> {
-    workspace_path_from_home()
 }
 
 #[cfg(unix)]
