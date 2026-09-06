@@ -2,9 +2,15 @@
 //!
 //! These twenty functions are the symlink and TOCTOU defences that every
 //! workspace read and write funnels through. They were extracted from
-//! `native_workspace.rs` as a dependency-closed set: no function here calls
-//! anything in the parent module, which is what makes the module compile on
-//! its own and what makes the boundary meaningful rather than cosmetic.
+//! `native_workspace.rs` as a dependency-closed set of *free functions*: no
+//! function here calls a free function in the parent module, which is what
+//! makes the boundary meaningful rather than cosmetic.
+//!
+//! The set is closed, not independent. It still borrows two types from the
+//! parent, `SecureWorkspaceDir` and `PinnedDirectory`, which carry the pinned
+//! directory descriptors these syscalls resolve names against. Those imports
+//! are named explicitly rather than glob-imported, so the remaining coupling
+//! is visible at the top of the file instead of being asserted in a comment.
 //!
 //! They stay `pub(super)`. All twenty were private to `native_workspace`
 //! before the move, and widening a symlink defence to `pub(crate)` as a side
@@ -28,7 +34,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-use super::*;
+use super::{PinnedDirectory, SecureWorkspaceDir};
 
 #[cfg(unix)]
 pub(super) fn c_name(name: &OsStr) -> Result<CString, String> {
