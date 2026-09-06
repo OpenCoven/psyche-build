@@ -1,11 +1,18 @@
-//! Keeping the workspace directory free of stale transaction artifacts.
+//! Keeping the workspace directory's transaction artifacts safe and tidy.
 //!
-//! Two halves of one job. `validate_workspace_artifact_paths` asserts that
-//! none of the names a save will need is already occupied by a regular file,
-//! and the `cleanup_*` functions remove the ones a previous transaction left
-//! behind. Between them sits `rollback_candidate_paths`, which enumerates the
-//! candidates by prefix because their names carry a pid and counter and so
-//! cannot be derived.
+//! Two jobs. `validate_workspace_artifact_paths` checks the *type* of every
+//! name a save will touch, and the `cleanup_*` functions remove what a
+//! previous transaction left behind. Between them sits
+//! `rollback_candidate_paths`, which enumerates candidates by prefix because
+//! their names carry a pid and counter and so cannot be derived.
+//!
+//! Read `validate_workspace_artifact_paths` carefully: it does **not** require
+//! those names to be free. It calls `regular_file_exists` and discards the
+//! boolean, so a name that is already a regular file passes. What it rejects
+//! is a name that exists as something else — a symlink, a directory, a fifo.
+//! It is a type-confusion defence run before the save touches anything, not a
+//! precondition that the directory be clean, and a pre-existing lock or
+//! rollback marker is expected rather than fatal.
 //!
 //! Three of these were measured into step 2 and deliberately left out of
 //! `workspace_paths`: they consult the filesystem through `secure_fs` and take
