@@ -68,16 +68,74 @@ at 550 lines is atomic publication, transaction finishing, and fault injection
 in one body. It is the single largest obstacle to testing publication
 independently of recovery.
 
+## Correction: the first order was derived from names, not dependencies
+
+The extraction order below was written from a concern map built by function
+naming. A trial extraction of the filesystem primitives failed to compile and
+showed that map is not a safe basis for ordering.
+
+**The primitives are not a leaf layer.** `open_temp_file_in` calls
+`open_new_workspace_file`, which is workspace-level code, so the dependency
+runs in both directions rather than bottom-up. Three of the cluster —
+`open_existing_regular_file`, `regular_file_exists`, and
+`require_new_regular_file_path` — also take `SecureWorkspaceDir`, so the claim
+that these are "generic helpers with no workspace semantics" was wrong.
+
+**Two functions were miscategorized entirely.** `publish_opened_workspace_file`
+and `publish_opened_restore_candidate` matched the `publish_opened` name
+pattern but call verification and fault-injection helpers; they belong to
+publication, not primitives.
+
+**The module's real structure is depth, not concern.** Its 131 free functions
+form a dependency graph 16 levels deep with **no cycles**:
+
+| Depth | Functions | Lines |
+|---:|---:|---:|
+| 0 (leaves) | 38 | 733 |
+| 1-3 | 34 | 1,234 |
+| 4-7 | 30 | 1,305 |
+| 8-11 | 15 | 1,202 |
+| 12-15 | 14 | 935 |
+
+No cycles means the module is decomposable. Depth means it must be taken
+bottom-up, and a concern is not an extractable unit: depth-0 leaves are spread
+across recovery (10 functions), paths (5), primitives (8), and restore (5).
+
+**The extractable unit is a dependency-closed set**, not a named concern.
+
+## Corrected first step
+
+Two closed sets exist at the bottom of the graph. Neither pulls in anything
+beyond itself, verified by computing the transitive closure:
+
+| Option | Functions | Lines | Coupling |
+|---|---:|---:|---|
+| Syscall and FD layer | 14 | 408 | Needs `use super::SecureWorkspaceDir` for three members |
+| Type-free subset | 11 | 262 | References no workspace type |
+
+Prefer the 14-function set. It is the larger reduction, and importing one type
+from the parent is a smaller cost than leaving three tightly related functions
+behind. Forty-three parent functions call into the set, so the parent needs a
+matching import list either way.
+
+Move it as a **child module** (`native_workspace/secure_fs.rs`, declared from
+`native_workspace.rs`) with `pub(super)` visibility rather than a sibling with
+`pub(crate)`. Edition 2021 supports that layout, and it keeps sixteen security
+primitives visible only to their parent instead of widening them crate-wide —
+which the original plan would have done as an unremarked side effect.
+
+Carry each moved function's `use` statements with it. The trial move relocated
+bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
+
 ## Proposed extraction order
 
 Each step is independently reviewable, preserves public behavior, and stays
 inside the slice cap.
 
-1. **Filesystem primitives → `secure_fs.rs`** (~574 lines, 20 functions).
-   Generic FD-safety helpers with no workspace semantics: directory and file
-   opening that refuses symlinks, permission tightening, temp-file creation.
-   Lowest risk and unblocks independent testing of the layer every other
-   concern sits on.
+1. **Syscall and FD layer → `native_workspace/secure_fs.rs`** (408 lines, 14
+   functions, dependency-closed). Superseded the original "filesystem
+   primitives, ~574 lines, 20 functions" step, which was not closed and would
+   not compile. See the correction above.
 
 2. **Path derivation → `workspace_paths.rs`** (~173 lines, 7 functions).
    Pure functions deriving temp, lock, rollback, and restore-candidate paths.
