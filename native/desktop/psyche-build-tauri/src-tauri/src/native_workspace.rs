@@ -20,9 +20,20 @@ use std::ffi::CString;
 use std::os::fd::AsRawFd;
 
 mod secure_fs;
+mod workspace_artifact_io;
+mod workspace_artifact_sweep;
 mod workspace_paths;
 mod workspace_publish;
 mod workspace_restore;
+
+use workspace_artifact_io::{
+    read_bounded_workspace_file, read_workspace_artifact_bytes, validate_workspace_artifact_bytes,
+    verify_opened_workspace_artifact, verify_workspace_artifact_bytes,
+};
+use workspace_artifact_sweep::{
+    cleanup_committed_rollback, cleanup_forward_rollback, cleanup_rollback_candidates,
+    rollback_candidates_exist, validate_workspace_artifact_paths,
+};
 
 #[cfg(test)]
 use workspace_publish::open_temp_file;
@@ -32,7 +43,7 @@ use workspace_publish::{
 };
 
 #[cfg(test)]
-use workspace_paths::workspace_rollback_candidate_path;
+use workspace_paths::{workspace_rollback_candidate_path, workspace_rollback_candidate_prefix};
 
 #[cfg(test)]
 use workspace_restore::{
@@ -47,8 +58,7 @@ pub(crate) use workspace_paths::workspace_default_path;
 use workspace_paths::{
     absent_rollback_marker_path, workspace_absent_rollback_committed_path,
     workspace_absent_rollback_pending_path, workspace_forward_rollback_path, workspace_lock_path,
-    workspace_rollback_candidate_prefix, workspace_rollback_committed_path,
-    workspace_rollback_pending_path,
+    workspace_rollback_committed_path, workspace_rollback_pending_path,
 };
 
 #[cfg(unix)]
@@ -59,7 +69,7 @@ use secure_fs::{
 use secure_fs::{
     hard_link_workspace_path, open_existing_regular_file, open_new_workspace_file,
     open_workspace_lock, regular_file_exists, rename_workspace_path_in, unlink_workspace_path,
-    verify_opened_regular_file, workspace_directory_entries,
+    verify_opened_regular_file,
 };
 
 const WORKSPACE_VERSION: i64 = 3;
@@ -635,179 +645,6 @@ fn prepare_workspace_parent_fallback(
     Ok(())
 }
 
-fn validate_workspace_artifact_paths(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    parent: &Path,
-    file_name: &str,
-) -> Result<(), String> {
-    regular_file_exists(workspace_dir, path, "workspace")?;
-    regular_file_exists(
-        workspace_dir,
-        &workspace_lock_path(parent, file_name),
-        "workspace lock",
-    )?;
-    regular_file_exists(
-        workspace_dir,
-        &workspace_rollback_pending_path(parent, file_name),
-        "workspace pending rollback",
-    )?;
-    regular_file_exists(
-        workspace_dir,
-        &workspace_rollback_committed_path(parent, file_name),
-        "workspace committed rollback",
-    )?;
-    regular_file_exists(
-        workspace_dir,
-        &workspace_absent_rollback_pending_path(parent, file_name),
-        "workspace absent pending rollback",
-    )?;
-    regular_file_exists(
-        workspace_dir,
-        &workspace_absent_rollback_committed_path(parent, file_name),
-        "workspace absent committed rollback",
-    )?;
-    regular_file_exists(
-        workspace_dir,
-        &workspace_forward_rollback_path(parent, file_name),
-        "workspace forward rollback",
-    )?;
-    validate_rollback_candidates(workspace_dir, parent, file_name)?;
-    Ok(())
-}
-
-fn cleanup_rollback_candidates(
-    workspace_dir: &SecureWorkspaceDir,
-    parent: &Path,
-    file_name: &str,
-    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    let mut removed = false;
-    for candidate in rollback_candidate_paths(workspace_dir, parent, file_name)? {
-        unlink_workspace_path(workspace_dir, &candidate, "workspace rollback candidate").map_err(
-            |error| {
-                format!(
-                    "remove workspace rollback candidate '{}': {}",
-                    candidate.display(),
-                    error
-                )
-            },
-        )?;
-        removed = true;
-    }
-    if removed {
-        sync_parent_directory(workspace_dir, parent).map_err(|error| {
-            format!(
-                "sync removal of workspace rollback candidates in '{}': {}",
-                parent.display(),
-                error
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn rollback_candidates_exist(
-    workspace_dir: &SecureWorkspaceDir,
-    parent: &Path,
-    file_name: &str,
-) -> Result<bool, String> {
-    Ok(!rollback_candidate_paths(workspace_dir, parent, file_name)?.is_empty())
-}
-
-fn validate_rollback_candidates(
-    workspace_dir: &SecureWorkspaceDir,
-    parent: &Path,
-    file_name: &str,
-) -> Result<(), String> {
-    rollback_candidate_paths(workspace_dir, parent, file_name).map(|_| ())
-}
-
-fn rollback_candidate_paths(
-    workspace_dir: &SecureWorkspaceDir,
-    parent: &Path,
-    file_name: &str,
-) -> Result<Vec<PathBuf>, String> {
-    let prefix = workspace_rollback_candidate_prefix(file_name);
-    let mut candidates = Vec::new();
-    for name in workspace_directory_entries(workspace_dir, parent)? {
-        if !name.to_string_lossy().starts_with(prefix.as_str()) {
-            continue;
-        }
-        let candidate = parent.join(name);
-        if !regular_file_exists(workspace_dir, &candidate, "workspace rollback candidate")? {
-            return Err(format!(
-                "workspace rollback candidate '{}' disappeared",
-                candidate.display()
-            ));
-        }
-        candidates.push(candidate);
-    }
-    Ok(candidates)
-}
-
-fn cleanup_committed_rollback(
-    workspace_dir: &SecureWorkspaceDir,
-    committed_path: &Path,
-    parent: &Path,
-    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    if !regular_file_exists(
-        workspace_dir,
-        committed_path,
-        "workspace committed rollback",
-    )? {
-        return Ok(());
-    }
-    unlink_workspace_path(
-        workspace_dir,
-        committed_path,
-        "workspace committed rollback",
-    )
-    .map_err(|error| {
-        format!(
-            "remove committed workspace rollback '{}': {}",
-            committed_path.display(),
-            error
-        )
-    })?;
-    sync_parent_directory(workspace_dir, parent).map_err(|error| {
-        format!(
-            "sync removal of committed workspace rollback '{}': {}",
-            committed_path.display(),
-            error
-        )
-    })?;
-    Ok(())
-}
-
-fn cleanup_forward_rollback(
-    workspace_dir: &SecureWorkspaceDir,
-    forward_path: &Path,
-    parent: &Path,
-    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    if !regular_file_exists(workspace_dir, forward_path, "workspace forward rollback")? {
-        return Ok(());
-    }
-    unlink_workspace_path(workspace_dir, forward_path, "workspace forward rollback").map_err(
-        |error| {
-            format!(
-                "remove workspace forward rollback '{}': {}",
-                forward_path.display(),
-                error
-            )
-        },
-    )?;
-    sync_parent_directory(workspace_dir, parent).map_err(|error| {
-        format!(
-            "sync removal of workspace forward rollback '{}': {}",
-            forward_path.display(),
-            error
-        )
-    })
-}
-
 #[cfg(test)]
 fn workspace_file_exists(path: &Path) -> Result<bool, String> {
     let Some(workspace_dir) = SecureWorkspaceDir::open_for_load(path)? else {
@@ -837,90 +674,6 @@ fn create_absent_rollback_marker_in(
     )?;
     marker_guard.commit();
     Ok(())
-}
-
-fn read_workspace_artifact_bytes(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    let Some(mut file) = open_existing_regular_file(workspace_dir, path, context, false)? else {
-        return Err(format!("{context} '{}' is missing", path.display()));
-    };
-    read_bounded_workspace_file(&mut file, path, context)
-}
-
-fn read_bounded_workspace_file(
-    file: &mut File,
-    path: &Path,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("inspect {context} '{}': {}", path.display(), error))?;
-    if metadata.len() > WORKSPACE_DOCUMENT_SIZE_LIMIT {
-        return Err(format!(
-            "{context} '{}' is too large: {} bytes (limit {})",
-            path.display(),
-            metadata.len(),
-            WORKSPACE_DOCUMENT_SIZE_LIMIT
-        ));
-    }
-
-    let capacity = usize::try_from(metadata.len()).map_err(|_| {
-        format!(
-            "{context} '{}' is too large for this platform",
-            path.display()
-        )
-    })?;
-    let mut bytes = Vec::with_capacity(capacity);
-    Read::by_ref(file)
-        .take(WORKSPACE_DOCUMENT_SIZE_LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read {context} '{}': {}", path.display(), error))?;
-    if bytes.len() as u64 > WORKSPACE_DOCUMENT_SIZE_LIMIT {
-        return Err(format!(
-            "{context} '{}' exceeded the {} byte limit while reading",
-            path.display(),
-            WORKSPACE_DOCUMENT_SIZE_LIMIT
-        ));
-    }
-    Ok(bytes)
-}
-
-fn verify_workspace_artifact_bytes(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    expected_bytes: &[u8],
-    context: &str,
-) -> Result<(), String> {
-    let actual = read_workspace_artifact_bytes(workspace_dir, path, context)?;
-    if actual != expected_bytes {
-        return Err(format!("{context} '{}' changed contents", path.display()));
-    }
-    Ok(())
-}
-
-fn verify_opened_workspace_artifact(
-    workspace_dir: &SecureWorkspaceDir,
-    file: &File,
-    path: &Path,
-    expected_bytes: &[u8],
-    context: &str,
-) -> Result<(), String> {
-    verify_opened_regular_file(workspace_dir, file, path, context)?;
-    verify_workspace_artifact_bytes(workspace_dir, path, expected_bytes, context)
-}
-
-fn validate_workspace_artifact_bytes(
-    bytes: &[u8],
-    path: &Path,
-    context: &str,
-) -> Result<(), String> {
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("parse {context} '{}': {}", path.display(), error))?;
-    validate_workspace(&value)
-        .map_err(|error| format!("validate {context} '{}': {}", path.display(), error))
 }
 
 fn write_absent_marker(
