@@ -69,7 +69,9 @@ export function findGateViolations(): GateViolation[] {
       }
     }
   }
-  return violations;
+  return violations.sort((left, right) => (
+    `${left.child}${left.item}`.localeCompare(`${right.child}${right.item}`)
+  ));
 }
 
 function read(path: string): string {
@@ -82,12 +84,17 @@ const moduleName = (file: string): string => basename(file, '.rs');
 /** Each `x/child.rs` sitting beside an `x.rs` that declares it. */
 function childModules(root: string): { parentFile: string; childFile: string }[] {
   const pairs: { parentFile: string; childFile: string }[] = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const parentFile = `${entry.name}.rs`;
+  // Sorted: `readdirSync` order varies by filesystem, and an unstable report
+  // order makes a multi-violation failure hard to diff between runs.
+  const directories = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  for (const directory of directories) {
+    const parentFile = `${directory}.rs`;
     if (!existsSync(resolve(root, parentFile))) continue;
-    for (const child of readdirSync(resolve(root, entry.name))) {
-      if (child.endsWith('.rs')) pairs.push({ parentFile, childFile: `${entry.name}/${child}` });
+    for (const child of readdirSync(resolve(root, directory)).sort()) {
+      if (child.endsWith('.rs')) pairs.push({ parentFile, childFile: `${directory}/${child}` });
     }
   }
   return pairs;
@@ -222,7 +229,33 @@ function parse(text: string): Predicate {
     if (combinator[1] === 'not') return { kind: 'not', inner: parts[0] };
     return { kind: combinator[1] as 'all' | 'any', parts };
   }
-  return { kind: 'atom', name: trimmed };
+  return { kind: 'atom', name: canonicalAtom(trimmed) };
+}
+
+/**
+ * Built-in `cfg` spellings that name the same condition, folded to one atom.
+ *
+ * `implies` treats atoms as independent booleans, so `windows` and
+ * `target_os = "windows"` would otherwise compare as unrelated and a
+ * declaration using one spelling with an import using the other would be
+ * reported as a violation. This crate already mixes both: `lib.rs` writes
+ * `#[cfg(windows)]` and `browser_focus.rs` writes `#[cfg(target_os =
+ * "windows")]`.
+ *
+ * Only exact aliases are folded. `windows` is not recorded as the negation of
+ * `unix`, because a target can be neither. Atoms outside this table stay
+ * independent, which can over-report rather than under-report — a spurious
+ * failure is a prompt to look, whereas a missed one is the defect this
+ * contract exists to catch.
+ */
+function canonicalAtom(atom: string): string {
+  const normalized = atom.replace(/\s*=\s*/gu, ' = ');
+  const aliases = new Map([
+    ['target_family = "unix"', 'unix'],
+    ['target_family = "windows"', 'windows'],
+    ['target_os = "windows"', 'windows'],
+  ]);
+  return aliases.get(normalized) ?? normalized;
 }
 
 /** Split on commas that are not inside parentheses. */
@@ -314,4 +347,22 @@ export function parentImports(child: string): string[] {
   return superImports(read(resolve(root, pair.childFile)))
     .filter((imported) => imported.viaModule === undefined)
     .map((imported) => imported.item);
+}
+
+/**
+ * Whether an import written under `importGate` may name a declaration written
+ * under `declarationGate`. Both are `cfg` predicate bodies, or `undefined` for
+ * an ungated item.
+ *
+ * Exposed so the implication rules can be asserted directly, rather than only
+ * through whichever combinations the tree happens to contain today.
+ */
+export function importGateSatisfies(
+  importGate: string | undefined,
+  declarationGate: string | undefined,
+): boolean {
+  return implies(
+    importGate === undefined ? ALWAYS : parse(importGate),
+    declarationGate === undefined ? ALWAYS : parse(declarationGate),
+  );
 }

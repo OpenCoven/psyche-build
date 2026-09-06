@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   findGateViolations,
+  importGateSatisfies,
   parentImports,
   resolvedGate,
   scannedModules,
@@ -32,6 +33,32 @@ describe('native workspace child module cfg gates', () => {
     );
     // Report the mismatches themselves; a bare count says nothing actionable.
     expect(report).toEqual([]);
+  });
+
+  test('an import gate may be narrower than the declaration, but never looser', () => {
+    // Narrower is fine: an author may restrict an import further than the
+    // declaration requires, and demanding an exact textual match would push
+    // them to loosen a correct gate to quiet this contract.
+    expect(importGateSatisfies('all(unix, test)', 'unix')).toBe(true);
+    expect(importGateSatisfies('unix', 'unix')).toBe(true);
+
+    // Looser is the defect: #366's ungated import of a `#[cfg(unix)]` type.
+    expect(importGateSatisfies(undefined, 'unix')).toBe(false);
+    expect(importGateSatisfies('test', 'unix')).toBe(false);
+  });
+
+  test('built-in cfg spellings for one condition are treated as equal', () => {
+    // rustc sets `windows` for the same targets as `target_os = "windows"`,
+    // and this crate uses both spellings — `lib.rs` the first, and
+    // `browser_focus.rs` the second. Comparing them as unrelated atoms would
+    // report a violation on code that compiles.
+    expect(importGateSatisfies('target_os = "windows"', 'windows')).toBe(true);
+    expect(importGateSatisfies('windows', 'target_os = "windows"')).toBe(true);
+    expect(importGateSatisfies('target_family = "unix"', 'unix')).toBe(true);
+
+    // Not folded: a target can be neither, so `windows` does not imply
+    // `not(unix)` and must still be reported.
+    expect(importGateSatisfies('windows', 'not(unix)')).toBe(false);
   });
 
   test('the child modules under test are actually being scanned', () => {
