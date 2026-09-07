@@ -331,7 +331,7 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
 async function main() {
   const args = process.argv.slice(2);
   const requireComplete = args.includes('--require-complete');
-  const paths = args.filter((arg) => arg !== '--require-complete');
+  const paths = args.filter((arg) => arg !== '--' && arg !== '--require-complete');
   if (paths.length !== 1) {
     console.error(
       'Usage: node scripts/validate-operator-acceptance.mjs <manifest.json> [--require-complete]',
