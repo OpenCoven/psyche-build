@@ -27,6 +27,7 @@ mod workspace_artifact_sweep;
 mod workspace_paths;
 mod workspace_publish;
 mod workspace_recovery_initial;
+mod workspace_recovery_pending;
 mod workspace_recovery_prior;
 mod workspace_restore;
 #[cfg(test)]
@@ -36,8 +37,7 @@ mod workspace_test_hooks;
 use workspace_test_hooks::*;
 
 use workspace_absent_marker::{
-    absent_rollback_resolution, create_absent_rollback_marker_in, declare_absent_forward_commit,
-    declare_absent_rollback,
+    create_absent_rollback_marker_in, declare_absent_forward_commit, declare_absent_rollback,
 };
 use workspace_artifact_io::{
     read_bounded_workspace_file, read_workspace_artifact_bytes, verify_opened_workspace_artifact,
@@ -48,19 +48,17 @@ use workspace_artifact_sweep::{
     rollback_candidates_exist, validate_workspace_artifact_paths,
 };
 use workspace_recovery_initial::{
-    durably_restore_initial_absence, recover_ambiguous_initial_workspace,
-    recover_workspace_from_forward_candidate, resolve_initial_workspace_after_marker_failure,
+    durably_restore_initial_absence, resolve_initial_workspace_after_marker_failure,
 };
+use workspace_recovery_pending::{recover_pending_rollback_state, recover_pending_workspace};
 use workspace_recovery_prior::{
-    certify_prior_committed_recovery, certify_prior_workspace_forward,
-    resolve_prior_workspace_after_commit_failure,
+    certify_prior_workspace_forward, resolve_prior_workspace_after_commit_failure,
 };
 
 #[cfg(test)]
 use workspace_publish::open_temp_file;
 use workspace_publish::{
-    mark_rollback_committed, mark_rollback_committed_with, stage_and_publish_workspace,
-    PublishedWorkspace,
+    mark_rollback_committed_with, stage_and_publish_workspace, PublishedWorkspace,
 };
 
 #[cfg(test)]
@@ -742,18 +740,6 @@ fn commit_initial_workspace_forward(
     )
 }
 
-fn unlink_existing_regular_workspace_path(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    context: &str,
-) -> Result<(), String> {
-    if !regular_file_exists(workspace_dir, path, context)? {
-        return Ok(());
-    }
-    unlink_workspace_path(workspace_dir, path, context)
-        .map_err(|error| format!("remove {context} '{}': {}", path.display(), error))
-}
-
 /// Finishes a save that created the workspace where none existed.
 ///
 /// The twin of `finish_prior_workspace_transaction`, for the branch where
@@ -979,141 +965,6 @@ fn finish_prior_workspace_transaction(
     }
 }
 
-fn recover_pending_rollback_state(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    parent: &Path,
-    pending_path: &Path,
-    committed_path: &Path,
-    absent_pending_path: &Path,
-    absent_committed_path: &Path,
-    forward_path: &Path,
-    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
-    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
-    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    let has_pending =
-        regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")?;
-    let has_absent_pending = regular_file_exists(
-        workspace_dir,
-        absent_pending_path,
-        "workspace absent pending rollback",
-    )?;
-    let has_committed = regular_file_exists(
-        workspace_dir,
-        committed_path,
-        "workspace committed rollback",
-    )?;
-    let has_forward =
-        regular_file_exists(workspace_dir, forward_path, "workspace forward rollback")?;
-    if has_pending && has_absent_pending {
-        return Err(format!(
-            "workspace has conflicting pending rollback states at '{}' and '{}'",
-            pending_path.display(),
-            absent_pending_path.display()
-        ));
-    }
-    if has_pending {
-        recover_pending_workspace(
-            workspace_dir,
-            path,
-            parent,
-            pending_path,
-            committed_path,
-            sync_parent_directory,
-            restore_workspace_backup,
-            rename_workspace_path,
-        )?;
-    } else {
-        match absent_rollback_resolution(workspace_dir, absent_pending_path, absent_committed_path)?
-        {
-            AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Rollback) => {
-                if has_absent_pending {
-                    recover_pending_workspace(
-                        workspace_dir,
-                        path,
-                        parent,
-                        absent_pending_path,
-                        absent_committed_path,
-                        sync_parent_directory,
-                        restore_workspace_backup,
-                        rename_workspace_path,
-                    )?;
-                } else {
-                    restore_prior_workspace_state(
-                        workspace_dir,
-                        absent_committed_path,
-                        path,
-                        restore_workspace_backup,
-                    )?;
-                    sync_parent_directory(workspace_dir, parent).map_err(|error| {
-                        format!(
-                            "sync restored absent workspace '{}': {}; committed rollback retained at '{}'",
-                            path.display(),
-                            error,
-                            absent_committed_path.display()
-                        )
-                    })?;
-                }
-            }
-            AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Forward {
-                require_candidate,
-            }) => {
-                if require_candidate || has_forward {
-                    recover_workspace_from_forward_candidate(
-                        workspace_dir,
-                        path,
-                        parent,
-                        forward_path,
-                        sync_parent_directory,
-                    )?;
-                } else {
-                    ensure_forward_workspace(workspace_dir, path, forward_path, false)?;
-                    sync_parent_directory(workspace_dir, parent).map_err(|error| {
-                        format!(
-                            "sync forward workspace '{}': {}; forward recovery retained at '{}'",
-                            path.display(),
-                            error,
-                            forward_path.display()
-                        )
-                    })?;
-                }
-                if has_absent_pending {
-                    cleanup_committed_rollback(
-                        workspace_dir,
-                        absent_pending_path,
-                        parent,
-                        sync_parent_directory,
-                    )?;
-                }
-            }
-            AbsentRollbackInterpretation::Ambiguous => {
-                recover_ambiguous_initial_workspace(
-                    workspace_dir,
-                    path,
-                    parent,
-                    absent_pending_path,
-                    absent_committed_path,
-                    forward_path,
-                    sync_parent_directory,
-                )?;
-            }
-            AbsentRollbackInterpretation::Missing if has_committed && has_forward => {
-                certify_prior_committed_recovery(
-                    workspace_dir,
-                    path,
-                    parent,
-                    committed_path,
-                    forward_path,
-                    sync_parent_directory,
-                )?;
-            }
-            AbsentRollbackInterpretation::Missing => {}
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbsentRollbackResolution {
     Rollback,
@@ -1171,71 +1022,6 @@ fn ensure_forward_workspace(
         &forward_file,
         path,
         "workspace forward rollback",
-    )
-}
-
-fn recover_pending_workspace(
-    workspace_dir: &SecureWorkspaceDir,
-    path: &Path,
-    parent: &Path,
-    pending_path: &Path,
-    committed_path: &Path,
-    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
-    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
-    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    restore_prior_workspace_state(
-        workspace_dir,
-        pending_path,
-        path,
-        restore_workspace_backup,
-    )
-    .map_err(|error| {
-        format!(
-            "restore pending workspace rollback '{}' to '{}': {}; pending rollback retained at '{}'",
-            pending_path.display(),
-            path.display(),
-            error,
-            pending_path.display()
-        )
-    })?;
-    sync_parent_directory(workspace_dir, parent).map_err(|error| {
-        format!(
-            "sync restored workspace '{}': {}; pending rollback retained at '{}'",
-            path.display(),
-            error,
-            pending_path.display()
-        )
-    })?;
-    if regular_file_exists(
-        workspace_dir,
-        committed_path,
-        "workspace committed rollback",
-    )? {
-        cleanup_committed_rollback(
-            workspace_dir,
-            committed_path,
-            parent,
-            sync_parent_directory,
-        )
-        .map_err(|error| {
-            format!(
-                "clean committed rollback '{}' before pending recovery: {}; pending rollback retained at '{}'",
-                committed_path.display(),
-                error,
-                pending_path.display()
-            )
-        })?;
-    }
-    mark_rollback_committed(
-        workspace_dir,
-        path,
-        pending_path,
-        committed_path,
-        parent,
-        sync_parent_directory,
-        restore_workspace_backup,
-        rename_workspace_path,
     )
 }
 

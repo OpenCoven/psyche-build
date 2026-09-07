@@ -169,9 +169,9 @@ bodies without imports and failed on unresolved `OsStr`, `CString`, and `fs`.
 
 ## Proposed extraction order
 
-Each step is independently reviewable and preserves public behavior. Steps 1
-to 5 have landed. Step 6 is still an estimate from the original concern map
-and must be re-derived before it is started.
+Each step is independently reviewable and preserves public behavior. All six
+have landed, across fourteen pull requests. `native_workspace.rs` went from
+8,586 lines to 4,505, and ten child modules now hold what came out.
 
 Two kinds of error have shown up so far, and only the first is caught by
 measuring. A dependency closure gives the right *size*; it does not give the
@@ -184,6 +184,8 @@ steps 2 and 3 had to drop members after reading the bodies:
 | 2 | 7 fns | 16 fns | 13 fns | 3 do filesystem I/O through `secure_fs` |
 | 3 | 14 fns | 18 fns | 14 fns | 4 are artifact helpers shared with load, save and recovery |
 | 5 | 11 fns | 22 fns | 11 fns | 11 are shared with load or recovery |
+| 6-G | 19 fns | — | 17 fns | 2 fault hooks are called by production, not tests |
+| 6-A | 9 fns | — | 7 fns | 2 are recovery procedures, not marker protocol |
 
 So the closure is where a step starts, not where it ends. Read the bodies
 before moving them.
@@ -289,11 +291,45 @@ before moving them.
    the `create_rollback_backup` a name match proposes. The `cfg` gate contract
    then verified the gating.
 
-6. **Recovery decisions → `workspace_recovery.rs`** (~2,372 lines, 49
-   functions), last and probably as several slices of its own. It is the
-   largest surface and the one whose invariants are hardest to preserve, so it
-   should move only after the layers beneath it are stable and independently
-   tested.
+6. **Everything left, as six slices.** The estimate was one module of ~2,372
+   lines and 49 functions. What remained after step 5 was not one concern but
+   six, and naming them was most of the work:
+
+   | Slice | Module | Fns | Lines | PR |
+   |---|---|---:|---:|---|
+   | C | `workspace_artifact_io` | 5 | 79 | #377 |
+   | D | `workspace_artifact_sweep` | 7 | 166 | #377 |
+   | G | `workspace_test_hooks` | 17 | 390 | #378 |
+   | A | `workspace_absent_marker` | 7 | 231 | #379 |
+   | B1 | `workspace_recovery_prior` | 8 | 622 | #380 |
+   | B2 | `workspace_recovery_initial` | 10 | 653 | #383 |
+   | B3 | `workspace_recovery_pending` | 2 | 198 | this |
+
+   **The recovery layer partitions on `had_workspace`.** Its two halves —
+   recovering a workspace that existed before the save, and one that did not —
+   have *no call edges to each other in either direction*. They are entered
+   from `finish_prior_workspace_transaction` and
+   `finish_initial_workspace_transaction` respectively, so the branch #372
+   named at the transaction level runs all the way down. The concern map
+   treated recovery as one undifferentiated block and so could not see this;
+   it appeared only once the layer was measured.
+
+   `recover_pending_rollback_state` dispatches between the halves and gets its
+   own module for that reason: it is entered from the load path, the save path
+   and post-failure rollback, and it precedes the distinction the two halves
+   turn on, so filing it under either would misname it.
+
+   Two things stayed. `ensure_forward_workspace` and
+   `restore_prior_workspace_state` look like recovery helpers but the save path
+   calls them too. And the save transaction itself — `save_workspace_to_inner`
+   and the finishers around it — is the hub the rest hangs off, with eighteen
+   outward calls; it is what remains, not a slice.
+
+Extracting the layers first turned out to matter for a reason the record did
+not anticipate. `unlink_existing_regular_workspace_path` had callers all over
+`native_workspace.rs` at the start; by the time initial-workspace recovery
+moved out, it had none left there and eight in that one file. Emptying the
+parent is what made its real owner visible.
 
 Schema and migration are deliberately not given a step. At 78 lines they
 belong with load and validation rather than a module of their own.
