@@ -1,10 +1,4 @@
-export interface OperatorAcceptanceManifest {
-  schemaVersion: number;
-  terminalState: 'incomplete' | 'complete';
-  [key: string]: unknown;
-}
-
 export function validateOperatorAcceptanceManifest(
-  manifest: OperatorAcceptanceManifest,
+  manifest: unknown,
   options?: { requireComplete?: boolean },
 ): string[];
