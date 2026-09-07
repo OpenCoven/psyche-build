@@ -1837,6 +1837,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn native_workspace_tests_absent_pending_cleanup_reports_its_marker_context() {
+        let (_dir, path) = temp_workspace_path();
+        let marker = absent_pending_path(&path);
+        fs::create_dir(&marker).expect("create invalid absent pending marker");
+        let workspace_dir = SecureWorkspaceDir::open_for_load(&path)
+            .expect("open workspace parent")
+            .expect("workspace parent exists");
+        let mut sync_directory = |_workspace_dir: &SecureWorkspaceDir, parent: &Path| {
+            sync_parent_directory_standalone(parent)
+        };
+
+        let error = workspace_artifact_sweep::cleanup_absent_pending_rollback(
+            &workspace_dir,
+            &marker,
+            path.parent().expect("parent"),
+            &mut sync_directory,
+        )
+        .expect_err("reject non-file absent pending marker");
+
+        assert!(
+            error.contains("workspace absent pending rollback"),
+            "{error}"
+        );
+        assert!(!error.contains("workspace committed rollback"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn native_workspace_tests_rejects_symlinked_restore_backup() {
         let case = TempDir::new().expect("tempdir");
         let workspace = case.path().join("workspace-v3.json");

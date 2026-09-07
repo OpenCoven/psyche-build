@@ -22,7 +22,9 @@ use std::path::Path;
 
 use super::secure_fs::regular_file_exists;
 use super::workspace_absent_marker::absent_rollback_resolution;
-use super::workspace_artifact_sweep::cleanup_committed_rollback;
+use super::workspace_artifact_sweep::{
+    cleanup_absent_pending_rollback, cleanup_committed_rollback,
+};
 use super::workspace_publish::mark_rollback_committed;
 use super::workspace_recovery_initial::{
     recover_ambiguous_initial_workspace, recover_workspace_from_forward_candidate,
@@ -133,7 +135,7 @@ pub(super) fn recover_pending_rollback_state(
                     })?;
                 }
                 if has_absent_pending {
-                    cleanup_committed_rollback(
+                    cleanup_absent_pending_rollback(
                         workspace_dir,
                         absent_pending_path,
                         parent,
