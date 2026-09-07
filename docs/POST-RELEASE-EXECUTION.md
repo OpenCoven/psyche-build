@@ -138,15 +138,37 @@ and deferred as of this reconciliation.
 **Resolved control-state regression:** the scheduled Beads Project sync failed
 on every scheduled run from 2026-08-30 until 2026-09-02 because a checkout
 running the accidental Beads v1.2.1 release migrated the shared Dolt schema to
-v65 and pushed it; the pinned 1.2.2 CLI could not open it. The schema cursor
-was rolled back to v53 following the upstream recovery guide and published on
-2026-09-02; the versioned `events` audit table was re-tracked from
-pre-migration history and published on 2026-09-04 together with the
-source-first Bead close. All 111 Beads were preserved. Scheduled
-applies have succeeded since 2026-09-03, the `psyche-z7c.4.4` Bead was closed
-source-first, the synchronizer regenerated the #230 mirror body from that
-corrected source, and the read-only validator exits `0` with zero findings.
-Generated mirror bodies were never edited to repair this.
+v65 and pushed it; the pinned 1.2.2 CLI could not open it. The recovery retained
+the Git sidecar at `9c85d2b79e3da16c283278824866a5ba1217950a` and the published
+Dolt transition
+`0at1pk83ng4ogm45svvp7ip122acgt4h` →
+`go64gshichpnsj3islhl6pmv5lgi2teb`. That state restored schema v53,
+re-tracked the versioned `events` table, and preserved all 111 Beads. Its 1,362
+event rows comprise the last durable pre-ignore snapshot of 1,361 rows plus the
+publication transition. Three known post-ignore writes retain their commits and
+final source state, but their clone-local event rows are unavailable; this is a
+bounded three-write audit gap, not an uninterrupted journal.
+
+The retained qualifying proof begins with scheduled apply
+[33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
+on 2026-09-04. It performed seven operations; from the authoritative closed
+`psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and ran the
+live read-only validator to exit `0`: 111 sources, 27 managed mirrors, 24 canonical
+outcomes, and 0 findings. The following scheduled apply
+[33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
+on 2026-09-05 planned and applied 0 operations, completed every step, reported
+no warnings or visibility drift, and retained schema v53. Mirror #230 was last
+updated by the first run and was never manually edited afterward; generated-body
+repair did not supply the proof.
+
+The audit also records two deviations rather than treating them as proof. PR
+#346 reviewed unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, while a
+different checkout published `go64gshichpnsj3islhl6pmv5lgi2teb`; the intended
+logical state agreed, but the exact-candidate gate did not hold. At that PR's
+merge, mirror #230 first entered the closed state through GitHub keyword syntax,
+not through the synchronizer. PR #350 then documented the recovery before the
+second qualifying scheduled run and omitted this documentation contract
+assertion. Neither deviation is counted as closeout evidence.
 
 Two contract improvements came out of it and are enforced now: the synchronizer
 reports schema skew as a bounded `Beads schema version skew` diagnostic instead

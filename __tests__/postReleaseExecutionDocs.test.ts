@@ -7,6 +7,9 @@ const issueUrl = (issue: number): string =>
 const pullUrl = (pull: number): string =>
   `https://github.com/OpenCoven/psyche-build/pull/${pull}`;
 
+const runUrl = (run: number): string =>
+  `https://github.com/OpenCoven/psyche-build/actions/runs/${run}`;
+
 describe('post-release execution documentation', () => {
   it('records the Stage 0 proof wave as closed with linked evidence before the active P0 gate', async () => {
     const documents = await Promise.all(
@@ -203,6 +206,41 @@ describe('post-release execution documentation', () => {
       .filter((paragraph) => /(?:edit|change|repair|authoritative source)/i.test(paragraph))
       .filter((paragraph) => !/(?:do not|never|must not|cannot|not the source)/i.test(paragraph));
     expect(permissiveMirrorParagraphs).toEqual([]);
+  });
+
+  it('retains the exact scheduled proof and bounded deviations for the Beads recovery', async () => {
+    const documents = await Promise.all(
+      ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
+        filePath,
+        source: await readFile(filePath, 'utf8'),
+      })),
+    );
+
+    for (const { filePath, source } of documents) {
+      expect(source, filePath).toContain(issueUrl(342));
+      expect(source, filePath).toContain(runUrl(33880014833));
+      expect(source, filePath).toContain(runUrl(33953178586));
+      expect(source, filePath).toContain('9c85d2b79e3da16c283278824866a5ba1217950a');
+      expect(source, filePath).toContain('0at1pk83ng4ogm45svvp7ip122acgt4h');
+      expect(source, filePath).toContain('go64gshichpnsj3islhl6pmv5lgi2teb');
+      expect(source, filePath).toContain('l3c2l93j2iogl4h3ai947qls2vr10tbp');
+      expect(source, filePath).toMatch(/schema v53/i);
+      expect(source, filePath).toMatch(/1,362\s+event rows/i);
+      expect(source, filePath).toMatch(/bounded three-write audit gap/i);
+      expect(source, filePath).toMatch(
+        /111 sources[\s\S]{0,100}27 managed mirrors[\s\S]{0,100}24 canonical\s+outcomes[\s\S]{0,80}0 findings/i,
+      );
+      expect(source, filePath).toMatch(/planned and applied 0 operations/i);
+      expect(source, filePath).toMatch(/Mirror #230[\s\S]{0,160}never[\s\S]{0,40}edited/i);
+      expect(source, filePath).toMatch(/exact-candidate\s+gate did\s+not hold/i);
+      expect(source, filePath).toMatch(
+        /Mirror #230[\s\S]{0,160}closed state[\s\S]{0,180}keyword syntax[\s\S]{0,120}(?:rather than|not through) the\s+synchronizer/i,
+      );
+      expect(source, filePath).toMatch(/PR #350[\s\S]{0,180}(?:before the second qualifying|omitted this documentation contract)/i);
+      expect(source, filePath).not.toMatch(
+        /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:the\s+)?(?:generated\s+)?(?:mirror\s+)?#230/i,
+      );
+    }
   });
 
   it('keeps the roadmap, docs index, and acceptance contract connected', async () => {
