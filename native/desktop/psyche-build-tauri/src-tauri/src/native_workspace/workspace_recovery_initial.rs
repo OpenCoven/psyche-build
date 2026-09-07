@@ -22,7 +22,8 @@ use std::fs::File;
 use std::path::Path;
 
 use super::secure_fs::{
-    open_existing_regular_file, regular_file_exists, verify_opened_regular_file,
+    open_existing_regular_file, regular_file_exists, unlink_workspace_path,
+    verify_opened_regular_file,
 };
 use super::workspace_absent_marker::{
     absent_rollback_resolution, create_absent_rollback_marker_in, declare_absent_forward_commit,
@@ -35,13 +36,31 @@ use super::workspace_artifact_io::{
 use super::workspace_artifact_sweep::cleanup_forward_rollback;
 use super::workspace_restore::restore_workspace_backup_in;
 use super::{
-    ensure_forward_workspace, restore_prior_workspace_state,
-    unlink_existing_regular_workspace_path, AbsentRollbackInterpretation, AbsentRollbackResolution,
-    SecureWorkspaceDir, WorkspaceRecoveryDecision, WORKSPACE_RECOVERY_DECISION_ATTEMPTS,
+    ensure_forward_workspace, restore_prior_workspace_state, AbsentRollbackInterpretation,
+    AbsentRollbackResolution, SecureWorkspaceDir, WorkspaceRecoveryDecision,
+    WORKSPACE_RECOVERY_DECISION_ATTEMPTS,
 };
 
 #[cfg(test)]
 use super::{run_marker_file_fault, MarkerFileOperation, ABSENT_FORWARD_MARKER};
+
+/// Removes a workspace artifact if it is present, tolerating absence.
+///
+/// Moved here from the parent in the same change that extracted the recovery
+/// dispatcher: once initial-workspace recovery moved out, this had no callers
+/// left in `native_workspace.rs` at all, and every one of its eight uses is in
+/// this file.
+fn unlink_existing_regular_workspace_path(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, path, context)? {
+        return Ok(());
+    }
+    unlink_workspace_path(workspace_dir, path, context)
+        .map_err(|error| format!("remove {context} '{}': {}", path.display(), error))
+}
 
 pub(super) fn resolve_initial_workspace_after_marker_failure(
     workspace_dir: &SecureWorkspaceDir,
