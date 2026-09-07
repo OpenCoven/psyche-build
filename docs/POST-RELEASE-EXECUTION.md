@@ -151,15 +151,17 @@ bounded three-write audit gap, not an uninterrupted journal.
 
 The retained qualifying proof begins with scheduled apply
 [33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
-on 2026-09-04. It performed seven operations; from the authoritative closed
+on 2026-09-04. It performed seven operations; from the authoritative
 `psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and ran the
 live read-only validator to exit `0`: 111 sources, 27 managed mirrors, 24 canonical
 outcomes, and 0 findings. The following scheduled apply
 [33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
 on 2026-09-05 planned and applied 0 operations, completed every step, reported
-no warnings or visibility drift, and retained schema v53. Mirror #230 was last
-updated by the first run and was never manually edited afterward; generated-body
-repair did not supply the proof.
+no warnings or visibility drift, and retained schema v53.
+
+Mirror #230 was regenerated after its authoritative source entered closed state.
+It was last updated by the first run and was never manually edited afterward;
+generated-body repair did not supply the proof.
 
 The audit also records two deviations rather than treating them as proof. PR
 #346 reviewed unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, while a

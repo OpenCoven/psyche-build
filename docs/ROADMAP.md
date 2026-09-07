@@ -279,15 +279,17 @@ not their clone-local event rows, leaving a bounded three-write audit gap.
 
 Scheduled apply
 [33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
-on 2026-09-04 performed seven operations; from the authoritative closed
+on 2026-09-04 performed seven operations; from the authoritative
 `psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and made the
 live read-only validator exit `0` with 111 sources, 27 managed mirrors, 24 canonical
 outcomes, and 0 findings. The following scheduled apply
 [33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
 on 2026-09-05 planned and applied 0 operations, completed every step without
-warnings or visibility drift, and retained schema v53. Mirror #230 has never
-been manually edited since the first run; generated-body repair did not supply
-this proof.
+warnings or visibility drift, and retained schema v53.
+
+Mirror #230 was regenerated after its authoritative source entered closed state.
+It has never been manually edited since the first run; generated-body repair did
+not supply this proof.
 
 The provenance and mirror deviations remain explicit: PR #346 reviewed
 unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, but another checkout

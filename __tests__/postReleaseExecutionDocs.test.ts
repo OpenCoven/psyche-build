@@ -210,15 +210,17 @@ describe('post-release execution documentation', () => {
 
   it('retains the exact scheduled proof and bounded deviations for the Beads recovery', async () => {
     const unsafeMirrorReference =
-      /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[^\n]{0,160}(?:#230\b|https:\/\/github\.com\/OpenCoven\/psyche-build\/issues\/230\b)/i;
+      /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b.*(?:#230\b|https:\/\/github\.com\/OpenCoven\/psyche-build\/issues\/230\b)/i;
     const unsafeReferenceFixtures = [
       'Closes issue #230',
       'Closes the issue #230',
       'Fixes OpenCoven/psyche-build#230',
       'Resolved by [the generated mirror](https://github.com/OpenCoven/psyche-build/issues/230)',
+      'Closes the generated mirror\n#230',
+      `Closes ${'bounded context '.repeat(20)}#230`,
     ];
     for (const fixture of unsafeReferenceFixtures) {
-      expect(fixture).toMatch(unsafeMirrorReference);
+      expect(fixture.replace(/\s+/g, ' ')).toMatch(unsafeMirrorReference);
     }
 
     const documents = await Promise.all(
@@ -232,6 +234,11 @@ describe('post-release execution documentation', () => {
       const paragraphs = source
         .split(/\n\s*\n/)
         .map((paragraph) => paragraph.replace(/\s+/g, ' '));
+      const closingKeywordBlocks = source
+        .split(/\n\s*\n/)
+        .flatMap((block) => (/^\s*\|/m.test(block) ? block.split('\n') : [block]))
+        .map((block) => block.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
       const scheduledProof = paragraphs.find((paragraph) =>
         paragraph.includes(runUrl(33880014833)),
       );
@@ -240,6 +247,9 @@ describe('post-release execution documentation', () => {
       );
       const reviewedProvenance = paragraphs.find((paragraph) =>
         paragraph.includes('l3c2l93j2iogl4h3ai947qls2vr10tbp'),
+      );
+      const mirrorDurability = paragraphs.find((paragraph) =>
+        /Mirror #230 was regenerated after/.test(paragraph),
       );
       const pr350Deviation = paragraphs.find((paragraph) => /PR #350/.test(paragraph));
 
@@ -254,8 +264,8 @@ describe('post-release execution documentation', () => {
       expect(scheduledProof, filePath).toMatch(
         /\[33953178586\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33953178586\).{0,80}planned and applied 0 operations.{0,180}(?:(?:without|no) warnings or visibility drift|no warnings.{0,100}no visibility drift).{0,100}(?:retained|retaining) schema v53/i,
       );
-      expect(scheduledProof, filePath).toMatch(
-        /Mirror #230[^.]{0,160}never[^.]{0,40}(?:manually )?edited/i,
+      expect(mirrorDurability, filePath).toMatch(
+        /Mirror #230.{0,160}authoritative source entered closed state.{0,240}never.{0,40}(?:manually )?edited/i,
       );
       expect(publicationProvenance, filePath).toMatch(
         /0at1pk83ng4ogm45svvp7ip122acgt4h`?\s*→\s*`?go64gshichpnsj3islhl6pmv5lgi2teb.{0,180}schema v53/i,
@@ -269,7 +279,9 @@ describe('post-release execution documentation', () => {
       expect(pr350Deviation, filePath).toMatch(
         /PR #350[^.]{0,180}(?:before the second qualifying|before the second scheduled)[^.]{0,160}(?:omitted this documentation contract|omitted the documentation-contract)/i,
       );
-      expect(source, filePath).not.toMatch(unsafeMirrorReference);
+      for (const block of closingKeywordBlocks) {
+        expect(block, filePath).not.toMatch(unsafeMirrorReference);
+      }
     }
   });
 
