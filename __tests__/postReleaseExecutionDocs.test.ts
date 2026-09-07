@@ -242,6 +242,9 @@ describe('post-release execution documentation', () => {
       const scheduledProof = paragraphs.find((paragraph) =>
         paragraph.includes(runUrl(33880014833)),
       );
+      const auditGap = paragraphs.find((paragraph) =>
+        /1,362\s+event rows/i.test(paragraph),
+      );
       const publicationProvenance = paragraphs.find((paragraph) =>
         paragraph.includes('0at1pk83ng4ogm45svvp7ip122acgt4h'),
       );
@@ -256,13 +259,14 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toContain(issueUrl(342));
       expect(source, filePath).toContain('9c85d2b79e3da16c283278824866a5ba1217950a');
       expect(source, filePath).toMatch(/schema v53/i);
-      expect(source, filePath).toMatch(/1,362\s+event rows/i);
-      expect(source, filePath).toMatch(/bounded three-write audit gap/i);
-      expect(scheduledProof, filePath).toMatch(
-        /\[33880014833\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33880014833\).{0,80}(?:performed|performing) seven operations.{0,240}(?:validator|validation).{0,120}(?:exit|exited) `?0`?.{0,160}111 sources.{0,100}27 managed mirrors.{0,100}24 canonical outcomes.{0,80}0 findings/i,
+      expect(auditGap, filePath).toMatch(
+        /1,362\s+event rows.{0,180}1,361(?:-row|\s+rows).{0,120}(?:plus|and).{0,80}publication transition.{0,220}Three known post-ignore writes.{0,180}retain their commits and final source state.{0,180}(?:clone-local event rows are unavailable|not their clone-local event rows).{0,140}bounded three-write audit gap/i,
       );
       expect(scheduledProof, filePath).toMatch(
-        /\[33953178586\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33953178586\).{0,80}planned and applied 0 operations.{0,180}(?:(?:without|no) warnings or visibility drift|no warnings.{0,100}no visibility drift).{0,100}(?:retained|retaining) schema v53/i,
+        /\[33880014833\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33880014833\).{0,100}9e4a9cf383a1993ca2c2099e3d296acb3dd3c5b4.{0,100}(?:performed|performing) seven operations.{0,240}(?:validator|validation).{0,120}(?:exit|exited) `?0`?.{0,160}111 sources.{0,100}27 managed mirrors.{0,100}24 canonical outcomes.{0,80}0 findings/i,
+      );
+      expect(scheduledProof, filePath).toMatch(
+        /\[33953178586\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33953178586\).{0,100}23cace08fdc5e35e3ee0cd46200b4ed3bbd94131.{0,100}planned and applied 0 operations.{0,180}(?:(?:without|no) warnings or visibility drift|no warnings.{0,100}no visibility drift).{0,100}(?:retained|retaining) schema v53/i,
       );
       expect(mirrorDurability, filePath).toMatch(
         /Mirror #230.{0,160}authoritative source entered closed state.{0,240}never.{0,40}(?:manually )?edited/i,
