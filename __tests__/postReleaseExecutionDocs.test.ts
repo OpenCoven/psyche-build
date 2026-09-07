@@ -209,6 +209,18 @@ describe('post-release execution documentation', () => {
   });
 
   it('retains the exact scheduled proof and bounded deviations for the Beads recovery', async () => {
+    const unsafeMirrorReference =
+      /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[^\n]{0,160}(?:#230\b|https:\/\/github\.com\/OpenCoven\/psyche-build\/issues\/230\b)/i;
+    const unsafeReferenceFixtures = [
+      'Closes issue #230',
+      'Closes the issue #230',
+      'Fixes OpenCoven/psyche-build#230',
+      'Resolved by [the generated mirror](https://github.com/OpenCoven/psyche-build/issues/230)',
+    ];
+    for (const fixture of unsafeReferenceFixtures) {
+      expect(fixture).toMatch(unsafeMirrorReference);
+    }
+
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
@@ -217,29 +229,47 @@ describe('post-release execution documentation', () => {
     );
 
     for (const { filePath, source } of documents) {
+      const paragraphs = source
+        .split(/\n\s*\n/)
+        .map((paragraph) => paragraph.replace(/\s+/g, ' '));
+      const scheduledProof = paragraphs.find((paragraph) =>
+        paragraph.includes(runUrl(33880014833)),
+      );
+      const publicationProvenance = paragraphs.find((paragraph) =>
+        paragraph.includes('0at1pk83ng4ogm45svvp7ip122acgt4h'),
+      );
+      const reviewedProvenance = paragraphs.find((paragraph) =>
+        paragraph.includes('l3c2l93j2iogl4h3ai947qls2vr10tbp'),
+      );
+      const pr350Deviation = paragraphs.find((paragraph) => /PR #350/.test(paragraph));
+
       expect(source, filePath).toContain(issueUrl(342));
-      expect(source, filePath).toContain(runUrl(33880014833));
-      expect(source, filePath).toContain(runUrl(33953178586));
       expect(source, filePath).toContain('9c85d2b79e3da16c283278824866a5ba1217950a');
-      expect(source, filePath).toContain('0at1pk83ng4ogm45svvp7ip122acgt4h');
-      expect(source, filePath).toContain('go64gshichpnsj3islhl6pmv5lgi2teb');
-      expect(source, filePath).toContain('l3c2l93j2iogl4h3ai947qls2vr10tbp');
       expect(source, filePath).toMatch(/schema v53/i);
       expect(source, filePath).toMatch(/1,362\s+event rows/i);
       expect(source, filePath).toMatch(/bounded three-write audit gap/i);
-      expect(source, filePath).toMatch(
-        /111 sources[\s\S]{0,100}27 managed mirrors[\s\S]{0,100}24 canonical\s+outcomes[\s\S]{0,80}0 findings/i,
+      expect(scheduledProof, filePath).toMatch(
+        /\[33880014833\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33880014833\).{0,80}(?:performed|performing) seven operations.{0,240}(?:validator|validation).{0,120}(?:exit|exited) `?0`?.{0,160}111 sources.{0,100}27 managed mirrors.{0,100}24 canonical outcomes.{0,80}0 findings/i,
       );
-      expect(source, filePath).toMatch(/planned and applied 0 operations/i);
-      expect(source, filePath).toMatch(/Mirror #230[\s\S]{0,160}never[\s\S]{0,40}edited/i);
-      expect(source, filePath).toMatch(/exact-candidate\s+gate did\s+not hold/i);
-      expect(source, filePath).toMatch(
-        /Mirror #230[\s\S]{0,160}closed state[\s\S]{0,180}keyword syntax[\s\S]{0,120}(?:rather than|not through) the\s+synchronizer/i,
+      expect(scheduledProof, filePath).toMatch(
+        /\[33953178586\]\(https:\/\/github\.com\/OpenCoven\/psyche-build\/actions\/runs\/33953178586\).{0,80}planned and applied 0 operations.{0,180}(?:(?:without|no) warnings or visibility drift|no warnings.{0,100}no visibility drift).{0,100}(?:retained|retaining) schema v53/i,
       );
-      expect(source, filePath).toMatch(/PR #350[\s\S]{0,180}(?:before the second qualifying|omitted this documentation contract)/i);
-      expect(source, filePath).not.toMatch(
-        /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:the\s+)?(?:generated\s+)?(?:mirror\s+)?#230/i,
+      expect(scheduledProof, filePath).toMatch(
+        /Mirror #230[^.]{0,160}never[^.]{0,40}(?:manually )?edited/i,
       );
+      expect(publicationProvenance, filePath).toMatch(
+        /0at1pk83ng4ogm45svvp7ip122acgt4h`?\s*→\s*`?go64gshichpnsj3islhl6pmv5lgi2teb.{0,180}schema v53/i,
+      );
+      expect(reviewedProvenance, filePath).toMatch(
+        /PR #346[^.]{0,120}reviewed[^.]{0,100}l3c2l93j2iogl4h3ai947qls2vr10tbp[^.]{0,180}(?:another|different) checkout[^.]{0,120}published[^.]{0,100}go64gshichpnsj3islhl6pmv5lgi2teb[^.]{0,180}exact-candidate gate did not hold/i,
+      );
+      expect(reviewedProvenance, filePath).toMatch(
+        /Mirror #230[^.]{0,160}closed state[^.]{0,180}keyword syntax[^.]{0,120}(?:rather than|not through) the synchronizer/i,
+      );
+      expect(pr350Deviation, filePath).toMatch(
+        /PR #350[^.]{0,180}(?:before the second qualifying|before the second scheduled)[^.]{0,160}(?:omitted this documentation contract|omitted the documentation-contract)/i,
+      );
+      expect(source, filePath).not.toMatch(unsafeMirrorReference);
     }
   });
 
