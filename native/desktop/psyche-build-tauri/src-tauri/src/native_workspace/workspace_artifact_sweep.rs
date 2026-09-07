@@ -151,29 +151,54 @@ pub(super) fn cleanup_committed_rollback(
     parent: &Path,
     sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !regular_file_exists(
+    cleanup_rollback_artifact(
         workspace_dir,
         committed_path,
+        parent,
         "workspace committed rollback",
-    )? {
+        "committed workspace rollback",
+        sync_parent_directory,
+    )
+}
+
+pub(super) fn cleanup_absent_pending_rollback(
+    workspace_dir: &SecureWorkspaceDir,
+    pending_path: &Path,
+    parent: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    cleanup_rollback_artifact(
+        workspace_dir,
+        pending_path,
+        parent,
+        "workspace absent pending rollback",
+        "absent pending workspace rollback",
+        sync_parent_directory,
+    )
+}
+
+fn cleanup_rollback_artifact(
+    workspace_dir: &SecureWorkspaceDir,
+    artifact_path: &Path,
+    parent: &Path,
+    context: &str,
+    description: &str,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, artifact_path, context)? {
         return Ok(());
     }
-    unlink_workspace_path(
-        workspace_dir,
-        committed_path,
-        "workspace committed rollback",
-    )
-    .map_err(|error| {
+    unlink_workspace_path(workspace_dir, artifact_path, context).map_err(|error| {
         format!(
-            "remove committed workspace rollback '{}': {}",
-            committed_path.display(),
+            "remove {description} '{}': {}",
+            artifact_path.display(),
             error
         )
     })?;
     sync_parent_directory(workspace_dir, parent).map_err(|error| {
         format!(
-            "sync removal of committed workspace rollback '{}': {}",
-            committed_path.display(),
+            "sync removal of {description} '{}': {}",
+            artifact_path.display(),
             error
         )
     })?;
