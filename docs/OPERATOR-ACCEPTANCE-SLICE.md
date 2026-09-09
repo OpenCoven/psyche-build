@@ -25,8 +25,10 @@ record.
 
 ## Preparation
 
-1. Copy `docs/templates/operator-acceptance-v0.0.1.json` outside the repository
-   into the durable, operator-controlled evidence location.
+1. Copy the
+   [v0.0.1 manifest template](https://github.com/OpenCoven/psyche-build/blob/main/docs/templates/operator-acceptance-v0.0.1.json)
+   outside the repository into the durable, operator-controlled evidence
+   location.
 2. Work in a disposable macOS user context and disposable Git repository.
 3. Add an uncommitted sentinel file, a named branch, and a disposable worktree.
 4. Record only bounded enumerated outcomes and SHA-256 digests. Do not retain raw
@@ -69,7 +71,8 @@ Verify the chosen DMG digest before installation. Then:
 - open the disposable repository;
 - create and use one plain tmux-backed terminal;
 - create one supported agent lane when available, otherwise mark it
-  `inapplicable` with the reason;
+  `inapplicable` with the reason in `safeNextAction`, set
+  `expectationMet` to `true`, and retain at least one sanitized evidence digest;
 - exercise project selection, lane selection, split, focus, resize,
   hide/restore, and active-project handoff;
 - close one pane while the sentinel remains uncommitted;

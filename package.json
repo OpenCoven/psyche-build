@@ -48,6 +48,7 @@
     "docs/BRIDGE-SECURITY.md",
     "docs/CONTROL-PLANE.md",
     "docs/INTEGRATIONS.md",
+    "docs/OPERATOR-ACCEPTANCE-SLICE.md",
     "docs/PRODUCT-SPEC.md",
     "docs/RELEASE-ACCEPTANCE.md",
     "docs/RELEASE.md",
