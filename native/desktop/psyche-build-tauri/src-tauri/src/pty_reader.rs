@@ -36,6 +36,10 @@ use super::{BeginExitOutcome, PtySessionToken, PTY_LIFECYCLES};
 use super::{create_cloexec_pipe, duplicate_cloexec_fd};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
+// `WindowsPtyReaderCancellation` holds the reader handle behind a mutex;
+// the crate root uses parking_lot's, whose `lock()` returns the guard directly.
+#[cfg(windows)]
+use parking_lot::Mutex;
 
 pub(crate) fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
     let mut buffer = [0u8; 4096];
@@ -197,7 +201,7 @@ impl PtyReaderCancellation {
     }
 
     #[cfg(windows)]
-    fn install_current_thread(&self) -> std::io::Result<()> {
+    pub(crate) fn install_current_thread(&self) -> std::io::Result<()> {
         use std::os::windows::io::FromRawHandle;
         use windows::Win32::System::Threading::{GetCurrentThreadId, OpenThread, THREAD_TERMINATE};
 
