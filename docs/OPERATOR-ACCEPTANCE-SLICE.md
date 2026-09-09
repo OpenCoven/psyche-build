@@ -23,6 +23,11 @@ tests or the recovery harness as observations of either DMG. Existing
 `v0.0.1` Homebrew lifecycle evidence remains a distinct completed publication
 record.
 
+This single-host manifest requires the observed source-smoke architecture to
+match the selected DMG. Record `aarch64` or `arm64` for Apple Silicon and
+`x86_64` or `x64` for Intel; the validator normalizes these aliases for comparison.
+Keep observations from different hosts in separate manifests.
+
 ## Preparation
 
 1. Copy the
@@ -111,6 +116,12 @@ Record `succeeded`, `failed`, or `recovery_required` only when the
 consequence is known. Record `unknown` when it is not known; the validator
 will prevent an unknown consequence from supporting closure.
 
+`failed` means the expected terminal state was not reached. Retain the failure
+and keep the manifest `incomplete` until remediation is re-observed on the named
+evidence subject. A #199 transfer does not turn a failed observation into a pass.
+An expected `recovery_required` outcome may support completion only with
+`expectationMet: true`, preserved work, evidence, and a safe next action.
+
 ## Deferred matrix
 
 This first slice does not claim packaged observation of corrupt persisted state,
@@ -135,3 +146,11 @@ After execution:
 6. keep both issues open while the manifest is `incomplete`;
 7. request closure only after `--require-complete` passes, every reusable gap
    is mapped to #199, and no consequential observation remains unknown.
+
+For each reusable gap, append a `transfers.issue199` record with `observationId`
+set to its manifest observation ID and `url` set to the concrete #199 comment
+that records ownership and follow-up. The URL must have the form
+`https://github.com/OpenCoven/psyche-build/issues/199#issuecomment-<id>`.
+The validator checks the record shape and destination, not the existence or
+content of remote comments; the operator/verifier must confirm those.
+Retain existing failure evidence when appending later successful observations.
