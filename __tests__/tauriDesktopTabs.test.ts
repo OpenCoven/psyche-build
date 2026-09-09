@@ -460,7 +460,11 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('keeps Tauri backend shared-state operations grouped correctly', () => {
-    expect(tauriLib).toMatch(
+    // The registry moved to `pty_lifecycle` in #197 slice 3; the code that
+    // *uses* it did not. This assertion is about the shared state's shape, so
+    // it follows the declaration, while everything below still describes
+    // `lib.rs` reaching for it.
+    expect(desktopSourceDefining('live_with_generation')).toMatch(
       /static\s+PTY_LIFECYCLES:\s*Lazy<Mutex<PtyLifecycleRegistry<PtySession>>>/
     );
     expect(tauriLib).not.toMatch(/static\s+STARTING_SESSIONS:/);

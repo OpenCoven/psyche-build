@@ -22,13 +22,11 @@ use std::sync::Arc;
 
 use portable_pty::MasterPty;
 
+use super::pty_lifecycle::{BeginExitOutcome, PtySessionToken, PTY_LIFECYCLES};
 use super::pty_process::PtyProcessTerminator;
 use super::pty_transport::{
     CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks, OutputPump,
 };
-// `BeginExitOutcome` belongs to the lifecycle registry, which is still in the
-// crate root and is the next slice's concern.
-use super::{BeginExitOutcome, PtySessionToken, PTY_LIFECYCLES};
 
 // Both pipe helpers are `#[cfg(unix)]` in the crate root, so these imports
 // must be too; ungated they would compile here and fail on Windows.
