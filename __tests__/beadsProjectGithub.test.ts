@@ -745,6 +745,104 @@ describe('createGhClient', () => {
     expect(runner.calls).toHaveLength(205);
   });
 
+  it('follows a short inventory page through its cursor without changing repository scope', async () => {
+    const existing = trustedIssue({
+      number: 208,
+      body: managedBody('pb-existing'),
+    });
+    const runner = createRunner([
+      {
+        ...success([{ number: 999, pull_request: {} }]),
+        headers: {
+          link: '<https://api.github.com/repositories/1319246194/issues?state=all&per_page=100&page=2&after=cursor-1>; rel="next"',
+        },
+      },
+      success([existing]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listRepositoryIssues()).resolves.toEqual([
+      { number: 999, pull_request: {} },
+      existing,
+    ]);
+    expect(runner.calls[1]?.args[1]).toBe(
+      `repos/${owner}/${repo}/issues?state=all&per_page=100&page=2&after=cursor-1`,
+    );
+  });
+
+  it.each([{}, null, 'unexpected'])('rejects a non-array inventory instead of planning from emptiness: %j', async (payload) => {
+    const runner = createRunner([success(JSON.stringify(payload))]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listRepositoryIssues()).rejects.toThrow(/inventory.*non-array/i);
+  });
+
+  it('stops on a full terminal cursor inventory page without replaying its cursor', async () => {
+    const lastPage = Array.from({ length: 100 }, (_, index) => ({ number: index + 1 }));
+    const runner = createRunner([
+      {
+        ...success([{ number: 101 }]),
+        headers: {
+          Link: `<https://api.github.com/repos/${owner}/${repo}/issues?state=all&per_page=100&page=2&after=cursor-1>; rel="next"`,
+        },
+      },
+      success(lastPage),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listRepositoryIssues()).resolves.toHaveLength(101);
+    expect(runner.calls).toHaveLength(2);
+  });
+
+  it.each([
+    'https://example.com/repos/OpenCoven/psyche-build/issues?page=2',
+    'https://api.github.com/repos/other/repository/issues?page=2',
+    'https://user:password@api.github.com/repos/OpenCoven/psyche-build/issues?page=2',
+    'https://api.github.com/repos/OpenCoven/psyche-build/issues?state=open&page=2',
+    'https://api.github.com/repos/OpenCoven/psyche-build/issues?state=all&page=2#fragment',
+  ])('rejects an unsafe inventory continuation: %s', async (next) => {
+    const runner = createRunner([{
+      ...success([]),
+      headers: { Link: `<${next}>; rel="next"` },
+    }]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listRepositoryIssues()).rejects.toThrow(/inventory.*next-page/i);
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  it('rejects a repeated inventory continuation rather than returning partial state', async () => {
+    const runner = createRunner([{
+      ...success([]),
+      headers: {
+        Link: `<https://api.github.com/repos/${owner}/${repo}/issues?state=all&per_page=100&page=1>; rel="next"`,
+      },
+    }]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.listRepositoryIssues()).rejects.toThrow(/inventory.*repeated/i);
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  it('bounds inventory pagination even when every continuation is distinct', async () => {
+    let requests = 0;
+    const client = createGhClient({
+      owner, repo, token,
+      run: async () => {
+        requests += 1;
+        return {
+          ...success([]),
+          headers: {
+            Link: `<https://api.github.com/repos/${owner}/${repo}/issues?state=all&per_page=100&page=${requests + 1}>; rel="next"`,
+          },
+        };
+      },
+    });
+
+    await expect(client.listRepositoryIssues()).rejects.toThrow(/inventory.*safety bound/i);
+    expect(requests).toBe(1_000);
+  });
+
   it('discovers a marked issue without the bead label and plans repair instead of a duplicate', async () => {
     const bead: PublicBead = {
       id: 'pb-label-drift',
@@ -782,6 +880,12 @@ describe('createGhClient', () => {
     expect(createOperation?.type).toBe('createIssue');
 
     const runner = createRunner([
+      {
+        ...success([{ number: 999, pull_request: {} }]),
+        headers: {
+          Link: `<https://api.github.com/repos/${owner}/${repo}/issues?state=all&per_page=100&page=2&after=cursor-1>; rel="next"`,
+        },
+      },
       success([trustedIssue({
         number: 77,
         title: createOperation?.type === 'createIssue' ? createOperation.title : null,
