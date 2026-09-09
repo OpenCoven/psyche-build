@@ -1704,9 +1704,9 @@ export function createGhClient(options) {
    * @param {string} endpoint
    * @param {Record<string, unknown> | undefined} [body]
    * @param {'managed' | 'lock'} [mutationScope]
-   * @returns {Promise<unknown>}
+   * @returns {Promise<GhRunResult>}
    */
-  async function rest(method, endpoint, body, mutationScope = 'managed') {
+  async function restResponse(method, endpoint, body, mutationScope = 'managed') {
     const args = [
       'api',
       endpoint,
@@ -1723,10 +1723,25 @@ export function createGhClient(options) {
       ? (method === 'POST' || method === 'DELETE' ? runGhOnce : runGh)
       : (method === 'POST' || method === 'DELETE' ? runManagedGhOnce : runManagedGh);
     try {
-      const result = await execute(
+      return await execute(
         args,
         body === undefined ? undefined : `${JSON.stringify(body)}\n`,
       );
+    } catch (error) {
+      throw toClientError(error);
+    }
+  }
+
+  /**
+   * @param {'GET' | 'POST' | 'PATCH' | 'DELETE'} method
+   * @param {string} endpoint
+   * @param {Record<string, unknown> | undefined} [body]
+   * @param {'managed' | 'lock'} [mutationScope]
+   * @returns {Promise<unknown>}
+   */
+  async function rest(method, endpoint, body, mutationScope = 'managed') {
+    const result = await restResponse(method, endpoint, body, mutationScope);
+    try {
       return parseJson(result.stdout, `${method} ${endpoint}`);
     } catch (error) {
       throw toClientError(error);
@@ -2894,16 +2909,66 @@ export function createGhClient(options) {
    */
   async function listRepositoryIssues() {
     const issues = [];
-    for (let page = 1; ; page += 1) {
-      const pageItems = array(await rest(
-        'GET',
-        `repos/${owner}/${repo}/issues?state=all&per_page=100&page=${page}`,
-      ));
+    const repositoryPath = `repos/${owner}/${repo}/issues`;
+    let endpoint = `${repositoryPath}?state=all&per_page=100&page=1`;
+    let followsLinks = false;
+    const seenEndpoints = new Set();
+    for (let page = 1; page <= 1_000; page += 1) {
+      if (seenEndpoints.has(endpoint)) {
+        throw new GhClientError('pagination', 'Issue inventory returned a repeated next-page link');
+      }
+      seenEndpoints.add(endpoint);
+      const response = await restResponse('GET', endpoint);
+      const pageItems = parseJson(response.stdout, 'Issue inventory');
+      if (!Array.isArray(pageItems)) {
+        throw new GhClientError('pagination', 'Issue inventory returned a non-array payload');
+      }
       issues.push(...pageItems);
-      if (pageItems.length < 100) {
+      const link = headerValue(response.headers, 'Link');
+      let nextEndpoint = null;
+      for (const part of link?.split(',') ?? []) {
+        const match = part.match(/^\s*<([^>]+)>\s*;\s*rel="([^"]+)"\s*$/iu);
+        if (match == null) {
+          throw new GhClientError('pagination', 'Issue inventory returned an invalid next-page link');
+        }
+        if (!match[2].split(/\s+/u).includes('next')) continue;
+        if (nextEndpoint != null || !URL.canParse(match[1])) {
+          throw new GhClientError('pagination', 'Issue inventory returned an invalid next-page link');
+        }
+        const url = new URL(match[1]);
+        const parameters = url.searchParams;
+        if (
+          url.origin !== 'https://api.github.com'
+          || url.username || url.password || url.hash
+          || (
+            url.pathname.toLowerCase() !== `/${repositoryPath}`.toLowerCase()
+            && !/^\/repositories\/[1-9]\d*\/issues$/u.test(url.pathname)
+          )
+          || parameters.get('state') !== 'all'
+          || parameters.get('per_page') !== '100'
+          || !/^[1-9]\d*$/u.test(parameters.get('page') ?? '')
+          || [...parameters.keys()].some((key) =>
+            !['state', 'per_page', 'page', 'after'].includes(key)
+            || parameters.getAll(key).length !== 1)
+        ) {
+          throw new GhClientError('pagination', 'Issue inventory returned an invalid next-page link');
+        }
+        // Keep credentials and numeric repository aliases scoped to our configured repository.
+        nextEndpoint = `${repositoryPath}${url.search}`;
+      }
+      if (nextEndpoint == null && (followsLinks || link != null || pageItems.length < 100)) {
         return issues;
       }
+      if (nextEndpoint != null) {
+        followsLinks = true;
+        endpoint = nextEndpoint;
+      } else {
+        const url = new URL(endpoint, 'https://api.github.com/');
+        url.searchParams.set('page', String(Number(url.searchParams.get('page')) + 1));
+        endpoint = `${repositoryPath}${url.search}`;
+      }
     }
+    throw new GhClientError('pagination', 'Issue inventory exceeded the safety bound of 1000 pages');
   }
 
   /**

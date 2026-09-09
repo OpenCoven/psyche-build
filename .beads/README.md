@@ -151,6 +151,13 @@ Local dry-run source loading is read-only and never bootstraps or mutates
 Beads. If the local database is missing, the command stops with instructions
 to run `bd bootstrap --yes` explicitly.
 
+Remote issue discovery follows GitHub's next-page links even when a page is
+short, retaining the cursor within the configured repository. Non-array
+responses, invalid or repeated continuation links, and inventories exceeding
+1,000 pages fail closed rather than becoming an empty or partial mirror plan.
+Duplicate Bead markers still stop reconciliation; this inventory safeguard
+does not authorize manual mirror retirement or choose a duplicate survivor.
+
 With `BEADS_PROJECT_TOKEN` exported, the check compares against the current
 Project. Without it, the command produces a first-run plan without contacting
 GitHub. A saved export can be checked explicitly:
