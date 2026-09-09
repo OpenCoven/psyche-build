@@ -313,6 +313,13 @@ cover — unavailable providers, upgrade recovery, and interrupting
 surface. The first two need observed #239 operator cases or two real installed
 builds, so they stay gated rather than inferred.
 
+The source harness now also exercises a real cleanup-worker interruption after
+project-lease acquisition and before Git mutation. It proves stale-lease
+takeover, work/config/branch preservation, and a retry blocked by an explicitly
+published harness/operator marker, with successful clean cleanup as a positive
+control. Interruption during Git mutation and automatic crash reconciliation
+remain open; this bounded scenario does not supply packaged acceptance evidence.
+
 #198/#244 is delivered. PR #261 landed the minimum security, ownership,
 support, issue, PR, conduct, and protected-data floor, and PR #321 closed the
 clean-checkout contributor loop with a credential-free acceptance run and live

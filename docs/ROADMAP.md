@@ -378,6 +378,12 @@ command retry, stale owner epoch, and interrupted-cleanup recovery evidence —
 runs from a clean checkout as `pnpm recovery:harness`, and runs in the Quality
 CI job with its report retained as a build artifact.
 
+An additional source scenario now interrupts the real cleanup worker before
+Git mutation, recovers its project lease, and proves a fresh retry respects an
+explicit harness/operator recovery marker. It includes a successful clean
+cleanup control and does not claim mid-Git interruption, automatic crash
+reconciliation, or packaged acceptance.
+
 The merged support-bundle v1 contract is versioned, deterministic, bounded by
 time, count, record, and total size, cancellable, and redacts by default. It
 has no production collector wiring, CLI, or UI yet.
