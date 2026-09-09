@@ -14,6 +14,16 @@
 //! point its `gitdir` anywhere, so a linked worktree is accepted only after
 //! its root is confirmed.
 //!
+//! **The defence is not uniform, and this file contains both halves of the
+//! comparison.** `read_bounded_git_metadata_file` is the hardened reader:
+//! `symlink_metadata`, a reparse check, and a size bound.
+//! `git_dir_for_worktree` is not — it uses `Path::is_dir` and `Path::is_file`,
+//! which follow symlinks, then reads the `.git` file unbounded. It is
+//! reachable from the `git_log` command with a caller-chosen root, and the
+//! directory it returns is used to build the `index` and `objects` paths that
+//! are read afterwards. Treat the paragraph above as describing what most of
+//! this module does, not all of it, until that is fixed.
+//!
 //! That is why the Windows file-identity helpers live here: they exist to
 //! answer "is this the same directory I checked a moment ago", which is a Git
 //! safety question rather than a filesystem utility.
