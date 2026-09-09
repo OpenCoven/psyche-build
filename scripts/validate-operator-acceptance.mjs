@@ -61,6 +61,9 @@ const TERMINAL_STATUSES = new Set([
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SHA40 = /^[a-f0-9]{40}$/;
+const ISO_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/;
+const REQUIRED_SOURCE_ENVIRONMENT_FIELDS = ['macOS', 'architecture', 'node', 'tmux', 'git'];
 
 function object(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -180,6 +183,14 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
     ) {
       errors.push('sourceSmoke.commandExitStatus must be 0 when succeeded');
     }
+    if (manifest.sourceSmoke.status === 'succeeded') {
+      for (const key of REQUIRED_SOURCE_ENVIRONMENT_FIELDS) {
+        const value = manifest.sourceSmoke.environment?.[key];
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          errors.push(`sourceSmoke.environment.${key} is required when succeeded`);
+        }
+      }
+    }
     digestArray(
       manifest.sourceSmoke.evidenceDigests,
       'sourceSmoke.evidenceDigests',
@@ -260,6 +271,9 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
       ) {
         errors.push(`${path}.safeNextAction is required for inapplicable observations`);
       }
+      if (observation.status === 'inapplicable' && observation.id !== 'supported-agent-lane') {
+        errors.push(`${path}.inapplicable is only supported for supported-agent-lane`);
+      }
       digestArray(observation.evidenceDigests, `${path}.evidenceDigests`, errors, {
         required: observed,
       });
@@ -272,7 +286,9 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
   if (
     exactKeys(manifest.operator, ['githubLogin', 'observedAt'], 'operator', errors) &&
     manifest.operator.observedAt !== null &&
-    Number.isNaN(Date.parse(manifest.operator.observedAt))
+    (typeof manifest.operator.observedAt !== 'string' ||
+      !ISO_TIMESTAMP.test(manifest.operator.observedAt) ||
+      Number.isNaN(Date.parse(manifest.operator.observedAt)))
   ) {
     errors.push('operator.observedAt must be an ISO-8601 timestamp');
   }
