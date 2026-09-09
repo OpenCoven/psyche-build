@@ -76,7 +76,7 @@ describe('operator acceptance manifest', () => {
     const manifest = await template();
     manifest.terminalState = 'complete';
     manifest.sourceSmoke.status = 'succeeded';
-    manifest.sourceSmoke.commandExitStatus = 0;
+    manifest.sourceSmoke.commandExitStatus = 1;
     manifest.sourceSmoke.evidenceDigests = ['a'.repeat(64)];
     manifest.packagedRuntime = {
       subject: 'published_dmg',
@@ -96,6 +96,7 @@ describe('operator acceptance manifest', () => {
     };
 
     const errors = validateOperatorAcceptanceManifest(manifest, { requireComplete: true });
+    expect(errors).toContain('sourceSmoke.commandExitStatus must be 0 when succeeded');
     expect(errors).toContain(
       'complete manifest cannot contain deferred: corrupt-persisted-state',
     );
@@ -126,6 +127,18 @@ describe('operator acceptance manifest', () => {
         evidenceDigests: [(index + 1).toString(16).padStart(64, '0')],
       }),
     );
+    manifest.observations[0] = {
+      ...manifest.observations[0],
+      status: 'inapplicable',
+      safeNextAction: null,
+      workPreserved: null,
+    };
+    expect(
+      validateOperatorAcceptanceManifest(manifest, { requireComplete: true }),
+    ).toContain(
+      'observations[0].safeNextAction is required for inapplicable observations',
+    );
+    manifest.observations[0].safeNextAction = 'Supported agent CLI unavailable';
     manifest.operator = {
       githubLogin: 'operator',
       observedAt: '2026-09-07T00:00:00Z',
