@@ -72,9 +72,9 @@ impl WindowsProcessTreeKiller {
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UnixPtyIdentity {
-    pub(crate) session_id: libc::pid_t,
-    pub(crate) original_process_group: libc::pid_t,
+struct UnixPtyIdentity {
+    session_id: libc::pid_t,
+    original_process_group: libc::pid_t,
 }
 
 #[cfg(unix)]
@@ -103,7 +103,7 @@ impl UnixPtyControl {
 }
 
 #[cfg(unix)]
-pub(crate) trait UnixTerminationPlatform: Send + Sync {
+trait UnixTerminationPlatform: Send + Sync {
     fn observe_termination(
         &self,
         identity: UnixPtyIdentity,
@@ -293,20 +293,20 @@ impl UnixPtyIdentity {
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UnixTerminationObservation {
-    pub(crate) current_pid: libc::pid_t,
-    pub(crate) current_process_group: libc::pid_t,
-    pub(crate) current_session: libc::pid_t,
-    pub(crate) tty_session: libc::pid_t,
-    pub(crate) foreground_process_group: libc::pid_t,
-    pub(crate) foreground_session: Option<libc::pid_t>,
-    pub(crate) foreground_group: Option<libc::pid_t>,
-    pub(crate) original_session: Option<libc::pid_t>,
-    pub(crate) original_group: Option<libc::pid_t>,
+struct UnixTerminationObservation {
+    current_pid: libc::pid_t,
+    current_process_group: libc::pid_t,
+    current_session: libc::pid_t,
+    tty_session: libc::pid_t,
+    foreground_process_group: libc::pid_t,
+    foreground_session: Option<libc::pid_t>,
+    foreground_group: Option<libc::pid_t>,
+    original_session: Option<libc::pid_t>,
+    original_group: Option<libc::pid_t>,
 }
 
 #[cfg(unix)]
-pub(crate) fn verified_unix_process_groups(
+fn verified_unix_process_groups(
     identity: UnixPtyIdentity,
     observation: UnixTerminationObservation,
 ) -> std::io::Result<Vec<libc::pid_t>> {
@@ -377,15 +377,15 @@ pub(crate) fn verified_unix_process_groups(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PtyProcessIdentity {
-    pub(crate) child_pid: Option<u32>,
+struct PtyProcessIdentity {
+    child_pid: Option<u32>,
     #[cfg(unix)]
-    pub(crate) unix: Option<UnixPtyIdentity>,
+    unix: Option<UnixPtyIdentity>,
 }
 
 impl PtyProcessIdentity {
     #[cfg(test)]
-    pub(crate) fn direct_child(child_pid: Option<u32>) -> Self {
+    fn direct_child(child_pid: Option<u32>) -> Self {
         Self {
             child_pid,
             #[cfg(unix)]
@@ -395,7 +395,7 @@ impl PtyProcessIdentity {
 
     #[cfg(unix)]
     #[cfg(test)]
-    pub(crate) fn confirmed_unix_process_group(&self) -> Option<libc::pid_t> {
+    fn confirmed_unix_process_group(&self) -> Option<libc::pid_t> {
         self.unix.map(|identity| identity.original_process_group)
     }
 }
@@ -530,7 +530,7 @@ impl PtyProcessTerminator {
     }
 
     #[cfg(all(not(windows), any(test, not(unix))))]
-    pub(crate) fn from_parts(
+    fn from_parts(
         killer: Box<dyn ChildKiller + Send + Sync>,
         identity: PtyProcessIdentity,
     ) -> Self {
@@ -543,7 +543,7 @@ impl PtyProcessTerminator {
     }
 
     #[cfg(unix)]
-    pub(crate) fn from_unix_parts(
+    fn from_unix_parts(
         killer: Box<dyn ChildKiller + Send + Sync>,
         identity: PtyProcessIdentity,
         unix_platform: Arc<dyn UnixTerminationPlatform>,
@@ -556,7 +556,7 @@ impl PtyProcessTerminator {
     }
 
     #[cfg(test)]
-    pub(crate) fn identity(&self) -> PtyProcessIdentity {
+    fn identity(&self) -> PtyProcessIdentity {
         self.identity
     }
 
@@ -793,4 +793,778 @@ fn terminate_platform_process(
 ) -> std::io::Result<PtyTerminationOutcome> {
     process_tree.terminate()?;
     Ok(PtyTerminationOutcome::ProcessTree)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    /// A terminator wired to a counting `ChildKiller`, for fixtures elsewhere.
+    ///
+    /// Exists so `PtyProcessTerminator::from_parts` and
+    /// `PtyProcessIdentity::direct_child` can stay private. One test in
+    /// `lib.rs` builds a live `PtySession`, which needs a terminator; giving it
+    /// a constructor here is cheaper than making two internals crate-visible
+    /// and keeps the shape of a real terminator in the module that owns it.
+    #[cfg(not(windows))]
+    pub(crate) fn recording_terminator(
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> super::PtyProcessTerminator {
+        super::PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller { calls }),
+            super::PtyProcessIdentity::direct_child(None),
+        )
+    }
+
+    #[cfg(unix)]
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    use super::*;
+    #[cfg(not(windows))]
+    use portable_pty::ChildKiller;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    #[cfg(not(windows))]
+    #[derive(Debug)]
+    pub(crate) struct RecordingChildKiller {
+        pub(crate) calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(not(windows))]
+    impl ChildKiller for RecordingChildKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self {
+                calls: Arc::clone(&self.calls),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    struct ExactUnixFixtureCleanup {
+        pids: Vec<libc::pid_t>,
+        process_groups: Vec<libc::pid_t>,
+    }
+
+    #[cfg(unix)]
+    impl ExactUnixFixtureCleanup {
+        fn new() -> Self {
+            Self {
+                pids: Vec::new(),
+                process_groups: Vec::new(),
+            }
+        }
+
+        fn track_pid(&mut self, pid: libc::pid_t) {
+            self.pids.push(pid);
+        }
+
+        fn track_process_group(&mut self, process_group: libc::pid_t) {
+            self.process_groups.push(process_group);
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ExactUnixFixtureCleanup {
+        fn drop(&mut self) {
+            let own_process_group = unsafe { libc::getpgrp() };
+            self.process_groups.sort_unstable();
+            self.process_groups.dedup();
+            for process_group in self.process_groups.iter().copied() {
+                if process_group > 1 && process_group != own_process_group {
+                    unsafe {
+                        libc::kill(-process_group, libc::SIGKILL);
+                    }
+                }
+            }
+            self.pids.sort_unstable();
+            self.pids.dedup();
+            for pid in self.pids.iter().copied() {
+                if pid > 1 && pid != unsafe { libc::getpid() } {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_process_group_disappears(process_group: libc::pid_t) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if unsafe { libc::kill(-process_group, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group {process_group} remained observable after SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum UnixObservationStep {
+        Observed(UnixTerminationObservation),
+        Disappeared,
+        PermissionDenied,
+    }
+
+    #[cfg(unix)]
+    struct RecordingUnixTerminationPlatform {
+        observations: Mutex<VecDeque<UnixObservationStep>>,
+        observation_count: AtomicUsize,
+        signals: Mutex<Vec<(libc::pid_t, libc::c_int)>>,
+    }
+
+    #[cfg(unix)]
+    impl RecordingUnixTerminationPlatform {
+        fn new(observations: impl IntoIterator<Item = UnixObservationStep>) -> Self {
+            Self {
+                observations: Mutex::new(observations.into_iter().collect()),
+                observation_count: AtomicUsize::new(0),
+                signals: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn signals(&self) -> Vec<(libc::pid_t, libc::c_int)> {
+            self.signals.lock().clone()
+        }
+    }
+
+    #[cfg(unix)]
+    impl UnixTerminationPlatform for RecordingUnixTerminationPlatform {
+        fn observe_termination(
+            &self,
+            _identity: UnixPtyIdentity,
+        ) -> std::io::Result<Option<UnixTerminationObservation>> {
+            self.observation_count.fetch_add(1, Ordering::SeqCst);
+            match self
+                .observations
+                .lock()
+                .pop_front()
+                .expect("test must provide one observation per escalation")
+            {
+                UnixObservationStep::Observed(observation) => Ok(Some(observation)),
+                UnixObservationStep::Disappeared => Ok(None),
+                UnixObservationStep::PermissionDenied => {
+                    Err(std::io::Error::from_raw_os_error(libc::EPERM))
+                }
+            }
+        }
+
+        fn signal_process_group(
+            &self,
+            process_group: libc::pid_t,
+            signal: libc::c_int,
+        ) -> std::io::Result<()> {
+            self.signals.lock().push((process_group, signal));
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_observation(
+        foreground_process_group: libc::pid_t,
+        foreground_session: Option<libc::pid_t>,
+        foreground_group: Option<libc::pid_t>,
+        original_session: Option<libc::pid_t>,
+        original_group: Option<libc::pid_t>,
+    ) -> UnixTerminationObservation {
+        UnixTerminationObservation {
+            current_pid: 100,
+            current_process_group: 100,
+            current_session: 100,
+            tty_session: 4_100,
+            foreground_process_group,
+            foreground_session,
+            foreground_group,
+            original_session,
+            original_group,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_selects_distinct_foreground_and_original_groups() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_100,
+                foreground_process_group: 4_200,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_200, 4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_uses_independently_verified_groups_when_ambient_ids_change() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 1,
+                current_session: 1,
+                tty_session: 4_200,
+                foreground_process_group: 4_200,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_200, 4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_deduplicates_matching_foreground_and_original_groups() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_100,
+                foreground_process_group: 4_100,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_100),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_rejects_psyches_own_process_group() {
+        let error = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 99,
+                current_process_group: 100,
+                current_session: 90,
+                tty_session: 4_100,
+                foreground_process_group: 100,
+                foreground_session: Some(4_100),
+                foreground_group: Some(100),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Psyche"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_rejects_foreground_groups_from_an_unrelated_session() {
+        let error = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_100,
+                foreground_process_group: 4_200,
+                foreground_session: Some(9_900),
+                foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("spawned PTY session"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn retained_child_killer_is_invoked_by_process_termination() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(41)),
+        );
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::DirectChild
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn pid_fallback_is_disabled_before_the_wait_callback_runs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(44)),
+        );
+
+        let outcome = terminator.wait_for_child(|| terminator.terminate().unwrap());
+
+        assert_eq!(outcome, PtyTerminationOutcome::NoProcess);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn timeout_cleanup_after_wait_never_calls_the_raw_pid_killer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(45)),
+        );
+
+        terminator.wait_for_child(|| ());
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::NoProcess
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn stop_before_wait_consumes_the_owned_killer_exactly_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(46)),
+        );
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::DirectChild
+        );
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::NoProcess
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_each_escalation_uses_a_fresh_validation_snapshot() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(unix_observation(
+                4_300,
+                Some(4_100),
+                Some(4_300),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(unix_observation(
+                4_400,
+                Some(4_100),
+                Some(4_400),
+                Some(4_100),
+                Some(4_100),
+            )),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        assert_eq!(platform.observation_count.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            platform.signals(),
+            vec![
+                (4_200, libc::SIGHUP),
+                (4_100, libc::SIGHUP),
+                (4_300, libc::SIGCONT),
+                (4_100, libc::SIGCONT),
+                (4_400, libc::SIGKILL),
+                (4_100, libc::SIGKILL),
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_recycled_original_group_identity_is_rejected_without_signaling() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(9_900),
+                Some(4_100),
+            )),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        let error = terminator.terminate().unwrap_err();
+
+        assert!(error.contains("spawned PTY session"));
+        assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_disappeared_groups_are_a_successful_no_op() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Disappeared,
+            UnixObservationStep::Disappeared,
+            UnixObservationStep::Disappeared,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::NoProcess
+        );
+        assert_eq!(platform.observation_count.load(Ordering::SeqCst), 3);
+        assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_permission_errors_surface_without_post_wait_pid_fallback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::PermissionDenied,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        let error = terminator.terminate().unwrap_err();
+
+        assert!(error.contains("Operation not permitted"));
+        assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// SIGHUP is what tears the session down, so by SIGCONT the terminal may
+    /// already be disassociated and observation starts failing. That must not
+    /// abort the escalation before SIGKILL: the groups were verified as ours on
+    /// the first round and stay ours.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_finishes_escalating_when_observation_fails_after_verification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::PermissionDenied,
+            UnixObservationStep::PermissionDenied,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        // Both groups still receive all three signals, SIGKILL included.
+        assert_eq!(
+            platform.signals(),
+            vec![
+                (4_200, libc::SIGHUP),
+                (4_100, libc::SIGHUP),
+                (4_200, libc::SIGCONT),
+                (4_100, libc::SIGCONT),
+                (4_200, libc::SIGKILL),
+                (4_100, libc::SIGKILL),
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Same guarantee when the observation succeeds but no longer validates —
+    /// a reaped foreground leader reports a session that is not ours.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_finishes_escalating_when_validation_fails_after_verification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let foreign = unix_observation(4_200, Some(9_999), Some(4_200), Some(9_999), Some(4_100));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(foreign),
+            UnixObservationStep::Observed(foreign),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        assert_eq!(platform.signals().len(), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn spawned_start_guard_terminates_on_setup_failure_but_not_after_install() {
+        let failed_calls = Arc::new(AtomicUsize::new(0));
+        let failed_terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&failed_calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(42)),
+        );
+        drop(PtySpawnTerminationGuard::new(failed_terminator));
+        assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+
+        let installed_calls = Arc::new(AtomicUsize::new(0));
+        let installed_terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&installed_calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(43)),
+        );
+        let mut guard = PtySpawnTerminationGuard::new(installed_terminator);
+        guard.disarm();
+        drop(guard);
+        assert_eq!(installed_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_foreground_process_group_termination_finishes_child_and_reader() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "set -m; trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; exec sleep 30' & fg",
+        ]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        let child_pid = child.process_id().unwrap() as libc::pid_t;
+        let mut cleanup = ExactUnixFixtureCleanup::new();
+        cleanup.track_pid(child_pid);
+        cleanup.track_process_group(child_pid);
+        let terminator =
+            PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref()).unwrap();
+        assert_eq!(
+            terminator.identity().confirmed_unix_process_group(),
+            Some(child_pid)
+        );
+        let control_fd = pair
+            .master
+            .as_raw_fd()
+            .expect("Unix PTY master must expose its control descriptor");
+        let foreground_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let foreground_process_group = loop {
+            let foreground = unsafe { libc::tcgetpgrp(control_fd) };
+            if foreground > 1 && foreground != child_pid {
+                break foreground;
+            }
+            assert!(
+                std::time::Instant::now() < foreground_deadline,
+                "interactive fixture never installed a distinct foreground process group"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        cleanup.track_pid(foreground_process_group);
+        cleanup.track_process_group(foreground_process_group);
+
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let (reader_tx, reader_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = reader.read_to_end(&mut bytes);
+            let _ = reader_tx.send(result);
+        });
+        let (child_tx, child_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = child_tx.send(child.wait());
+        });
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group,
+                original_process_group: child_pid,
+                group_count: 2,
+            }
+        );
+        drop(writer);
+        drop(pair.master);
+
+        child_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("terminated PTY child wait must finish")
+            .expect("terminated PTY child wait must succeed");
+        reader_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("terminated PTY reader must finish")
+            .expect("terminated PTY reader must exit cleanly");
+        assert_process_group_disappears(foreground_process_group);
+        assert_process_group_disappears(child_pid);
+    }
 }
