@@ -25,8 +25,29 @@ import { resolve } from 'node:path';
 const SRC_DIRECTORY = 'native/desktop/psyche-build-tauri/src-tauri/src';
 
 /** Free functions and methods; `fn` may be preceded by visibility and qualifiers. */
-const definition = (name: string): RegExp =>
-  new RegExp(`^[ \\t]*(?:pub(?:\\([a-z():]+\\))? )?(?:const )?(?:unsafe )?(?:async )?fn ${name}\\b`, 'mu');
+const declaration = (name: string): RegExp =>
+  new RegExp(`^[ \\t]*(?:pub(?:\\([a-z():]+\\))? )?(?:const )?(?:unsafe )?(?:async )?fn ${name}\\b`, 'gmu');
+
+/**
+ * Offset of the first *braced* definition of `name`, or -1.
+ *
+ * A bare `fn name(..);` is a declaration without a body — a trait method
+ * signature or an extern item, and this crate has fourteen of them. Slicing
+ * from one would find an unrelated `{` further down the file and return a
+ * nonsense body that assertions could still match. Silent nonsense is the
+ * worst failure available to a contract test, so a declaration is skipped and
+ * a name with no braced definition anywhere is an error.
+ */
+function definitionOffset(source: string, name: string): number {
+  for (const match of source.matchAll(declaration(name))) {
+    const start = match.index ?? -1;
+    if (start < 0) continue;
+    const brace = source.indexOf('{', start);
+    const semicolon = source.indexOf(';', start);
+    if (brace >= 0 && (semicolon < 0 || brace < semicolon)) return start;
+  }
+  return -1;
+}
 
 /**
  * The body of `name`, from its signature to its closing brace.
@@ -39,8 +60,9 @@ export function desktopFunctionBody(name: string): string {
   const owners = desktopFunctionOwners(name);
   if (owners.length === 0) {
     throw new Error(
-      `no definition of \`fn ${name}\` under ${SRC_DIRECTORY}; `
-      + 'the function was renamed or removed, which is a contract change rather than a moved file',
+      `no braced definition of \`fn ${name}\` under ${SRC_DIRECTORY}; `
+      + 'the function was renamed, removed, or exists only as a bodiless declaration, '
+      + 'any of which is a contract change rather than a moved file',
     );
   }
   if (owners.length > 1) {
@@ -50,7 +72,7 @@ export function desktopFunctionBody(name: string): string {
     );
   }
   const source = read(owners[0]);
-  const start = definition(name).exec(source)?.index ?? -1;
+  const start = definitionOffset(source, name);
   const bodyStart = source.indexOf('{', start);
   let depth = 0;
   for (let index = bodyStart; index < source.length; index += 1) {
@@ -63,8 +85,9 @@ export function desktopFunctionBody(name: string): string {
 
 /** Files defining `name`, relative to the source directory. Exported for contract self-checks. */
 export function desktopFunctionOwners(name: string): string[] {
-  const pattern = definition(name);
-  return rustFiles().filter((file) => pattern.test(read(file)));
+  // Braced definitions only: a trait signature elsewhere in the crate would
+  // otherwise register that file as an owner and report a false ambiguity.
+  return rustFiles().filter((file) => definitionOffset(read(file), name) >= 0);
 }
 
 let files: string[] | undefined;
