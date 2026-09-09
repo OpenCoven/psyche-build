@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   findGateViolations,
+  parentImportsOf,
   importGateSatisfies,
   parentImports,
   resolvedGate,
@@ -84,6 +85,15 @@ describe('native workspace child module cfg gates', () => {
     // everywhere this crate builds.
     expect(importGateSatisfies(undefined, 'any(unix, windows)')).toBe(true);
     expect(importGateSatisfies(undefined, 'unix')).toBe(false);
+  });
+
+  test('a re-export is checked like any other parent import', () => {
+    // `native_workspace.rs` carries `pub(crate) use workspace_paths::…` so the
+    // old call path keeps working. A `pub use` binds the child's item and
+    // republishes it, so leaving it unscanned would miss the widest coupling
+    // a parent can have on a child.
+    expect(parentImportsOf('native_workspace.rs', 'workspace_paths'))
+      .toContain('workspace_default_path');
   });
 
   test('the child modules under test are actually being scanned', () => {

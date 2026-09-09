@@ -172,11 +172,22 @@ function stripCommentsAndStrings(source: string): string {
 
 interface SuperImport { item: string; gate: Predicate; viaModule?: string }
 
-/** `use <module>::…` in a parent, for a module it declares. */
+/**
+ * `use <module>::…` in a parent, for a module it declares.
+ *
+ * Visibility is optional because a re-export is an import too:
+ * `native_workspace.rs` carries `pub(crate) use workspace_paths::workspace_default_path;`
+ * so `lib.rs` can keep calling it by its old path. A `pub use` is in fact the
+ * more dangerous form — it binds the child's item *and* republishes it — so
+ * missing it would leave the widest parent-to-child coupling unchecked.
+ */
 function moduleImports(source: string, module: string): SuperImport[] {
   const clean = stripCommentsAndStrings(source);
   const imports: SuperImport[] = [];
-  const pattern = new RegExp(`^[ \\t]*use[ \\t]+${module}::([^;]*);`, 'gmu');
+  const pattern = new RegExp(
+    `^[ \\t]*(?:pub(?:\\([a-z():]+\\))? )?use[ \\t]+${module}::([^;]*);`,
+    'gmu',
+  );
   for (const match of clean.matchAll(pattern)) {
     const gate = gateBefore(clean, match.index ?? 0, source);
     const tail = match[1].trim();
@@ -453,4 +464,10 @@ export function importGateSatisfies(
     importGate === undefined ? ALWAYS : parse(importGate),
     declarationGate === undefined ? ALWAYS : parse(declarationGate),
   );
+}
+
+/** Names a parent imports from one of its child modules. Exported for contract self-checks. */
+export function parentImportsOf(parentFile: string, module: string): string[] {
+  const root = resolve(process.cwd(), SRC_DIRECTORY);
+  return moduleImports(read(resolve(root, parentFile)), module).map((imported) => imported.item);
 }
