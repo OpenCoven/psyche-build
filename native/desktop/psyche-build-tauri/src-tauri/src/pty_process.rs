@@ -17,7 +17,19 @@
 //! is a gated pair, one definition per family, and both must stay together —
 //! moving one would leave the other platform with no implementation at all.
 
-use super::*;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use portable_pty::{Child, ChildKiller, MasterPty};
+
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+
+// `duplicate_cloexec_fd` is `#[cfg(unix)]` in the crate root, so this import
+// must be too. Gating it only on the module's own needs would compile here and
+// fail on Windows.
+#[cfg(unix)]
+use super::duplicate_cloexec_fd;
 
 #[derive(Debug)]
 pub(crate) enum PtyProcessTerminatorSetupError {

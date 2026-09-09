@@ -34,7 +34,7 @@ use objc2_foundation::{NSDictionary, NSError, NSString, NSURLRequest, NSURL};
 use objc2_web_kit::{WKNavigation, WKWebView};
 use once_cell::sync::Lazy;
 use parking_lot::{Condvar, Mutex};
-use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
@@ -90,8 +90,14 @@ use control_provider::{
     control_provider_upsert, control_state, ControlProviderState,
 };
 #[cfg(test)]
+use pty_process::PtyProcessIdentity;
+// The other four are `#[cfg(unix)]` in `pty_process`, so this import has to be
+// gated to match. Under `#[cfg(test)]` alone it compiles on macOS and Linux and
+// fails on Windows with E0432 — the same mismatch that broke #366, and the
+// reason this PR's first CI run failed.
+#[cfg(all(test, unix))]
 use pty_process::{
-    verified_unix_process_groups, PtyProcessIdentity, UnixPtyIdentity, UnixTerminationObservation,
+    verified_unix_process_groups, UnixPtyIdentity, UnixTerminationObservation,
     UnixTerminationPlatform,
 };
 

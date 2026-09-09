@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -10,6 +11,17 @@ const mainJs = readFileSync(
 ).replace(/\r\n/g, '\n');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
 const tauriLib = readDesktopCommandSurface();
+
+/**
+ * The command surface plus the module that now owns process termination.
+ *
+ * #197 slice 3 moved the terminator, the identity types and the platform kill
+ * paths into `pty_process.rs`, while reader cancellation stayed in `lib.rs`.
+ * The three assertions below describe one end-to-end sequence, so they now
+ * legitimately span two files; resolving the termination module by a function
+ * it defines keeps them pointed at the behaviour rather than at a path.
+ */
+const ptyTerminationSurface = `${tauriLib}\n${desktopSourceDefining('verified_unix_process_groups')}`;
 const nativeFocus = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs'),
   'utf8',
@@ -497,32 +509,32 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('queries and validates the current Unix PTY foreground group before bounded escalation', () => {
-    expect(tauriLib).toMatch(/portable_pty::\{[^}]*ChildKiller/);
-    expect(tauriLib).toMatch(/child\.clone_killer\(\)/);
-    expect(tauriLib).toMatch(/child\.process_id\(\)/);
-    expect(tauriLib).toMatch(/master\.process_group_leader\(\)/);
-    expect(tauriLib).toContain('master.as_raw_fd()');
-    expect(tauriLib).toContain('libc::tcgetpgrp');
-    expect(tauriLib).toContain('libc::tcgetsid');
-    expect(tauriLib).toContain('libc::getsid');
-    expect(tauriLib).toContain('libc::getpgid');
-    expect(tauriLib).toMatch(/libc::SIGHUP[\s\S]*libc::SIGCONT[\s\S]*libc::SIGKILL/);
-    expect(tauriLib).not.toContain('UNIX_PTY_TERMINATION_GRACE');
-    expect(tauriLib).toMatch(
+    expect(ptyTerminationSurface).toMatch(/portable_pty::\{[^}]*ChildKiller/);
+    expect(ptyTerminationSurface).toMatch(/child\.clone_killer\(\)/);
+    expect(ptyTerminationSurface).toMatch(/child\.process_id\(\)/);
+    expect(ptyTerminationSurface).toMatch(/master\.process_group_leader\(\)/);
+    expect(ptyTerminationSurface).toContain('master.as_raw_fd()');
+    expect(ptyTerminationSurface).toContain('libc::tcgetpgrp');
+    expect(ptyTerminationSurface).toContain('libc::tcgetsid');
+    expect(ptyTerminationSurface).toContain('libc::getsid');
+    expect(ptyTerminationSurface).toContain('libc::getpgid');
+    expect(ptyTerminationSurface).toMatch(/libc::SIGHUP[\s\S]*libc::SIGCONT[\s\S]*libc::SIGKILL/);
+    expect(ptyTerminationSurface).not.toContain('UNIX_PTY_TERMINATION_GRACE');
+    expect(ptyTerminationSurface).toMatch(
       /for\s+signal\s+in\s+\[libc::SIGHUP,\s*libc::SIGCONT,\s*libc::SIGKILL\][\s\S]*?observe_termination\([^)]*identity[^)]*\)[\s\S]*?verified_unix_process_groups/
     );
-    expect(tauriLib).toContain('original_session');
-    expect(tauriLib).toContain('original_group');
-    expect(tauriLib).toMatch(/reader_cancellation\.cancel\(\)/);
+    expect(ptyTerminationSurface).toContain('original_session');
+    expect(ptyTerminationSurface).toContain('original_group');
+    expect(ptyTerminationSurface).toMatch(/reader_cancellation\.cancel\(\)/);
   });
 
   it('disables the Unix raw-PID fallback before the exit watcher can wait or reap', () => {
-    expect(tauriLib).toMatch(
+    expect(ptyTerminationSurface).toMatch(
       /fn\s+wait_for_child<[^>]+>[\s\S]*?disable_pid_fallback_before_wait\(\);[\s\S]*?wait\(\)/
     );
-    const watcherStart = tauriLib.indexOf('let exit_terminator = terminator;');
-    const waitStart = tauriLib.indexOf('exit_terminator.wait_for_child(|| child.wait())', watcherStart);
-    const shutdownStart = tauriLib.indexOf('PtyExitShutdown::new(', waitStart);
+    const watcherStart = ptyTerminationSurface.indexOf('let exit_terminator = terminator;');
+    const waitStart = ptyTerminationSurface.indexOf('exit_terminator.wait_for_child(|| child.wait())', watcherStart);
+    const shutdownStart = ptyTerminationSurface.indexOf('PtyExitShutdown::new(', waitStart);
     expect(watcherStart).toBeGreaterThanOrEqual(0);
     expect(waitStart).toBeGreaterThan(watcherStart);
     expect(shutdownStart).toBeGreaterThan(waitStart);
@@ -532,23 +544,23 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriCargo).not.toMatch(
       /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys/
     );
-    expect(tauriLib).not.toContain('AssignProcessToJobObject');
-    expect(tauriLib).not.toContain('CreateJobObjectW');
-    expect(tauriLib).not.toContain('TerminateJobObject');
-    expect(tauriLib).not.toContain('TerminateProcess');
-    expect(tauriLib).toMatch(
+    expect(ptyTerminationSurface).not.toContain('AssignProcessToJobObject');
+    expect(ptyTerminationSurface).not.toContain('CreateJobObjectW');
+    expect(ptyTerminationSurface).not.toContain('TerminateJobObject');
+    expect(ptyTerminationSurface).not.toContain('TerminateProcess');
+    expect(ptyTerminationSurface).toMatch(
       /struct\s+WindowsProcessTreeKiller\s*\{[\s\S]*?killer:\s*Mutex<Box<dyn ChildKiller \+ Send \+ Sync>>/
     );
-    expect(tauriLib).toMatch(
+    expect(ptyTerminationSurface).toMatch(
       /fn\s+terminate_platform_process\(\s*process_tree:\s*&WindowsProcessTreeKiller[\s\S]*?process_tree\.terminate\(\)\?;[\s\S]*?PtyTerminationOutcome::ProcessTree/
     );
 
-    const windowsStart = tauriLib.search(
+    const windowsStart = ptyTerminationSurface.search(
       /#\[cfg\(windows\)\]\r?\nfn terminate_platform_process/,
     );
     expect(windowsStart).toBeGreaterThanOrEqual(0);
-    const windowsEnd = tauriLib.indexOf('\n#[cfg', windowsStart + 1);
-    const windowsTermination = tauriLib.slice(
+    const windowsEnd = ptyTerminationSurface.indexOf('\n#[cfg', windowsStart + 1);
+    const windowsTermination = ptyTerminationSurface.slice(
       windowsStart,
       windowsEnd === -1 ? undefined : windowsEnd
     );
@@ -556,18 +568,18 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(windowsTermination).not.toContain('killer.kill()');
     expect(windowsTermination).not.toContain('libc::');
 
-    const stopStart = tauriLib.indexOf('fn terminate_pty_session(');
-    const stopEnd = tauriLib.indexOf('\npub fn recent_pty_transport_snapshot', stopStart);
-    const stopSource = tauriLib.slice(stopStart, stopEnd);
+    const stopStart = ptyTerminationSurface.indexOf('fn terminate_pty_session(');
+    const stopEnd = ptyTerminationSurface.indexOf('\npub fn recent_pty_transport_snapshot', stopStart);
+    const stopSource = ptyTerminationSurface.slice(stopStart, stopEnd);
     expect(stopSource.indexOf('session.terminator.terminate()')).toBeGreaterThanOrEqual(0);
     expect(stopSource.indexOf('drop(session)')).toBeGreaterThan(
       stopSource.indexOf('session.terminator.terminate()')
     );
 
-    const shutdownHooksStart = tauriLib.indexOf('impl ExitShutdownHooks for PtyExitShutdown');
-    const timeoutStart = tauriLib.indexOf('fn terminate_process(&mut self)', shutdownHooksStart);
-    const timeoutEnd = tauriLib.indexOf('fn abandon_terminated_threads', timeoutStart);
-    const timeoutSource = tauriLib.slice(timeoutStart, timeoutEnd);
+    const shutdownHooksStart = ptyTerminationSurface.indexOf('impl ExitShutdownHooks for PtyExitShutdown');
+    const timeoutStart = ptyTerminationSurface.indexOf('fn terminate_process(&mut self)', shutdownHooksStart);
+    const timeoutEnd = ptyTerminationSurface.indexOf('fn abandon_terminated_threads', timeoutStart);
+    const timeoutSource = ptyTerminationSurface.slice(timeoutStart, timeoutEnd);
     expect(timeoutSource.indexOf('self.terminator.terminate()')).toBeGreaterThanOrEqual(0);
     expect(timeoutSource.indexOf('self.begin_matching_exit()')).toBeGreaterThan(
       timeoutSource.indexOf('self.terminator.terminate()')
