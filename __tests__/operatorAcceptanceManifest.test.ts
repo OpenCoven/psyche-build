@@ -48,6 +48,30 @@ describe('operator acceptance manifest', () => {
     );
   });
 
+  it('returns validation errors instead of throwing for malformed nested input', async () => {
+    const manifest = await template();
+    manifest.observations[0] = null;
+    manifest.sourceSmoke = null;
+    manifest.operator = null;
+    manifest.sanitization = null;
+    manifest.terminalState = 'complete';
+
+    expect(() =>
+      validateOperatorAcceptanceManifest(manifest, { requireComplete: true }),
+    ).not.toThrow();
+    expect(validateOperatorAcceptanceManifest(manifest, { requireComplete: true })).toEqual(
+      expect.arrayContaining([
+        'observations[0] must be an object',
+        'sourceSmoke must be an object',
+        'operator must be an object',
+        'sanitization must be an object',
+        'complete manifest requires successful exact-source smoke',
+        'complete manifest requires the operator identity and observation time',
+        'complete manifest requires a named sanitization review',
+      ]),
+    );
+  });
+
   it('does not let deferred or undigested evidence claim completion', async () => {
     const manifest = await template();
     manifest.terminalState = 'complete';
