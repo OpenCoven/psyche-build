@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
@@ -675,8 +676,11 @@ describe('desktop Tauri layout', () => {
     const libSource = readFileSync(libSourcePath, 'utf8');
     const mainSource = readFileSync(mainSourcePath, 'utf8');
     const appEnvironment = bracedItem(libSource, 'fn app_environment');
-    const ptyStart = bracedItem(libSource, 'fn pty_start_blocking');
-    const ptyStartImplementation = bracedItem(libSource, 'fn pty_start_blocking_with_launch');
+    // The start commands moved to `pty_launch` in #197 slice 3; `app_environment`
+    // and the front-end wiring did not, so this reads both.
+    const launchSource = desktopSourceDefining('pty_start_blocking_with_launch');
+    const ptyStart = bracedItem(launchSource, 'fn pty_start_blocking');
+    const ptyStartImplementation = bracedItem(launchSource, 'fn pty_start_blocking_with_launch');
     const spawnShellThread = bracedItem(mainSource, 'function spawnShellThread');
     const spawnPsycheThread = bracedItem(mainSource, 'function spawnPsycheThread');
 

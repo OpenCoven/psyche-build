@@ -9,9 +9,16 @@ import {
 } from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
 import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const repoRoot = process.cwd();
-const libRs = readDesktopCommandSurface();
+// Launch validation moved to `pty_launch` in #197 slice 3 while the handler
+// registration stayed in the composition root. This file asserts across both,
+// resolving the module by a function it defines rather than by a path.
+const libRs = [
+  readDesktopCommandSurface(),
+  desktopSourceDefining('validate_coven_launch_with'),
+].join('\n');
 const mainJs = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',

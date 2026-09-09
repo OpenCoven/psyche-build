@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 import {
   createPtyClient,
   disposePtyClient,
@@ -9,7 +10,14 @@ import {
   type PtyDataBatch,
 } from '../native/desktop/psyche-build-tauri/web/runtime/pty-client';
 
-const source = readDesktopCommandSurface();
+// The PTY start sequence spans two files since #197 slice 3 moved start and
+// attach into `pty_launch`: the commands and their reservation live there, the
+// pump wiring and event fence stayed in `lib.rs`. These assertions describe one
+// sequence, so the surface is both, resolved by a function rather than a path.
+const source = [
+  readDesktopCommandSurface(),
+  desktopSourceDefining('register_pty_client'),
+].join('\n');
 const transportSource = readFileSync(
   resolve(process.cwd(), 'native/desktop/psyche-build-tauri/src-tauri/src/pty_transport.rs'),
   'utf8',
@@ -26,7 +34,10 @@ const mainSource = readFileSync(
 function commandSource(sourceText: string, name: string): string {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const declaration = new RegExp(
-    `#\\[tauri::command\\]\\s*(?:pub\\s+)?(?:async\\s+)?fn\\s+${escapedName}\\s*\\(`,
+    // `pub(crate)` as well as `pub`: a command defined in a submodule needs
+    // crate visibility so the macro `generate_handler!` expands to can reach
+    // it from the composition root.
+    `#\\[tauri::command\\]\\s*(?:pub(?:\\([a-z()]+\\))?\\s+)?(?:async\\s+)?fn\\s+${escapedName}\\s*\\(`,
     'g',
   );
   const match = declaration.exec(sourceText);
@@ -239,7 +250,7 @@ describe('Tauri PTY command threading contract', () => {
     expect(openCwd).toBeGreaterThan(reserve);
     expect(install).toContain('PTY_LIFECYCLES');
     expect(install).toContain('.install(&self.token, session)');
-    expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_start\b/);
+    expect(command).toMatch(/#\[tauri::command\]\s*(?:pub(?:\([a-z()]+\))?\s+)?async\s+fn\s+pty_start\b/);
     expect(command).toMatch(/tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_start_blocking\s*\(/);
     expect(blockingEntry).toContain('pty_start_blocking_with_launch(app, options, None)');
 
@@ -266,7 +277,7 @@ describe('Tauri PTY command threading contract', () => {
     const operation = rustFunctionSource(source, 'pty_write_operation');
     const blocking = rustFunctionSource(source, 'pty_write_blocking');
 
-    expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_write\b/);
+    expect(command).toMatch(/#\[tauri::command\]\s*(?:pub(?:\([a-z()]+\))?\s+)?async\s+fn\s+pty_write\b/);
     expect(command).toMatch(
       /pty_write_operation\(&thread_id,\s*generation\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_write_blocking\s*\(/,
     );
@@ -284,7 +295,7 @@ describe('Tauri PTY command threading contract', () => {
     const operation = rustFunctionSource(source, 'pty_resize_operation');
     const blocking = rustFunctionSource(source, 'pty_resize_blocking');
 
-    expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_resize\b/);
+    expect(command).toMatch(/#\[tauri::command\]\s*(?:pub(?:\([a-z()]+\))?\s+)?async\s+fn\s+pty_resize\b/);
     expect(command).toMatch(
       /pty_resize_operation\(&thread_id,\s*generation\)[\s\S]*operation_admission[\s\S]*\.try_acquire_owned\(\)[\s\S]*operation_lane\.lock_owned\(\)\.await[\s\S]*tauri::async_runtime::spawn_blocking\s*\([\s\S]*pty_resize_blocking\s*\(/,
     );
