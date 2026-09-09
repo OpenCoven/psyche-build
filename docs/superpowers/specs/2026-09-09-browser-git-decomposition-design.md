@@ -46,7 +46,7 @@ Slice 3 ended with this recorded: a whole-file surface is a path coupling
 wearing a different hat. Slice 4 inherits it at greater scale.
 
 **Three test files read `lib.rs` by hardcoded path** and assert browser
-behaviour: `tauriBrowserScriptAuthority`, `tauriBrowserFocusAuthority`,
+behavior: `tauriBrowserScriptAuthority`, `tauriBrowserFocusAuthority`,
 `tauriBrowserCrossPlatformNavigation`.
 
 **Nine more assert against `readDesktopCommandSurface()`**, which returns
@@ -77,5 +77,5 @@ would undo a boundary that already exists.
 
 ## What this record does not do
 
-It does not authorise an extraction. It records what is there, what the two
+It does not authorize an extraction. It records what is there, what the two
 closures do and do not share, and which safety net has to move with the code.
