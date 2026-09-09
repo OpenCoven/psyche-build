@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   findGateViolations,
+  parentImportsOf,
   importGateSatisfies,
   parentImports,
   resolvedGate,
@@ -56,9 +57,43 @@ describe('native workspace child module cfg gates', () => {
     expect(importGateSatisfies('windows', 'target_os = "windows"')).toBe(true);
     expect(importGateSatisfies('target_family = "unix"', 'unix')).toBe(true);
 
-    // Not folded: a target can be neither, so `windows` does not imply
-    // `not(unix)` and must still be reported.
-    expect(importGateSatisfies('windows', 'not(unix)')).toBe(false);
+    // `windows` does imply `not(unix)` here, which reverses what this test
+    // asserted when it was written. The original reasoning — a target can be
+    // neither — is true of Rust and false of this crate: every platform in
+    // `Cargo.toml` is macOS, Linux, iOS or Windows, so exactly one of the two
+    // holds. Enforcing the general rule made the contract report four correct
+    // imports of `cfg`-paired functions as violations, and a check that flags
+    // correct code stops being read.
+    expect(importGateSatisfies('windows', 'not(unix)')).toBe(true);
+    expect(importGateSatisfies('unix', 'not(windows)')).toBe(true);
+
+    // Still not folded: an unrelated condition tells you nothing about either.
+    expect(importGateSatisfies('test', 'unix')).toBe(false);
+  });
+
+  test('a parent may not import a child item under a looser gate', () => {
+    // The direction that broke Windows in #387: the offending `use` lives in
+    // `lib.rs`, not in the child, so scanning only child modules missed it.
+    expect(importGateSatisfies('test', 'unix')).toBe(false);
+    expect(importGateSatisfies('all(test, unix)', 'unix')).toBe(true);
+  });
+
+  test('an item declared once per platform is available on both', () => {
+    // `coven_launch_session` is `#[cfg(unix)]` and `#[cfg(target_os =
+    // "windows")]`. Reading only the first declaration reports an ungated
+    // import of the pair as a violation; the union makes it available
+    // everywhere this crate builds.
+    expect(importGateSatisfies(undefined, 'any(unix, windows)')).toBe(true);
+    expect(importGateSatisfies(undefined, 'unix')).toBe(false);
+  });
+
+  test('a re-export is checked like any other parent import', () => {
+    // `native_workspace.rs` carries `pub(crate) use workspace_paths::…` so the
+    // old call path keeps working. A `pub use` binds the child's item and
+    // republishes it, so leaving it unscanned would miss the widest coupling
+    // a parent can have on a child.
+    expect(parentImportsOf('native_workspace.rs', 'workspace_paths'))
+      .toContain('workspace_default_path');
   });
 
   test('the child modules under test are actually being scanned', () => {

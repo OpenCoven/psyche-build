@@ -51,6 +51,23 @@ export function findGateViolations(): GateViolation[] {
     // A gated `mod` declaration gates everything the child imports.
     const moduleGate = declarationGate(parentSource, moduleName(childFile), 'mod');
 
+    // Parent importing from child. The `use` lives in the parent, so the
+    // child-to-parent scan below cannot see it, which is how #387 reached CI.
+    for (const imported of moduleImports(parentSource, moduleName(childFile))) {
+      const declared = declarationGate(childSource, imported.item);
+      if (declared === undefined) continue;
+      const effective: Predicate = { kind: 'all', parts: [moduleGate ?? ALWAYS, imported.gate] };
+      if (!implies(effective, declared)) {
+        violations.push({
+          child: parentFile,
+          parent: childFile,
+          item: imported.item,
+          importGate: render(effective),
+          declarationGate: render(declared),
+        });
+      }
+    }
+
     for (const imported of superImports(childSource)) {
       const target = imported.viaModule
         ? read(resolve(root, `${dirOf(childFile)}/${imported.viaModule}.rs`))
@@ -84,6 +101,17 @@ const moduleName = (file: string): string => basename(file, '.rs');
 /** Each `x/child.rs` sitting beside an `x.rs` that declares it. */
 function childModules(root: string): { parentFile: string; childFile: string }[] {
   const pairs: { parentFile: string; childFile: string }[] = [];
+
+  // Crate-root siblings. `lib.rs` declares `mod pty_process;` and the module
+  // lives beside it, not under a directory, so the directory pairing below
+  // never sees it. #387 imported four `#[cfg(unix)]` items from such a sibling
+  // under `#[cfg(test)]` alone — green on macOS and Linux, E0432 on Windows —
+  // and this contract stayed silent because its scope stopped at directories.
+  const rootSource = read(resolve(root, 'lib.rs'));
+  for (const match of rootSource.matchAll(/^(?:pub(?:\([a-z()]+\))? )?mod ([a-z_0-9]+);/gmu)) {
+    const childFile = `${match[1]}.rs`;
+    if (existsSync(resolve(root, childFile))) pairs.push({ parentFile: 'lib.rs', childFile });
+  }
   // Sorted: `readdirSync` order varies by filesystem, and an unstable report
   // order makes a multi-violation failure hard to diff between runs.
   const directories = readdirSync(root, { withFileTypes: true })
@@ -144,13 +172,41 @@ function stripCommentsAndStrings(source: string): string {
 
 interface SuperImport { item: string; gate: Predicate; viaModule?: string }
 
+/**
+ * `use <module>::…` in a parent, for a module it declares.
+ *
+ * Visibility is optional because a re-export is an import too:
+ * `native_workspace.rs` carries `pub(crate) use workspace_paths::workspace_default_path;`
+ * so `lib.rs` can keep calling it by its old path. A `pub use` is in fact the
+ * more dangerous form — it binds the child's item *and* republishes it — so
+ * missing it would leave the widest parent-to-child coupling unchecked.
+ */
+function moduleImports(source: string, module: string): SuperImport[] {
+  const clean = stripCommentsAndStrings(source);
+  const imports: SuperImport[] = [];
+  const pattern = new RegExp(
+    `^[ \\t]*(?:pub(?:\\([a-z():]+\\))? )?use[ \\t]+${module}::([^;]*);`,
+    'gmu',
+  );
+  for (const match of clean.matchAll(pattern)) {
+    const gate = gateBefore(clean, match.index ?? 0, source);
+    const tail = match[1].trim();
+    const names = tail.startsWith('{') ? tail.slice(1, tail.lastIndexOf('}')).split(',') : [tail];
+    for (const raw of names) {
+      const item = raw.trim().split(/\s+as\s+/u)[0].trim();
+      if (item && item !== 'self' && item !== '*') imports.push({ item, gate });
+    }
+  }
+  return imports;
+}
+
 /** `use super::X;`, `use super::{A, B};`, `use super::sibling::{A};` — braces may span lines. */
 function superImports(source: string): SuperImport[] {
   const clean = stripCommentsAndStrings(source);
   const imports: SuperImport[] = [];
   const pattern = /^[ \t]*use[ \t]+super::([^;]*);/gmu;
   for (const match of clean.matchAll(pattern)) {
-    const gate = gateBefore(clean, match.index ?? 0);
+    const gate = gateBefore(clean, match.index ?? 0, source);
     let tail = match[1].trim();
     let viaModule: string | undefined;
     // `super::sibling::…` names a sibling module; `super::Item` names the parent's.
@@ -182,21 +238,38 @@ function superImports(source: string): SuperImport[] {
 function declarationGate(source: string, item: string, kind?: string): Predicate | undefined {
   const clean = stripCommentsAndStrings(source);
   const lines = clean.split('\n');
+  // Declarations are matched on stripped text so a commented-out one does not
+  // count, but gates are read from the raw text: stripping blanks string
+  // literals, and a `cfg` value *is* one. `#[cfg(target_os = "windows")]`
+  // would otherwise parse as the atom `target_os = ` with the value gone,
+  // silently comparing two different conditions as though they were equal.
+  const raw = source.split('\n');
   const kinds = kind ?? 'fn|struct|enum|type|const|static|trait|mod|union';
   const declaration = new RegExp(`^(?:pub(?:\\([a-z():]+\\))? )?(?:unsafe )?(?:async )?(?:${kinds}) ${item}\\b`, 'u');
   const nested = new RegExp(`^\\s+(?:pub(?:\\([a-z():]+\\))? )?static ${item}\\s*:`, 'u');
 
+  // Every declaration, not the first. A `cfg`-gated pair declares one item per
+  // platform — `coven_launch_session` is `#[cfg(unix)]` and
+  // `#[cfg(target_os = "windows")]` — and the item exists wherever *either*
+  // applies. Reading only the first reports an ungated import of a fully
+  // covered pair as a violation, which is how correct code looks broken.
+  const gates: Predicate[] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (declaration.test(lines[index])) return attributeGate(lines, index);
-    if (nested.test(lines[index])) {
+    if (declaration.test(lines[index])) gates.push(attributeGate(raw, index));
+    else if (nested.test(lines[index])) {
+      let gate = attributeGate(raw, index);
       // Inherit the gate of the enclosing macro block.
       for (let scan = index; scan >= 0; scan -= 1) {
-        if (/^[a-z_]+!\s*\{/u.test(lines[scan])) return attributeGate(lines, scan);
+        if (/^[a-z_]+!\s*\{/u.test(lines[scan])) {
+          gate = attributeGate(raw, scan);
+          break;
+        }
       }
-      return attributeGate(lines, index);
+      gates.push(gate);
     }
   }
-  return undefined;
+  if (gates.length === 0) return undefined;
+  return gates.length === 1 ? gates[0] : { kind: 'any', parts: gates };
 }
 
 /** Conjunction of every `#[cfg(…)]` in the attribute run above `line`. */
@@ -214,11 +287,13 @@ function attributeGate(lines: string[], line: number): Predicate {
   return parts.length === 1 ? parts[0] : { kind: 'all', parts };
 }
 
-function gateBefore(source: string, offset: number): Predicate {
+function gateBefore(source: string, offset: number, raw?: string): Predicate {
   // The final element is the text on the `use` line itself, so the attribute
-  // run to inspect ends at the line before it.
+  // run ends at the line before it. Gates come from the raw text when it is
+  // available, so `cfg` string values survive comment stripping.
   const before = source.slice(0, offset).split('\n');
-  return attributeGate(before, before.length - 1);
+  const lines = raw === undefined ? before : raw.split('\n').slice(0, before.length);
+  return attributeGate(lines, before.length - 1);
 }
 
 function parse(text: string): Predicate {
@@ -302,9 +377,33 @@ function implies(left: Predicate, right: Predicate): boolean {
   const names = [...atoms(left, atoms(right))];
   for (let mask = 0; mask < 2 ** names.length; mask += 1) {
     const world = new Map(names.map((name, bit) => [name, Boolean(mask & (1 << bit))]));
+    if (!plausibleTarget(world)) continue;
     if (evaluate(left, world) && !evaluate(right, world)) return false;
   }
   return true;
+}
+
+/**
+ * Whether a world describes a target this crate can actually be built for.
+ *
+ * Exactly one of `unix` and `windows` holds for every platform in
+ * `Cargo.toml` — macOS, Linux, iOS and Windows — so worlds where both or
+ * neither hold are not configurations anything here compiles under.
+ *
+ * This reverses a decision made when the contract was written. #371 recorded
+ * that `windows` is deliberately not the negation of `unix`, "because a target
+ * can be neither". That is true of Rust in general and false of this crate,
+ * and enforcing the general rule made the contract report correct code as
+ * broken: `coven_launch_session` is declared once per family, so an ungated
+ * import of it is right, and without this the check called four such imports
+ * violations. A contract that flags correct code gets ignored, which costs
+ * more than the narrow generality it was protecting.
+ */
+function plausibleTarget(world: Map<string, boolean>): boolean {
+  const unix = world.get('unix');
+  const windows = world.get('windows');
+  if (unix === undefined || windows === undefined) return true;
+  return unix !== windows;
 }
 
 function render(predicate: Predicate): string {
@@ -365,4 +464,10 @@ export function importGateSatisfies(
     importGate === undefined ? ALWAYS : parse(importGate),
     declarationGate === undefined ? ALWAYS : parse(declarationGate),
   );
+}
+
+/** Names a parent imports from one of its child modules. Exported for contract self-checks. */
+export function parentImportsOf(parentFile: string, module: string): string[] {
+  const root = resolve(process.cwd(), SRC_DIRECTORY);
+  return moduleImports(read(resolve(root, parentFile)), module).map((imported) => imported.item);
 }
