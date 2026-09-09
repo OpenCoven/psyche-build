@@ -3,6 +3,7 @@
 **Status:** Reusable release gate; macOS `v0.0.1` published 2026-08-23  
 **Active stabilization owner:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)  
 **Executable evidence slice:** [#239](https://github.com/OpenCoven/psyche-build/issues/239)  
+**Bounded operator runbook:** [OPERATOR-ACCEPTANCE-SLICE.md](./OPERATOR-ACCEPTANCE-SLICE.md)  
 **Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
 **Execution order:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
