@@ -70,7 +70,7 @@ export function findGateViolations(): GateViolation[] {
 
     for (const imported of superImports(childSource)) {
       const target = imported.viaModule
-        ? read(resolve(root, `${dirOf(childFile)}/${imported.viaModule}.rs`))
+        ? read(resolve(root, siblingPath(childFile, imported.viaModule)))
         : parentSource;
       const declared = declarationGate(target, imported.item);
       if (declared === undefined) continue; // not our call to resolve; the compiler reports it
@@ -78,7 +78,7 @@ export function findGateViolations(): GateViolation[] {
       if (!implies(effective, declared)) {
         violations.push({
           child: childFile,
-          parent: imported.viaModule ? `${dirOf(childFile)}/${imported.viaModule}.rs` : parentFile,
+          parent: imported.viaModule ? siblingPath(childFile, imported.viaModule) : parentFile,
           item: imported.item,
           importGate: render(effective),
           declarationGate: render(declared),
@@ -95,7 +95,25 @@ function read(path: string): string {
   return readFileSync(path, 'utf8').replace(/\r\n/gu, '\n');
 }
 
-const dirOf = (file: string): string => file.slice(0, file.lastIndexOf('/'));
+/**
+ * Directory part of a module path, or `''` for a crate-root sibling.
+ *
+ * `slice(0, lastIndexOf('/'))` returns `pty_reader.r` for `pty_reader.rs`,
+ * because `lastIndexOf` is -1 and `slice(0, -1)` drops the final character.
+ * Sibling resolution then looked for `pty_reader.r/pty_process.rs`. The bug
+ * was unreachable until #197 slice 3 put a module beside `lib.rs` that
+ * imports from another one.
+ */
+/** Path of a sibling module beside `file`, handling crate-root siblings. */
+const siblingPath = (file: string, module: string): string => {
+  const directory = dirOf(file);
+  return directory === '' ? `${module}.rs` : `${directory}/${module}.rs`;
+};
+
+const dirOf = (file: string): string => {
+  const cut = file.lastIndexOf('/');
+  return cut === -1 ? '' : file.slice(0, cut);
+};
 const moduleName = (file: string): string => basename(file, '.rs');
 
 /** Each `x/child.rs` sitting beside an `x.rs` that declares it. */

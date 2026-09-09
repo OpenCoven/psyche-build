@@ -13,15 +13,21 @@ const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri
 const tauriLib = readDesktopCommandSurface();
 
 /**
- * The command surface plus the module that now owns process termination.
+ * The command surface plus the modules that own process termination.
  *
- * #197 slice 3 moved the terminator, the identity types and the platform kill
- * paths into `pty_process.rs`, while reader cancellation stayed in `lib.rs`.
- * The three assertions below describe one end-to-end sequence, so they now
- * legitimately span two files; resolving the termination module by a function
- * it defines keeps them pointed at the behaviour rather than at a path.
+ * #197 slice 3 split this across files: the terminator, identity types and
+ * platform kill paths into `pty_process.rs`, then the reader cancellation and
+ * exit shutdown into `pty_reader.rs`. The assertions below describe one
+ * end-to-end sequence, so they legitimately span all three.
+ *
+ * Each module is resolved by a function it defines rather than by a path, so
+ * a later slice moving these again does not read as the sequence disappearing.
  */
-const ptyTerminationSurface = `${tauriLib}\n${desktopSourceDefining('verified_unix_process_groups')}`;
+const ptyTerminationSurface = [
+  tauriLib,
+  desktopSourceDefining('verified_unix_process_groups'),
+  desktopSourceDefining('pump_pty_reader'),
+].join('\n');
 const nativeFocus = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs'),
   'utf8',
