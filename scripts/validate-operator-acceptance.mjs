@@ -174,6 +174,12 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
     ) {
       errors.push('sourceSmoke.commandExitStatus must be a non-negative integer when observed');
     }
+    if (
+      manifest.sourceSmoke.status === 'succeeded' &&
+      manifest.sourceSmoke.commandExitStatus !== 0
+    ) {
+      errors.push('sourceSmoke.commandExitStatus must be 0 when succeeded');
+    }
     digestArray(
       manifest.sourceSmoke.evidenceDigests,
       'sourceSmoke.evidenceDigests',
@@ -246,6 +252,13 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
           observation.safeNextAction.trim().length === 0)
       ) {
         errors.push(`${path}.safeNextAction is required for failure or recovery`);
+      }
+      if (
+        observation.status === 'inapplicable' &&
+        (typeof observation.safeNextAction !== 'string' ||
+          observation.safeNextAction.trim().length === 0)
+      ) {
+        errors.push(`${path}.safeNextAction is required for inapplicable observations`);
       }
       digestArray(observation.evidenceDigests, `${path}.evidenceDigests`, errors, {
         required: observed,
