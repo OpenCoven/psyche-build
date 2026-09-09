@@ -294,22 +294,31 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
   if (requireComplete && !complete) errors.push('terminalState is not complete');
 
   if (complete) {
-    if (manifest.sourceSmoke.status !== 'succeeded') {
+    if (!object(manifest.sourceSmoke) || manifest.sourceSmoke.status !== 'succeeded') {
       errors.push('complete manifest requires successful exact-source smoke');
     }
-    if (!ARTIFACTS.has(manifest.packagedRuntime.architecture)) {
+    if (
+      !object(manifest.packagedRuntime) ||
+      !ARTIFACTS.has(manifest.packagedRuntime.architecture)
+    ) {
       errors.push('complete manifest requires one pinned packaged runtime');
     }
-    if (!manifest.operator.githubLogin || !manifest.operator.observedAt) {
+    if (
+      !object(manifest.operator) ||
+      !manifest.operator.githubLogin ||
+      !manifest.operator.observedAt
+    ) {
       errors.push('complete manifest requires the operator identity and observation time');
     }
     if (
+      !object(manifest.sanitization) ||
       manifest.sanitization.reviewed !== true ||
       !manifest.sanitization.reviewerGitHubLogin
     ) {
       errors.push('complete manifest requires a named sanitization review');
     }
-    for (const observation of manifest.observations ?? []) {
+    for (const observation of Array.isArray(manifest.observations) ? manifest.observations : []) {
+      if (!object(observation)) continue;
       if (!TERMINAL_STATUSES.has(observation.status)) {
         errors.push(`complete manifest cannot contain ${observation.status}: ${observation.id}`);
       }
@@ -319,7 +328,8 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
     }
   }
 
-  for (const observation of manifest.observations ?? []) {
+  for (const observation of Array.isArray(manifest.observations) ? manifest.observations : []) {
+    if (!object(observation)) continue;
     if (observation.status === 'unknown') {
       errors.push(`unknown consequential outcome cannot support handoff: ${observation.id}`);
     }
