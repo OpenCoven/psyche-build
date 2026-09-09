@@ -142,5 +142,5 @@ that question should be answered by reading them rather than by this document.
 
 ## What this record does not do
 
-It does not authorise an extraction. It records what is there, what the closure
+It does not authorize an extraction. It records what is there, what the closure
 over-reports, and which safety net has to be repaired before any of it moves.
