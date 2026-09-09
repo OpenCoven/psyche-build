@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const libSourcePath = resolve(
   process.cwd(),
@@ -53,7 +54,9 @@ describe('Tauri workspace metrics native contract', () => {
 
     expect(cargoToml).toMatch(/\bsysinfo = "0\.36\.1"/);
 
-    expect(libSource).toMatch(
+    // `PtySession` moved to `pty_lifecycle` in #197 slice 3; the code that
+    // builds one did not. This asserts the shape where it is now declared.
+    expect(desktopSourceDefining('live_with_generation')).toMatch(
       /struct\s+PtySession\s*\{[\s\S]*pid\s*:\s*Option<u32>\s*,[\s\S]*spawn_time_unix_secs\s*:\s*u64\s*,[\s\S]*\}/,
     );
     expect(libSource).toMatch(/mod\s+metrics\s*;/);

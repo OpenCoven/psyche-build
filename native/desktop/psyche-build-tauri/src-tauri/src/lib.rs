@@ -62,6 +62,7 @@ mod native_sessions;
 mod native_workspace;
 mod pane_metrics;
 mod platform;
+mod pty_lifecycle;
 mod pty_process;
 mod pty_reader;
 
@@ -73,6 +74,10 @@ mod runtime_diagnostics;
 pub use app::run;
 mod workspace_contract;
 
+use pty_lifecycle::{
+    InstallSessionOutcome, PtyLifecycleError, PtySession, PtySessionToken, StopSessionOutcome,
+    PTY_LIFECYCLES,
+};
 use pty_process::{PtyProcessTerminator, PtySpawnTerminationGuard, PtyTerminationOutcome};
 use pty_reader::{prepare_pty_reader, pump_pty_reader, PtyExitShutdown, PtyReaderCancellation};
 
@@ -408,378 +413,6 @@ fn validate_browser_snapshot_dimensions(width: u32, height: u32) -> Result<(), S
 // Multi-PTY backend
 // ----------------------------------------------------------------------------
 
-struct PtySession {
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    operation_lane: Arc<tokio::sync::Mutex<()>>,
-    operation_admission: Arc<tokio::sync::Semaphore>,
-    pump: OutputPump,
-    terminator: PtyProcessTerminator,
-    reader_cancellation: PtyReaderCancellation,
-    pid: Option<u32>,
-    spawn_time_unix_secs: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PtySessionToken {
-    thread_id: String,
-    generation: u64,
-}
-
-#[derive(Debug)]
-enum PtyLifecycleState<T> {
-    Starting { stop_requested: bool },
-    Running(T),
-    Stopping,
-    Exiting,
-}
-
-#[derive(Debug)]
-struct PtyLifecycleEntry<T> {
-    generation: u64,
-    state: PtyLifecycleState<T>,
-}
-
-#[derive(Debug)]
-struct PtyLifecycleRegistry<T> {
-    next_generation: u64,
-    entries: HashMap<String, PtyLifecycleEntry<T>>,
-}
-
-impl<T> Default for PtyLifecycleRegistry<T> {
-    fn default() -> Self {
-        Self {
-            next_generation: 1,
-            entries: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PtyLifecycleError {
-    AlreadyRunning {
-        thread_id: String,
-    },
-    CleanupInProgress {
-        thread_id: String,
-    },
-    GenerationRequired {
-        thread_id: String,
-    },
-    StaleOperation {
-        thread_id: String,
-        expected: u64,
-        actual: u64,
-    },
-    GenerationExhausted,
-    StaleStart {
-        thread_id: String,
-        generation: u64,
-    },
-    NotFound {
-        thread_id: String,
-    },
-    AlreadyStopping {
-        thread_id: String,
-        generation: u64,
-    },
-}
-
-impl std::fmt::Display for PtyLifecycleError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyRunning { thread_id } => {
-                write!(formatter, "thread '{thread_id}' already running")
-            }
-            Self::CleanupInProgress { thread_id } => {
-                write!(formatter, "thread '{thread_id}' cleanup in progress")
-            }
-            Self::GenerationRequired { thread_id } => {
-                write!(formatter, "thread '{thread_id}' operation requires a PTY generation")
-            }
-            Self::StaleOperation {
-                thread_id,
-                expected,
-                actual,
-            } => write!(
-                formatter,
-                "thread '{thread_id}' operation generation {expected} is stale; current generation is {actual}"
-            ),
-            Self::GenerationExhausted => formatter.write_str("PTY session generation exhausted"),
-            Self::StaleStart {
-                thread_id,
-                generation,
-            } => write!(
-                formatter,
-                "thread '{thread_id}' start generation {generation} is stale"
-            ),
-            Self::NotFound { thread_id } => write!(formatter, "thread '{thread_id}' not found"),
-            Self::AlreadyStopping {
-                thread_id,
-                generation,
-            } => write!(
-                formatter,
-                "thread '{thread_id}' generation {generation} is already stopping"
-            ),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum InstallSessionOutcome<T> {
-    Running,
-    StopImmediately(T),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum StopSessionOutcome<T> {
-    RecordedDuringStart { generation: u64 },
-    Terminate { generation: u64, session: T },
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BeginExitOutcome<T> {
-    Emit { session: Option<T> },
-    Stale,
-}
-
-impl<T> PtyLifecycleRegistry<T> {
-    fn reserve(&mut self, thread_id: &str) -> Result<PtySessionToken, PtyLifecycleError> {
-        if let Some(entry) = self.entries.get(thread_id) {
-            return Err(match entry.state {
-                PtyLifecycleState::Exiting => PtyLifecycleError::CleanupInProgress {
-                    thread_id: thread_id.to_string(),
-                },
-                _ => PtyLifecycleError::AlreadyRunning {
-                    thread_id: thread_id.to_string(),
-                },
-            });
-        }
-        let generation = self.next_generation;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .ok_or(PtyLifecycleError::GenerationExhausted)?;
-        self.entries.insert(
-            thread_id.to_string(),
-            PtyLifecycleEntry {
-                generation,
-                state: PtyLifecycleState::Starting {
-                    stop_requested: false,
-                },
-            },
-        );
-        Ok(PtySessionToken {
-            thread_id: thread_id.to_string(),
-            generation,
-        })
-    }
-
-    fn install(
-        &mut self,
-        token: &PtySessionToken,
-        session: T,
-    ) -> Result<InstallSessionOutcome<T>, PtyLifecycleError> {
-        let entry = self
-            .entries
-            .get_mut(&token.thread_id)
-            .filter(|entry| entry.generation == token.generation)
-            .ok_or_else(|| PtyLifecycleError::StaleStart {
-                thread_id: token.thread_id.clone(),
-                generation: token.generation,
-            })?;
-        match entry.state {
-            PtyLifecycleState::Starting {
-                stop_requested: true,
-            } => {
-                entry.state = PtyLifecycleState::Stopping;
-                Ok(InstallSessionOutcome::StopImmediately(session))
-            }
-            PtyLifecycleState::Starting {
-                stop_requested: false,
-            } => {
-                entry.state = PtyLifecycleState::Running(session);
-                Ok(InstallSessionOutcome::Running)
-            }
-            _ => Err(PtyLifecycleError::StaleStart {
-                thread_id: token.thread_id.clone(),
-                generation: token.generation,
-            }),
-        }
-    }
-
-    fn stop(
-        &mut self,
-        thread_id: &str,
-        expected_generation: Option<u64>,
-    ) -> Result<StopSessionOutcome<T>, PtyLifecycleError> {
-        let entry = self
-            .entries
-            .get_mut(thread_id)
-            .ok_or_else(|| PtyLifecycleError::NotFound {
-                thread_id: thread_id.to_string(),
-            })?;
-        if let Some(expected) = expected_generation {
-            if expected != entry.generation {
-                return Err(PtyLifecycleError::StaleOperation {
-                    thread_id: thread_id.to_string(),
-                    expected,
-                    actual: entry.generation,
-                });
-            }
-        } else if matches!(entry.state, PtyLifecycleState::Running(_)) {
-            return Err(PtyLifecycleError::GenerationRequired {
-                thread_id: thread_id.to_string(),
-            });
-        }
-        match &mut entry.state {
-            PtyLifecycleState::Starting { stop_requested } => {
-                *stop_requested = true;
-                Ok(StopSessionOutcome::RecordedDuringStart {
-                    generation: entry.generation,
-                })
-            }
-            PtyLifecycleState::Running(_) => {
-                let state = std::mem::replace(&mut entry.state, PtyLifecycleState::Stopping);
-                let PtyLifecycleState::Running(session) = state else {
-                    unreachable!("running PTY state was checked before replacement");
-                };
-                Ok(StopSessionOutcome::Terminate {
-                    generation: entry.generation,
-                    session,
-                })
-            }
-            PtyLifecycleState::Stopping | PtyLifecycleState::Exiting => {
-                Err(PtyLifecycleError::AlreadyStopping {
-                    thread_id: thread_id.to_string(),
-                    generation: entry.generation,
-                })
-            }
-        }
-    }
-
-    fn begin_exit(&mut self, token: &PtySessionToken) -> BeginExitOutcome<T> {
-        let Some(entry) = self
-            .entries
-            .get_mut(&token.thread_id)
-            .filter(|entry| entry.generation == token.generation)
-        else {
-            return BeginExitOutcome::Stale;
-        };
-        match entry.state {
-            PtyLifecycleState::Running(_) => {
-                let state = std::mem::replace(&mut entry.state, PtyLifecycleState::Exiting);
-                let PtyLifecycleState::Running(session) = state else {
-                    unreachable!("running PTY state was checked before replacement");
-                };
-                BeginExitOutcome::Emit {
-                    session: Some(session),
-                }
-            }
-            PtyLifecycleState::Stopping => {
-                entry.state = PtyLifecycleState::Exiting;
-                BeginExitOutcome::Emit { session: None }
-            }
-            PtyLifecycleState::Starting { .. } | PtyLifecycleState::Exiting => {
-                BeginExitOutcome::Stale
-            }
-        }
-    }
-
-    fn finish_exit(&mut self, token: &PtySessionToken) -> bool {
-        let should_remove = self.entries.get(&token.thread_id).is_some_and(|entry| {
-            entry.generation == token.generation
-                && matches!(entry.state, PtyLifecycleState::Exiting)
-        });
-        if should_remove {
-            self.entries.remove(&token.thread_id);
-        }
-        should_remove
-    }
-
-    fn abort_start(&mut self, token: &PtySessionToken) -> bool {
-        let should_remove = self.entries.get(&token.thread_id).is_some_and(|entry| {
-            entry.generation == token.generation
-                && matches!(entry.state, PtyLifecycleState::Starting { .. })
-        });
-        if should_remove {
-            self.entries.remove(&token.thread_id);
-        }
-        should_remove
-    }
-
-    fn live(&self, thread_id: &str) -> Option<&T> {
-        self.entries
-            .get(thread_id)
-            .and_then(|entry| match &entry.state {
-                PtyLifecycleState::Running(session) => Some(session),
-                _ => None,
-            })
-    }
-
-    fn current_generation(&self, thread_id: &str) -> Option<u64> {
-        self.entries.get(thread_id).map(|entry| entry.generation)
-    }
-
-    fn live_with_generation(
-        &self,
-        thread_id: &str,
-        expected_generation: Option<u64>,
-    ) -> Result<&T, PtyLifecycleError> {
-        let entry = self
-            .entries
-            .get(thread_id)
-            .ok_or_else(|| PtyLifecycleError::NotFound {
-                thread_id: thread_id.to_string(),
-            })?;
-        if let Some(expected) = expected_generation {
-            if expected != entry.generation {
-                return Err(PtyLifecycleError::StaleOperation {
-                    thread_id: thread_id.to_string(),
-                    expected,
-                    actual: entry.generation,
-                });
-            }
-        } else if matches!(entry.state, PtyLifecycleState::Running(_)) {
-            return Err(PtyLifecycleError::GenerationRequired {
-                thread_id: thread_id.to_string(),
-            });
-        }
-        match &entry.state {
-            PtyLifecycleState::Running(session) => Ok(session),
-            _ => Err(PtyLifecycleError::NotFound {
-                thread_id: thread_id.to_string(),
-            }),
-        }
-    }
-
-    #[cfg(test)]
-    fn is_live(&self, thread_id: &str) -> bool {
-        self.live(thread_id).is_some()
-    }
-
-    fn live_sessions(&self) -> Vec<(&String, &T)> {
-        self.entries
-            .iter()
-            .filter_map(|(thread_id, entry)| match &entry.state {
-                PtyLifecycleState::Running(session) => Some((thread_id, session)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn live_thread_ids(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter_map(|(thread_id, entry)| {
-                matches!(entry.state, PtyLifecycleState::Running(_)).then(|| thread_id.clone())
-            })
-            .collect()
-    }
-}
-
-static PTY_LIFECYCLES: Lazy<Mutex<PtyLifecycleRegistry<PtySession>>> =
-    Lazy::new(|| Mutex::new(PtyLifecycleRegistry::default()));
 static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
     Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
 
@@ -8941,6 +8574,63 @@ mod pty_runtime_tests {
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
+    #[cfg(not(windows))]
+    struct TestLivePtySession {
+        token: PtySessionToken,
+        pump: OutputPump,
+    }
+
+    #[cfg(not(windows))]
+    impl TestLivePtySession {
+        fn register(thread_id: &str) -> Self {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 10,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+            let pending = PendingPtyStart::reserve(thread_id).unwrap();
+            let pump =
+                OutputPump::new_with_generation(thread_id.to_string(), pending.token.generation)
+                    .unwrap();
+            let (token, install_outcome) = pending
+                .install(PtySession {
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(writer)),
+                    operation_lane: Arc::new(tokio::sync::Mutex::new(())),
+                    operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
+                    pump: pump.clone(),
+                    terminator: crate::pty_process::tests::recording_terminator(Arc::new(
+                        AtomicUsize::new(0),
+                    )),
+                    reader_cancellation,
+                    pid: Some(42),
+                    spawn_time_unix_secs: 99,
+                })
+                .unwrap();
+            assert!(matches!(install_outcome, InstallSessionOutcome::Running));
+            Self { token, pump }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for TestLivePtySession {
+        fn drop(&mut self) {
+            let action = {
+                let mut registry = PTY_LIFECYCLES.lock();
+                registry.stop(&self.token.thread_id, Some(self.token.generation))
+            };
+            if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
+                drop(session);
+            }
+            PTY_LIFECYCLES.lock().finish_exit(&self.token);
+        }
+    }
+
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9484,63 +9174,6 @@ mod pty_runtime_tests {
         assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
-    #[cfg(not(windows))]
-    struct TestLivePtySession {
-        token: PtySessionToken,
-        pump: OutputPump,
-    }
-
-    #[cfg(not(windows))]
-    impl TestLivePtySession {
-        fn register(thread_id: &str) -> Self {
-            let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows: 10,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .unwrap();
-            let writer = pair.master.take_writer().unwrap();
-            let (_, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
-            let pending = PendingPtyStart::reserve(thread_id).unwrap();
-            let pump =
-                OutputPump::new_with_generation(thread_id.to_string(), pending.token.generation)
-                    .unwrap();
-            let (token, install_outcome) = pending
-                .install(PtySession {
-                    master: Arc::new(Mutex::new(pair.master)),
-                    writer: Arc::new(Mutex::new(writer)),
-                    operation_lane: Arc::new(tokio::sync::Mutex::new(())),
-                    operation_admission: Arc::new(tokio::sync::Semaphore::new(2)),
-                    pump: pump.clone(),
-                    terminator: crate::pty_process::tests::recording_terminator(Arc::new(
-                        AtomicUsize::new(0),
-                    )),
-                    reader_cancellation,
-                    pid: Some(42),
-                    spawn_time_unix_secs: 99,
-                })
-                .unwrap();
-            assert!(matches!(install_outcome, InstallSessionOutcome::Running));
-            Self { token, pump }
-        }
-    }
-
-    #[cfg(not(windows))]
-    impl Drop for TestLivePtySession {
-        fn drop(&mut self) {
-            let action = {
-                let mut registry = PTY_LIFECYCLES.lock();
-                registry.stop(&self.token.thread_id, Some(self.token.generation))
-            };
-            if let Ok(StopSessionOutcome::Terminate { session, .. }) = action {
-                drop(session);
-            }
-            PTY_LIFECYCLES.lock().finish_exit(&self.token);
-        }
-    }
-
     fn assert_no_output_fields(value: &serde_json::Value) {
         match value {
             serde_json::Value::Array(values) => {
@@ -9643,109 +9276,6 @@ mod pty_runtime_tests {
 
         drop(pair.slave);
         drop(pair.master);
-    }
-
-    #[test]
-    fn stop_during_start_is_recorded_and_installed_session_is_stopped() {
-        let mut registry = PtyLifecycleRegistry::default();
-        let start = registry.reserve("racing-start").unwrap();
-
-        assert_eq!(
-            registry
-                .stop("racing-start", Some(start.generation))
-                .unwrap(),
-            StopSessionOutcome::RecordedDuringStart {
-                generation: start.generation,
-            }
-        );
-        assert_eq!(
-            registry.install(&start, "spawned-child").unwrap(),
-            InstallSessionOutcome::StopImmediately("spawned-child")
-        );
-        assert!(!registry.is_live("racing-start"));
-        assert!(registry.reserve("racing-start").is_err());
-        assert!(matches!(
-            registry.begin_exit(&start),
-            BeginExitOutcome::Emit { session: None }
-        ));
-        assert!(registry.finish_exit(&start));
-    }
-
-    #[test]
-    fn same_id_restart_waits_for_exit_and_old_generation_cannot_emit_again() {
-        let mut registry = PtyLifecycleRegistry::default();
-        let old = registry.reserve("same-id").unwrap();
-        assert_eq!(
-            registry.install(&old, "old-session").unwrap(),
-            InstallSessionOutcome::Running
-        );
-        assert_eq!(
-            registry.stop("same-id", Some(old.generation)).unwrap(),
-            StopSessionOutcome::Terminate {
-                generation: old.generation,
-                session: "old-session",
-            }
-        );
-        assert!(matches!(
-            registry.begin_exit(&old),
-            BeginExitOutcome::Emit { session: None }
-        ));
-        assert!(registry.reserve("same-id").is_err());
-
-        assert!(registry.finish_exit(&old));
-        let replacement = registry.reserve("same-id").unwrap();
-        assert_ne!(replacement.generation, old.generation);
-        assert!(matches!(registry.begin_exit(&old), BeginExitOutcome::Stale));
-        assert_eq!(
-            registry
-                .install(&replacement, "replacement-session")
-                .unwrap(),
-            InstallSessionOutcome::Running
-        );
-        assert!(registry.is_live("same-id"));
-    }
-
-    #[test]
-    fn timed_out_exit_blocks_same_id_restart_until_old_emitter_cleanup_finishes() {
-        let registry = Arc::new(Mutex::new(PtyLifecycleRegistry::default()));
-        let old = {
-            let mut registry = registry.lock();
-            let old = registry.reserve("timed-out-pane").unwrap();
-            assert_eq!(
-                registry.install(&old, "old-output-pump").unwrap(),
-                InstallSessionOutcome::Running
-            );
-            assert_eq!(
-                registry.reserve("timed-out-pane").unwrap_err().to_string(),
-                "thread 'timed-out-pane' already running"
-            );
-            assert!(matches!(
-                registry.begin_exit(&old),
-                BeginExitOutcome::Emit {
-                    session: Some("old-output-pump")
-                }
-            ));
-            old
-        };
-        let (old_emit_done_tx, old_emit_done_rx) = mpsc::channel();
-        let cleanup_registry = Arc::clone(&registry);
-        let cleanup_token = old.clone();
-        let cleanup = std::thread::spawn(move || {
-            old_emit_done_rx.recv().unwrap();
-            cleanup_registry.lock().finish_exit(&cleanup_token)
-        });
-        assert_eq!(
-            registry
-                .lock()
-                .reserve("timed-out-pane")
-                .unwrap_err()
-                .to_string(),
-            "thread 'timed-out-pane' cleanup in progress"
-        );
-        old_emit_done_tx.send(()).unwrap();
-        assert!(cleanup.join().unwrap());
-        let replacement = registry.lock().reserve("timed-out-pane").unwrap();
-        assert_ne!(replacement.generation, old.generation);
     }
 
     #[cfg(not(windows))]
