@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -37,7 +38,12 @@ const stylesCss = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8'
 );
-const tauriLib = readDesktopCommandSurface();
+// Git control moved to `git_control` in #197 slice 4; the panels that call it
+// did not. This reads both, resolving the module by a function it defines.
+const tauriLib = [
+  readDesktopCommandSurface(),
+  desktopSourceDefining('git_command'),
+].join('\n');
 const tauriPackage = JSON.parse(
   readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/package.json'), 'utf8')
 ) as {

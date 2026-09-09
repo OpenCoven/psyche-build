@@ -11,22 +11,26 @@
 //!
 //! `OpenedPtyCwd` and `open_pty_cwd_candidate` are both `cfg`-gated pairs, one
 //! definition per platform, because Unix keeps an open descriptor to defeat a
-//! rename between check and use while Windows canonicalises a path instead.
+//! rename between check and use while Windows canonicalizes a path instead.
 //! Each pair moved whole.
 //!
-//! The git worktree helpers stayed in the crate root. `open_pty_cwd` calls
-//! `linked_worktree_roots` to accept a cwd inside a linked worktree, but
-//! worktree identity is #197 slice 4's concern and has callers beyond this
-//! one, so it is a dependency rather than a member.
+//! `open_pty_cwd` calls `linked_worktree_roots` to accept a cwd inside a
+//! linked worktree. Worktree identity is #197 slice 4's concern and has
+//! callers beyond this one, so it is a dependency rather than a member; since
+//! slice 4 it lives in `git_control` and is imported like any other.
 
 use std::path::{Path, PathBuf};
 
 use portable_pty::CommandBuilder;
 
-use super::{canonical_project_root, linked_worktree_roots};
+use super::canonical_project_root;
+// Worktree identity moved to `git_control` in #197 slice 4. This module's
+// header called it a dependency rather than a member; it now imports it as
+// one instead of reaching through the crate root.
+use super::git_control::linked_worktree_roots;
 
 // Unix resolves the opened directory through its descriptor; Windows
-// canonicalises a path instead, so these are gated to match their callers.
+// canonicalizes a path instead, so these are gated to match their callers.
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]

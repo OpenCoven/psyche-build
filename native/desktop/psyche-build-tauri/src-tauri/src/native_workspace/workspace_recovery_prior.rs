@@ -13,7 +13,7 @@
 //! either in this module or in a sibling child module, and the three items it
 //! borrows from the parent — `SecureWorkspaceDir`,
 //! `WorkspaceRecoveryDecision`, `WORKSPACE_RECOVERY_DECISION_ATTEMPTS` — are a
-//! type, an enum and a constant, not behaviour. Nothing here reaches back into
+//! type, an enum and a constant, not behavior. Nothing here reaches back into
 //! the save path, which matters because a recovery decision that re-entered
 //! the transaction it is recovering from would be very hard to reason about.
 //!
