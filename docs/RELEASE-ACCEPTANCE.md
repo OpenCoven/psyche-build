@@ -361,6 +361,7 @@ Current scenarios:
 | `duplicate-command-retry` | The same command replayed after the control journal is reopened | `effect-executed-exactly-once`, `retry-reconciles-canonical-outcome`, `reconciliation-survives-restart`, `uncommitted-work-untouched` |
 | `stale-owner-epoch` | A valid capability lease asserted with the pre-restart owner epoch | `stale-epoch-assertion-rejected`, `current-epoch-assertion-accepted` |
 | `interrupted-cleanup-recovery-marker` | Cleanup abandoned after publishing its recovery marker | `worktree-retained-after-interruption`, `recovery-marker-discoverable`, `recovery-marker-names-the-worktree`, `recovery-marker-carries-operator-instructions`, `uncommitted-work-untouched` |
+| `interrupted-cleanup-owner` | Real cleanup worker killed after acquiring its project lease, before Git mutation | `cleanup-owner-interrupted`, `cleanup-project-lease-recovered`, `cleanup-retry-blocked-by-marker`, `worktree-retained-after-interruption`, `worktree-branch-unchanged`, `clean-worktree-control-removed`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -406,6 +407,29 @@ worktree and its uncommitted file survive, and the published marker names the
 worktree and carries operator instructions. It does **not** interrupt
 `WorktreeCleanupService` mid-flight, so it must not be read as covering the
 full cleanup path.
+
+`interrupted-cleanup-owner` extends that coverage through the real
+`WorktreeCleanupService` queue in disposable child processes. The harness holds
+the exact-worktree lease, observes the worker's durable project lease, and
+terminates only that worker before any Git mutation can begin. It then proves
+stale-project-lease takeover, publishes an explicit harness/operator recovery
+marker, and starts a fresh cleanup worker. The retry must report that the marker
+blocks cleanup while the worktree bytes, branch OID, and persisted config remain
+unchanged. A separate clean-worktree control must actually remove its worktree
+and branch; a no-op queue cannot pass.
+
+The child uses a disposable home and tmux socket directory, with global Git
+configuration excluded. The harness rejects ambient `GIT_DIR`, `GIT_WORK_TREE`,
+or `GIT_COMMON_DIR` overrides before parent-side worktree-lease discovery.
+Before disposing the fixture, it reacquires the project lifecycle lease to
+confirm no supervised mutation remains active. If that bounded barrier fails,
+it retains the fixture and reports an explicit error rather than deleting
+the leases of a possibly live Git child.
+Reports never include child output, process identifiers,
+paths, or branch names. The marker is published by the harness, not automatically
+by the cleanup service. This scenario does not prove interruption during a Git
+mutation, automatic crash reconciliation, application restart, or packaged GUI
+acceptance. It does not close #196, #199, or #239.
 
 The remaining #199 scenarios — unavailable providers and upgrade recovery —
 are not yet implemented and must not be implied by a passing run.

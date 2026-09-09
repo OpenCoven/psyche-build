@@ -26,6 +26,11 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'recovery-marker-discoverable',
   'recovery-marker-names-the-worktree',
   'recovery-marker-carries-operator-instructions',
+  'cleanup-owner-interrupted',
+  'cleanup-project-lease-recovered',
+  'cleanup-retry-blocked-by-marker',
+  'worktree-branch-unchanged',
+  'clean-worktree-control-removed',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -128,6 +133,28 @@ describe('disposable recovery harness', () => {
     // is not a reconciliation action — it is a silent cleanup with a file.
     expect(byId.get('recovery-marker-names-the-worktree')).toBe(true);
     expect(byId.get('recovery-marker-carries-operator-instructions')).toBe(true);
+  });
+
+  it('recovers a killed cleanup owner before retrying behind its recovery marker', async () => {
+    expect(recoveryScenarioIds()).toContain('interrupted-cleanup-owner');
+    const report = await runRecoveryHarness(['interrupted-cleanup-owner']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('cleanup_recoverable');
+    expect(scenario.outcome).toBe('passed');
+    const byId = new Map(scenario.invariants.map((entry) => [entry.id, entry.held]));
+    const expected: readonly RecoveryInvariantId[] = [
+      'cleanup-owner-interrupted',
+      'cleanup-project-lease-recovered',
+      'cleanup-retry-blocked-by-marker',
+      'worktree-retained-after-interruption',
+      'worktree-branch-unchanged',
+      'uncommitted-work-untouched',
+      'clean-worktree-control-removed',
+    ];
+    for (const id of expected) {
+      expect(byId.get(id), id).toBe(true);
+    }
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {

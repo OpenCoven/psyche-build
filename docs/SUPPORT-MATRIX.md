@@ -86,7 +86,7 @@ for the source, workflow, and pinned Cask distinction.
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
 | Bonjour host discovery | Not a desktop product claim | Planned pending the #241/#200 discovery and reconnect slice | Local discovery only; not identity, authority, or the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
-| Diagnostics/support bundle | Current visible diagnostics only; the support-bundle v1 schema merged under #243 (PR #278) without production collector wiring, CLI, or UI | Planned | `v0.0.1` does not claim a support bundle; #199's six-scenario recovery harness is delivered on source, not packaged operator acceptance |
+| Diagnostics/support bundle | Current visible diagnostics only; the support-bundle v1 schema merged under #243 (PR #278) without production collector wiring, CLI, or UI | Planned | `v0.0.1` does not claim a support bundle; #199's recovery harness is source-only, including the bounded pre-Git cleanup-owner interruption scenario, not packaged operator acceptance |
 | Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
 | Team collaboration | Planned | Planned | Not a first-release claim |
 | Marketplace/plugin ecosystem | Planned | Planned | Must wait for stable capability, identity, and compatibility contracts |
