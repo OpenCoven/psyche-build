@@ -70,9 +70,49 @@ Both need to follow functions rather than paths, as
 slice, and it is testable on its own: reintroduce the flat scan and the
 assertions must fail.
 
-## Proposed order
+## What was done
 
-Sizes are from the measurement above and must be re-derived by reading bodies
+All five steps landed. `lib.rs` went from 16,387 lines to 13,268, and five
+modules now hold what came out.
+
+| Step | Module | Lines | PR |
+|---|---|---:|---|
+| 1 | *(contracts follow functions)* | — | #386 |
+| 2 | `pty_process` | 1,570 | #387 |
+| 3 | `pty_reader` | 491 | #390 |
+| 4 | `pty_lifecycle` | 507 | #391 |
+| 5a | `pty_cwd` | 290 | #392 |
+| 5b | `pty_launch` | 487 | this |
+
+Step 5 was scoped as one thing and turned out to be two. "Start and attach"
+spanned nine separate regions of `lib.rs` and interleaved with the git
+worktree helpers that belong to slice 4, so working-directory resolution went
+first as a contiguous, self-contained half and the commands followed.
+
+Three things this record did not anticipate, each worth carrying into slices
+4 and 5:
+
+**A module cannot share a name with a Tauri command it defines.** `app.rs`
+globs the crate root to build `generate_handler!`, so `mod pty_start` and
+`fn pty_start` collide there. The module is `pty_launch` for that reason, and
+the command name — which is IPC contract — was never a candidate to change.
+
+**A command in a submodule must be `pub(crate)`.** `#[tauri::command]`
+generates a macro with the function's own visibility, so a private command in
+a submodule leaves `generate_handler!` unable to find it. That in turn meant
+teaching two contract helpers that a command signature may carry visibility.
+
+**The safety net cost more than the extractions.** Step 1 was written to stop
+a moved function reading as a deleted one, and it worked, but nine further
+contract files still asserted against a whole-file surface. Every step after
+the first spent as much effort retargeting assertions as moving code. The
+lesson is not that the assertions were wrong — they describe real sequences
+that now legitimately span files — but that a whole-file surface is a path
+coupling wearing a different hat.
+
+## Order as proposed
+
+Sizes were from the original measurement and were re-derived by reading bodies
 before each step, not taken from this table.
 
 1. **Teach the PTY and pane contracts to follow functions.** No production
@@ -88,7 +128,13 @@ before each step, not taken from this table.
 4. **Lifecycle registry** — `PtyLifecycleRegistry` (234) and its states,
    entries, errors and outcomes. Largest single `impl` in the subsystem.
 5. **Start and attach** — `PendingPtyStart`, `PtyAttachOptions`, `OpenedPtyCwd`,
-   `PtyStartResult`, and the start/attach helpers.
+   `PtyStartResult`, and the start/attach helpers. Split in two on contact:
+   `pty_cwd` for working-directory resolution, `pty_launch` for reservation,
+   launch validation and the commands.
+
+`native_launch_command` was measured into this slice and left out of it. Its
+only caller is `native_sessions`, so it belongs to that capability; it is a
+candidate for a later move rather than an omission.
 
 Metrics and visibility types are deliberately unscheduled. `PtyTransportMetrics`
 and friends may belong with `pty_transport.rs` rather than with lifecycle, and

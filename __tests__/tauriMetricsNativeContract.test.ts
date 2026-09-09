@@ -2,7 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
-import { desktopSourceDefining } from './support/desktopRustSurface.js';
+import {
+  desktopFunctionBody,
+  desktopSourceDefining,
+} from './support/desktopRustSurface.js';
 
 const libSourcePath = resolve(
   process.cwd(),
@@ -67,7 +70,8 @@ describe('Tauri workspace metrics native contract', () => {
       /#\[derive\(Clone,\s*Default\)\]\s*struct\s+MetricsState\s*\{[\s\S]*collector\s*:\s*Arc<Mutex<MetricsCollector>>[\s\S]*\}/,
     );
 
-    const ptyClient = functionBody(libSource, 'register_pty_client');
+    // `register_pty_client` moved to `pty_launch` with the start commands.
+    const ptyClient = desktopFunctionBody('register_pty_client');
     expect(ptyClient).toMatch(
       /let\s+spawn_time_unix_secs\s*=\s*SystemTime::now\(\)[\s\S]*?duration_since\(UNIX_EPOCH\)[\s\S]*?as_secs\(\)\s*;/,
     );

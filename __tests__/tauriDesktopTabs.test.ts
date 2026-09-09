@@ -23,10 +23,14 @@ const tauriLib = readDesktopCommandSurface();
  * Each module is resolved by a function it defines rather than by a path, so
  * a later slice moving these again does not read as the sequence disappearing.
  */
+/** The command surface plus the module that owns PTY start and attach. */
+const ptyStartSurface = [tauriLib, desktopSourceDefining('register_pty_client')].join('\n');
+
 const ptyTerminationSurface = [
   tauriLib,
   desktopSourceDefining('verified_unix_process_groups'),
   desktopSourceDefining('pump_pty_reader'),
+  desktopSourceDefining('register_pty_client'),
 ].join('\n');
 const nativeFocus = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/browser_focus.rs'),
@@ -440,7 +444,7 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {
-    expect(tauriLib).toMatch(/status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\)/);
+    expect(ptyStartSurface).toMatch(/status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\)/);
     expect(tauriLib).toMatch(
       /fn\s+app_environment\(\)\s*->\s*AppEnvironment[\s\S]*?let\s+\(default_shell,\s*default_shell_args\)\s*=\s*platform::default_shell\(\);/
     );
@@ -467,41 +471,41 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(desktopSourceDefining('live_with_generation')).toMatch(
       /static\s+PTY_LIFECYCLES:\s*Lazy<Mutex<PtyLifecycleRegistry<PtySession>>>/
     );
-    expect(tauriLib).not.toMatch(/static\s+STARTING_SESSIONS:/);
-    expect(tauriLib).toMatch(/let\s+pending_start\s*=\s*PendingPtyStart::reserve\(&thread_id\)\?/);
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).not.toMatch(/static\s+STARTING_SESSIONS:/);
+    expect(ptyStartSurface).toMatch(/let\s+pending_start\s*=\s*PendingPtyStart::reserve\(&thread_id\)\?/);
+    expect(ptyStartSurface).toMatch(
       /pending_start\.install\(\s*PtySession\s*\{[\s\S]*?terminator:[\s\S]*?\}\s*\)/
     );
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).toMatch(
       /pump\.start_worker[\s\S]*?app_for_output[\s\S]*?\.emit\("pty:data-batch",\s*payload\)/
     );
-    expect(tauriLib).not.toMatch(/\.emit\(\s*"pty:data"/);
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).not.toMatch(/\.emit\(\s*"pty:data"/);
+    expect(ptyStartSurface).toMatch(
       /let\s+\(reader_done_tx,\s*reader_done_rx\)\s*=\s*std::sync::mpsc::sync_channel\(1\);[\s\S]*?reader_done_tx\.send\(reader_result\)/
     );
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).toMatch(
       /let\s+outcome\s*=\s*coordinate_exit_shutdown\(\s*&mut shutdown,\s*EXIT_DRAIN_TIMEOUT\s*\);[\s\S]*?app_for_exit\.emit\(\s*"pty:exit"/
     );
-    expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).not.toMatch(/data_thread\.join\(\)/);
+    expect(ptyStartSurface).toMatch(
       /async\s+fn\s+pty_write[\s\S]*?pty_write_operation\(&thread_id,\s*generation\)[\s\S]*?try_acquire_owned\(\)[\s\S]*?operation_lane\.lock_owned\(\)\.await[\s\S]*?spawn_blocking/
     );
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).toMatch(
       /fn\s+pty_write_operation[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?\.live_with_generation\(thread_id,\s*expected_generation\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?Arc::clone\(&session\.operation_lane\)[\s\S]*?Arc::clone\(&session\.operation_admission\)[\s\S]*?drop\(guard\)/
     );
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).toMatch(
       /fn\s+pty_write_blocking[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);[\s\S]*?writer\.write_all\(&bytes\)[\s\S]*?writer\.flush\(\)/
     );
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).toMatch(
       /app_for_exit\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*exit_token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&exit_token\)/
     );
-    expect(tauriLib).toMatch(/fn\s+agent_skill_source_rank\(source:\s*&str\)\s*->\s*u8/);
-    expect(tauriLib).toMatch(/"project"\s*=>\s*0,[\s\S]*?"user"\s*=>\s*1,[\s\S]*?"plugin"\s*=>\s*2/);
-    expect(tauriLib).toMatch(
+    expect(ptyStartSurface).toMatch(/fn\s+agent_skill_source_rank\(source:\s*&str\)\s*->\s*u8/);
+    expect(ptyStartSurface).toMatch(/"project"\s*=>\s*0,[\s\S]*?"user"\s*=>\s*1,[\s\S]*?"plugin"\s*=>\s*2/);
+    expect(ptyStartSurface).toMatch(
       /out\.sort_by\(\|a,\s*b\|\s*\{[\s\S]*?a\.name[\s\S]*?\.cmp\(&b\.name\)[\s\S]*?\.then\(a\.kind\.cmp\(&b\.kind\)\)[\s\S]*?agent_skill_source_rank\(&a\.source\)\.cmp\(&agent_skill_source_rank\(&b\.source\)\)[\s\S]*?\.then\(a\.source\.cmp\(&b\.source\)\)/
     );
-    expect(tauriLib).toMatch(/out\.dedup_by\(\|a,\s*b\|\s*a\.name\s*==\s*b\.name\s*&&\s*a\.kind\s*==\s*b\.kind\)/);
-    expect(tauriLib).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
+    expect(ptyStartSurface).toMatch(/out\.dedup_by\(\|a,\s*b\|\s*a\.name\s*==\s*b\.name\s*&&\s*a\.kind\s*==\s*b\.kind\)/);
+    expect(ptyStartSurface).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
   });
 
   it('delivers batched PTY output to the matching terminal thread', () => {
