@@ -48,6 +48,7 @@
     "docs/BRIDGE-SECURITY.md",
     "docs/CONTROL-PLANE.md",
     "docs/INTEGRATIONS.md",
+    "docs/OPERATOR-ACCEPTANCE-SLICE.md",
     "docs/PRODUCT-SPEC.md",
     "docs/RELEASE-ACCEPTANCE.md",
     "docs/RELEASE.md",
@@ -88,7 +89,8 @@
     "test": "vitest --run --exclude __tests__/beadsProjectRender.test.ts && vitest --run -c vitest.beads-render.config.ts",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
     "prepack": "pnpm run build && pnpm run docs:focus:check",
-    "smoke:pack": "node scripts/smoke-pack-install.js"
+    "smoke:pack": "node scripts/smoke-pack-install.js",
+    "acceptance:validate": "node scripts/validate-operator-acceptance.mjs"
   },
   "bin": {
     "psyche": "psyche"

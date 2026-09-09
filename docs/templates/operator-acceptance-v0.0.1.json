@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "terminalState": "incomplete",
+  "release": {
+    "version": "0.0.1",
+    "tag": "v0.0.1",
+    "tagObjectSha": "6c628be321419c07c508e75c3652b44376d2ab3b",
+    "sourceSha": "57c6c71bd5264fde960b062e95de278c8438c94f"
+  },
+  "sourceSmoke": {
+    "subject": "exact_source",
+    "status": "pending",
+    "commandExitStatus": null,
+    "environment": {
+      "macOS": null,
+      "architecture": null,
+      "node": null,
+      "pnpm": "10.34.5",
+      "tmux": null,
+      "git": null
+    },
+    "evidenceDigests": []
+  },
+  "packagedRuntime": {
+    "subject": "published_dmg",
+    "filename": null,
+    "sha256": null,
+    "architecture": null
+  },
+  "observations": [
+    {
+      "id": "first-run-onboarding",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "plain-terminal-lifecycle",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "supported-agent-lane",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "project-pane-focus-handoff",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "pane-close-work-preservation",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "normal-restart-restore",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "force-quit-transition",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "merge-conflict-interrupted-cleanup",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "provider-interruption-revocation",
+      "status": "pending",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "corrupt-persisted-state",
+      "status": "deferred",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": "Retain under #239 for a later packaged-runtime observation.",
+      "evidenceDigests": []
+    },
+    {
+      "id": "stale-tmux-identity",
+      "status": "deferred",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": "Retain under #239 for a later packaged-runtime observation.",
+      "evidenceDigests": []
+    },
+    {
+      "id": "unwritable-or-full-storage",
+      "status": "deferred",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": "Retain under #239 for a later packaged-runtime observation.",
+      "evidenceDigests": []
+    },
+    {
+      "id": "duplicate-consequential-retry",
+      "status": "deferred",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": "Retain under #239 for a later packaged-runtime observation.",
+      "evidenceDigests": []
+    },
+    {
+      "id": "uninstall-reinstall",
+      "status": "deferred",
+      "expectationMet": null,
+      "workPreserved": null,
+      "safeNextAction": "Retain under #239 for a later packaged-runtime observation.",
+      "evidenceDigests": []
+    }
+  ],
+  "operator": {
+    "githubLogin": null,
+    "observedAt": null
+  },
+  "sanitization": {
+    "reviewed": false,
+    "reviewerGitHubLogin": null,
+    "evidenceDigestCountBefore": 15,
+    "newEvidenceDigests": []
+  },
+  "transfers": {
+    "issue199": []
+  }
+}
