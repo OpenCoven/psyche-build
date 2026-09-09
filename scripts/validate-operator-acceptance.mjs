@@ -2,25 +2,25 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 const RELEASE = Object.freeze({
-  version: '0.0.2',
-  tag: 'v0.0.2',
-  tagObjectSha: '87e23c17b3fcff38d33e37a70f56679c475edd43',
-  sourceSha: 'a4546f45bb0ee05cfbb388a0fc5f9e951596be51',
+  version: '0.0.1',
+  tag: 'v0.0.1',
+  tagObjectSha: '6c628be321419c07c508e75c3652b44376d2ab3b',
+  sourceSha: '57c6c71bd5264fde960b062e95de278c8438c94f',
 });
 
 const ARTIFACTS = new Map([
   [
     'aarch64',
     {
-      filename: 'Psyche-Build-v0.0.2-aarch64.dmg',
-      sha256: 'dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103',
+      filename: 'Psyche-Build-v0.0.1-aarch64.dmg',
+      sha256: 'e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f',
     },
   ],
   [
     'x86_64',
     {
-      filename: 'Psyche-Build-v0.0.2-x86_64.dmg',
-      sha256: 'f9e19a77d0d7bc746226fa510bf3e34e5d96185e6563e53bb1898f0d9423033e',
+      filename: 'Psyche-Build-v0.0.1-x86_64.dmg',
+      sha256: 'c6d62f8aeea1570f377fe6bc2d5c90f5b6a4701390af1c42073465f2a586e882',
     },
   ],
 ]);
@@ -133,7 +133,7 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
   ) {
     for (const [key, expected] of Object.entries(RELEASE)) {
       if (manifest.release[key] !== expected) {
-        errors.push(`release.${key} must identify the published v0.0.2 subject`);
+        errors.push(`release.${key} must identify the published v0.0.1 subject`);
       }
     }
     if (!SHA40.test(manifest.release.tagObjectSha) || !SHA40.test(manifest.release.sourceSha)) {
@@ -204,7 +204,7 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
         errors.push('packagedRuntime.filename does not match its architecture');
       }
       if (manifest.packagedRuntime.sha256 !== artifact.sha256) {
-        errors.push('packagedRuntime.sha256 does not match the published v0.0.2 DMG');
+        errors.push('packagedRuntime.sha256 does not match the published v0.0.1 DMG');
       }
     }
   }
