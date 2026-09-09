@@ -72,14 +72,16 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toMatch(/#198\/#244[\s\S]{0,120}delivered/i);
       expect(source, filePath).toMatch(/PR #322[\s\S]{0,240}(?:publication only|execution and (?:mobile )?controls)/i);
       expect(source, filePath).toMatch(/PR #323[\s\S]{0,240}(?:no pairing|physical acceptance)/i);
-      expect(source, filePath).toMatch(/0\.0\.2[\s\S]{0,120}unreleased candidate/i);
+      expect(source, filePath).toContain('https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2');
+      expect(source, filePath).toContain('a4546f45bb0ee05cfbb388a0fc5f9e951596be51');
+      expect(source, filePath).not.toMatch(/0\.0\.2[\s\S]{0,120}unreleased candidate/i);
       expect(source, filePath).toMatch(/scheduled Beads Project sync[\s\S]{0,160}failed/i);
       expect(source, filePath).toMatch(/psyche-z7c\.4\.4[\s\S]{0,80}#230/);
       expect(source, filePath).not.toMatch(/(?:iOS|TestFlight)[^\n]{0,120}(?:now supported|internal beta is (?:live|available))/i);
     }
   });
 
-  it('records administrator enforcement with one named PR-only owner bypass for Stage 0', async () => {
+  it('distinguishes historical Stage 0 proof from the current bypass-free policy', async () => {
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
@@ -88,18 +90,46 @@ describe('post-release execution documentation', () => {
     );
 
     for (const { filePath, source } of documents) {
-      expect(source, filePath).toMatch(/administrator enforcement/i);
-      expect(source, filePath).toMatch(/single named PR-only owner bypass[\s\S]{0,100}BunsDev/i);
-      expect(source, filePath).toMatch(/all other actors[\s\S]{0,160}(?:require|remain subject to)[\s\S]{0,80}approval/i);
-      expect(source, filePath).toMatch(/direct-push rejection proof/i);
-      expect(source, filePath).toMatch(/direct pushes[\s\S]{0,120}platform-blocked[\s\S]{0,100}BunsDev/i);
+      expect(source, filePath).toMatch(/administrator\s+enforcement/i);
+      expect(source, filePath).toContain(pullUrl(351));
+      expect(source, filePath).toContain('23cace08');
+      expect(source, filePath).toMatch(/no\s+bypass\s+actors/i);
+      expect(source, filePath).toMatch(/zero\s+required\s+approving\s+reviews/i);
+      expect(source, filePath).toMatch(/direct-push\s+rejection\s+proof/i);
+      expect(source, filePath).toMatch(/direct pushes[\s\S]{0,120}platform-blocked/i);
       expect(source, filePath).toMatch(/GitHub[\s\S]{0,100}(?:cannot|does not)[\s\S]{0,100}self-approval/i);
-      expect(source, filePath).toMatch(
-        /BunsDev[\s\S]{0,180}explicit PR-only bypass[\s\S]{0,160}admin merge[\s\S]{0,180}exact-head[\s\S]{0,120}resolved conversations/i,
-      );
-      expect(source, filePath).not.toMatch(/classic `?bypass_pull_request_allowances`?[\s\S]{0,100}(?:BunsDev|owner)/i);
-      expect(source, filePath).not.toMatch(/no standing (?:bypass )?actor/i);
-      expect(source, filePath).not.toMatch(/zero (?:standing )?bypasses/i);
+      expect(source, filePath).toMatch(/ordinary merges[\s\S]{0,100}no admin override/i);
+      expect(source, filePath).not.toMatch(/all other actors require one approval/i);
+      expect(source, filePath).not.toMatch(/uses the explicit PR-only bypass/i);
+    }
+  });
+
+  it('separates published DMGs, the older Cask, and operator acceptance across public docs', async () => {
+    for (const filePath of [
+      'README.md',
+      'docs/README.md',
+      'docs/ROADMAP.md',
+      'docs/POST-RELEASE-EXECUTION.md',
+      'docs/SUPPORT-MATRIX.md',
+      'docs/RELEASE-ACCEPTANCE.md',
+    ]) {
+      const source = await readFile(filePath, 'utf8');
+      expect(source, filePath).toContain('https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2');
+      expect(source, filePath).toMatch(/Homebrew Cask[\s\S]{0,100}(?:still|remains)[\s\S]{0,50}`v0\.0\.1`/i);
+      expect(source, filePath).toContain('33311851717');
+    }
+  });
+
+  it('records delivered decomposition without treating it as stabilization closure', async () => {
+    for (const filePath of ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md']) {
+      const source = await readFile(filePath, 'utf8');
+      for (const pull of [362, 366, 369, 370, 371, 372, 373]) {
+        expect(source, filePath).toContain(pullUrl(pull));
+      }
+      expect(source, filePath).toMatch(/#196[\s\S]{0,100}reopened[\s\S]{0,80}2026-09-06/i);
+      expect(source, filePath).toContain('terminal_state: incomplete');
+      expect(source, filePath).not.toContain('still in design/inventory mode');
+      expect(source, filePath).not.toContain('At reconciliation there is no open pull request');
     }
   });
 
@@ -308,7 +338,9 @@ describe('post-release execution documentation', () => {
     expect(acceptance).not.toContain('**Open governance debt**');
     expect(acceptance).toMatch(/#31 closed on 2026-08-30/i);
     expect(acceptance).toContain(issueUrl(31));
-    expect(acceptance).toMatch(/\| \*\*Complete\*\* \| \[#31\]/);
+    expect(acceptance).toMatch(/\| \*\*Complete; corrected 2026-09-05\*\* \| \[#31\]/);
+    expect(acceptance).toMatch(/Reusable recovery harness[\s\S]{0,160}\*\*Delivered on source only\*\*/);
+    expect(acceptance).toMatch(/Operator-observed failure scenarios[\s\S]{0,160}\*\*Open post-release stabilization debt\*\*/);
     expect(acceptance).toMatch(/completed publication evidence[\s\S]{0,180}operator-observed acceptance work/i);
   });
 

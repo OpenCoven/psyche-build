@@ -2,8 +2,8 @@
 
 **Status:** Active release contract
 
-**Applies to:** released `v0.0.1` and current post-release `main` unless a later
-release document supersedes it
+**Applies to:** the accepted `v0.0.1` baseline, separately published `v0.0.2`
+artifacts, and current source; publication does not transfer acceptance
 
 **Roadmap:** [ROADMAP.md](./ROADMAP.md)
 
@@ -55,6 +55,23 @@ planned surface rather than a macOS prerequisite.
 
 ## Core capability contract
 
+### Separate publication and installation state
+
+The [v0.0.2 release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2)
+was published on 2026-08-31 from signed tag source
+`a4546f45bb0ee05cfbb388a0fc5f9e951596be51`, with both macOS DMGs and
+checksums. [Release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717)
+completed desktop publication and skipped iOS upload.
+
+The Homebrew Cask still selects `v0.0.1` as of 2026-09-06. The distribution
+table above records that accepted baseline, not a claim that `v0.0.2` is
+unpublished. The newer DMGs require their own operator and upgrade/rollback
+evidence; publication does not complete #196/#239 or change iOS availability.
+See [release acceptance](./RELEASE-ACCEPTANCE.md#v002-publication-is-separate-from-acceptance)
+for the source, workflow, and pinned Cask distinction.
+
+### Capability boundaries
+
 | Capability | macOS / source status | iOS status | Notes |
 |---|---|---|---|
 | Open and manage explicit projects | Supported / source-supported | Planned observation pending #200 | Project identity and canonical scope must be proven |
@@ -69,7 +86,7 @@ planned surface rather than a macOS prerequisite.
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
 | Bonjour host discovery | Not a desktop product claim | Planned pending the #241/#200 discovery and reconnect slice | Local discovery only; not identity, authority, or the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
-| Diagnostics/support bundle | Current visible diagnostics only; the support-bundle v1 schema merged under #243 (PR #278) without production collector wiring, CLI, or UI | Planned | `v0.0.1` does not claim a support bundle; the reusable harness remains under #199 |
+| Diagnostics/support bundle | Current visible diagnostics only; the support-bundle v1 schema merged under #243 (PR #278) without production collector wiring, CLI, or UI | Planned | `v0.0.1` does not claim a support bundle; #199's six-scenario recovery harness is delivered on source, not packaged operator acceptance |
 | Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
 | Team collaboration | Planned | Planned | Not a first-release claim |
 | Marketplace/plugin ecosystem | Planned | Planned | Must wait for stable capability, identity, and compatibility contracts |
@@ -155,13 +172,14 @@ unless they expose a shared defect in the supported macOS path:
 - internal, public, or external iOS distribution and mobile feature completion;
 - remote/off-LAN companion transport;
 - graphics diagnostics in #190 unless release acceptance proves them required;
-- desktop architecture decomposition;
-- complete community-health work beyond the minimum security and ownership
-  floor;
+- remaining desktop architecture decomposition (#197 has early merged slices);
 - cloud terminals or hosted orchestration;
 - team collaboration;
 - marketplace/plugin behavior;
 - complete Threads and AgentFS convergence.
+
+Community-health readiness (#198/#244) is delivered, as recorded in the
+[roadmap](./ROADMAP.md#delivered-since-2026-08-28), rather than a current deferral.
 
 ## Changing this contract
 
