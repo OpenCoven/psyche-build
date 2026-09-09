@@ -82,6 +82,10 @@ use pty_cwd::{open_pty_cwd, OpenedPtyCwd};
 #[cfg(debug_assertions)]
 use pty_launch::pty_start_blocking_with_trusted_fixture;
 pub(crate) use pty_launch::trusted_coven_executable_with;
+// Windows-only, matching its single `#[cfg(target_os = "windows")]`
+// definition; `coven_sessions` reaches it as `super::trusted_coven_executable`.
+#[cfg(target_os = "windows")]
+pub(crate) use pty_launch::trusted_coven_executable;
 // `pty_runtime_tests` drives launch validation directly, and the shared
 // `TestLivePtySession` fixture reserves a slot through `PendingPtyStart`.
 #[cfg(test)]

@@ -168,7 +168,7 @@ pub(crate) fn trusted_coven_executable_with(
 }
 
 #[cfg(target_os = "windows")]
-fn trusted_coven_executable(requested_coven: &str) -> Result<String, String> {
+pub(crate) fn trusted_coven_executable(requested_coven: &str) -> Result<String, String> {
     let resolved_coven = which_on_path("coven");
     trusted_coven_executable_with(Some(requested_coven), resolved_coven.as_deref())
 }
