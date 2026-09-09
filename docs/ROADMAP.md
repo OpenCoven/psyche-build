@@ -268,13 +268,38 @@ exact-head checks and resolved conversations, never a self-approval claim.
 One control-state regression was opened and resolved in this window: the
 scheduled Beads Project sync failed on every scheduled run from 2026-08-30
 until 2026-09-02 after an accidental Beads v1.2.1 binary on one checkout
-migrated the shared Dolt schema and published it. The cursor was rolled back
-per the upstream recovery guide, the versioned `events` audit table was
-re-tracked, `psyche-z7c.4.4` was closed source-first, and the synchronizer
-regenerated its #230 mirror from that corrected source. Scheduled applies have
-succeeded since 2026-09-03 and the read-only validator exits `0`. Repair stayed
-source-first through Beads and the supported synchronizer; generated mirror
-bodies were never the place to repair it.
+migrated the shared Dolt schema and published it. The recovery retained Git
+sidecar `9c85d2b79e3da16c283278824866a5ba1217950a` and published Dolt transition
+`0at1pk83ng4ogm45svvp7ip122acgt4h` →
+`go64gshichpnsj3islhl6pmv5lgi2teb`, restoring schema v53, re-tracking the
+versioned `events` table, and preserving 111 Beads. The 1,362 event rows are the
+last durable 1,361-row pre-ignore snapshot plus the publication transition.
+Three known post-ignore writes retain their commits and final source state but
+not their clone-local event rows, leaving a bounded three-write audit gap.
+
+Scheduled apply
+[33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
+executed source head `9e4a9cf383a1993ca2c2099e3d296acb3dd3c5b4` on 2026-09-04 and
+performed seven operations; from the authoritative
+`psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and made the
+live read-only validator exit `0` with 111 sources, 27 managed mirrors, 24 canonical
+outcomes, and 0 findings. The following scheduled apply
+[33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
+executed source head `23cace08fdc5e35e3ee0cd46200b4ed3bbd94131` on 2026-09-05,
+planned and applied 0 operations, completed every step without warnings or
+visibility drift, and retained schema v53.
+
+Mirror #230 was regenerated after its authoritative source entered closed state.
+It has never been manually edited since the first run; generated-body repair did
+not supply this proof.
+
+The provenance and mirror deviations remain explicit: PR #346 reviewed
+unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, but another checkout
+published `go64gshichpnsj3islhl6pmv5lgi2teb`, so the exact-candidate gate did
+not hold despite matching intended logical state. Mirror #230 first entered the
+closed state through GitHub keyword syntax at that PR's merge rather than the
+synchronizer. PR #350 documented recovery before the second qualifying run and
+omitted this documentation contract assertion; it is not closeout proof.
 [#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the
 evidence under #195.
 
