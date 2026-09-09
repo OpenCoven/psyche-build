@@ -97,6 +97,7 @@ describe('operator acceptance manifest', () => {
 
     const errors = validateOperatorAcceptanceManifest(manifest, { requireComplete: true });
     expect(errors).toContain('sourceSmoke.commandExitStatus must be 0 when succeeded');
+    expect(errors).toContain('sourceSmoke.environment.macOS is required when succeeded');
     expect(errors).toContain(
       'complete manifest cannot contain deferred: corrupt-persisted-state',
     );
@@ -110,6 +111,14 @@ describe('operator acceptance manifest', () => {
     manifest.terminalState = 'complete';
     manifest.sourceSmoke.status = 'succeeded';
     manifest.sourceSmoke.commandExitStatus = 0;
+    manifest.sourceSmoke.environment = {
+      macOS: '15.6',
+      architecture: 'aarch64',
+      node: '22.19.0',
+      pnpm: '10.34.5',
+      tmux: '3.5a',
+      git: '2.51.0',
+    };
     manifest.sourceSmoke.evidenceDigests = ['a'.repeat(64)];
     manifest.packagedRuntime = {
       subject: 'published_dmg',
@@ -138,7 +147,21 @@ describe('operator acceptance manifest', () => {
     ).toContain(
       'observations[0].safeNextAction is required for inapplicable observations',
     );
-    manifest.observations[0].safeNextAction = 'Supported agent CLI unavailable';
+    expect(
+      validateOperatorAcceptanceManifest(manifest, { requireComplete: true }),
+    ).toContain('observations[0].inapplicable is only supported for supported-agent-lane');
+    manifest.observations[0] = {
+      ...manifest.observations[0],
+      status: 'succeeded',
+      workPreserved: true,
+      safeNextAction: null,
+    };
+    manifest.observations[2] = {
+      ...manifest.observations[2],
+      status: 'inapplicable',
+      safeNextAction: 'Supported agent CLI unavailable',
+      workPreserved: null,
+    };
     manifest.operator = {
       githubLogin: 'operator',
       observedAt: '2026-09-07T00:00:00Z',
@@ -153,5 +176,21 @@ describe('operator acceptance manifest', () => {
     expect(
       validateOperatorAcceptanceManifest(manifest, { requireComplete: true }),
     ).toEqual([]);
+  });
+
+  it('requires a string ISO timestamp and complete smoke environment', async () => {
+    const manifest = await template();
+    manifest.operator.observedAt = 1;
+    manifest.sourceSmoke.status = 'succeeded';
+    manifest.sourceSmoke.commandExitStatus = 0;
+    manifest.sourceSmoke.evidenceDigests = ['a'.repeat(64)];
+
+    const errors = validateOperatorAcceptanceManifest(manifest);
+    expect(errors).toContain('operator.observedAt must be an ISO-8601 timestamp');
+    expect(errors).toContain('sourceSmoke.environment.macOS is required when succeeded');
+    expect(errors).toContain('sourceSmoke.environment.architecture is required when succeeded');
+    expect(errors).toContain('sourceSmoke.environment.node is required when succeeded');
+    expect(errors).toContain('sourceSmoke.environment.tmux is required when succeeded');
+    expect(errors).toContain('sourceSmoke.environment.git is required when succeeded');
   });
 });

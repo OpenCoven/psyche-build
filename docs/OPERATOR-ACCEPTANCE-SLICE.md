@@ -71,7 +71,8 @@ Verify the chosen DMG digest before installation. Then:
 - open the disposable repository;
 - create and use one plain tmux-backed terminal;
 - create one supported agent lane when available, otherwise mark it
-  `inapplicable` with the reason in `safeNextAction`, set
+  `inapplicable` only for the `supported-agent-lane` observation, with the reason in
+  `safeNextAction`, set
   `expectationMet` to `true`, and retain at least one sanitized evidence digest;
 - exercise project selection, lane selection, split, focus, resize,
   hide/restore, and active-project handoff;
