@@ -2,6 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import {
+  desktopFunctionBody,
+  desktopFunctionOwners,
+} from './support/desktopRustSurface.js';
 
 const covenSessionsSourcePath = resolve(
   process.cwd(),
@@ -48,10 +52,7 @@ function blockingClosureBody(command: string): string {
 
 describe('Tauri Coven session native contract', () => {
   test('wires bare Coven CLI and attach launch seams', async () => {
-    const [mainSource, libSource] = await Promise.all([
-      readFile(mainSourcePath, 'utf8'),
-      Promise.resolve(readDesktopCommandSurface()),
-    ]);
+    const mainSource = await readFile(mainSourcePath, 'utf8');
     const codeStart = mainSource.indexOf('function covenCliLaunch');
     const codeEnd = mainSource.indexOf('async function spawnCovenThread', codeStart);
     expect(codeStart).toBeGreaterThanOrEqual(0);
@@ -61,18 +62,18 @@ describe('Tauri Coven session native contract', () => {
     expect(codeLaunch).toContain('env: {}');
     expect(codeLaunch).not.toContain('COVEN_SESSION_SOURCE');
 
-    const applyLaunchEnv = functionBody(libSource, 'apply_launch_env');
+    const applyLaunchEnv = desktopFunctionBody('apply_launch_env');
     expect(applyLaunchEnv).toMatch(
       /matches!\s*\(\s*launch_kind\s*,\s*Some\("coven-code"\s*\|\s*"coven-attach"\)\s*\)/,
     );
     expect(applyLaunchEnv).toContain('cmd.env_remove(COVEN_SESSION_SOURCE)');
 
-    const nativeLaunchCommand = functionBody(libSource, 'native_launch_command');
+    const nativeLaunchCommand = desktopFunctionBody('native_launch_command');
     expect(nativeLaunchCommand).not.toContain('"code".to_string()');
     expect(nativeLaunchCommand).not.toContain('--session-id');
 
-    const ptyStart = functionBody(libSource, 'pty_start_blocking');
-    const ptyStartImplementation = functionBody(libSource, 'pty_start_blocking_with_launch');
+    const ptyStart = desktopFunctionBody('pty_start_blocking');
+    const ptyStartImplementation = desktopFunctionBody('pty_start_blocking_with_launch');
     expect(ptyStart).toContain('pty_start_blocking_with_launch(app, options, None)');
     expect(ptyStartImplementation.indexOf('prepare_pty_start(&options)?')).toBeLessThan(
       ptyStartImplementation.indexOf('validate_coven_launch(&options)?'),
@@ -112,11 +113,24 @@ describe('Tauri Coven session native contract', () => {
     expect(libSource).toMatch(
       /tauri::generate_handler!\s*\[[\s\S]*?app_environment\s*,\s*coven_sessions\s*,/,
     );
+    // Deliberately still scoped to the composition root: this says the root
+    // must not call `load_coven_sessions` itself but go through the module.
+    // Widening it to the whole crate would make it fail on the module's own
+    // definition, and re-scoping it to "no PTY module calls it either" is a
+    // different guarantee than the one written here. Revisit when #197 slice 3
+    // moves the launch helpers, rather than silently changing what it asserts.
     expect(libSource).not.toMatch(/load_coven_sessions\s*\(/);
-    expect(libSource).toMatch(/fn\s+validate_coven_launch\(/);
-    expect(libSource).toMatch(/fn\s+resolve_pty_cwd\(/);
-    expect(libSource).toMatch(/fn\s+linked_worktree_roots\(/);
-    expect(libSource).toMatch(/cmd\.env_remove\("TMUX"\)/);
+
+    // Existence assertions resolve by name, so slice 3 relocating these does
+    // not read as their removal.
+    for (const guard of ['validate_coven_launch', 'resolve_pty_cwd', 'linked_worktree_roots']) {
+      expect(desktopFunctionOwners(guard)).toHaveLength(1);
+    }
+    // Names the function that must scrub TMUX. The original asserted only that
+    // the string appeared somewhere in `lib.rs`, which a move would break and
+    // which said nothing about where the scrub had to happen.
+    expect(desktopFunctionBody('pty_start_blocking_with_launch'))
+      .toMatch(/cmd\.env_remove\("TMUX"\)/);
   });
 
   test('registers a non-blocking native Coven session kill command', async () => {

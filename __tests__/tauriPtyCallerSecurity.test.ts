@@ -1,30 +1,18 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { desktopFunctionBody } from './support/desktopRustSurface.js';
 
-const sourcePath = resolve(
-  process.cwd(),
-  'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
-);
-
-function functionBody(source: string, name: string): string {
-  const signature = new RegExp(`\\bfn\\s+${name}\\s*\\(`).exec(source);
-  const start = signature?.index ?? -1;
-  expect(start).toBeGreaterThanOrEqual(0);
-  const bodyStart = source.indexOf('{', start);
-  let depth = 0;
-  for (let index = bodyStart; index < source.length; index += 1) {
-    if (source[index] === '{') depth += 1;
-    if (source[index] === '}') depth -= 1;
-    if (depth === 0) return source.slice(start, index + 1);
-  }
-  throw new Error(`Could not find function body for ${name}`);
-}
-
+/**
+ * Every PTY command must reject callers from embedded external webviews.
+ *
+ * This resolves each function by name rather than reading `lib.rs` by path.
+ * #197 slice 3 moves the PTY subsystem out of that file; a path-coupled
+ * assertion would then fail with *function not found*, which reads as a
+ * missing function when the risk this guards is an unguarded one. The two
+ * failures must not look alike: only one of them is a security regression.
+ */
 describe('Tauri PTY caller security contract', () => {
-  test('rejects PTY access from embedded external webviews', async () => {
-    const source = await readFile(sourcePath, 'utf8');
-    const guard = functionBody(source, 'ensure_trusted_pty_caller');
+  test('rejects PTY access from embedded external webviews', () => {
+    const guard = desktopFunctionBody('ensure_trusted_pty_caller');
 
     expect(guard).toMatch(/label\s*==\s*"main"/);
     expect(guard).toContain("only available to trusted webview 'main'");
@@ -42,7 +30,7 @@ describe('Tauri PTY caller security contract', () => {
       'pty_list',
       'pty_transport_metrics',
     ]) {
-      const command = functionBody(source, name);
+      const command = desktopFunctionBody(name);
       expect(command).toMatch(/webview\s*:\s*tauri::Webview/);
       expect(command).toContain('ensure_trusted_pty_caller(webview.label())?;');
     }
