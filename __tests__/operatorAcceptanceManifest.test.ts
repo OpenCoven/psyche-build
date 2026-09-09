@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { validateOperatorAcceptanceManifest } from '../scripts/validate-operator-acceptance.mjs';
 
-const templatePath = 'docs/templates/operator-acceptance-v0.0.2.json';
+const templatePath = 'docs/templates/operator-acceptance-v0.0.1.json';
 
 async function template(): Promise<Record<string, any>> {
   return JSON.parse(await readFile(templatePath, 'utf8')) as Record<string, any>;
@@ -17,25 +17,25 @@ describe('operator acceptance manifest', () => {
     const manifest = await template();
     manifest.packagedRuntime = {
       subject: 'published_dmg',
-      filename: 'Psyche-Build-v0.0.2-x86_64.dmg',
-      sha256: 'dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103',
+      filename: 'Psyche-Build-v0.0.1-x86_64.dmg',
+      sha256: 'e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f',
       architecture: 'x86_64',
     };
 
     expect(validateOperatorAcceptanceManifest(manifest)).toContain(
-      'packagedRuntime.sha256 does not match the published v0.0.2 DMG',
+      'packagedRuntime.sha256 does not match the published v0.0.1 DMG',
     );
 
     manifest.packagedRuntime = {
       subject: 'published_dmg',
-      filename: 'Psyche-Build-v0.0.2-aarch64.dmg',
-      sha256: 'dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103',
+      filename: 'Psyche-Build-v0.0.1-aarch64.dmg',
+      sha256: 'e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f',
       architecture: 'aarch64',
     };
     manifest.release.sourceSha = '093b4dbd8ca5732deb312659a8ea7c371a6430ed';
 
     expect(validateOperatorAcceptanceManifest(manifest)).toContain(
-      'release.sourceSha must identify the published v0.0.2 subject',
+      'release.sourceSha must identify the published v0.0.1 subject',
     );
   });
 
@@ -56,8 +56,8 @@ describe('operator acceptance manifest', () => {
     manifest.sourceSmoke.evidenceDigests = ['a'.repeat(64)];
     manifest.packagedRuntime = {
       subject: 'published_dmg',
-      filename: 'Psyche-Build-v0.0.2-aarch64.dmg',
-      sha256: 'dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103',
+      filename: 'Psyche-Build-v0.0.1-aarch64.dmg',
+      sha256: 'e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f',
       architecture: 'aarch64',
     };
     manifest.operator = {
@@ -88,8 +88,8 @@ describe('operator acceptance manifest', () => {
     manifest.sourceSmoke.evidenceDigests = ['a'.repeat(64)];
     manifest.packagedRuntime = {
       subject: 'published_dmg',
-      filename: 'Psyche-Build-v0.0.2-aarch64.dmg',
-      sha256: 'dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103',
+      filename: 'Psyche-Build-v0.0.1-aarch64.dmg',
+      sha256: 'e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f',
       architecture: 'aarch64',
     };
     manifest.observations = manifest.observations.map(

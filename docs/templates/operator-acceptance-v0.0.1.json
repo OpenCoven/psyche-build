@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "terminalState": "incomplete",
   "release": {
-    "version": "0.0.2",
-    "tag": "v0.0.2",
-    "tagObjectSha": "87e23c17b3fcff38d33e37a70f56679c475edd43",
-    "sourceSha": "a4546f45bb0ee05cfbb388a0fc5f9e951596be51"
+    "version": "0.0.1",
+    "tag": "v0.0.1",
+    "tagObjectSha": "6c628be321419c07c508e75c3652b44376d2ab3b",
+    "sourceSha": "57c6c71bd5264fde960b062e95de278c8438c94f"
   },
   "sourceSmoke": {
     "subject": "exact_source",

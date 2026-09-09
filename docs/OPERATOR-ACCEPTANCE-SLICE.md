@@ -13,9 +13,9 @@ Keep these subjects separate throughout collection:
 
 | Subject | Immutable identity | What it may prove |
 |---|---|---|
-| Exact-source smoke | signed tag `v0.0.2`, tag object `87e23c17b3fcff38d33e37a70f56679c475edd43`, commit `a4546f45bb0ee05cfbb388a0fc5f9e951596be51` | `pnpm smoke` on a tmux-equipped supported Mac |
-| Apple Silicon packaged runtime | `Psyche-Build-v0.0.2-aarch64.dmg`, SHA-256 `dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103` | operator-observed Tauri behavior on Apple Silicon |
-| Intel packaged runtime | `Psyche-Build-v0.0.2-x86_64.dmg`, SHA-256 `f9e19a77d0d7bc746226fa510bf3e34e5d96185e6563e53bb1898f0d9423033e` | operator-observed Tauri behavior on Intel |
+| Exact-source smoke | signed tag `v0.0.1`, tag object `6c628be321419c07c508e75c3652b44376d2ab3b`, commit `57c6c71bd5264fde960b062e95de278c8438c94f` | `pnpm smoke` on a tmux-equipped supported Mac |
+| Apple Silicon packaged runtime | `Psyche-Build-v0.0.1-aarch64.dmg`, SHA-256 `e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f` | operator-observed Tauri behavior on Apple Silicon |
+| Intel packaged runtime | `Psyche-Build-v0.0.1-x86_64.dmg`, SHA-256 `c6d62f8aeea1570f377fe6bc2d5c90f5b6a4701390af1c42073465f2a586e882` | operator-observed Tauri behavior on Intel |
 
 Choose exactly one packaged runtime matching the operator host. Do not describe
 the source smoke as packaged-runtime evidence. Do not describe current-source
@@ -25,7 +25,7 @@ record.
 
 ## Preparation
 
-1. Copy `docs/templates/operator-acceptance-v0.0.2.json` outside the repository
+1. Copy `docs/templates/operator-acceptance-v0.0.1.json` outside the repository
    into the durable, operator-controlled evidence location.
 2. Work in a disposable macOS user context and disposable Git repository.
 3. Add an uncommitted sentinel file, a named branch, and a disposable worktree.
@@ -52,7 +52,7 @@ pnpm acceptance:validate -- /absolute/path/to/manifest.json --require-complete
 From a clean checkout at the exact tagged commit:
 
 ```sh
-test "$(git rev-parse HEAD)" = a4546f45bb0ee05cfbb388a0fc5f9e951596be51
+test "$(git rev-parse HEAD)" = 57c6c71bd5264fde960b062e95de278c8438c94f
 pnpm install --frozen-lockfile
 pnpm smoke
 ```
