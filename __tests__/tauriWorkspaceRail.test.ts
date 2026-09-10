@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
+import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const root = process.cwd();
 const indexHtml = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/index.html'), 'utf8');
@@ -10,7 +11,13 @@ const styles = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/st
 const packagedTitlebarMark = readFileSync(
   join(root, 'native/desktop/psyche-build-tauri/web/assets/opencoven-mark.png'),
 );
-const tauri = readDesktopCommandSurface();
+// Git control moved to `git_control` in #197 slice 4 while the handler
+// registration stayed in the composition root, so this reads both. The module
+// is resolved by a function it defines rather than by a path.
+const tauri = [
+  readDesktopCommandSurface(),
+  desktopSourceDefining('git_command'),
+].join('\n');
 const sessionModel = readFileSync(
   join(root, 'native/desktop/psyche-build-tauri/web/sessions/session-model.mjs'),
   'utf8',
