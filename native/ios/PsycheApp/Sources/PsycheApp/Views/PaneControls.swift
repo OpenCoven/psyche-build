@@ -170,22 +170,6 @@ struct PaneControlsMenu: View {
 
         Menu {
             switch menu {
-            case .available(let projectID, let rituals):
-                ForEach(rituals) { ritual in
-                    Button {
-                        launchRitual(ritual.id, projectID: projectID)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(ritual.displayName)
-                            if let description = ritual.description, !description.isEmpty {
-                                Text(description)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .disabled(localActionBusy)
-                }
             case .status(let label, let systemImage):
                 Button {} label: {
                     Label(label, systemImage: systemImage)
@@ -223,12 +207,6 @@ struct PaneControlsMenu: View {
     private func stop() {
         run {
             try await store.stopPane(paneID)
-        }
-    }
-
-    private func launchRitual(_ ritualID: String, projectID: String) {
-        run {
-            try await store.launchRitual(ritualID, inProject: projectID)
         }
     }
 
@@ -311,7 +289,6 @@ enum PaneControlsPresentation {
 }
 
 enum RitualMenuPresentation: Equatable {
-    case available(projectID: String, rituals: [PublishedRitual])
     case status(label: String, systemImage: String)
 
     static func make(
@@ -333,7 +310,11 @@ enum RitualMenuPresentation: Equatable {
             if publication.rituals.isEmpty {
                 return .status(label: "No rituals are published for \(project.title)", systemImage: "sparkles")
             }
-            return .available(projectID: project.id, rituals: publication.rituals)
+            // Publication does not advertise an execution capability (#242).
+            return .status(
+                label: "Ritual execution is not available on mobile yet",
+                systemImage: "sparkles"
+            )
         case .empty:
             return .status(label: "No rituals are published for \(project.title)", systemImage: "sparkles")
         case .stale:
