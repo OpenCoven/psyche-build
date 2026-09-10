@@ -5,6 +5,8 @@ struct ActionSheetView: View {
     @ObservedObject var store: RemoteActionStore
 
     @State private var draft = ""
+    @State private var pullRequestTitle = ""
+    @State private var pullRequestBody = ""
 
     var body: some View {
         NavigationStack {
@@ -15,7 +17,7 @@ struct ActionSheetView: View {
                         ActionSheetPresentation.sectionOrder(
                             hasScope: !presentation.scope.rows.isEmpty,
                             hasConsequence: presentation.scope.consequence != nil,
-                            hasRelatedFiles: !presentation.relatedFiles.isEmpty
+                            hasRelatedFiles: standaloneRelatedFiles(for: presentation).isEmpty == false
                         ),
                         id: \.self
                     ) { section in
@@ -100,6 +102,7 @@ struct ActionSheetView: View {
         case .pullRequestReview(let review):
             pullRequestReviewSection(
                 review,
+                paneID: presentation.paneID,
                 message: presentation.message
             )
         case .progress(let progress):
@@ -145,6 +148,7 @@ struct ActionSheetView: View {
 
     private func pullRequestReviewSection(
         _ review: RemoteActionReview,
+        paneID: String,
         message: String
     ) -> some View {
         Section("Pull Request Review") {
@@ -165,18 +169,23 @@ struct ActionSheetView: View {
                 .foregroundStyle(PsycheTheme.amber)
             }
 
-            TextField("Summary", text: $draft, axis: .vertical)
-                .lineLimit(1...12)
+            TextField("Title", text: $pullRequestTitle)
+                .lineLimit(1)
                 .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+                .accessibilityIdentifier("remote-action-pr-title")
+
+            TextField("Summary", text: $pullRequestBody, axis: .vertical)
+                .lineLimit(3...12)
+                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+                .accessibilityIdentifier("remote-action-pr-body")
 
             if !review.details.files.isEmpty {
-                LabeledContent("Review files") {
-                    VStack(alignment: .trailing, spacing: 8) {
-                        ForEach(review.details.files.indices, id: \.self) { index in
-                            Label(review.details.files[index], systemImage: "doc")
-                                .multilineTextAlignment(.trailing)
-                        }
-                    }
+                ForEach(review.details.files, id: \.self) { path in
+                    relatedFileLink(
+                        path,
+                        paneID: paneID,
+                        accessibilityIdentifier: "remote-action-pr-file-\(path)"
+                    )
                 }
             }
         }
@@ -232,8 +241,12 @@ struct ActionSheetView: View {
     @ViewBuilder
     private func relatedFilesSection(for presentation: RemoteActionPresentation) -> some View {
         Section("Related Files") {
-            ForEach(presentation.relatedFiles.indices, id: \.self) { index in
-                Label(presentation.relatedFiles[index], systemImage: "doc")
+            ForEach(standaloneRelatedFiles(for: presentation), id: \.self) { path in
+                relatedFileLink(
+                    path,
+                    paneID: presentation.paneID,
+                    accessibilityIdentifier: "remote-action-file-\(path)"
+                )
             }
         }
     }
@@ -273,7 +286,7 @@ struct ActionSheetView: View {
         case .choice(let options):
             Section("Controls") {
                 submittingIndicator
-                ForEach(options) { option in
+                ForEach(ActionSheetPresentation.visibleChoiceOptions(options)) { option in
                     Button(
                         role: ActionSheetPresentation.optionRole(option).buttonRole,
                         action: { respond(.choice(optionID: option.id)) }
@@ -284,9 +297,10 @@ struct ActionSheetView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(option.label)
                     .accessibilityValue(option.description ?? "")
-                    .accessibilityIdentifier("remote-action-choice-\(option.id)")
+                    .accessibilityIdentifier(ActionSheetPresentation.controlIdentifier(for: option.label))
                 }
-                responseButton("Cancel", response: .cancel)
+                let cancelControl = ActionSheetPresentation.cancelControl(for: options)
+                responseButton(cancelControl.label, response: cancelControl.response)
             }
         case .input:
             Section("Controls") {
@@ -304,8 +318,8 @@ struct ActionSheetView: View {
                 responseButton("Cancel", response: .cancel)
                 responseButton(
                     ActionSheetPresentation.primaryInputLabel(for: presentation.action),
-                    response: .input(value: draft),
-                    recoveryText: draft
+                    response: .input(value: pullRequestSummary),
+                    recoveryText: pullRequestSummary
                 )
             }
         case .progress:
@@ -332,12 +346,14 @@ struct ActionSheetView: View {
         response: MobileActionResponse,
         recoveryText: String? = nil
     ) -> some View {
-        Button(
-            label,
-            role: role.buttonRole,
-            action: { respond(response, recoveryText: recoveryText) }
-        )
+        Button(role: role.buttonRole, action: { respond(response, recoveryText: recoveryText) }) {
+            Text(label)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
         .disabled(store.isSubmitting)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(ActionSheetPresentation.controlIdentifier(for: label))
     }
 
     private func dismissButton(_ label: String) -> some View {
@@ -345,6 +361,9 @@ struct ActionSheetView: View {
             store.dismiss()
         }
         .disabled(store.isSubmitting)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(ActionSheetPresentation.controlIdentifier(for: label))
     }
 
     private func choiceLabel(for option: MobileActionOption) -> some View {
@@ -384,17 +403,56 @@ struct ActionSheetView: View {
     private func resetDraft() {
         guard let presentation = store.presentation else {
             draft = ""
+            pullRequestTitle = ""
+            pullRequestBody = ""
             return
         }
 
         switch presentation.content {
         case .input(let input):
             draft = input.defaultValue
+            pullRequestTitle = ""
+            pullRequestBody = ""
         case .pullRequestReview(let review):
-            draft = review.defaultSummary
+            let reviewDraft = ActionSheetPresentation.pullRequestDraft(from: review.defaultSummary)
+            draft = ""
+            pullRequestTitle = reviewDraft.title
+            pullRequestBody = reviewDraft.body
         default:
             draft = ""
+            pullRequestTitle = ""
+            pullRequestBody = ""
         }
+    }
+
+    private func standaloneRelatedFiles(for presentation: RemoteActionPresentation) -> [String] {
+        switch presentation.content {
+        case .pullRequestReview(let review):
+            let reviewFiles = Set(review.details.files)
+            return presentation.relatedFiles.filter { !reviewFiles.contains($0) }
+        default:
+            return presentation.relatedFiles
+        }
+    }
+
+    private func relatedFileLink(
+        _ path: String,
+        paneID: String,
+        accessibilityIdentifier: String
+    ) -> some View {
+        NavigationLink {
+            ActionSheetRelatedFileView(paneID: paneID, path: path)
+        } label: {
+            Label(path, systemImage: "doc")
+        }
+        .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    private var pullRequestSummary: String {
+        ActionSheetPresentation.pullRequestSummary(
+            title: pullRequestTitle,
+            body: pullRequestBody
+        )
     }
 
     private func color(for tone: ActionSheetStatusTone) -> Color {

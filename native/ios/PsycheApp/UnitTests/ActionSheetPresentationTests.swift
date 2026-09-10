@@ -72,6 +72,38 @@ final class ActionSheetPresentationTests: XCTestCase {
         )
     }
 
+    func testChoiceCancelControlUsesHostCancelOptionWhenAvailable() {
+        let options = [
+            MobileActionOption(id: "ship", label: "Ship"),
+            MobileActionOption(id: "cancel", label: "Cancel merge"),
+        ]
+
+        XCTAssertEqual(
+            ActionSheetPresentation.visibleChoiceOptions(options).map(\.id),
+            ["ship"]
+        )
+        XCTAssertEqual(
+            ActionSheetPresentation.cancelControl(for: options),
+            ActionSheetCancelControl(
+                label: "Cancel merge",
+                response: .choice(optionID: "cancel")
+            )
+        )
+    }
+
+    func testChoiceCancelControlFallsBackToGenericCancelWithoutHostOption() {
+        let options = [MobileActionOption(id: "ship", label: "Ship")]
+
+        XCTAssertEqual(
+            ActionSheetPresentation.visibleChoiceOptions(options).map(\.id),
+            ["ship"]
+        )
+        XCTAssertEqual(
+            ActionSheetPresentation.cancelControl(for: options),
+            ActionSheetCancelControl(label: "Cancel", response: .cancel)
+        )
+    }
+
     func testInputLineRangeUsesDefaultsAndClampsBounds() {
         XCTAssertEqual(ActionSheetPresentation.inputLineRange(nil), 1...6)
         XCTAssertEqual(ActionSheetPresentation.inputLineRange(0), 1...1)
@@ -141,6 +173,32 @@ final class ActionSheetPresentationTests: XCTestCase {
             "Create Pull Request"
         )
         XCTAssertEqual(ActionSheetPresentation.primaryInputLabel(for: .rename), "Continue")
+        XCTAssertEqual(
+            ActionSheetPresentation.controlIdentifier(for: "Continue"),
+            "remote-action-control-continue"
+        )
+        XCTAssertEqual(
+            ActionSheetPresentation.controlIdentifier(for: "Create Pull Request"),
+            "remote-action-control-create-pull-request"
+        )
+    }
+
+    func testPullRequestDraftRoundTripsTitleAndBody() {
+        let draft = ActionSheetPresentation.pullRequestDraft(
+            from: "feat(ios): wire review flow\r\n\r\n\r\n## Summary\r\n- Ship it\r\n"
+        )
+
+        XCTAssertEqual(
+            draft,
+            ActionSheetPullRequestDraft(
+                title: "feat(ios): wire review flow",
+                body: "## Summary\n- Ship it"
+            )
+        )
+        XCTAssertEqual(
+            ActionSheetPresentation.pullRequestSummary(title: draft.title, body: draft.body),
+            "feat(ios): wire review flow\n\n## Summary\n- Ship it"
+        )
     }
 
     @MainActor
@@ -185,5 +243,82 @@ final class ActionSheetPresentationTests: XCTestCase {
             "Close and delete everything",
         ])
         XCTAssertEqual(options.map(\.danger), [nil, true, true])
+    }
+
+    @MainActor
+    func testFixtureMergeFallbackChainSurfacesHostDrivenConfirmations() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let requests = FixtureControlRequests(workspace: workspace)
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .merge, onPane: "web-home", in: workspace)
+        XCTAssertEqual(store.presentation?.title, "Sibling Agents Active")
+        XCTAssertEqual(
+            store.presentation?.message,
+            "1 other agent (homepage preview) is using this worktree. Merging will close it. Proceed?"
+        )
+
+        await store.respond(.confirm)
+        XCTAssertEqual(store.presentation?.title, "Parent Merge Target Unavailable")
+        XCTAssertTrue(
+            store.presentation?.message.contains("Merge \"homepage polish\" directly into main instead?") == true
+        )
+
+        await store.respond(.confirm)
+        XCTAssertEqual(store.presentation?.title, "Merge Worktree")
+        XCTAssertEqual(store.presentation?.message, "Merge \"homepage polish\" into main?")
+    }
+
+    @MainActor
+    func testFixturePullRequestStartsSpecializedReviewFlow() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let requests = FixtureControlRequests(workspace: workspace)
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .createPR, onPane: "web-home", in: workspace)
+        await store.respond(.confirm)
+
+        guard case let .pullRequestReview(review)? = store.presentation?.content else {
+            return XCTFail("Expected pull request review presentation")
+        }
+        XCTAssertEqual(store.presentation?.title, "Create Pull Request")
+        XCTAssertEqual(review.details.files, ["Sources/App.swift", "Sources/Deleted.swift"])
+        XCTAssertEqual(
+            ActionSheetPresentation.pullRequestDraft(from: review.defaultSummary),
+            ActionSheetPullRequestDraft(
+                title: "feat(website): ship homepage polish",
+                body: """
+                ## Summary
+                - Publish the reviewed homepage polish changes.
+
+                ## Changes
+                - Refresh the launch copy and supporting assets.
+                """
+            )
+        )
+    }
+
+    @MainActor
+    func testFixturePullRequestSubmissionPreservesEditedTitleAndBody() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let requests = FixtureControlRequests(workspace: workspace)
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .createPR, onPane: "web-home", in: workspace)
+        await store.respond(.confirm)
+        await store.respond(
+            .input(
+                value: ActionSheetPresentation.pullRequestSummary(
+                    title: "feat(website): ship homepage polish safely",
+                    body: "## Summary\n- Confirmed from iOS"
+                )
+            )
+        )
+
+        XCTAssertEqual(store.presentation?.title, "Create Pull Request")
+        XCTAssertEqual(
+            store.presentation?.message,
+            "Created PR \"feat(website): ship homepage polish safely\" with your edited summary: https://github.com/OpenCoven/psyche-build/pull/903"
+        )
     }
 }

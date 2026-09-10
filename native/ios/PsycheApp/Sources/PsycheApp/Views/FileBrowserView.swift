@@ -239,6 +239,74 @@ private struct FileBrowserRow: View {
     }
 }
 
+struct ActionSheetRelatedFileView: View {
+    @EnvironmentObject private var store: WorkspaceStore
+
+    let paneID: String
+    let path: String
+
+    @State private var file: BrowserFile?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        Group {
+            if store.isStale {
+                ContentUnavailableView(
+                    "Workspace out of date",
+                    systemImage: "wifi.exclamationmark",
+                    description: Text("Reconnect before inspecting this file.")
+                )
+            } else if isLoading, file == nil, errorMessage == nil {
+                ProgressView("Loading file…")
+            } else if let file {
+                switch FileInspectionDestination.forFile(file) {
+                case .preview:
+                    FilePreviewView(paneID: paneID, file: file)
+                case .diff:
+                    DiffView(paneID: paneID, file: file)
+                }
+            } else if let errorMessage {
+                ContentUnavailableView(
+                    "Couldn't load file",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(errorMessage)
+                )
+            } else {
+                ProgressView("Loading file…")
+            }
+        }
+        .navigationTitle(path.components(separatedBy: "/").last ?? path)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: store.isStale) {
+            guard !store.isStale else {
+                isLoading = false
+                return
+            }
+            await load()
+        }
+        .accessibilityIdentifier("action-sheet-related-file")
+    }
+
+    private func load() async {
+        guard !isLoading else { return }
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            let snapshot = try await store.listFiles(inPane: paneID)
+            guard let file = snapshot.files.first(where: { $0.path == path }) else {
+                errorMessage = "The host did not publish \(path) for this pane."
+                return
+            }
+            self.file = file
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
 private struct FilePreviewView: View {
     @EnvironmentObject private var store: WorkspaceStore
 
