@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 import { readSyncConfig } from './beads-project-sync/config.mjs';
 import { validateTrackerDrift } from './beads-project-sync/drift.mjs';
+import { partitionRecoveryIssues, retirementNotice } from './beads-project-sync/recovery.mjs';
 import {
   LEGACY_ISSUE_MARKERS,
   recognizedMarkers,
@@ -175,28 +176,67 @@ function normalizeIssue(rawValue, config, trustedIssueAuthors, issueMarkers) {
 }
 
 function nextPageUrl(linkHeader, config) {
-  if (typeof linkHeader !== 'string' || !linkHeader.trim()) return null;
+  if (linkHeader == null) return null;
+  let next = null;
   for (const part of linkHeader.split(',')) {
     const match = part.match(/^\s*<([^>]+)>\s*;\s*rel="([^"]+)"\s*$/iu);
-    if (match == null || !match[2].split(/\s+/u).includes('next')) continue;
+    if (match == null) fail('Public GitHub issue inventory returned an invalid next-page link');
+    if (!match[2].split(/\s+/u).includes('next')) continue;
+    if (next != null || !URL.canParse(match[1])) {
+      fail('Public GitHub issue inventory returned an invalid next-page link');
+    }
     const url = new URL(match[1]);
-    const namedRepositoryPath = `/repos/${config.owner}/${config.repository}/issues`.toLowerCase();
+    const namedRepositoryPath = `/repos/${config.owner}/${config.repository}/issues`;
     const repositoryIdPath = /^\/repositories\/[1-9]\d*\/issues$/u;
+    const parameters = url.searchParams;
     if (
-      url.protocol !== 'https:'
-      || url.hostname !== 'api.github.com'
+      url.origin !== 'https://api.github.com'
       || url.username
       || url.password
+      || url.hash
       || (
-        url.pathname.toLowerCase() !== namedRepositoryPath
+        url.pathname.toLowerCase() !== namedRepositoryPath.toLowerCase()
         && !repositoryIdPath.test(url.pathname)
       )
+      || parameters.get('state') !== 'all'
+      || parameters.get('per_page') !== '100'
+      || !/^[1-9]\d*$/u.test(parameters.get('page') ?? '')
+      || [...parameters.keys()].some((key) =>
+        !['state', 'per_page', 'page', 'after'].includes(key)
+        || parameters.getAll(key).length !== 1)
     ) {
       fail('Public GitHub issue inventory returned an invalid next-page link');
     }
-    return url;
+    // Match the sync client's numeric-alias handling: never leave the configured repository.
+    next = new URL(`https://api.github.com${namedRepositoryPath}${url.search}`);
   }
-  return null;
+  return next;
+}
+
+function assertRepositoryIdentity(config) {
+  if (typeof config.owner !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]*$/u.test(config.owner)
+    || typeof config.repository !== 'string'
+    || !/^[A-Za-z0-9_.-]+$/u.test(config.repository)
+    || ['.', '..'].includes(config.repository)) {
+    fail('Invalid GitHub repository identity');
+  }
+}
+
+async function readGitHub(url, fetchImpl, env) {
+  const token = env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim();
+  try {
+    return await fetchImpl(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'psyche-build-tracker-drift-check',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      redirect: 'error',
+    });
+  } catch {
+    fail('GitHub read request failed');
+  }
 }
 
 export async function loadPublicGitHubIssues(
@@ -204,6 +244,8 @@ export async function loadPublicGitHubIssues(
   fetchImpl = fetch,
   options = {},
 ) {
+  assertRepositoryIdentity(config);
+  const env = options.env ?? process.env;
   const maxPages = options.maxPages ?? DEFAULT_MAX_GITHUB_ISSUE_PAGES;
   if (!Number.isSafeInteger(maxPages) || maxPages <= 0) {
     fail('GitHub issue page safety bound must be a positive integer');
@@ -213,15 +255,11 @@ export async function loadPublicGitHubIssues(
   url.searchParams.set('state', 'all');
   url.searchParams.set('per_page', String(GITHUB_ISSUE_PAGE_SIZE));
   url.searchParams.set('page', '1');
+  const seenUrls = new Set();
   for (let pageCount = 1; ; pageCount += 1) {
-    const response = await fetchImpl(url, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'psyche-build-tracker-drift-check',
-      },
-      redirect: 'error',
-    });
+    if (seenUrls.has(url.href)) fail('Public GitHub issue inventory returned a repeated next-page link');
+    seenUrls.add(url.href);
+    const response = await readGitHub(url, fetchImpl, env);
     if (!response.ok) {
       fail(`Public GitHub issue inventory failed with HTTP ${response.status}`);
     }
@@ -253,8 +291,28 @@ async function loadIssueInventory(options, config, dependencies) {
   return loadPublicGitHubIssues(
     config,
     dependencies.fetchImpl,
-    { maxPages: options.maxIssuePages },
+    { maxPages: options.maxIssuePages, env: dependencies.env },
   );
+}
+
+async function assertRetiredRelationshipsEmpty(number, config, fetchImpl, env) {
+  assertRepositoryIdentity(config);
+  for (const suffix of ['sub_issues', 'dependencies/blocking', 'dependencies/blocked_by', 'parent']) {
+    const response = await readGitHub(
+      `https://api.github.com/repos/${config.owner}/${config.repository}/issues/${number}/${suffix}${suffix === 'parent' ? '' : '?per_page=100&page=1'}`,
+      fetchImpl,
+      env,
+    );
+    if (suffix === 'parent' && response.status === 404) continue;
+    if (!response.ok) fail('Recovery relationship inventory is unavailable');
+    const values = await response.json();
+    // Only a complete empty connection proves retirement; partial/offline issue
+    // inventories alone cannot establish the absence of incoming references.
+    if (suffix === 'parent' || !Array.isArray(values) || values.length !== 0
+      || response.headers.get('link') != null) {
+      fail('Recovery relationships remain or the relationship inventory is incomplete');
+    }
+  }
 }
 
 export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
@@ -265,6 +323,7 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
     configPath: suppliedDependencies.configPath,
     rawIssues: suppliedDependencies.rawIssues,
     fetchImpl: suppliedDependencies.fetchImpl ?? fetch,
+    env: suppliedDependencies.env ?? process.env,
   };
   try {
     const options = parseOptions(argv);
@@ -327,7 +386,28 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
       LEGACY_ISSUE_MARKERS,
       'tracker drift issue marker',
     );
-    const managedIssues = rawIssues
+    const recovery = partitionRecoveryIssues(rawIssues.map((raw) => {
+      const issue = objectRecord(raw);
+      return {
+        number: issue.number,
+        body: issue.body,
+        state: issue.state,
+        repository: `${config.owner}/${config.repository}`,
+        author: objectRecord(issue.user).login,
+      };
+    }));
+    const retired = new Set(recovery.aliases.filter(({ issue, beadId, survivor }) =>
+      issue.state === 'closed'
+      && issue.body?.endsWith(retirementNotice(beadId, survivor, issue.number)))
+      .map(({ issue }) => issue.number));
+    if (retired.size && (options.issuesFile || dependencies.rawIssues != null)
+      && suppliedDependencies.fetchImpl == null) {
+      fail('Recovery relationship verification requires a live inventory or an explicit fixture reader');
+    }
+    for (const number of retired) {
+      await assertRetiredRelationshipsEmpty(number, config, dependencies.fetchImpl, dependencies.env);
+    }
+    const managedIssues = rawIssues.filter((issue) => !retired.has(objectRecord(issue).number))
       .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors, issueMarkers))
       .filter((issue) => issue != null);
     const report = validateTrackerDrift(

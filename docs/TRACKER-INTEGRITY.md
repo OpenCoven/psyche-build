@@ -101,6 +101,14 @@ Managed issue authors are compared case-insensitively against
 issue contributes bounded findings and does not prevent validation of the
 remaining public inventory.
 
+For incident #420 only, the reader validates the source-owned recovery manifest
+and excludes aliases only when they are closed and carry the exact generated
+retirement notice. Missing survivors, mismatched identities, or forged notices
+fail evidence loading. Unfinished/unmarked aliases still contribute duplicate
+drift; the drift report alone does not prove Project-item or relationship
+cleanup. Pair it with a zero-operation synchronizer plan as described in
+[the recovery contract](../.beads/README.md#incident-420-duplicate-recovery).
+
 ## Bounded retained evidence
 
 Output is JSON and intentionally contains only bounded control-plane fields:

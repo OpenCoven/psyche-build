@@ -64,6 +64,14 @@ const SHA40 = /^[a-f0-9]{40}$/;
 const ISO_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/;
 const REQUIRED_SOURCE_ENVIRONMENT_FIELDS = ['macOS', 'architecture', 'node', 'tmux', 'git'];
+const HOST_ARCHITECTURES = new Map([
+  ['aarch64', 'aarch64'],
+  ['arm64', 'aarch64'],
+  ['x86_64', 'x86_64'],
+  ['x64', 'x86_64'],
+]);
+const ISSUE199_COMMENT =
+  /^https:\/\/github\.com\/OpenCoven\/psyche-build\/issues\/199#issuecomment-[1-9]\d*$/;
 
 function object(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -172,6 +180,14 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
     const smokeObserved = TERMINAL_STATUSES.has(manifest.sourceSmoke.status);
     if (
       smokeObserved &&
+      !HOST_ARCHITECTURES.has(manifest.sourceSmoke.environment?.architecture)
+    ) {
+      errors.push(
+        'sourceSmoke.environment.architecture must be aarch64, arm64, x86_64, or x64 when observed',
+      );
+    }
+    if (
+      smokeObserved &&
       (!Number.isInteger(manifest.sourceSmoke.commandExitStatus) ||
         manifest.sourceSmoke.commandExitStatus < 0)
     ) {
@@ -222,6 +238,13 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
       }
       if (manifest.packagedRuntime.sha256 !== artifact.sha256) {
         errors.push('packagedRuntime.sha256 does not match the published v0.0.1 DMG');
+      }
+      if (
+        TERMINAL_STATUSES.has(manifest.sourceSmoke?.status) &&
+        HOST_ARCHITECTURES.get(manifest.sourceSmoke?.environment?.architecture) !==
+          manifest.packagedRuntime.architecture
+      ) {
+        errors.push('packagedRuntime.architecture must match the observed source smoke host');
       }
     }
   }
@@ -312,11 +335,21 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
     );
   }
 
-  if (
-    exactKeys(manifest.transfers, ['issue199'], 'transfers', errors) &&
-    !Array.isArray(manifest.transfers.issue199)
-  ) {
-    errors.push('transfers.issue199 must be an array');
+  if (exactKeys(manifest.transfers, ['issue199'], 'transfers', errors)) {
+    if (!Array.isArray(manifest.transfers.issue199)) {
+      errors.push('transfers.issue199 must be an array');
+    } else {
+      for (const [index, transfer] of manifest.transfers.issue199.entries()) {
+        const path = `transfers.issue199[${index}]`;
+        if (!exactKeys(transfer, ['observationId', 'url'], path, errors)) continue;
+        if (!REQUIRED_OBSERVATIONS.has(transfer.observationId)) {
+          errors.push(`${path}.observationId must name a required observation`);
+        }
+        if (typeof transfer.url !== 'string' || !ISSUE199_COMMENT.test(transfer.url)) {
+          errors.push(`${path}.url must identify a concrete #199 issue comment`);
+        }
+      }
+    }
   }
 
   const complete = manifest.terminalState === 'complete';
@@ -348,7 +381,7 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
     }
     for (const observation of Array.isArray(manifest.observations) ? manifest.observations : []) {
       if (!object(observation)) continue;
-      if (!TERMINAL_STATUSES.has(observation.status)) {
+      if (!TERMINAL_STATUSES.has(observation.status) || observation.status === 'failed') {
         errors.push(`complete manifest cannot contain ${observation.status}: ${observation.id}`);
       }
       if (observation.expectationMet !== true) {

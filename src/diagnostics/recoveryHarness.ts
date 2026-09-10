@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { observeInterruptedCleanup, RecoveryCleanupRetentionError } from './recoveryCleanup.js';
 
 import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
@@ -39,7 +40,8 @@ export type RecoveryScenarioId =
   | 'unwritable-state-storage'
   | 'duplicate-command-retry'
   | 'stale-owner-epoch'
-  | 'interrupted-cleanup-recovery-marker';
+  | 'interrupted-cleanup-recovery-marker'
+  | 'interrupted-cleanup-owner';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -47,7 +49,8 @@ export type RecoveryInjectionId =
   | 'state-directory-made-read-only'
   | 'command-replayed-after-journal-restart'
   | 'lease-asserted-with-pre-restart-owner-epoch'
-  | 'cleanup-abandoned-after-marker-publication';
+  | 'cleanup-abandoned-after-marker-publication'
+  | 'cleanup-owner-killed-before-git-mutation';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -79,7 +82,12 @@ export type RecoveryInvariantId =
   | 'worktree-retained-after-interruption'
   | 'recovery-marker-discoverable'
   | 'recovery-marker-names-the-worktree'
-  | 'recovery-marker-carries-operator-instructions';
+  | 'recovery-marker-carries-operator-instructions'
+  | 'cleanup-owner-interrupted'
+  | 'cleanup-project-lease-recovered'
+  | 'cleanup-retry-blocked-by-marker'
+  | 'worktree-branch-unchanged'
+  | 'clean-worktree-control-removed';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -592,6 +600,45 @@ async function runInterruptedCleanupRecoveryMarker(): Promise<RecoveryScenarioEv
   }
 }
 
+async function runInterruptedCleanupOwner(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  let retainWorkspace = false;
+  try {
+    const workBefore = digest(await readFile(workspace.workPath));
+    const configBefore = digest(await readFile(projectPaneConfigPath(workspace.projectRoot)));
+    const observed = await observeInterruptedCleanup(workspace.projectRoot);
+    const workAfter = digest(await readFile(workspace.workPath));
+    const configAfter = digest(await readFile(projectPaneConfigPath(workspace.projectRoot)));
+    const invariants: RecoveryInvariantResult[] = [
+      { id: 'cleanup-owner-interrupted', held: observed.interrupted },
+      { id: 'cleanup-project-lease-recovered', held: observed.recovered },
+      { id: 'cleanup-retry-blocked-by-marker', held: observed.retryBlocked },
+      { id: 'worktree-retained-after-interruption', held: observed.retained },
+      { id: 'worktree-branch-unchanged', held: observed.branchUnchanged },
+      { id: 'clean-worktree-control-removed', held: observed.controlRemoved },
+      { id: 'uncommitted-work-untouched', held: workBefore === workAfter },
+      { id: 'persisted-config-unchanged', held: configBefore === configAfter },
+    ];
+    return evidence(
+      'interrupted-cleanup-owner',
+      'cleanup-owner-killed-before-git-mutation',
+      invariants.every((entry) => entry.held) ? 'cleanup_recoverable' : 'unexpected_error',
+      invariants,
+      {
+        workAfter, configBefore, configAfter,
+        ...(observed.workAfter ? { worktreeWorkAfter: digest(observed.workAfter) } : {}),
+      },
+      startedAt,
+    );
+  } catch (error) {
+    retainWorkspace = error instanceof RecoveryCleanupRetentionError;
+    throw error;
+  } finally {
+    if (!retainWorkspace) await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -601,6 +648,7 @@ const SCENARIOS: Readonly<
   'duplicate-command-retry': runDuplicateCommandRetry,
   'stale-owner-epoch': runStaleOwnerEpoch,
   'interrupted-cleanup-recovery-marker': runInterruptedCleanupRecoveryMarker,
+  'interrupted-cleanup-owner': runInterruptedCleanupOwner,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {

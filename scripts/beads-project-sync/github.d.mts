@@ -58,6 +58,7 @@ export interface ProjectViewContext extends ProjectViewDefinition {
 
 export interface ManagedIssueSnapshot {
   beadId: string;
+  author?: string;
   number: number;
   title: string | null;
   body: string | null;
@@ -272,10 +273,13 @@ export interface GhClient {
   }): Promise<IssueMutationResult>;
   closeIssue(operation: {
     issueNumber: number;
+    survivorIssueNumber?: number;
     beadId?: string;
     type?: 'closeIssue';
     phase?: 'closeIssues';
   } | number): Promise<IssueMutationResult>;
+  prepareReconciliationOperation(operation: import('./reconcile.mjs').ReconciliationOperation): void;
+  verifyRecoveryComplete(aliasNumbers: readonly number[]): Promise<void>;
   reopenIssue(operation: { issueNumber: number } | number): Promise<IssueMutationResult>;
   labelIssue(operation: LabelIssueInput): Promise<IssueMutationResult>;
   assignIssue(operation: AssignIssueInput): Promise<IssueMutationResult>;

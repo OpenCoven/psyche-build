@@ -8,6 +8,7 @@ interface TrackerDriftWritable {
 }
 
 interface TrackerDriftRunDependencies {
+  env?: Readonly<Record<string, string | undefined>>;
   cwd?: string;
   stdout?: TrackerDriftWritable;
   stderr?: TrackerDriftWritable;
@@ -19,7 +20,7 @@ interface TrackerDriftRunDependencies {
 export function loadPublicGitHubIssues(
   config: TrackerDriftConfigIdentity,
   fetchImpl?: typeof fetch,
-  options?: { maxPages?: number },
+  options?: { maxPages?: number; env?: Readonly<Record<string, string | undefined>> },
 ): Promise<unknown[]>;
 
 export function runTrackerDriftCheck(

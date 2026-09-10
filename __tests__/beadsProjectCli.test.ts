@@ -79,6 +79,7 @@ interface FakeGhOptions {
   failLeaseValidationAfterWrite?: string;
   failReleaseLock?: Error;
   failSetFields?: Error;
+  failRecoveryVerification?: Error;
   project?: ProjectContext | null;
   projectAfterLock?: ProjectContext | null;
 }
@@ -309,6 +310,10 @@ function createFakeGh(options: FakeGhOptions = {}) {
         : options.existingIssues;
       return [...(issues ?? [])];
     },
+    async verifyRecoveryComplete(numbers: readonly number[]) {
+      calls.push(`verifyRecoveryComplete:${numbers.join(',')}`);
+      if (options.failRecoveryVerification) throw options.failRecoveryVerification;
+    },
     async ensureLabels() {
       writes.push('ensureLabels');
       return [];
@@ -396,6 +401,29 @@ function createFakeGh(options: FakeGhOptions = {}) {
   };
 }
 
+describe('incident #420 CLI completion gate', () => {
+  it.each([false, true])('requires the final reread before apply success (failure=%s)', async (failure) => {
+    const fakeGh = createFakeGh({
+      existingIssues: [208, 395].map((number) => ({
+        ...managedIssue('psyche-i7c', number), author: 'BunsDev', repository: 'OpenCoven/psyche-build',
+      })),
+      ...(failure ? { failRecoveryVerification: new Error('Recovery incoming relationships remain') } : {}),
+    });
+    const result = await runCliWithMockedConfigAndSource(['--apply'], {
+      config: canonicalTargetConfig(),
+      jsonl: toJsonl(makeSourceIssue({ id: 'psyche-i7c', external_ref: 'gh-200' })),
+      env: { BEADS_PROJECT_TOKEN: token },
+      fakeGh,
+    });
+    expect(fakeGh.calls).toContain('verifyRecoveryComplete:395');
+    expect(result.exitCode).toBe(failure ? 1 : 0);
+    if (failure) {
+      expect(result.stderr).toMatch(/Recovery incoming relationships remain/);
+      expect(result.stderr).not.toMatch(/Applied \d+ Beads/);
+    }
+  });
+});
+
 async function runCli(
   args: readonly string[],
   options: {
@@ -482,7 +510,31 @@ async function runCliWithMockedConfigAndSource(
     vi.doUnmock('../scripts/beads-project-sync/source.mjs');
     vi.resetModules();
   }
+
 }
+
+describe('incident #420 CLI preflight', () => {
+    it('renders source preflight without treating it as an empty remote inventory', async () => {
+      const config = await readSyncConfig(configPath);
+      const fakeGh = createFakeGh({ existingIssues: [208, 395].map((number) => ({
+        number, author: 'BunsDev', repository: 'OpenCoven/psyche-build', state: 'open',
+        body: '<!-- psyche-bead-sync:v1 bead-id=psyche-i7c -->',
+      })) });
+      const result = await runCliWithMockedConfigAndSource(['--dry-run'], {
+        config: { ...config }, env: { BEADS_PROJECT_TOKEN: token }, fakeGh,
+        jsonl: JSON.stringify({
+          _type: 'issue', id: 'psyche-i7c', title: 'Recovery fixture', issue_type: 'epic',
+          status: 'open', priority: 1, external_ref: 'gh-200',
+          created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z',
+        }),
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).closureCandidates).toContainEqual(expect.objectContaining({
+        issueNumber: 395, survivorIssueNumber: 208,
+      }));
+      expect(fakeGh.writes).toEqual([]);
+    });
+  });
 
 describe('Beads project sync configuration', () => {
   it('loads the exact checked-in public Project configuration', async () => {

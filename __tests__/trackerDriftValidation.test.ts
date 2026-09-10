@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { RECOVERY_PAIRS, retirementNotice } from '../scripts/beads-project-sync/recovery.mjs';
 
 import {
   TRACKER_DRIFT_FINDING_LIMIT,
@@ -89,6 +90,258 @@ function outputBuffer(): { write: (value: string) => boolean; value: () => strin
 }
 
 describe('tracker drift validation', () => {
+  it.each([
+    [{ GH_TOKEN: 'gh-primary', GITHUB_TOKEN: 'github-fallback' }, 'gh-primary'],
+    [{ GITHUB_TOKEN: 'github-fallback' }, 'github-fallback'],
+    [{ GH_TOKEN: '  ', GITHUB_TOKEN: 'github-fallback' }, 'github-fallback'],
+    [{}, null],
+  ])('uses standard GitHub credential precedence: %j', async (env, token) => {
+    await loadPublicGitHubIssues(
+      { owner: 'OpenCoven', repository: 'psyche-build' },
+      async (_url, init) => {
+        expect(new Headers(init?.headers).get('Authorization'))
+          .toBe(token == null ? null : `Bearer ${token}`);
+        expect(init?.redirect).toBe('error');
+        return new Response('[]');
+      },
+      { env },
+    );
+  });
+
+  it.each(['GH_TOKEN', 'GITHUB_TOKEN', null])('checks all 96 retirement reads with credential=%s', async (credential) => {
+    const rawIssues = RECOVERY_PAIRS.flatMap(({ beadId, survivor, alias }) => [
+      rawIssue(beadId, survivor),
+      rawIssue(beadId, alias, {
+        state: 'closed',
+        body: body('open', 1, undefined, beadId) + retirementNotice(beadId, survivor, alias),
+      }),
+    ]);
+    let requests = 0;
+    let anonymous = 0;
+    const relationships = new Set<string>();
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], {
+      env: credential ? { [credential]: 'fixture-token' } : {},
+      stdout, stderr,
+      fetchImpl: async (input, init) => {
+        requests += 1;
+        if (!new Headers(init?.headers).has('Authorization')) anonymous += 1;
+        if (anonymous > 60) return new Response(null, { status: 403 });
+        expect(init?.redirect).toBe('error');
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/issues')) return new Response(JSON.stringify(rawIssues));
+        relationships.add(url.pathname);
+        return url.pathname.endsWith('/parent')
+          ? new Response(null, { status: 404 }) : new Response('[]');
+      },
+    });
+    if (credential) {
+      expect(stderr.value()).toBe('');
+      expect(exitCode).toBe(1); // Deliberately unrelated Beads fixture still reports drift.
+      expect(requests).toBe(97);
+      expect(anonymous).toBe(0);
+      expect(relationships.size).toBe(96);
+      expect(JSON.parse(stdout.value()).managedMirrorCount).toBe(24);
+    } else {
+      expect(exitCode).toBe(2);
+      expect(requests).toBe(61);
+      expect(stdout.value()).toBe('');
+    }
+  });
+
+  it('keeps authenticated numeric-alias pagination on the configured repository', async () => {
+    const requests: string[] = [];
+    await loadPublicGitHubIssues(
+      { owner: 'OpenCoven', repository: 'psyche-build' },
+      async (input, init) => {
+        const url = new URL(String(input));
+        requests.push(url.pathname);
+        expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer fixture-token');
+        return new Response('[]', {
+          headers: requests.length === 1 ? {
+            Link: '<https://api.github.com/repositories/999/issues?state=all&per_page=100&page=2>; rel="next"',
+          } : {},
+        });
+      },
+      { env: { GH_TOKEN: 'fixture-token' } },
+    );
+    expect(requests).toEqual(Array(2).fill('/repos/OpenCoven/psyche-build/issues'));
+  });
+
+  it.each(['inventory', 'relationship'])('refuses %s redirects without forwarding credentials', async (surface) => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    let requests = 0;
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], {
+      env: { GH_TOKEN: 'fixture-token' }, stdout, stderr,
+      ...(surface === 'relationship' ? { rawIssues: [
+        rawIssue('psyche-i7c', 208),
+        rawIssue('psyche-i7c', 395, {
+          state: 'closed',
+          body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+        }),
+      ] } : {}),
+      fetchImpl: async (url, init) => {
+        requests += 1;
+        expect(new URL(String(url)).origin).toBe('https://api.github.com');
+        expect(init?.redirect).toBe('error');
+        return new Response(null, {
+          status: 302, headers: { Location: 'https://private.invalid/credential-target' },
+        });
+      },
+    });
+    expect(exitCode).toBe(2);
+    expect(requests).toBe(1);
+    expect(stdout.value()).toBe('');
+    expect(stderr.value()).not.toMatch(/fixture-token|private\.invalid/);
+  });
+
+  it.each([
+    'https://example.invalid/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2',
+    'https://api.github.com:444/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2',
+    'https://token@api.github.com/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2',
+    'https://api.github.com/repos/other/repository/issues?state=all&per_page=100&page=2',
+    'https://api.github.com/repos/OpenCoven/psyche-build/issues?state=open&per_page=100&page=2',
+    'https://api.github.com/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2#secret',
+    'https://api.github.com/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2&page=3',
+    'https://api.github.com/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2&secret=sentinel',
+    'not-a-url',
+  ])('rejects untrusted continuation without forwarding credentials: %s', async (next) => {
+    let calls = 0;
+    await expect(loadPublicGitHubIssues(
+      { owner: 'OpenCoven', repository: 'psyche-build' },
+      async () => {
+        calls += 1;
+        return new Response('[]', { headers: { Link: `<${next}>; rel="next"` } });
+      },
+      { env: { GH_TOKEN: 'fixture-token' }, maxPages: 2 },
+    )).rejects.toThrow('invalid next-page link');
+    expect(calls).toBe(1);
+  });
+
+  it.each(['malformed', '<https://api.github.com/repos/OpenCoven/psyche-build/issues?state=all&per_page=100&page=2>; rel="next", malformed'])(
+    'fails closed on malformed pagination: %s', async (link) => {
+      await expect(loadPublicGitHubIssues(
+        { owner: 'OpenCoven', repository: 'psyche-build' },
+        async () => new Response('[]', { headers: { Link: link } }),
+        { env: { GH_TOKEN: 'fixture-token' } },
+      )).rejects.toThrow('invalid next-page link');
+    },
+  );
+
+  it.each([
+    { owner: 'example.invalid@api.github.com', repository: 'psyche-build' },
+    { owner: 'OpenCoven', repository: '../other' },
+    { owner: 'OpenCoven', repository: 'psyche-build?secret=sentinel' },
+  ])('rejects malformed repository config before any request: %j', async (config) => {
+    let calls = 0;
+    await expect(loadPublicGitHubIssues(config, async () => {
+      calls += 1;
+      return new Response('[]');
+    }, { env: { GH_TOKEN: 'fixture-token' } })).rejects.toThrow('repository');
+    expect(calls).toBe(0);
+  });
+
+  it.each(['inventory', 'relationship'])('bounds %s transport errors without secrets', async (surface) => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const exitCode = await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads.jsonl',
+    ], {
+      env: { GH_TOKEN: 'PRIVATE-TOKEN-SENTINEL' }, stdout, stderr,
+      ...(surface === 'relationship' ? { rawIssues: [
+        rawIssue('psyche-i7c', 208),
+        rawIssue('psyche-i7c', 395, {
+          state: 'closed',
+          body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+        }),
+      ] } : {}),
+      fetchImpl: async (_url, init) => {
+        expect(init?.redirect).toBe('error');
+        throw new Error('PRIVATE-TOKEN-SENTINEL https://private.invalid');
+      },
+    });
+    expect(exitCode).toBe(2);
+    expect(stdout.value()).toBe('');
+    expect(stderr.value()).not.toMatch(/PRIVATE|private\.invalid/);
+  });
+
+  it('excludes only verified closed retired aliases from live drift inventories', async () => {
+    const original = rawIssue('psyche-i7c', 208);
+    const alias = rawIssue('psyche-i7c', 395, {
+      state: 'closed',
+      body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+    });
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+    ], { rawIssues: [original, alias], stdout, stderr,
+      fetchImpl: async (url) => String(url).endsWith('/parent')
+        ? new Response(null, { status: 404 }) : new Response('[]', { status: 200 }),
+    });
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value()).managedMirrorCount).toBe(1);
+    expect(JSON.parse(stdout.value()).findings)
+      .not.toContainEqual(expect.objectContaining({ kind: 'duplicate_mirror' }));
+  });
+
+  it.each(['sub_issues', 'dependencies/blocking', 'dependencies/blocked_by', 'parent'])(
+    'does not hide a retired alias with remaining %s relationships from drift', async (suffix) => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const fetchImpl: typeof fetch = async (url) => {
+      if (String(url).includes(`/${suffix}`)) return new Response(JSON.stringify([
+        rawIssue('psyche-i7c.10', 209, { state: 'closed' }),
+      ]), { status: 200 });
+      return String(url).endsWith('/parent')
+        ? new Response(null, { status: 404 }) : new Response('[]', { status: 200 });
+    };
+    const code = await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+    ], {
+      rawIssues: [rawIssue('psyche-i7c', 208), rawIssue('psyche-i7c', 395, {
+        state: 'closed',
+        body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+      })],
+      fetchImpl, stdout, stderr,
+    });
+    expect(code).toBe(2);
+    expect(stderr.value()).toMatch(/recovery.*relationship/i);
+    expect(stdout.value()).toBe('');
+  });
+
+  it.each(['offline', 'unavailable', 'malformed', 'partial'])(
+    'refuses %s relationship evidence for retired aliases', async (kind) => {
+      const stdout = outputBuffer();
+      const stderr = outputBuffer();
+      const code = await runTrackerDriftCheck([
+        '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+      ], {
+        rawIssues: [rawIssue('psyche-i7c', 208), rawIssue('psyche-i7c', 395, {
+          state: 'closed',
+          body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+        })],
+        ...(kind === 'offline' ? {} : { fetchImpl: async () => new Response(
+          kind === 'malformed' ? '{}' : '[]',
+          {
+            status: kind === 'unavailable' ? 403 : 200,
+            ...(kind === 'partial' ? { headers: { link: '<https://api.github.com/next>; rel="next"' } } : {}),
+          },
+        ) }),
+        stdout, stderr,
+      });
+      expect(code).toBe(2);
+      expect(stderr.value()).toMatch(/recovery.*relationship/i);
+      expect(stdout.value()).toBe('');
+    },
+  );
+
   it('does not require a mirror for a closed Bead the synchronizer never publishes', () => {
     const report = validateTrackerDrift(
       [
@@ -778,7 +1031,7 @@ describe('tracker drift validation', () => {
     });
   });
 
-  it('loads more than ten GitHub issue pages without ambient authorization', async () => {
+  it('loads more than ten GitHub issue pages with explicitly anonymous credentials', async () => {
     const requests: Array<{ url: string; headers: RequestInit['headers'] }> = [];
     const fetchImpl = async (
       input: string | URL | Request,
@@ -802,12 +1055,14 @@ describe('tracker drift validation', () => {
     const issues = await loadPublicGitHubIssues(
       { owner: 'OpenCoven', repository: 'psyche-build' },
       fetchImpl,
+      { env: {} },
     );
 
     expect(issues).toHaveLength(1_100);
     expect(requests).toHaveLength(12);
     for (const request of requests) {
       expect(new Headers(request.headers).has('Authorization')).toBe(false);
+      expect(new URL(request.url).pathname).toBe('/repos/OpenCoven/psyche-build/issues');
     }
   });
 
