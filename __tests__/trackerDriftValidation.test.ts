@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { retirementNotice } from '../scripts/beads-project-sync/recovery.mjs';
 
 import {
   TRACKER_DRIFT_FINDING_LIMIT,
@@ -89,6 +90,23 @@ function outputBuffer(): { write: (value: string) => boolean; value: () => strin
 }
 
 describe('tracker drift validation', () => {
+  it('excludes only verified closed retired aliases from live drift inventories', async () => {
+    const original = rawIssue('psyche-i7c', 208);
+    const alias = rawIssue('psyche-i7c', 395, {
+      state: 'closed',
+      body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+    });
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+    ], { rawIssues: [original, alias], stdout, stderr });
+    expect(stderr.value()).toBe('');
+    expect(JSON.parse(stdout.value()).managedMirrorCount).toBe(1);
+    expect(JSON.parse(stdout.value()).findings)
+      .not.toContainEqual(expect.objectContaining({ kind: 'duplicate_mirror' }));
+  });
+
   it('does not require a mirror for a closed Bead the synchronizer never publishes', () => {
     const report = validateTrackerDrift(
       [

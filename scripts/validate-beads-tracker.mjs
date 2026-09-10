@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 import { readSyncConfig } from './beads-project-sync/config.mjs';
 import { validateTrackerDrift } from './beads-project-sync/drift.mjs';
+import { partitionRecoveryIssues, retirementNotice } from './beads-project-sync/recovery.mjs';
 import {
   LEGACY_ISSUE_MARKERS,
   recognizedMarkers,
@@ -327,7 +328,17 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
       LEGACY_ISSUE_MARKERS,
       'tracker drift issue marker',
     );
-    const managedIssues = rawIssues
+    const recovery = partitionRecoveryIssues(rawIssues.map((raw) => ({
+      ...raw,
+      number: raw.number,
+      repository: `${config.owner}/${config.repository}`,
+      author: objectRecord(raw.user).login,
+    })));
+    const retired = new Set(recovery.aliases.filter(({ issue, beadId, survivor }) =>
+      issue.state === 'closed'
+      && issue.body?.endsWith(retirementNotice(beadId, survivor, issue.number)))
+      .map(({ issue }) => issue.number));
+    const managedIssues = rawIssues.filter((issue) => !retired.has(issue.number))
       .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors, issueMarkers))
       .filter((issue) => issue != null);
     const report = validateTrackerDrift(

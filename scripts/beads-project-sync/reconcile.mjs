@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createHash } from 'node:crypto';
+import { partitionRecoveryIssues, RECOVERY_PAIRS, retirementNotice } from './recovery.mjs';
 
 import {
   activeBeads,
@@ -108,6 +109,7 @@ import {
  * @typedef {{
  *   number: number,
  *   title: string | null,
+ *   author?: string | null,
  *   body: string | null,
  *   state: string,
  *   assignees: string[],
@@ -195,6 +197,7 @@ import {
  *   phase: 'closeIssues',
  *   beadId: string,
  *   issueNumber: number,
+ *   survivorIssueNumber?: number,
  * }} CloseIssueOperation
  */
 
@@ -294,6 +297,12 @@ import {
  *   beadId: string,
  *   issueNumber: number,
  *   issueTitle: string | null,
+ *   survivorIssueNumber?: number,
+ *   retirement?: {
+ *     detachParentIssueNumber: number | null,
+ *     detachBlockerIssueNumbers: number[],
+ *     archiveProjectItem: boolean,
+ *   },
  * }} ReconciliationClosureCandidate
  */
 
@@ -358,6 +367,7 @@ import {
 /**
  * @typedef {{
  *   assertApplyLockOwned?: () => Awaitable<void>,
+ *   prepareReconciliationOperation?: (operation: ReconciliationOperation) => void,
  *   createIssue: (operation: CreateIssueOperation) => Awaitable<CreateIssueResult>,
  *   updateIssue: (operation: UpdateIssueOperation & { issueNumber: number }) => Awaitable<unknown>,
  *   labelIssue: (operation: LabelIssueOperation) => Awaitable<unknown>,
@@ -757,6 +767,9 @@ function normalizeIssueSnapshot(value, context) {
   }));
   return {
     number: normalizePositiveInteger(issue.number, 'number', context),
+    ...(issue.author == null ? {} : {
+      author: normalizeOptionalTrimmedString(issue.author, 'author', context),
+    }),
     title: normalizeOptionalTrimmedString(issue.title, 'title', context),
     body: normalizeOptionalMultilineString(issue.body, 'body', context),
     state: normalizeOptionalTrimmedString(issue.state, 'state', context)?.toLowerCase() ?? 'open',
@@ -1392,6 +1405,9 @@ function buildSummary(
     beadId: operation.beadId,
     issueNumber: operation.issueNumber,
     issueTitle: managedIssuesByBeadId.get(operation.beadId)?.title ?? null,
+    ...(operation.survivorIssueNumber == null ? {} : {
+      survivorIssueNumber: operation.survivorIssueNumber,
+    }),
   }));
 
   return {
@@ -1419,6 +1435,25 @@ function buildSummary(
 }
 
 /**
+ * Validate source rendering without inventing a remote inventory or an
+ * executable reconciliation plan.
+ * @param {readonly PublicBead[]} inventory
+ * @param {RenderContext} renderContext
+ * @returns {string}
+ */
+export function preflightSourceReadme(inventory, renderContext) {
+  const markers = resolveMarkerContext(renderContext);
+  const context = buildIssueRenderContext(inventory, renderContext, new Map());
+  for (const bead of activeBeads(inventory)) {
+    renderValidatedManagedIssueBody(bead, context, markers.issueMarker);
+  }
+  const body = renderProjectReadme(inventory, renderContext);
+  const managedBody = attachRenderHash(body, hashRenderedBody(body), markers.projectMarker);
+  assertProjectReadmeWithinLimit(managedBody);
+  return managedBody;
+}
+
+/**
  * @param {PlanReconciliationInput} input
  * @returns {ReconciliationPlan}
  */
@@ -1441,8 +1476,20 @@ export function planReconciliation(input) {
   }
 
   const inventoryIndex = buildBeadIndex(inventory);
+  const recovery = partitionRecoveryIssues(normalizedInput.existingIssues ?? []);
+  for (const pair of RECOVERY_PAIRS) {
+    if (inventoryIndex.byId.has(pair.beadId)
+      && !recovery.canonical.some((issue) => issue.number === pair.survivor)) {
+      fail(`Recovery #420 requires survivor #${pair.survivor} for "${pair.beadId}"`);
+    }
+  }
+  for (const { beadId } of recovery.aliases) {
+    if (!inventoryIndex.byId.has(beadId)) {
+      fail(`Recovery #420 requires source membership for "${beadId}"`);
+    }
+  }
   const managedIssuesByBeadId = indexManagedIssues(
-    normalizedInput.existingIssues ?? [],
+    recovery.canonical,
     markerContext.recognizedIssueMarkers,
   );
   const normalizedRenderContext = normalizedInput.renderContext ?? {};
@@ -1478,6 +1525,17 @@ export function planReconciliation(input) {
   const labelIssues = [];
   /** @type {CloseIssueOperation[]} */
   const closeIssues = [];
+  for (const { issue, beadId, survivor } of recovery.aliases) {
+    if (issue.state !== 'closed'
+      || !issue.body?.endsWith(retirementNotice(beadId, survivor, issue.number))
+      || (issue.projectItem != null && !issue.projectItem.archived)
+      || issue.parentIssue != null || issue.blockerIssues.length > 0) {
+      closeIssues.push({
+        type: 'closeIssue', phase: 'closeIssues', beadId,
+        issueNumber: issue.number, survivorIssueNumber: survivor,
+      });
+    }
+  }
   /** @type {EnsureProjectItemOperation[]} */
   const ensureProjectItems = [];
   /** @type {RestoreItemOperation[]} */
@@ -1796,12 +1854,7 @@ export function planReconciliation(input) {
     ...updateReadmeOperations,
   ]);
 
-  return {
-    inventory,
-    operations,
-    managedIssuesByBeadId,
-    renderContext: normalizedRenderContext,
-    summary: buildSummary(
+  const summary = buildSummary(
       inventory,
       managedIssuesByBeadId,
       createIssues,
@@ -1816,7 +1869,27 @@ export function planReconciliation(input) {
       archiveItems,
       updateReadmeOperations,
       visibilityDrift,
-    ),
+    );
+  summary.managedTotal += recovery.aliases.length;
+  summary.managedOpenCount += recovery.aliases.filter(({ issue }) => issue.state !== 'closed').length;
+  summary.defaultMaxCloseCount = Math.max(5, Math.ceil(summary.managedOpenCount * 0.25));
+  for (const candidate of summary.closureCandidates) {
+    const alias = recovery.aliases.find(({ issue }) => issue.number === candidate.issueNumber);
+    if (alias) {
+      candidate.issueTitle = alias.issue.title;
+      candidate.retirement = {
+        detachParentIssueNumber: alias.issue.parentIssueNumber,
+        detachBlockerIssueNumbers: alias.issue.blockerIssueNumbers,
+        archiveProjectItem: alias.issue.projectItem != null && !alias.issue.projectItem.archived,
+      };
+    }
+  }
+  return {
+    inventory,
+    operations,
+    managedIssuesByBeadId,
+    renderContext: normalizedRenderContext,
+    summary,
   };
 }
 
@@ -1953,6 +2026,7 @@ export async function applyReconciliation(plan, adapters) {
       if (adapters.assertApplyLockOwned) {
         await adapters.assertApplyLockOwned();
       }
+      adapters.prepareReconciliationOperation?.(operation);
       switch (operation.type) {
         case 'createIssue': {
           const createIssue = adapters.createIssue ?? fail('applyReconciliation requires adapters.createIssue');
@@ -2019,7 +2093,9 @@ export async function applyReconciliation(plan, adapters) {
         case 'closeIssue': {
           const closeIssue = adapters.closeIssue ?? fail('applyReconciliation requires adapters.closeIssue');
           const result = await closeIssue(operation);
-          issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
+          if (operation.survivorIssueNumber == null) {
+            issueNumbersByBeadId.set(operation.beadId, operation.issueNumber);
+          }
           applied.push({ operation, result });
           break;
         }

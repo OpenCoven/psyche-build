@@ -11,6 +11,7 @@ import {
   applyReconciliation,
   assertSafePlan,
   planReconciliation,
+  preflightSourceReadme,
   ReconciliationApplyError,
 } from './reconcile.mjs';
 import {
@@ -370,18 +371,6 @@ function summarizeNoReconciliation() {
 }
 
 /**
- * @param {import('./reconcile.mjs').ReconciliationPlan} plan
- * @returns {string}
- */
-function plannedReadme(plan) {
-  const operation = plan.operations.find((candidate) => candidate.type === 'updateReadme');
-  if (!operation || operation.type !== 'updateReadme') {
-    fail('Provisioning requires a generated Project README operation');
-  }
-  return operation.body;
-}
-
-/**
  * @param {import('./github.mjs').ProjectContext | null} project
  * @param {string} projectNodeId
  * @returns {asserts project is import('./github.mjs').ProjectContext}
@@ -552,14 +541,7 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
     let project = await gh.discoverProject();
     assertPinnedPublicProject(project, config.projectNodeId);
     let provisionedThisRun = false;
-    const firstRunPlan = planReconciliation({
-      inventory,
-      existingIssues: [],
-      readme: null,
-      renderContext,
-    });
-    validatePlanSafety(firstRunPlan, config.massClose, false);
-    const desiredProjectReadme = plannedReadme(firstRunPlan);
+    const desiredProjectReadme = preflightSourceReadme(inventory, renderContext);
     const applyLock = options.mode === 'dry-run'
       ? null
       : await gh.acquireApplyLock(createApplyLockIdentity(env));

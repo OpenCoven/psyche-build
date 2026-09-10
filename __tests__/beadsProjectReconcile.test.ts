@@ -11,6 +11,7 @@ import {
   DEFAULT_ISSUE_MARKER,
   renderHashMarker,
 } from '../scripts/beads-project-sync/markers.mjs';
+import { retirementNotice } from '../scripts/beads-project-sync/recovery.mjs';
 import {
   GITHUB_ISSUE_BODY_MAX_CODE_POINTS,
   GITHUB_PROJECT_README_MAX_CODE_POINTS,
@@ -75,6 +76,85 @@ function makeBead(id: string, overrides: Partial<PublicBead> = {}): PublicBead {
 
   return bead;
 }
+
+describe('incident #420 retirement planning', () => {
+    const pair = [
+      { number: 208, author: 'BunsDev', repository: 'OpenCoven/psyche-build', state: 'open',
+        body: '<!-- psyche-bead-sync:v1 bead-id=psyche-i7c -->' },
+      { number: 395, author: 'BunsDev', repository: 'OpenCoven/psyche-build', state: 'open',
+        body: '<!-- psyche-bead-sync:v1 bead-id=psyche-i7c -->' },
+    ];
+
+    it('plans retirement only for the alias and retains canonical relationship references', () => {
+      const plan = planReconciliation({
+        inventory: [makeBead('psyche-i7c'), makeBead('child', {
+          parentId: 'psyche-i7c', blockedByIds: ['psyche-i7c'],
+        })],
+        existingIssues: pair,
+        renderContext: baseContext,
+      });
+      expect(plan.managedIssuesByBeadId.get('psyche-i7c')?.number).toBe(208);
+      expect(plan.operations.filter((op) => op.type === 'closeIssue')).toEqual([
+        expect.objectContaining({ issueNumber: 395, survivorIssueNumber: 208 }),
+      ]);
+      expect(plan.summary.closeIssueCount).toBe(1);
+      expect(plan.summary.managedOpenCount).toBe(2);
+      expect(plan.summary.closureCandidates).toContainEqual(expect.objectContaining({
+        issueNumber: 395, survivorIssueNumber: 208,
+        retirement: {
+          detachParentIssueNumber: null, detachBlockerIssueNumbers: [], archiveProjectItem: false,
+        },
+      }));
+      expect(plan.operations.filter((op) => op.type === 'createIssue'))
+        .not.toContainEqual(expect.objectContaining({ beadId: 'psyche-i7c' }));
+      expect(() => assertSafePlan(plan, { maxCloseCount: 0 })).toThrow(/Refusing to close/);
+    });
+
+    it('refuses alias retirement without authoritative source membership', () => {
+      expect(() => planReconciliation({
+        inventory: [makeBead('unrelated')], existingIssues: pair, renderContext: baseContext,
+      })).toThrow(/source.*psyche-i7c/i);
+    });
+
+    it('does not recreate an approved survivor missing from a partial inventory', () => {
+      expect(() => planReconciliation({
+        inventory: [makeBead('psyche-i7c')], existingIssues: [], renderContext: baseContext,
+      })).toThrow(/survivor.*208/i);
+    });
+
+    it('preserves canonical application references through alias retirement', async () => {
+      const plan = planReconciliation({
+        inventory: finalizeInventory([makeBead('psyche-i7c'), makeBead('child', {
+          parentId: 'psyche-i7c', blockedByIds: ['psyche-i7c'],
+        })]),
+        existingIssues: pair, renderContext: baseContext,
+      });
+      const adapters = recordingAdapters(() => {});
+      adapters.syncParent = (operation) => { expect(operation.parentIssueNumber).toBe(208); };
+      adapters.syncBlocker = (operation) => { expect(operation.blockerIssueNumbers).toEqual([208]); };
+      const result = await applyReconciliation(plan, adapters);
+      expect(result.issueNumbersByBeadId.get('psyche-i7c')).toBe(208);
+    });
+
+    it('plans no work after completed alias cleanup and canonical reconciliation', () => {
+      const inventory = finalizeInventory([makeBead('psyche-i7c')]);
+      const numbers = new Map([['psyche-i7c', 208]]);
+      const canonical = {
+        ...managedIssue(inventory[0]!, inventory, numbers),
+        author: 'BunsDev', repository: 'OpenCoven/psyche-build',
+      };
+      const plan = planReconciliation({
+        inventory, renderContext: baseContext,
+        readme: { body: canonicalReadmeBody(inventory) },
+        existingIssues: [canonical, {
+          ...pair[1]!, state: 'closed',
+          body: pair[1]!.body + retirementNotice('psyche-i7c', 208, 395),
+          projectItem: { id: 'alias-item', archived: true, fields: {} },
+        }],
+      });
+      expect(plan.operations).toEqual([]);
+    });
+  });
 
 function finalizeInventory(beads: readonly PublicBead[]): PublicBead[] {
   const byId = new Map(beads.map((bead) => [bead.id, bead]));
@@ -1030,14 +1110,14 @@ describe('Beads project reconciliation', () => {
       }),
     ]);
     const currentBead = currentInventory[0]!;
-    const issueNumbers = activeIssueNumbersByBeadId(currentInventory, 401);
+    const issueNumbers = activeIssueNumbersByBeadId(currentInventory, 1401);
 
     const plan = planReconciliation({
       inventory: currentInventory,
       existingIssues: [
         managedIssue(previousInventory[0]!, previousInventory, issueNumbers, {
           projectItem: {
-            id: 'item-401',
+            id: 'item-1401',
             archived: false,
             fields: desiredFields(currentBead),
           },
@@ -1052,7 +1132,7 @@ describe('Beads project reconciliation', () => {
     expect(updateOps).toHaveLength(1);
     expect(updateOps[0]).toMatchObject({
       beadId: 'pb-01',
-      issueNumber: 401,
+      issueNumber: 1401,
       title: '[pb-01] Refresh the public issue body',
       assignees: ['BunsDev'],
     });
@@ -1063,7 +1143,7 @@ describe('Beads project reconciliation', () => {
     const inventory = finalizeInventory([
       makeBead('pb-assignee-extra', { githubAssignee: 'BunsDev' }),
     ]);
-    const issueNumbers = activeIssueNumbersByBeadId(inventory, 410);
+    const issueNumbers = activeIssueNumbersByBeadId(inventory, 1410);
     const plan = planReconciliation({
       inventory,
       existingIssues: [

@@ -37,6 +37,200 @@ const apiHeaders = [
   '--include',
 ];
 
+describe('incident #420 retirement writes', () => {
+  function recoveryBackend() {
+    const issues = new Map([208, 395].map((number) => [number, trustedIssue({
+      number, id: number + 1000, node_id: `I_${number}`, state: 'open',
+      repository_url: `https://api.github.com/repos/${owner}/${repo}`,
+      body: managedBody('psyche-i7c'), html_url: `https://github.com/${owner}/${repo}/issues/${number}`,
+    })]));
+    const writes: RunCall[] = [];
+    const relationships: {
+      parent: boolean; blocker: boolean; item: boolean; archived: boolean; staleParent?: boolean;
+    } = { parent: false, blocker: false, item: false, archived: false };
+    let failPatch = false;
+    let changeIdentity = false;
+    const run: GhRun = async (command, args, options) => {
+      const call = { command, args, options };
+      if (args[1] === 'user') return success({ login: 'BunsDev' });
+      const method = args[args.indexOf('--method') + 1];
+      if (method === 'GET' && args[1]?.includes('/issues?')) return success([...issues.values()]);
+      const number = Number(args[1]?.match(/issues\/(\d+)/)?.[1]);
+      if (method === 'GET' && /\/parent$/u.test(args[1] ?? '')) {
+        if (number === 395 && relationships.parent) return success({
+          ...issues.get(208), ...(relationships.staleParent ? { id: 99999 } : {}),
+        });
+        throw httpError(404, 'no parent');
+      }
+      if (method === 'GET' && /dependencies\//u.test(args[1] ?? '')) {
+        return success(number === 395 && relationships.blocker ? [issues.get(208)] : []);
+      }
+      if (method === 'GET' && issues.has(number)) return success(issues.get(number));
+      if (args[1] === 'graphql' && String(parseStdin(call).query).includes('DiscoverManagedProject(')) {
+        return success({ data: {
+          repository: { id: 'R_1' },
+          organization: { id: 'O_1', projectsV2: {
+            nodes: [{ id: projectNodeId, number: 11, title: 'Project',
+              readme: boundProjectReadmeMarker, public: true }],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          } },
+        } });
+      }
+      if (args[1] === 'graphql') return success({ data: { node: { items: {
+        nodes: relationships.item ? [{
+          id: 'ALIAS_ITEM', isArchived: relationships.archived,
+          content: { id: 'I_395', url: `https://github.com/${owner}/${repo}/issues/395` },
+        }] : [], pageInfo: { hasNextPage: false, endCursor: null },
+      } } } });
+      if (method === 'DELETE') {
+        writes.push(call);
+        if (args[1]?.endsWith('/sub_issue')) relationships.parent = false;
+        else if (args[1]?.endsWith('/blocked_by/1208')) relationships.blocker = false;
+        else throw new Error('Unexpected relationship delete');
+        return success();
+      }
+      if (args[0] === 'project' && args[1] === 'item-archive') {
+        writes.push(call);
+        expect(args).toContain('ALIAS_ITEM');
+        relationships.archived = true;
+        return success();
+      }
+      if (method === 'PATCH') {
+        writes.push(call);
+        if (failPatch) {
+          failPatch = false;
+          if (changeIdentity) issues.get(395)!.body = managedBody('other');
+          throw httpError(503, 'retry');
+        }
+        Object.assign(issues.get(number)!, parseStdin(call));
+        return success(issues.get(number));
+      }
+      throw new Error(`Unexpected recovery request ${args.join(' ')}`);
+    };
+    return { issues, writes, relationships, run, failNextPatch(change = false) { failPatch = true; changeIdentity = change; } };
+  }
+
+  const operation = { beadId: 'psyche-i7c', issueNumber: 395, survivorIssueNumber: 208 };
+  it('preserves issue content and canonical state, and resumes after a partial retirement', async () => {
+    const backend = recoveryBackend();
+    const client = createGhClient({ owner, repo, token, run: backend.run, projectNodeId });
+    await client.discoverProject();
+    const originalBody = backend.issues.get(395)!.body;
+    await client.closeIssue(operation);
+    expect(backend.issues.get(208)!.state).toBe('open');
+    expect(backend.issues.get(395)!.body).toContain(originalBody);
+    expect(backend.issues.get(395)!.body).toContain('psyche-bead-retired:420');
+    expect(backend.issues.get(395)!.state).toBe('closed');
+    backend.issues.get(395)!.state = 'open';
+    await client.closeIssue(operation);
+    expect(backend.issues.get(395)!.state).toBe('closed');
+    expect(backend.issues.get(395)!.body.match(/psyche-bead-retired:420/gu)).toHaveLength(1);
+  });
+
+  it('revalidates identity before a retry and stops before another write', async () => {
+    const backend = recoveryBackend();
+    backend.failNextPatch(true);
+    const client = createGhClient({ owner, repo, token, run: backend.run, projectNodeId, sleep: async () => {} });
+    await client.discoverProject();
+    await expect(client.closeIssue(operation)).rejects.toThrow(/identity/i);
+    expect(backend.writes).toHaveLength(1);
+    expect(backend.issues.get(208)!.state).toBe('open');
+  });
+
+  it('refuses retirement without an owned lease', async () => {
+    const backend = recoveryBackend();
+    const client = createGhClient({
+      owner, repo, token, run: backend.run, mutationMode: 'lease-required',
+    });
+    await expect(client.closeIssue(operation)).rejects.toThrow(/lease/i);
+    expect(backend.writes).toHaveLength(0);
+  });
+
+  it('rejects a reversed survivor before writing', async () => {
+    const backend = recoveryBackend();
+    const client = createGhClient({ owner, repo, token, run: backend.run });
+    await expect(client.closeIssue({ ...operation, issueNumber: 208, survivorIssueNumber: 395 }))
+      .rejects.toThrow(/recovery/i);
+    expect(backend.writes).toHaveLength(0);
+  });
+
+  it('returns both approved members for planning but rejects an untrusted alias creator', async () => {
+    const backend = recoveryBackend();
+    const client = createGhClient({ owner, repo, token, run: backend.run, projectNodeId });
+    expect((await client.listManagedIssues()).map((issue) => issue.number)).toEqual([208, 395]);
+    Object.assign(backend.issues.get(395)!.user, { login: 'stranger' });
+    await expect(client.listManagedIssues()).rejects.toThrow(/identity/i);
+  });
+
+  it('validates canonical recovery targets again on every write retry', async () => {
+    const backend = recoveryBackend();
+    backend.failNextPatch(true);
+    const client = createGhClient({ owner, repo, token, run: backend.run, sleep: async () => {} });
+    client.prepareReconciliationOperation({
+      type: 'updateIssue', phase: 'updateIssues', beadId: 'psyche-i7c',
+      issueNumber: 208, title: 'Canonical', body: managedBody('psyche-i7c'),
+      renderHash: '0'.repeat(64), assignees: [], labels: [], state: 'open',
+    });
+    await expect(client.updateIssue({
+      issueNumber: 208, title: 'Canonical', body: managedBody('psyche-i7c'),
+    })).rejects.toThrow(/identity/i);
+    expect(backend.writes).toHaveLength(1);
+  });
+
+  it('stops retirement retries after losing the owned lease', async () => {
+    const backend = recoveryBackend();
+    const lock = createApplyLockBackend();
+    backend.failNextPatch();
+    const client = createGhClient({
+      owner, repo, token, projectNodeId, mutationMode: 'lease-required',
+      run: (command, args, options) => args[1]?.includes('/issues/') || args[1] === 'graphql'
+        ? backend.run(command, args, options) : lock.run(command, args, options),
+      sleep: async () => { lock.stealLock({
+        owner: 'other', runId: 'other', leaseId: 'other',
+        acquiredAt: Date.now(), expiresAt: Date.now() + 60_000,
+      }); },
+    });
+    await client.discoverProject();
+    const handle = await client.acquireApplyLock({
+      owner: 'test', runId: 'recovery', leaseId: 'recovery-lease', ttlMs: 60_000,
+    });
+    const lease = client.startApplyLockLease(handle);
+    try {
+      await expect(client.closeIssue(operation)).rejects.toThrow(/lease|ownership/i);
+      expect(backend.writes).toHaveLength(1);
+    } finally {
+      await lease.stop();
+    }
+  });
+
+  it('detaches alias relationships and archives only its own Project item', async () => {
+    const backend = recoveryBackend();
+    Object.assign(backend.relationships, { parent: true, blocker: true, item: true });
+    const client = createGhClient({ owner, repo, token, run: backend.run, projectNodeId });
+    await client.discoverProject();
+    await client.closeIssue(operation);
+    expect(backend.relationships).toEqual({ parent: false, blocker: false, item: true, archived: true });
+    expect(backend.issues.get(208)!.state).toBe('open');
+    expect(backend.writes.filter((call) => call.args.includes('DELETE'))).toHaveLength(2);
+  });
+
+  it('requires the pinned Project before the first retirement write', async () => {
+    const backend = recoveryBackend();
+    const client = createGhClient({ owner, repo, token, run: backend.run });
+    await expect(client.closeIssue(operation)).rejects.toThrow(/project/i);
+    expect(backend.writes).toHaveLength(0);
+  });
+
+  it('validates parent relationship identity before any recovery write', async () => {
+    const backend = recoveryBackend();
+    Object.assign(backend.relationships, { parent: true, staleParent: true });
+    const client = createGhClient({ owner, repo, token, run: backend.run, projectNodeId });
+    await client.discoverProject();
+    await expect(client.closeIssue(operation)).rejects.toThrow(/relationship.*identity/i);
+    expect(backend.writes).toHaveLength(0);
+  });
+});
+
 type TestGhClientOptions = Omit<
   Parameters<typeof createGhClientImplementation>[0],
   'mutationMode' | 'trustedIssueAuthors'
