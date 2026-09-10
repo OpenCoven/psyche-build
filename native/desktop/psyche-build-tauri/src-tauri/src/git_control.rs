@@ -575,27 +575,27 @@ const MAX_GIT_COMMONDIR_FILE_BYTES: u64 = 4 * 1024;
 const MAX_GIT_HEAD_BYTES: u64 = 4 * 1024;
 
 /// Same resolution as [`git_common_dir`], but classifies the `commondir`
-/// marker with `symlink_metadata` (no-follow) and reads it through a
-/// directory handle already pinned by identity, rather than trusting a
-/// plain path a second time after that identity was captured. This closes
-/// the same TOCTOU window `git_dir_for_worktree` already defends against
-/// for the `.git` marker itself: a hostile repository swapping its Git
-/// directory, or the `commondir` file inside it, for a symlink between
-/// resolution and this read must not redirect where the common directory
-/// is believed to live.
+/// marker via the pinned directory handle's own no-follow, fd-relative
+/// open, rather than a second, separate path-based stat. Existence,
+/// symlink-ness, and directory-ness are all classified by the same
+/// `openat`/`NtCreateFile` call that performs the read, so nothing about
+/// the marker's type can be decided from a lookup that could itself have
+/// raced against a swap of the resolved Git directory or the marker
+/// inside it. This closes the same TOCTOU window `git_dir_for_worktree`
+/// already defends against for the `.git` marker itself: a hostile
+/// repository swapping its Git directory, or the `commondir` file inside
+/// it, for a symlink between resolution and this read must not redirect
+/// where the common directory is believed to live.
 fn git_common_dir_pinned(handle: &GitMetadataDirectory, git_dir: &Path) -> Result<PathBuf, String> {
     let label = "Git commondir file";
-    match git_marker_kind(&git_dir.join("commondir"), label)? {
-        GitMarkerKind::Missing => Ok(git_dir.to_path_buf()),
-        GitMarkerKind::Directory => Err(format!("{label} is a directory, not a file")),
-        GitMarkerKind::File => {
-            let bytes = handle
-                .read_file("commondir", label, MAX_GIT_COMMONDIR_FILE_BYTES)
-                .map_err(|error| error.into_message(label))?;
+    match handle.read_file("commondir", label, MAX_GIT_COMMONDIR_FILE_BYTES) {
+        Ok(bytes) => {
             let raw =
                 String::from_utf8(bytes).map_err(|_| format!("{label} is not valid UTF-8"))?;
             Ok(resolve_git_path(git_dir, &raw))
         }
+        Err(GitMetadataReadError::NotFound) => Ok(git_dir.to_path_buf()),
+        Err(error) => Err(error.into_message(label)),
     }
 }
 
@@ -1015,16 +1015,21 @@ fn windows_git_metadata_child_share_mode() -> u32 {
 }
 
 #[cfg(any(test, windows))]
-fn windows_git_metadata_open_error(label: &str, error: u32) -> String {
+fn windows_git_metadata_open_error(label: &str, error: u32) -> GitMetadataReadError {
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
     const ERROR_SHARING_VIOLATION: u32 = 32;
 
-    if error == ERROR_SHARING_VIOLATION {
-        format!("{label} changed while being read")
+    if matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+        GitMetadataReadError::NotFound
+    } else if error == ERROR_SHARING_VIOLATION {
+        format!("{label} changed while being read").into()
     } else {
         format!(
             "open {label}: {}",
             std::io::Error::from_raw_os_error(error as i32)
         )
+        .into()
     }
 }
 
@@ -1058,7 +1063,7 @@ fn windows_open_relative_no_follow(
     directory: &std::fs::File,
     name: &str,
     label: &str,
-) -> Result<std::fs::File, String> {
+) -> Result<std::fs::File, GitMetadataReadError> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
     const FILE_GENERIC_READ: u32 = 0x0012_0089;
@@ -1070,7 +1075,7 @@ fn windows_open_relative_no_follow(
 
     let mut name = name.encode_utf16().collect::<Vec<_>>();
     if name.iter().any(|unit| *unit == 0) {
-        return Err(format!("{label} has an invalid file name"));
+        return Err(format!("{label} has an invalid file name").into());
     }
     let byte_length = name
         .len()
@@ -1116,7 +1121,7 @@ fn windows_open_relative_no_follow(
         return Err(windows_git_metadata_open_error(label, error));
     }
     if handle.is_null() {
-        return Err(format!("open {label}: Windows returned an invalid handle"));
+        return Err(format!("open {label}: Windows returned an invalid handle").into());
     }
     Ok(unsafe { std::fs::File::from_raw_handle(handle) })
 }
@@ -1124,6 +1129,12 @@ fn windows_open_relative_no_follow(
 #[derive(Debug, Eq, PartialEq)]
 enum GitMetadataReadError {
     TooLarge,
+    /// The child does not exist, determined the same way the read itself
+    /// resolves the child (relative to the pinned directory handle, not a
+    /// second, separately racy path lookup). Only meaningful for optional
+    /// markers like `commondir`; required markers like `HEAD` still treat
+    /// this as an error via [`Self::into_message`].
+    NotFound,
     Other(String),
 }
 
@@ -1137,6 +1148,7 @@ impl GitMetadataReadError {
     fn into_message(self, label: &str) -> String {
         match self {
             Self::TooLarge => format!("{label} is too large"),
+            Self::NotFound => format!("{label} does not exist"),
             Self::Other(error) => error,
         }
     }
@@ -1148,8 +1160,13 @@ fn read_bounded_git_metadata_file(
     label: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, GitMetadataReadError> {
-    let before =
-        std::fs::symlink_metadata(path).map_err(|error| format!("inspect {label}: {error}"))?;
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GitMetadataReadError::NotFound);
+        }
+        Err(error) => return Err(format!("inspect {label}: {error}").into()),
+    };
     if metadata_is_link_like(&before) || !before.is_file() {
         return Err(format!("{label} is not a regular file").into());
     }
@@ -1268,6 +1285,9 @@ impl GitMetadataDirectory {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
                 return Err(format!("{label} is not a regular file").into());
+            }
+            if matches!(error.raw_os_error(), Some(libc::ENOENT)) {
+                return Err(GitMetadataReadError::NotFound);
             }
             return Err(format!("open {label}: {error}").into());
         }
@@ -4404,7 +4424,8 @@ mod tests {
     #[test]
     fn git_reftable_windows_sharing_violation_reports_change() {
         assert_eq!(
-            windows_git_metadata_open_error("Git reftable table list", 32),
+            windows_git_metadata_open_error("Git reftable table list", 32)
+                .into_message("Git reftable table list"),
             "Git reftable table list changed while being read"
         );
     }
@@ -4891,7 +4912,14 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.contains("symlink"), "unexpected error: {error}");
+        // The pinned read classifies the marker via the same no-follow,
+        // fd-relative open that performs the read, so a symlink surfaces
+        // as "not a regular file" rather than being silently followed or
+        // misclassified by a separate, racy path-based check.
+        assert!(
+            error.contains("not a regular file"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
