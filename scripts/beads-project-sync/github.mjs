@@ -3986,7 +3986,7 @@ export function createGhClient(options) {
     }
     const commentBody = [
       `This mirror duplicates #${survivorIssueNumber} for the same Bead identity.`,
-      'It was created by a scheduled-sync inventory-pagination defect; see #420 and #424.',
+      'It was created by a scheduled-sync inventory-pagination defect; see #420 and #425.',
       `#${survivorIssueNumber} is the surviving mirror and retains history and Project linkage.`,
       'This issue is retired as a duplicate by the reviewed Beads synchronizer, not by manual edit.',
     ].join(' ');
