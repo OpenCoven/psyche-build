@@ -17,17 +17,23 @@ public final class MobileAppComposition: ObservableObject {
     public let hostReadiness: HostReadinessMachine
     public let connectionManager: ConnectionManager
     public let terminalRegistry: TerminalSessionRegistry
+    public let workspaceCache: WorkspaceCache?
+    @Published public private(set) var workspaceCacheError: String?
 
     private var hasStarted = false
+    private var cachedWorkspaceHostID: String?
+    private var subscriptions = Set<AnyCancellable>()
 
     public init(
         transport: any PsycheTransport,
         pairedHostStore: PairedHostStore,
+        workspaceCache: WorkspaceCache? = nil,
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS"
     ) {
         self.transport = transport
         self.pairedHostStore = pairedHostStore
+        self.workspaceCache = workspaceCache
 
         let requestClient = ControlRequestClient(transport: transport)
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
@@ -51,12 +57,14 @@ public final class MobileAppComposition: ObservableObject {
         terminalRegistry = TerminalSessionRegistry(
             client: TerminalControlClient(requests: requestClient, transport: transport)
         )
+        bindWorkspaceCachePersistence()
     }
 
     public static func production() -> MobileAppComposition {
         MobileAppComposition(
             transport: URLSessionControlTransport(),
-            pairedHostStore: PairedHostStore(secureStore: KeychainSecureStore())
+            pairedHostStore: PairedHostStore(secureStore: KeychainSecureStore()),
+            workspaceCache: WorkspaceCache()
         )
     }
 
@@ -64,6 +72,74 @@ public final class MobileAppComposition: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
         terminalRegistry.start()
+        await restorePersistedWorkspaceIfAvailable()
         await connectionManager.connectToStoredHost()
+    }
+
+    func restorePersistedWorkspaceIfAvailable() async {
+        guard let workspaceCache else { return }
+
+        do {
+            guard let selectedHost = try await pairedHostStore.selectedHost() else {
+                cachedWorkspaceHostID = nil
+                workspaceCacheError = nil
+                return
+            }
+            cachedWorkspaceHostID = selectedHost.serverID
+            if let cachedState = try await workspaceCache.cachedState(
+                forServerID: selectedHost.serverID
+            ) {
+                workspaceStore.restoreCachedState(cachedState)
+            }
+            workspaceCacheError = nil
+        } catch {
+            workspaceCacheError = error.localizedDescription
+        }
+    }
+
+    private func bindWorkspaceCachePersistence() {
+        guard workspaceCache != nil else { return }
+
+        workspaceStore.objectWillChange
+            .sink { [weak self] _ in
+                self?.scheduleWorkspaceCachePersistence()
+            }
+            .store(in: &subscriptions)
+
+        hostReadiness.objectWillChange
+            .sink { [weak self] _ in
+                self?.scheduleWorkspaceCachePersistence()
+            }
+            .store(in: &subscriptions)
+    }
+
+    private func scheduleWorkspaceCachePersistence() {
+        Task { @MainActor [weak self] in
+            await self?.persistWorkspaceCacheIfPossible()
+        }
+    }
+
+    private func persistWorkspaceCacheIfPossible() async {
+        guard let workspaceCache else { return }
+
+        if let committedHostID = hostReadiness.committedHost?.serverID {
+            cachedWorkspaceHostID = committedHostID
+        }
+        guard let cachedWorkspaceHostID else { return }
+        guard hostReadiness.state != .authenticating,
+              hostReadiness.state != .synchronizing else {
+            return
+        }
+
+        do {
+            if let cachedState = workspaceStore.cachedState() {
+                try await workspaceCache.save(cachedState, forServerID: cachedWorkspaceHostID)
+            } else {
+                try await workspaceCache.removeCachedState(forServerID: cachedWorkspaceHostID)
+            }
+            workspaceCacheError = nil
+        } catch {
+            workspaceCacheError = error.localizedDescription
+        }
     }
 }
