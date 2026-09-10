@@ -65,7 +65,8 @@ final class AppModelTests: XCTestCase {
         ))))
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(3))
-        while model.workspaceCacheRecoveryNotice == nil, clock.now < deadline {
+        while (model.workspaceCacheRecoveryNotice == nil || model.workspaceCacheError != nil),
+              clock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertNil(model.workspaceCacheError)
