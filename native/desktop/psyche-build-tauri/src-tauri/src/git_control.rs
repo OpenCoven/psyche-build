@@ -514,6 +514,16 @@ fn git_dir_for_worktree(root: &Path) -> Result<(PathBuf, PathBuf), String> {
         let label = "worktree .git marker";
         match git_marker_kind(&dot_git, label)? {
             GitMarkerKind::Directory => {
+                // Unlike the `File` branch below, this only returns a path;
+                // it does not open or pin the `.git` directory itself. That
+                // is safe: every production caller resolves this path and
+                // then immediately opens it with a no-follow
+                // (`O_NOFOLLOW`/reparse-point-rejecting) handle before
+                // reading anything from inside it (see
+                // `GitInspectionRepository::snapshot`'s `git_dir_handle`).
+                // A `.git` marker swapped for a symlink between this
+                // classification and that open fails closed there rather
+                // than being followed, so no separate pin is needed here.
                 return Ok((candidate.to_path_buf(), dot_git));
             }
             GitMarkerKind::File => {
@@ -4920,6 +4930,39 @@ mod tests {
             error.contains("not a regular file"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn git_inspection_rejects_a_worktree_whose_git_directory_marker_is_a_symlink() {
+        // `git_dir_for_worktree_rejects_a_symlinked_git_directory_marker`
+        // already proves `git_dir_for_worktree` itself rejects this in
+        // isolation. This test proves the same guarantee holds at the
+        // entrypoint external callers actually use,
+        // `GitInspectionRepository::snapshot`, which resolves the path via
+        // `git_dir_for_worktree` internally: a symlinked `.git` directory
+        // marker must still be rejected once routed through the full
+        // snapshot call, not merely when calling the classification helper
+        // directly. It does not, by itself, exercise a marker swapped
+        // *between* that classification and `snapshot`'s later no-follow
+        // open of the resolved Git directory (`git_dir_handle`); that
+        // narrower race window is closed structurally by `open_directory_no_follow`
+        // using `O_NOFOLLOW`, which fails closed rather than following a
+        // symlink regardless of when the swap happens.
+        let tree = TempTree::new("git-inspection-symlinked-git-directory");
+        let root = tree.root.join("root");
+        let outside = tree.root.join("outside-git-dir");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        if !create_test_symlink(TestSymlinkKind::Directory, &outside, &root.join(".git")) {
+            return;
+        }
+
+        let error = match GitInspectionRepository::snapshot(path_text(&root), None, Vec::new()) {
+            Ok(_) => panic!("a symlinked .git directory marker must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("symlink"), "unexpected error: {error}");
     }
 
     #[test]
