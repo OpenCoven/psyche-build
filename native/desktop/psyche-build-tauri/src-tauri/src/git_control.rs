@@ -4934,15 +4934,20 @@ mod tests {
 
     #[test]
     fn git_inspection_rejects_a_worktree_whose_git_directory_marker_is_a_symlink() {
-        // `git_dir_for_worktree` classifies the `.git` marker with a
-        // no-follow `symlink_metadata` check before returning its path, but
-        // that classification and `GitInspectionRepository::snapshot`'s own
-        // reads from the resolved Git directory are two separate steps. This
-        // proves the gap between them is closed end to end: `snapshot` pins
-        // the resolved Git directory with a no-follow open (`O_NOFOLLOW`)
-        // immediately, as the very first thing it does after resolving the
-        // path, so a `.git` marker that is a symlink is rejected there too,
-        // not just by the earlier classification helper.
+        // `git_dir_for_worktree_rejects_a_symlinked_git_directory_marker`
+        // already proves `git_dir_for_worktree` itself rejects this in
+        // isolation. This test proves the same guarantee holds at the
+        // entrypoint external callers actually use,
+        // `GitInspectionRepository::snapshot`, which resolves the path via
+        // `git_dir_for_worktree` internally: a symlinked `.git` directory
+        // marker must still be rejected once routed through the full
+        // snapshot call, not merely when calling the classification helper
+        // directly. It does not, by itself, exercise a marker swapped
+        // *between* that classification and `snapshot`'s later no-follow
+        // open of the resolved Git directory (`git_dir_handle`); that
+        // narrower race window is closed structurally by `open_directory_no_follow`
+        // using `O_NOFOLLOW`, which fails closed rather than following a
+        // symlink regardless of when the swap happens.
         let tree = TempTree::new("git-inspection-symlinked-git-directory");
         let root = tree.root.join("root");
         let outside = tree.root.join("outside-git-dir");
