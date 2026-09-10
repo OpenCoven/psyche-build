@@ -79,6 +79,7 @@
     "beads:project:check": "node scripts/sync-beads-project.mjs --dry-run",
     "beads:project:e2e": "node scripts/verify-beads-graphql-e2e.mjs",
     "beads:project:sync": "node scripts/sync-beads-project.mjs --apply",
+    "beads:project:reconcile-duplicates": "node scripts/reconcile-beads-duplicates.mjs",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
     "recovery:harness": "tsx scripts/run-recovery-harness.ts",
     "ios:project:generate": "xcodegen generate --spec native/ios/project.yml --project native/ios",

@@ -15,6 +15,7 @@
   "include": [
     "scripts/beads-project-sync/*.mjs",
     "scripts/sync-beads-project.mjs",
+    "scripts/reconcile-beads-duplicates.mjs",
     "scripts/verify-beads-graphql-e2e.mjs"
   ],
   "exclude": ["node_modules", "dist"]

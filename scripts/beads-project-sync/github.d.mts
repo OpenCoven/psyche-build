@@ -80,6 +80,12 @@ export interface ManagedIssueSnapshot {
   url?: string;
 }
 
+export interface DuplicateManagedIssueGroup {
+  beadId: string;
+  survivorIssueNumber: number;
+  duplicateIssueNumbers: readonly number[];
+}
+
 export interface IssueIdentity {
   id: number | null;
   nodeId: string | null;
@@ -234,6 +240,12 @@ export interface GhClient {
   startApplyLockLease(handle: ApplyLockHandle): ApplyLockLeaseController;
   listRepositoryIssues(): Promise<unknown[]>;
   listManagedIssues(): Promise<ManagedIssueSnapshot[]>;
+  detectDuplicateManagedIssues(): Promise<DuplicateManagedIssueGroup[]>;
+  retireDuplicateIssue(operation: {
+    issueNumber: number;
+    survivorIssueNumber: number;
+    beadId?: string;
+  }): Promise<{ issueNumber: number; survivorIssueNumber: number }>;
   ensureLabels(): Promise<readonly ManagedLabel[]>;
 
   discoverProject(): Promise<ProjectContext | null>;
@@ -277,6 +289,7 @@ export interface GhClient {
     phase?: 'closeIssues';
   } | number): Promise<IssueMutationResult>;
   reopenIssue(operation: { issueNumber: number } | number): Promise<IssueMutationResult>;
+  commentOnIssue(operation: { issueNumber: number; body: string }): Promise<IssueMutationResult>;
   labelIssue(operation: LabelIssueInput): Promise<IssueMutationResult>;
   assignIssue(operation: AssignIssueInput): Promise<IssueMutationResult>;
 

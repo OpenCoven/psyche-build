@@ -420,7 +420,7 @@ function writeSummary(summary, stdout) {
  * @param {Readonly<Record<string, string | undefined>>} env
  * @returns {{owner: string, runId: string, leaseId: string}}
  */
-function createApplyLockIdentity(env) {
+export function createApplyLockIdentity(env) {
   const actionsRunId = env.GITHUB_RUN_ID?.trim();
   const actionsAttempt = env.GITHUB_RUN_ATTEMPT?.trim();
   return {

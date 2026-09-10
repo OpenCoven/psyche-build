@@ -68,6 +68,12 @@ export interface CliSummary {
 
 export function parseCliOptions(argv: readonly string[]): CliOptions;
 
+export function createApplyLockIdentity(env: Readonly<Record<string, string | undefined>>): {
+  owner: string;
+  runId: string;
+  leaseId: string;
+};
+
 export function runBeadsProjectCli(
   argv: readonly string[],
   dependencies?: CliDependencies,

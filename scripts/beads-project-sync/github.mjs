@@ -3883,6 +3883,119 @@ export function createGhClient(options) {
   }
 
   /**
+   * @param {{issueNumber: number, body: string}} operation
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function commentOnIssue(operation) {
+    const issueNumber = issueNumberFrom(operation);
+    const body = requiredString(
+      /** @type {Record<string, unknown>} */ (operation)?.body,
+      'issue comment body',
+    );
+    return record(await rest(
+      'POST',
+      `repos/${owner}/${repo}/issues/${issueNumber}/comments`,
+      { body },
+    ));
+  }
+
+  /**
+   * @typedef {{
+   *   beadId: string,
+   *   survivorIssueNumber: number,
+   *   duplicateIssueNumbers: readonly number[],
+   * }} DuplicateManagedIssueGroup
+   */
+
+  /**
+   * Detects Bead identities mirrored onto more than one open, trusted
+   * managed issue, without the fail-closed behavior `listManagedIssues`
+   * applies for the same condition. Read-only: performs no mutation and
+   * does not require an authenticated actor. The lowest issue number in
+   * each group is reported as the survivor; callers decide whether and
+   * how to act on that.
+   *
+   * @returns {Promise<DuplicateManagedIssueGroup[]>}
+   */
+  async function detectDuplicateManagedIssues() {
+    const rawIssues = await listRepositoryIssues();
+    /** @type {Map<string, number[]>} */
+    const issueNumbersByBeadId = new Map();
+
+    for (const rawIssue of rawIssues) {
+      const issue = record(rawIssue);
+      if (issue.pull_request != null) {
+        continue;
+      }
+      if (!isTrustedManagedIssue(issue)) {
+        continue;
+      }
+      const state = typeof issue.state === 'string' ? issue.state : 'open';
+      if (state === 'closed') {
+        continue;
+      }
+      const number = positiveInteger(issue.number, 'issue number');
+      const body = stringOrEmpty(issue.body);
+      const beadId = extractBeadId(body, number, recognizedIssueMarkerValues);
+      if (beadId == null) {
+        continue;
+      }
+      const numbers = issueNumbersByBeadId.get(beadId) ?? [];
+      numbers.push(number);
+      issueNumbersByBeadId.set(beadId, numbers);
+    }
+
+    /** @type {DuplicateManagedIssueGroup[]} */
+    const groups = [];
+    for (const [beadId, numbers] of issueNumbersByBeadId) {
+      if (numbers.length <= 1) {
+        continue;
+      }
+      const sorted = [...numbers].sort((left, right) => left - right);
+      groups.push({
+        beadId,
+        survivorIssueNumber: /** @type {number} */ (sorted[0]),
+        duplicateIssueNumbers: Object.freeze(sorted.slice(1)),
+      });
+    }
+    groups.sort((left, right) => (
+      left.beadId < right.beadId ? -1 : left.beadId > right.beadId ? 1 : 0
+    ));
+    return groups;
+  }
+
+  /**
+   * Retires one duplicate mirror of a Bead identity in favor of its
+   * survivor: posts a sanitized, closing-keyword-free explanatory comment,
+   * then closes the duplicate issue. Does not touch the survivor, does not
+   * remove Project items (a closed duplicate is reconciled out of the
+   * Project on the next ordinary sync pass), and refuses to retire an
+   * issue in favor of itself.
+   *
+   * @param {{issueNumber: number, survivorIssueNumber: number, beadId?: string}} operation
+   * @returns {Promise<{issueNumber: number, survivorIssueNumber: number}>}
+   */
+  async function retireDuplicateIssue(operation) {
+    const issueNumber = issueNumberFrom(operation);
+    const survivorIssueNumber = positiveInteger(
+      /** @type {Record<string, unknown>} */ (operation)?.survivorIssueNumber,
+      'survivor issue number',
+    );
+    if (survivorIssueNumber === issueNumber) {
+      fail('a duplicate issue cannot be retired in favor of itself');
+    }
+    const commentBody = [
+      `This mirror duplicates #${survivorIssueNumber} for the same Bead identity.`,
+      'It was created by a scheduled-sync inventory-pagination defect; see #420 and #424.',
+      `#${survivorIssueNumber} is the surviving mirror and retains history and Project linkage.`,
+      'This issue is retired as a duplicate by the reviewed Beads synchronizer, not by manual edit.',
+    ].join(' ');
+    await commentOnIssue({ issueNumber, body: commentBody });
+    await closeIssue({ issueNumber });
+    return { issueNumber, survivorIssueNumber };
+  }
+
+  /**
    * @param {unknown} operation
    * @returns {Promise<Record<string, unknown>>}
    */
@@ -4496,6 +4609,8 @@ ${selections.join('\n')}
     startApplyLockLease,
     listRepositoryIssues,
     listManagedIssues,
+    detectDuplicateManagedIssues,
+    retireDuplicateIssue,
     ensureLabels,
     discoverProject,
     refreshProject,
@@ -4510,6 +4625,7 @@ ${selections.join('\n')}
     updateIssue,
     closeIssue,
     reopenIssue,
+    commentOnIssue,
     labelIssue,
     assignIssue,
     ensureProjectItem,

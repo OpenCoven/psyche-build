@@ -1044,6 +1044,71 @@ describe('createGhClient', () => {
     ).rejects.toThrow(/duplicate managed bead id.*pb-6/i);
   });
 
+  it('detects duplicate managed issues without the fail-closed listManagedIssues behavior', async () => {
+    const runner = createRunner([
+      success([
+        trustedIssue({ number: 232, body: managedBody('pb-232'), state: 'open', title: 'original' }),
+        trustedIssue({ number: 418, body: managedBody('pb-232'), state: 'open', title: 'duplicate' }),
+        trustedIssue({ number: 210, body: managedBody('pb-210'), state: 'open', title: 'no dup' }),
+        // A closed duplicate must not be counted.
+        trustedIssue({ number: 419, body: managedBody('pb-210'), state: 'closed', title: 'closed dup' }),
+        // An untrusted author's mirror-shaped issue must not be counted.
+        { number: 420, body: managedBody('pb-210'), state: 'open', title: 'untrusted', author_association: 'NONE', user: { login: 'someone-else' } },
+        { number: 421, pull_request: {}, body: managedBody('pb-210'), state: 'open', title: 'a pull request' },
+      ]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.detectDuplicateManagedIssues()).resolves.toEqual([
+      {
+        beadId: 'pb-232',
+        survivorIssueNumber: 232,
+        duplicateIssueNumbers: [418],
+      },
+    ]);
+  });
+
+  it('returns no groups when no bead id maps to more than one open trusted issue', async () => {
+    const runner = createRunner([
+      success([
+        trustedIssue({ number: 1, body: managedBody('pb-1'), state: 'open', title: 'one' }),
+        trustedIssue({ number: 2, body: managedBody('pb-2'), state: 'open', title: 'two' }),
+      ]),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(client.detectDuplicateManagedIssues()).resolves.toEqual([]);
+  });
+
+  it('retires a duplicate issue by commenting then closing it, never itself', async () => {
+    const runner = createRunner([
+      success({ id: 999, body: 'comment posted' }),
+      success({ number: 418, state: 'closed' }),
+    ]);
+    const client = createGhClient({ run: runner.run, owner, repo, token });
+
+    await expect(
+      client.retireDuplicateIssue({ issueNumber: 418, survivorIssueNumber: 232, beadId: 'pb-232' }),
+    ).resolves.toEqual({ issueNumber: 418, survivorIssueNumber: 232 });
+
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      ['api', `repos/${owner}/${repo}/issues/418/comments`, '--method', 'POST', ...apiHeaders, '--input', '-'],
+      ['api', `repos/${owner}/${repo}/issues/418`, '--method', 'PATCH', ...apiHeaders, '--input', '-'],
+    ]);
+    const commentBody = parseStdin(runner.calls[0]!);
+    expect(commentBody.body).toContain('#232');
+    expect(commentBody.body).toContain('#420');
+    expect(commentBody.body).toContain('#424');
+    // The comment must never contain a GitHub auto-close keyword immediately
+    // before the survivor issue reference (see .beads/README.md).
+    expect(commentBody.body).not.toMatch(/\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#232\b/i);
+    expect(parseStdin(runner.calls[1]!)).toEqual({ state: 'closed' });
+
+    await expect(
+      client.retireDuplicateIssue({ issueNumber: 418, survivorIssueNumber: 418 }),
+    ).rejects.toThrow(/cannot be retired in favor of itself/i);
+  });
+
   it('uses the pinned author login instead of mutable author association', async () => {
     const runner = createRunner([
       success([
