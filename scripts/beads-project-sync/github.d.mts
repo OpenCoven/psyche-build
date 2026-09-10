@@ -279,6 +279,7 @@ export interface GhClient {
     phase?: 'closeIssues';
   } | number): Promise<IssueMutationResult>;
   prepareReconciliationOperation(operation: import('./reconcile.mjs').ReconciliationOperation): void;
+  verifyRecoveryComplete(aliasNumbers: readonly number[]): Promise<void>;
   reopenIssue(operation: { issueNumber: number } | number): Promise<IssueMutationResult>;
   labelIssue(operation: LabelIssueInput): Promise<IssueMutationResult>;
   assignIssue(operation: AssignIssueInput): Promise<IssueMutationResult>;

@@ -100,12 +100,66 @@ describe('tracker drift validation', () => {
     const stderr = outputBuffer();
     await runTrackerDriftCheck([
       '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
-    ], { rawIssues: [original, alias], stdout, stderr });
+    ], { rawIssues: [original, alias], stdout, stderr,
+      fetchImpl: async (url) => String(url).endsWith('/parent')
+        ? new Response(null, { status: 404 }) : new Response('[]', { status: 200 }),
+    });
     expect(stderr.value()).toBe('');
     expect(JSON.parse(stdout.value()).managedMirrorCount).toBe(1);
     expect(JSON.parse(stdout.value()).findings)
       .not.toContainEqual(expect.objectContaining({ kind: 'duplicate_mirror' }));
   });
+
+  it.each(['sub_issues', 'dependencies/blocking', 'dependencies/blocked_by', 'parent'])(
+    'does not hide a retired alias with remaining %s relationships from drift', async (suffix) => {
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
+    const fetchImpl: typeof fetch = async (url) => {
+      if (String(url).includes(`/${suffix}`)) return new Response(JSON.stringify([
+        rawIssue('psyche-i7c.10', 209, { state: 'closed' }),
+      ]), { status: 200 });
+      return String(url).endsWith('/parent')
+        ? new Response(null, { status: 404 }) : new Response('[]', { status: 200 });
+    };
+    const code = await runTrackerDriftCheck([
+      '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+    ], {
+      rawIssues: [rawIssue('psyche-i7c', 208), rawIssue('psyche-i7c', 395, {
+        state: 'closed',
+        body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+      })],
+      fetchImpl, stdout, stderr,
+    });
+    expect(code).toBe(2);
+    expect(stderr.value()).toMatch(/recovery.*relationship/i);
+    expect(stdout.value()).toBe('');
+  });
+
+  it.each(['offline', 'unavailable', 'malformed', 'partial'])(
+    'refuses %s relationship evidence for retired aliases', async (kind) => {
+      const stdout = outputBuffer();
+      const stderr = outputBuffer();
+      const code = await runTrackerDriftCheck([
+        '--inventory-file', '__tests__/fixtures/beads-project-sync/tracker-beads-canonical-drift.jsonl',
+      ], {
+        rawIssues: [rawIssue('psyche-i7c', 208), rawIssue('psyche-i7c', 395, {
+          state: 'closed',
+          body: body('open', 1, undefined, 'psyche-i7c') + retirementNotice('psyche-i7c', 208, 395),
+        })],
+        ...(kind === 'offline' ? {} : { fetchImpl: async () => new Response(
+          kind === 'malformed' ? '{}' : '[]',
+          {
+            status: kind === 'unavailable' ? 403 : 200,
+            ...(kind === 'partial' ? { headers: { link: '<https://api.github.com/next>; rel="next"' } } : {}),
+          },
+        ) }),
+        stdout, stderr,
+      });
+      expect(code).toBe(2);
+      expect(stderr.value()).toMatch(/recovery.*relationship/i);
+      expect(stdout.value()).toBe('');
+    },
+  );
 
   it('does not require a mirror for a closed Bead the synchronizer never publishes', () => {
     const report = validateTrackerDrift(

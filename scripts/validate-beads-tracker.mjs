@@ -258,6 +258,27 @@ async function loadIssueInventory(options, config, dependencies) {
   );
 }
 
+async function assertRetiredRelationshipsEmpty(number, config, fetchImpl) {
+  for (const suffix of ['sub_issues', 'dependencies/blocking', 'dependencies/blocked_by', 'parent']) {
+    const response = await fetchImpl(
+      `https://api.github.com/repos/${config.owner}/${config.repository}/issues/${number}/${suffix}${suffix === 'parent' ? '' : '?per_page=100&page=1'}`,
+      {
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'psyche-build-tracker-drift-check' },
+        redirect: 'error',
+      },
+    );
+    if (suffix === 'parent' && response.status === 404) continue;
+    if (!response.ok) fail('Recovery relationship inventory is unavailable');
+    const values = await response.json();
+    // Only a complete empty connection proves retirement; partial/offline issue
+    // inventories alone cannot establish the absence of incoming references.
+    if (suffix === 'parent' || !Array.isArray(values) || values.length !== 0
+      || response.headers.get('link') != null) {
+      fail('Recovery relationships remain or the relationship inventory is incomplete');
+    }
+  }
+}
+
 export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
   const dependencies = {
     cwd: suppliedDependencies.cwd ?? process.cwd(),
@@ -342,7 +363,14 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
       issue.state === 'closed'
       && issue.body?.endsWith(retirementNotice(beadId, survivor, issue.number)))
       .map(({ issue }) => issue.number));
-    const managedIssues = rawIssues.filter((issue) => !retired.has(issue.number))
+    if (retired.size && (options.issuesFile || dependencies.rawIssues != null)
+      && suppliedDependencies.fetchImpl == null) {
+      fail('Recovery relationship verification requires a live inventory or an explicit fixture reader');
+    }
+    for (const number of retired) {
+      await assertRetiredRelationshipsEmpty(number, config, dependencies.fetchImpl);
+    }
+    const managedIssues = rawIssues.filter((issue) => !retired.has(objectRecord(issue).number))
       .map((issue) => normalizeIssue(issue, config, trustedIssueAuthors, issueMarkers))
       .filter((issue) => issue != null);
     const report = validateTrackerDrift(

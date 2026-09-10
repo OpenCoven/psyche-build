@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import { readSyncConfig } from './config.mjs';
 import { createGhClient } from './github.mjs';
+import { RECOVERY_PAIRS } from './recovery.mjs';
 import { parseBeadExport, summarizeInventory } from './model.mjs';
 import { validateCanonicalOutcomes } from './outcomes.mjs';
 import {
@@ -719,6 +720,9 @@ export async function runBeadsProjectCli(argv, dependencies = {}) {
         return 1;
       }
       await applyLease?.assertOwned();
+      const recoveryAliases = existingIssues.filter((issue) =>
+        RECOVERY_PAIRS.some((pair) => pair.alias === issue.number)).map((issue) => issue.number);
+      if (recoveryAliases.length) await gh.verifyRecoveryComplete(recoveryAliases);
       stderr.write(`Applied ${applied.applied.length} Beads Project reconciliation operations.\n`);
       writeSummary({
         mode: options.mode,

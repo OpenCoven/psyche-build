@@ -179,12 +179,31 @@ alias's outgoing parent/blocker relationships and archives its Project item.
 Unmanaged issues are not rewritten. Retirement does not complete or cancel an
 active Bead or change Beads source.
 
+Closed canonical mirrors also reconcile incident-owned incoming dependencies.
+An alias reference must agree with the Bead's source parent or blocker before
+repair. Source dependencies on active incident Beads use their pinned survivors,
+including reattachment after an interrupted detach. Dependencies on closed
+Beads do not create new GitHub relationships; already canonical closed history
+and unrelated historical relationships are preserved. Unknown, foreign,
+source-disagreeing, or cyclic repair graphs fail closed rather than moving
+arbitrary links.
+
 Each individual recovery write and retry revalidates the owned lease and
 issue identity. Canonical recovery operations also re-read the pinned pair
 before each write. Archive requests re-read the alias's Project item identity.
 A crash after marking, closing, detaching, or archiving is resumable through
 the same command. Inventories retain aliases for unfinished cleanup but never
 promote them to canonical mirrors; completed retirement plans no further work.
+Incoming repairs additionally compare exact relationship sets before each write
+and after each detach/reattach. Retirement refuses remaining canonical or
+unknown incoming links; approved aliases may retain incoming links only until
+their own outgoing cleanup. Before apply reports success, a fresh bounded
+reread requires every incident alias to be marked, closed, archived when present
+in the Project, and free of incoming and outgoing relationships.
+
+Tracker drift checks verify empty incoming/outgoing relationship connections
+before excluding retired aliases. An offline issues-only snapshot cannot prove
+that condition and fails closed; it is not recovery-completion evidence.
 
 The normal mass-close guard still applies, including alias retirement.
 Summaries expose alias/survivor numbers, outgoing relationship targets, and

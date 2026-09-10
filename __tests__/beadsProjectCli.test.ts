@@ -79,6 +79,7 @@ interface FakeGhOptions {
   failLeaseValidationAfterWrite?: string;
   failReleaseLock?: Error;
   failSetFields?: Error;
+  failRecoveryVerification?: Error;
   project?: ProjectContext | null;
   projectAfterLock?: ProjectContext | null;
 }
@@ -309,6 +310,10 @@ function createFakeGh(options: FakeGhOptions = {}) {
         : options.existingIssues;
       return [...(issues ?? [])];
     },
+    async verifyRecoveryComplete(numbers: readonly number[]) {
+      calls.push(`verifyRecoveryComplete:${numbers.join(',')}`);
+      if (options.failRecoveryVerification) throw options.failRecoveryVerification;
+    },
     async ensureLabels() {
       writes.push('ensureLabels');
       return [];
@@ -395,6 +400,29 @@ function createFakeGh(options: FakeGhOptions = {}) {
     writes,
   };
 }
+
+describe('incident #420 CLI completion gate', () => {
+  it.each([false, true])('requires the final reread before apply success (failure=%s)', async (failure) => {
+    const fakeGh = createFakeGh({
+      existingIssues: [208, 395].map((number) => ({
+        ...managedIssue('psyche-i7c', number), author: 'BunsDev', repository: 'OpenCoven/psyche-build',
+      })),
+      ...(failure ? { failRecoveryVerification: new Error('Recovery incoming relationships remain') } : {}),
+    });
+    const result = await runCliWithMockedConfigAndSource(['--apply'], {
+      config: canonicalTargetConfig(),
+      jsonl: toJsonl(makeSourceIssue({ id: 'psyche-i7c', external_ref: 'gh-200' })),
+      env: { BEADS_PROJECT_TOKEN: token },
+      fakeGh,
+    });
+    expect(fakeGh.calls).toContain('verifyRecoveryComplete:395');
+    expect(result.exitCode).toBe(failure ? 1 : 0);
+    if (failure) {
+      expect(result.stderr).toMatch(/Recovery incoming relationships remain/);
+      expect(result.stderr).not.toMatch(/Applied \d+ Beads/);
+    }
+  });
+});
 
 async function runCli(
   args: readonly string[],

@@ -1132,7 +1132,7 @@ function numberListsEqual(left, right) {
 
 /**
  * @param {IssueIdentity | null | undefined} relationship
- * @param {ManagedIssueSnapshot | null | undefined} managedIssue
+ * @param {IssueSnapshot | null | undefined} managedIssue
  * @returns {boolean}
  */
 function relationshipMatchesManagedIssue(relationship, managedIssue) {
@@ -1546,6 +1546,68 @@ export function planReconciliation(input) {
   const syncParents = [];
   /** @type {SyncBlockerOperation[]} */
   const syncBlockers = [];
+  const aliasesByNumber = new Map(recovery.aliases.map((entry) => [entry.issue.number, entry]));
+  const recoveryBeadIds = new Set(recovery.aliases.map((entry) => entry.beadId));
+  for (const [beadId, issue] of managedIssuesByBeadId) {
+    const bead = inventoryIndex.byId.get(beadId);
+    for (const target of [...(issue.parentIssue ? [issue.parentIssue] : []), ...issue.blockerIssues]) {
+      const alias = aliasesByNumber.get(target.number);
+      if (alias && (!bead
+        || (target.repository != null && target.repository !== alias.issue.repository)
+        || !relationshipMatchesManagedIssue(target, alias.issue))) {
+        fail(`Recovery #420 unknown incoming relationship on "${beadId}"`);
+      }
+    }
+    if (bead?.status !== 'closed') continue;
+    const parentAlias = issue.parentIssue == null ? null : aliasesByNumber.get(issue.parentIssue.number);
+    const blockerAliases = issue.blockerIssues.filter((target) => aliasesByNumber.has(target.number));
+    if (parentAlias && bead.parentId !== parentAlias.beadId
+      || blockerAliases.some((target) => !bead.blockedByIds.includes(aliasesByNumber.get(target.number)?.beadId ?? ''))) {
+      fail(`Recovery #420 incoming relationship disagrees with source for "${beadId}"`);
+    }
+    // Closed mirrors retain history. Only incident-owned source dependencies are
+    // reconciled, including absent edges left by an interrupted detach/reattach.
+    if (parentAlias || (bead.parentId != null && recoveryBeadIds.has(bead.parentId))) {
+      const parentBeadId = shouldMirrorRelationshipTarget(inventoryIndex.byId.get(bead.parentId ?? ''))
+        ? bead.parentId : null;
+      const parent = parentBeadId == null ? null : managedIssuesByBeadId.get(parentBeadId);
+      if (parentAlias || (parent != null && !relationshipMatchesManagedIssue(issue.parentIssue, parent))) {
+        if (issue.parentIssue && !parentAlias
+          && !relationshipMatchesManagedIssue(issue.parentIssue, managedIssuesByBeadId.get(bead.parentId ?? ''))) {
+          fail(`Recovery #420 unrelated parent on "${beadId}"`);
+        }
+        syncParents.push({
+          type: 'syncParent', phase: 'syncParents', beadId, parentBeadId,
+          parentIssueNumber: parent?.number ?? null,
+          currentParentIssueNumber: issue.parentIssueNumber, currentParentIssue: issue.parentIssue,
+        });
+      }
+    }
+    if (blockerAliases.length || bead.blockedByIds.some((id) => recoveryBeadIds.has(id))) {
+      const retained = issue.blockerIssues.filter((target) =>
+        !aliasesByNumber.has(target.number)
+        && !recovery.aliases.some((entry) =>
+          entry.survivor === target.number && bead.blockedByIds.includes(entry.beadId)
+          && shouldMirrorRelationshipTarget(inventoryIndex.byId.get(entry.beadId))));
+      const retainedIds = retained.map((target) => {
+        const match = [...managedIssuesByBeadId.values()]
+          .find((candidate) => relationshipMatchesManagedIssue(target, candidate));
+        if (!match) fail(`Recovery #420 unknown blocker on "${beadId}"`);
+        return match.beadId;
+      });
+      const blockerBeadIds = [...new Set([...retainedIds, ...bead.blockedByIds.filter((id) =>
+        recoveryBeadIds.has(id) && shouldMirrorRelationshipTarget(inventoryIndex.byId.get(id)))])].sort(compareStrings);
+      const desired = blockerBeadIds.map((id) => managedIssuesByBeadId.get(id)
+        ?? fail(`Recovery #420 missing blocker mirror for "${id}"`));
+      if (!relationshipListsEqual(issue.blockerIssues, desired)) {
+        syncBlockers.push({
+          type: 'syncBlocker', phase: 'syncBlockers', beadId, blockerBeadIds,
+          blockerIssueNumbers: desired.map((target) => target.number).sort((a, b) => a - b),
+          currentBlockerIssueNumbers: issue.blockerIssueNumbers, currentBlockerIssues: issue.blockerIssues,
+        });
+      }
+    }
+  }
   /** @type {ArchiveItemOperation[]} */
   const archiveItems = [];
   /** @type {UpdateReadmeOperation[]} */
@@ -1853,6 +1915,35 @@ export function planReconciliation(input) {
     ...archiveItems,
     ...updateReadmeOperations,
   ]);
+
+  if (recovery.aliases.length) {
+    for (const kind of ['syncParent', 'syncBlocker']) {
+      const graph = new Map([...managedIssuesByBeadId.values()].map((issue) => [
+        issue.number,
+        kind === 'syncParent'
+          ? (issue.parentIssueNumber == null ? [] : [issue.parentIssueNumber])
+          : issue.blockerIssueNumbers,
+      ]));
+      const changed = [];
+      for (const operation of operations) {
+        if ((operation.type !== 'syncParent' && operation.type !== 'syncBlocker')
+          || operation.type !== kind) continue;
+        const number = managedIssuesByBeadId.get(operation.beadId)?.number;
+        if (number == null) continue;
+        graph.set(number, operation.type === 'syncParent'
+          ? (operation.parentIssueNumber == null ? [] : [operation.parentIssueNumber])
+          : operation.blockerIssueNumbers ?? []);
+        changed.push(number);
+      }
+      /** @param {number} number @param {Set<number>} path */
+      const visit = (number, path) => {
+        if (path.has(number)) fail('Recovery #420 relationship graph contains a cycle');
+        const next = new Set(path).add(number);
+        for (const target of graph.get(number) ?? []) visit(target, next);
+      };
+      for (const number of changed) visit(number, new Set());
+    }
+  }
 
   const summary = buildSummary(
       inventory,

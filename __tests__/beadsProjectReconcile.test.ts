@@ -116,6 +116,122 @@ describe('incident #420 retirement planning', () => {
       })).toThrow(/source.*psyche-i7c/i);
     });
 
+    it('repairs closed canonical incoming references even after alias retirement', () => {
+      const inventory = [makeBead('psyche-i7c'), makeBead('psyche-i7c.10', {
+        status: 'closed', parentId: 'psyche-i7c', blockedByIds: ['psyche-i7c'],
+      })];
+      const alias = { ...pair[1]!, state: 'closed',
+        body: pair[1]!.body + retirementNotice('psyche-i7c', 208, 395) };
+      const plan = planReconciliation({
+        inventory, renderContext: baseContext,
+        existingIssues: [...pair.slice(0, 1), alias, {
+          number: 209, author: 'BunsDev', repository: 'OpenCoven/psyche-build',
+          body: '<!-- psyche-bead-sync:v1 bead-id=psyche-i7c.10 -->', state: 'closed',
+          parentIssueNumber: 395, blockerIssueNumbers: [395],
+        }],
+      });
+      expect(plan.operations).toContainEqual(expect.objectContaining({
+        type: 'syncParent', beadId: 'psyche-i7c.10', parentIssueNumber: 208,
+      }));
+      expect(plan.operations).toContainEqual(expect.objectContaining({
+        type: 'syncBlocker', beadId: 'psyche-i7c.10', blockerIssueNumbers: [208],
+      }));
+    });
+
+    function closedRecoveryFixture(parentStatus = 'open') {
+      const inventory = [
+        makeBead('psyche-i7c', { status: parentStatus }),
+        makeBead('psyche-i7c.10', {
+          status: 'closed', parentId: 'psyche-i7c', blockedByIds: ['psyche-i7c'],
+        }),
+        makeBead('historical', { status: 'closed' }),
+      ];
+      const numbers = new Map([['psyche-i7c', 208], ['psyche-i7c.10', 209], ['historical', 700]]);
+      const existingIssues = inventory.map((bead) => ({
+        ...managedIssue(bead, inventory, numbers, { blockerIssues: null }),
+        author: 'BunsDev', repository: 'OpenCoven/psyche-build',
+      }));
+      existingIssues.push({
+        ...existingIssues[0]!, number: 395, state: 'closed',
+        issueNodeId: 'ISSUE-395',
+        body: pair[1]!.body + retirementNotice('psyche-i7c', 208, 395),
+        parentIssueNumber: null, blockerIssueNumbers: [],
+        projectItem: { id: 'alias-item', archived: true, fields: {} },
+      });
+      return { inventory, existingIssues, renderContext: baseContext,
+        readme: { body: canonicalReadmeBody(inventory) } };
+    }
+
+    it('converges closed incoming repairs and preserves unrelated historical links', () => {
+      const input = closedRecoveryFixture();
+      input.existingIssues[1]!.parentIssueNumber = 395;
+      input.existingIssues[1]!.blockerIssueNumbers = [395, 700];
+      const plan = planReconciliation(input);
+      expect(plan.operations).toHaveLength(2);
+      expect(plan.operations).toContainEqual(expect.objectContaining({
+        type: 'syncBlocker', blockerIssueNumbers: [208, 700],
+      }));
+      input.existingIssues[1]!.parentIssueNumber = 208;
+      input.existingIssues[1]!.blockerIssueNumbers = [208, 700];
+      expect(planReconciliation(input).operations).toEqual([]);
+    });
+
+    it('resumes after incoming edges were detached but not reattached', () => {
+      const input = closedRecoveryFixture();
+      input.existingIssues[1]!.parentIssueNumber = null;
+      input.existingIssues[1]!.blockerIssueNumbers = [];
+      expect(planReconciliation(input).operations.map((op) => op.type)).toEqual(['syncParent', 'syncBlocker']);
+    });
+
+    it('does not recreate relationships to closed source dependencies', () => {
+      const input = closedRecoveryFixture('closed');
+      input.existingIssues[1]!.parentIssueNumber = 395;
+      input.existingIssues[1]!.blockerIssueNumbers = [395];
+      const plan = planReconciliation(input);
+      expect(plan.operations).toContainEqual(expect.objectContaining({
+        type: 'syncParent', parentBeadId: null, parentIssueNumber: null,
+      }));
+      expect(plan.operations).toContainEqual(expect.objectContaining({
+        type: 'syncBlocker', blockerBeadIds: [], blockerIssueNumbers: [],
+      }));
+      input.existingIssues[1]!.parentIssueNumber = null;
+      input.existingIssues[1]!.blockerIssueNumbers = [];
+      expect(planReconciliation(input).operations).toEqual([]);
+    });
+
+    it('preserves already canonical closed dependency history', () => {
+      const input = closedRecoveryFixture('closed');
+      input.existingIssues[1]!.parentIssueNumber = 208;
+      input.existingIssues[1]!.blockerIssueNumbers = [208];
+      expect(planReconciliation(input).operations).toEqual([]);
+    });
+
+    it.each(['parent', 'blocker'])('rejects an incoming %s alias not declared by the source', (kind) => {
+      const input = closedRecoveryFixture();
+      if (kind === 'parent') {
+        input.inventory[1]!.parentId = null;
+        input.existingIssues[1]!.parentIssueNumber = 395;
+      } else {
+        input.inventory[1]!.blockedByIds = [];
+        input.existingIssues[1]!.blockerIssueNumbers = [395];
+      }
+      expect(() => planReconciliation(input)).toThrow(/disagrees with source/);
+    });
+
+    it('rejects an unknown historical blocker instead of dropping it during alias repair', () => {
+      const input = closedRecoveryFixture();
+      input.existingIssues[1]!.blockerIssueNumbers = [395, 999];
+      expect(() => planReconciliation(input)).toThrow(/unknown blocker/);
+    });
+
+    it.each(['parent', 'blocker'])('rejects a recovery %s reattachment cycle', (kind) => {
+      const input = closedRecoveryFixture();
+      input.inventory[1]!.status = 'open';
+      input.inventory[1]!.parentId = kind === 'parent' ? 'psyche-i7c.10' : null;
+      input.inventory[1]!.blockedByIds = kind === 'blocker' ? ['psyche-i7c.10'] : [];
+      expect(() => planReconciliation(input)).toThrow(/cycle/);
+    });
+
     it('does not recreate an approved survivor missing from a partial inventory', () => {
       expect(() => planReconciliation({
         inventory: [makeBead('psyche-i7c')], existingIssues: [], renderContext: baseContext,
