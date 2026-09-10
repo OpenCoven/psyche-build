@@ -1,10 +1,104 @@
 import Combine
+import Darwin
 import Foundation
 import XCTest
 @testable import PsycheCore
 
 @MainActor
 final class WorkspaceCacheTests: XCTestCase {
+    func testMatchingPreservationRetryFinalizesMetadataBeforeReplacement() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        let archive = directory.appendingPathComponent("\(WorkspaceCache.defaultFileName).quarantine-0")
+        let original = Data("recoverable draft after interrupted metadata write".utf8)
+        try original.write(to: url)
+        let manager = FaultingWorkspaceCacheFileManager(baseDirectoryURL: directory)
+        manager.failFinalization = true
+        let cache = WorkspaceCache(baseDirectoryURL: directory, fileManager: manager)
+        let fresh = makeCachedState(
+            revision: 2, sequence: 2, selectedProjectID: nil,
+            primaryPaneID: nil, secondaryPaneID: nil, drafts: [:]
+        )
+        for _ in 0..<2 {
+            do {
+                try await cache.save(fresh, forServerID: "server-a")
+                XCTFail("Metadata failure must prevent replacement, including on retry")
+            } catch {
+                XCTAssertEqual(error as? FaultingWorkspaceCacheFileManagerError, .finalizationFailed)
+            }
+            XCTAssertEqual(try Data(contentsOf: url), original)
+            XCTAssertEqual(try Data(contentsOf: archive), original)
+        }
+        manager.failFinalization = false
+        let attemptsBeforeRetry = manager.finalizationAttempts
+        try await cache.save(fresh, forServerID: "server-a")
+        XCTAssertGreaterThan(manager.finalizationAttempts, attemptsBeforeRetry)
+        XCTAssertEqual(try Data(contentsOf: archive), original)
+        let restored = try await cache.cachedState(forServerID: "server-a")
+        XCTAssertEqual(restored, fresh)
+    }
+
+    func testMatchingCrashRecordReceivesRequiredMetadata() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        let archive = directory.appendingPathComponent("\(WorkspaceCache.defaultFileName).quarantine-0")
+        let original = Data("draft bytes written before metadata".utf8)
+        try original.write(to: url)
+        try original.write(to: archive, options: .noFileProtection)
+        let descriptor = open(archive.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        defer { close(descriptor) }
+        #if !targetEnvironment(simulator)
+        // The simulator ignores protection options and reports class C even
+        // for an unprotected fixture; only a device proves the class change.
+        XCTAssertEqual(fcntl(descriptor, F_GETPROTECTIONCLASS), 4)
+        #endif
+        XCTAssertNotEqual(try archive.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        let cache = WorkspaceCache(baseDirectoryURL: directory)
+        try await cache.save(makeCachedState(
+            revision: 2, sequence: 2, selectedProjectID: nil,
+            primaryPaneID: nil, secondaryPaneID: nil, drafts: [:]
+        ), forServerID: "server-a")
+        XCTAssertEqual(try Data(contentsOf: archive), original)
+        XCTAssertEqual(try archive.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        XCTAssertEqual(fcntl(descriptor, F_GETPROTECTIONCLASS), 3)
+        #if !targetEnvironment(simulator)
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: archive.path)[.protectionKey] as? FileProtectionType,
+            .completeUntilFirstUserAuthentication
+        )
+        #endif
+    }
+
+    func testFinalizationRejectsUnsafeFileIdentitiesWithoutChangingTarget() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("target")
+        let original = Data("unrelated draft".utf8)
+        try original.write(to: target, options: .noFileProtection)
+        let manager = SystemWorkspaceCacheFileManager()
+        let symlink = directory.appendingPathComponent("symlink")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+        XCTAssertThrowsError(try manager.finalizeFile(at: symlink, protection: .completeUntilFirstUserAuthentication))
+        let hardlink = directory.appendingPathComponent("hardlink")
+        try FileManager.default.linkItem(at: target, to: hardlink)
+        XCTAssertThrowsError(try manager.finalizeFile(at: hardlink, protection: .completeUntilFirstUserAuthentication))
+        try FileManager.default.removeItem(at: hardlink)
+        let fifo = directory.appendingPathComponent("fifo")
+        XCTAssertEqual(mkfifo(fifo.path, 0o600), 0)
+        XCTAssertThrowsError(try manager.finalizeFile(at: fifo, protection: .completeUntilFirstUserAuthentication))
+        XCTAssertThrowsError(try manager.finalizeFile(at: directory, protection: .completeUntilFirstUserAuthentication))
+        let parentLink = directory.appendingPathComponent("parent-link")
+        try FileManager.default.createSymbolicLink(at: parentLink, withDestinationURL: directory)
+        XCTAssertThrowsError(try manager.finalizeFile(
+            at: parentLink.appendingPathComponent("target"), protection: .completeUntilFirstUserAuthentication
+        ))
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        XCTAssertNotEqual(try target.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+    }
+
     func testSparseRecordReadStopsAtLimitPlusOne() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -723,6 +817,7 @@ final class WorkspaceCacheTests: XCTestCase {
 private enum FaultingWorkspaceCacheFileManagerError: Error, Equatable {
     case replaceFailed
     case preserveFailed
+    case finalizationFailed
 }
 
 private final class RecordingWorkspaceCacheFileManager: WorkspaceCacheFileManaging, @unchecked Sendable {
@@ -773,6 +868,10 @@ private final class RecordingWorkspaceCacheFileManager: WorkspaceCacheFileManagi
         FileManager.default.fileExists(atPath: url.path)
     }
 
+    func finalizeFile(at url: URL, protection: FileProtectionType) throws {
+        try SystemWorkspaceCacheFileManager().finalizeFile(at: url, protection: protection)
+    }
+
     func moveItem(at sourceURL: URL, to destinationURL: URL) throws {
         try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
     }
@@ -801,6 +900,8 @@ private final class FaultingWorkspaceCacheFileManager: WorkspaceCacheFileManagin
     private let baseDirectoryURL: URL
     private var shouldFailNextReplace = false
     var failPreservation = false
+    var failFinalization = false
+    private(set) var finalizationAttempts = 0
 
     init(baseDirectoryURL: URL) {
         self.baseDirectoryURL = baseDirectoryURL
@@ -846,6 +947,17 @@ private final class FaultingWorkspaceCacheFileManager: WorkspaceCacheFileManagin
             attributes: [.protectionKey: protection]
         )
         XCTAssertTrue(created)
+        if url.lastPathComponent.contains(".quarantine-") {
+            try finalizeFile(at: url, protection: protection)
+        }
+    }
+
+    func finalizeFile(at url: URL, protection: FileProtectionType) throws {
+        finalizationAttempts += 1
+        if failFinalization {
+            throw FaultingWorkspaceCacheFileManagerError.finalizationFailed
+        }
+        try SystemWorkspaceCacheFileManager().finalizeFile(at: url, protection: protection)
     }
 
     func fileExists(at url: URL) throws -> Bool {

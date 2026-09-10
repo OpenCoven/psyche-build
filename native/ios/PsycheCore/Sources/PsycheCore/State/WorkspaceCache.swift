@@ -626,14 +626,15 @@ private struct ProtectedAppSupportFileStore: Sendable {
         for index in 0..<Self.recoveryRecordLimit {
             let destination = recoveryURL(index)
             if try fileManager.fileExists(at: destination) {
-                if try fileManager.readData(at: destination, maxBytes: Self.recoveryByteLimit) == data {
-                    return
+                guard try fileManager.readData(at: destination, maxBytes: Self.recoveryByteLimit) == data else {
+                    continue
                 }
-                continue
+            } else {
+                try fileManager.createFile(at: destination, contents: data, protection: Self.protection)
             }
-            try fileManager.createFile(at: destination, contents: data, protection: Self.protection)
-            // Do not replace the original until the protected preservation copy
-            // has been read back successfully.
+            // Matching bytes can survive an interrupted metadata write. Both new
+            // and reused records must be finalized before replacing the original.
+            try fileManager.finalizeFile(at: destination, protection: Self.protection)
             guard try fileManager.readData(at: destination, maxBytes: Self.recoveryByteLimit) == data,
                   try read(maxBytes: Self.recoveryByteLimit) == data else {
                 throw WorkspaceCacheError.unwritableRecord("preservation verification failed")
@@ -693,6 +694,7 @@ protocol WorkspaceCacheFileManaging: Sendable {
     func readData(at url: URL, maxBytes: Int) throws -> Data?
     func createDirectory(at url: URL, protection: FileProtectionType) throws
     func createFile(at url: URL, contents: Data, protection: FileProtectionType) throws
+    func finalizeFile(at url: URL, protection: FileProtectionType) throws
     func fileExists(at url: URL) throws -> Bool
     func moveItem(at sourceURL: URL, to destinationURL: URL) throws
     func replaceItem(at originalURL: URL, withItemAt replacementURL: URL) throws
@@ -769,17 +771,79 @@ struct SystemWorkspaceCacheFileManager: WorkspaceCacheFileManaging {
         try contents.write(to: url, options: [
             .withoutOverwriting, .completeFileProtectionUntilFirstUserAuthentication
         ])
-        var protectedURL = url
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try protectedURL.setResourceValues(values)
-        let descriptor = open(url.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+        try finalizeFile(at: url, protection: protection)
+    }
+
+    func finalizeFile(at url: URL, protection: FileProtectionType) throws {
+        guard protection == .completeUntilFirstUserAuthentication else {
+            throw WorkspaceCacheError.unwritableRecord("unsupported file protection")
+        }
+        let directoryURL = url.deletingLastPathComponent()
+        let directory = open(directoryURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(directory) }
+        var directoryIdentity = stat()
+        guard fstat(directory, &directoryIdentity) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let descriptor = openat(
+            directory, url.lastPathComponent, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        )
         guard descriptor >= 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
+        var identity = stat()
+        guard fstat(descriptor, &identity) == 0,
+              identity.st_mode & S_IFMT == S_IFREG,
+              identity.st_nlink == 1 else {
+            throw WorkspaceCacheError.unwritableRecord("unsafe file identity")
+        }
+        // Darwin protection class C is complete-until-first-authentication.
+        guard fcntl(descriptor, F_SETPROTECTIONCLASS, 3) == 0,
+              fcntl(descriptor, F_GETPROTECTIONCLASS) == 3 else {
+            throw WorkspaceCacheError.unwritableRecord("file protection verification failed")
+        }
+        // Use the descriptor, not a mutable path, for the backup exclusion
+        // attribute. Also verify Foundation recognizes it before accepting it.
+        let backupAttribute = "com.apple.metadata:com_apple_backup_excludeItem"
+        let excluded = try PropertyListSerialization.data(
+            fromPropertyList: "com.apple.backupd", format: .binary, options: 0
+        )
+        let setResult = excluded.withUnsafeBytes {
+            fsetxattr(descriptor, backupAttribute, $0.baseAddress, $0.count, 0, 0)
+        }
+        guard setResult == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var actual = Data(count: excluded.count)
+        let readCount = actual.withUnsafeMutableBytes {
+            fgetxattr(descriptor, backupAttribute, $0.baseAddress, $0.count, 0, 0)
+        }
+        guard readCount == excluded.count, actual == excluded,
+              try URL(fileURLWithPath: url.path).resourceValues(
+                forKeys: [.isExcludedFromBackupKey]
+              ).isExcludedFromBackup == true else {
+            throw WorkspaceCacheError.unwritableRecord("backup exclusion verification failed")
+        }
         try handle.synchronize()
+        var currentIdentity = stat()
+        var currentDirectoryIdentity = stat()
+        guard fstatat(directory, url.lastPathComponent, &currentIdentity, AT_SYMLINK_NOFOLLOW) == 0,
+              currentIdentity.st_dev == identity.st_dev,
+              currentIdentity.st_ino == identity.st_ino,
+              currentIdentity.st_nlink == 1,
+              lstat(directoryURL.path, &currentDirectoryIdentity) == 0,
+              currentDirectoryIdentity.st_dev == directoryIdentity.st_dev,
+              currentDirectoryIdentity.st_ino == directoryIdentity.st_ino else {
+            throw WorkspaceCacheError.unwritableRecord("file identity changed")
+        }
+        guard fsync(directory) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     func fileExists(at url: URL) throws -> Bool {

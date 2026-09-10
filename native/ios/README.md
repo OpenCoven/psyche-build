@@ -33,6 +33,9 @@ oversized cache data only after preserving and verifying the original bytes
 locally. The app keeps up to three preservation records, each at most 1 MiB,
 with the same complete-until-first-authentication protection as the cache and
 excluded from backup. It does not evict or truncate old drafts to make room.
+Byte-matching records left by an interrupted preservation attempt are not
+assumed complete: new and reused copies must finish descriptor-bound protection,
+backup-exclusion verification, and synchronization before replacing the original.
 Larger records, unsafe paths, unreadable files, exhausted preservation slots,
 or failed preservation leave the original cache untouched and require help
 preserving the app data before retrying. Removing a host record is not a
