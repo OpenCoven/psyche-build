@@ -519,12 +519,12 @@ mod tests {
             "#!/bin/sh\nexec /bin/dd if=/dev/zero bs=2097153 count=1 2>/dev/null\n",
         );
 
-        let error = load_coven_metrics_with_timeout(
+        // Non-timing fixtures use the production budget, including cold script startup.
+        let error = load_coven_metrics(
             coven.to_str().unwrap(),
             &tree.path,
             "session",
             OsStr::new("/usr/bin:/bin"),
-            Duration::from_secs(2),
         )
         .unwrap_err();
 
@@ -569,12 +569,11 @@ mod tests {
         );
         write_executable(&fake_node, "#!/bin/sh\nexec /bin/sh \"$@\"\n");
 
-        let stripped_error = load_coven_metrics_with_timeout(
+        let stripped_error = load_coven_metrics(
             coven.to_str().unwrap(),
             &tree.path,
             "session",
             stripped.as_os_str(),
-            Duration::from_secs(2),
         )
         .unwrap_err();
         assert!(
@@ -583,14 +582,8 @@ mod tests {
         );
 
         let path = std::env::join_paths([augmented, stripped]).unwrap();
-        let metrics = load_coven_metrics_with_timeout(
-            coven.to_str().unwrap(),
-            &tree.path,
-            "session",
-            &path,
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        let metrics =
+            load_coven_metrics(coven.to_str().unwrap(), &tree.path, "session", &path).unwrap();
 
         assert_eq!(metrics.spend_usd, Some(0.5));
         assert_eq!(metrics.cost_kind, "local-estimate");

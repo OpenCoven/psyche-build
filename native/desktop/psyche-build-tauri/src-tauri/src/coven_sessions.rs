@@ -1877,6 +1877,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     use serde_json::json;
+    use tokio::net::TcpSocket;
 
     use super::*;
 
@@ -2049,6 +2050,14 @@ mod tests {
         for path in paths {
             assert_eq!(server.recv_request(), expected_request("GET", path));
         }
+    }
+
+    fn unavailable_tcp_socket() -> TcpSocket {
+        // Reserve the port without listening so parallel fixtures cannot take it.
+        // Depending on the OS, connecting is refused or reaches the adapter deadline.
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        socket
     }
 
     fn spawn_tcp_server(responses: Vec<Vec<u8>>) -> (CovenEndpoint, FakeServer) {
@@ -3301,10 +3310,28 @@ mod tests {
     }
 
     #[test]
-    fn maps_a_refused_tcp_connection_to_unavailable() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
-        drop(listener);
+    fn unavailable_tcp_fixture_reserves_its_port() {
+        let socket = unavailable_tcp_socket();
+        let address = socket.local_addr().unwrap();
+
+        assert_eq!(
+            TcpListener::bind(address).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+    }
+
+    #[test]
+    fn refused_tcp_connections_are_classified_as_unavailable() {
+        assert_eq!(
+            categorize_io_error(&io::Error::from(io::ErrorKind::ConnectionRefused), false),
+            CovenAdapterError::Unavailable
+        );
+    }
+
+    #[test]
+    fn maps_an_unavailable_tcp_endpoint_to_unavailable() {
+        let socket = unavailable_tcp_socket();
+        let endpoint = CovenEndpoint::Http(socket.local_addr().unwrap());
 
         let response = load_coven_sessions(&endpoint, &[]);
 
@@ -3543,9 +3570,8 @@ mod tests {
 
     #[test]
     fn a_successful_call_after_failure_has_no_stale_failure_state() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let failed_endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
-        drop(listener);
+        let socket = unavailable_tcp_socket();
+        let failed_endpoint = CovenEndpoint::Http(socket.local_addr().unwrap());
         let failed = load_coven_sessions(&failed_endpoint, &[]);
         assert_eq!(failed.status, "unavailable");
 
@@ -4098,9 +4124,8 @@ mod tests {
 
     #[test]
     fn launch_failures_map_to_recovery_messages() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
-        drop(listener);
+        let socket = unavailable_tcp_socket();
+        let endpoint = CovenEndpoint::Http(socket.local_addr().unwrap());
 
         assert_eq!(
             launch_failure_response(
@@ -4184,7 +4209,7 @@ mod tests {
         let coven = tree.root.join("coven");
         fs::write(
             &coven,
-            "#!/bin/sh\ncat <<'JSON'\n[{\"id\":\"codex\",\"label\":\"Codex\",\"available\":true,\"source\":\"bundled\"}]\nJSON\n",
+            "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"codex\",\"label\":\"Codex\",\"available\":true,\"source\":\"bundled\"}]'\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
