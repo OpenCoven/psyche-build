@@ -1,9 +1,240 @@
+import Combine
 import Foundation
 import XCTest
 @testable import PsycheCore
 
 @MainActor
 final class WorkspaceCacheTests: XCTestCase {
+    func testSparseRecordReadStopsAtLimitPlusOne() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: 32 * 1024 * 1024)
+        try handle.close()
+        let cache = WorkspaceCache(baseDirectoryURL: directory)
+        do {
+            _ = try await cache.cachedState(forServerID: "server-a")
+            XCTFail("Expected bounded oversized read")
+        } catch {
+            XCTAssertEqual(error as? WorkspaceCacheError, .cacheTooLarge(
+                actualBytes: 256 * 1024 + 1, limit: 256 * 1024
+            ))
+        }
+    }
+
+    func testSymlinkRecordIsRejectedRatherThanRead() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("target")
+        try Data("{\"version\":1,\"records\":{}}".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(
+            at: directory.appendingPathComponent(WorkspaceCache.defaultFileName),
+            withDestinationURL: target
+        )
+        do {
+            _ = try await WorkspaceCache(baseDirectoryURL: directory).cachedState(forServerID: "server-a")
+            XCTFail("Expected unsafe record rejection")
+        } catch {
+            guard case .unreadableRecord = error as? WorkspaceCacheError else {
+                return XCTFail("Expected unreadable record")
+            }
+        }
+    }
+
+    func testSymlinkCacheDirectoryIsRejected() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try Data("{\"version\":1,\"records\":{}}".utf8).write(
+            to: target.appendingPathComponent(WorkspaceCache.defaultFileName)
+        )
+        let link = directory.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        do {
+            _ = try await WorkspaceCache(baseDirectoryURL: link).cachedState(forServerID: "server-a")
+            XCTFail("Expected unsafe directory rejection")
+        } catch {
+            guard case .unreadableRecord = error as? WorkspaceCacheError else {
+                return XCTFail("Expected unreadable record")
+            }
+        }
+    }
+
+    func testPreservationFailureNeverReplacesOriginal() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = Data("recoverable bytes".utf8)
+        let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        try original.write(to: url)
+        let manager = FaultingWorkspaceCacheFileManager(baseDirectoryURL: directory)
+        manager.failPreservation = true
+        let cache = WorkspaceCache(baseDirectoryURL: directory, fileManager: manager)
+        do {
+            try await cache.save(makeCachedState(
+                revision: 2, sequence: 2, selectedProjectID: nil,
+                primaryPaneID: nil, secondaryPaneID: nil, drafts: [:]
+            ), forServerID: "server-a")
+            XCTFail("Expected preservation failure")
+        } catch {
+            XCTAssertEqual(error as? FaultingWorkspaceCacheFileManagerError, .preserveFailed)
+        }
+        XCTAssertEqual(try Data(contentsOf: url), original)
+    }
+
+    func testFreshSavePreservesInvalidRecordBeforeRecovering() async throws {
+        for original in [
+            Data("broken record with recoverable draft".utf8),
+            Data("{\"version\":999,\"records\":{}}".utf8),
+            Data(repeating: 65, count: 256 * 1024 + 20)
+        ] {
+            let directory = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+            try original.write(to: url)
+            let cache = WorkspaceCache(baseDirectoryURL: directory)
+            let fresh = makeCachedState(
+                revision: 2, sequence: 2, selectedProjectID: nil,
+                primaryPaneID: nil, secondaryPaneID: nil, drafts: ["pane-a": "fresh draft"]
+            )
+            try await cache.save(fresh, forServerID: "server-a")
+            let restored = try await cache.cachedState(forServerID: "server-a")
+            XCTAssertEqual(restored, fresh)
+            let archives = try FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil
+            ).filter { $0.lastPathComponent.contains(".quarantine-") }
+            XCTAssertEqual(archives.count, 1)
+            XCTAssertEqual(try Data(contentsOf: XCTUnwrap(archives.first)), original)
+            let otherHost = try await cache.cachedState(forServerID: "server-b")
+            XCTAssertNil(otherHost)
+        }
+    }
+
+    func testFailedRecoveryWriteKeepsOriginalBytes() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        let original = Data("recoverable draft".utf8)
+        try original.write(to: url)
+        let manager = FaultingWorkspaceCacheFileManager(baseDirectoryURL: directory)
+        manager.failNextReplace()
+        let cache = WorkspaceCache(baseDirectoryURL: directory, fileManager: manager)
+        do {
+            try await cache.save(makeCachedState(
+                revision: 2, sequence: 2, selectedProjectID: nil,
+                primaryPaneID: nil, secondaryPaneID: nil, drafts: [:]
+            ), forServerID: "server-a")
+            XCTFail("Expected replacement failure")
+        } catch {
+            XCTAssertEqual(error as? FaultingWorkspaceCacheFileManagerError, .replaceFailed)
+        }
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        try await cache.save(makeCachedState(
+            revision: 2, sequence: 2, selectedProjectID: nil,
+            primaryPaneID: nil, secondaryPaneID: nil, drafts: [:]
+        ), forServerID: "server-a")
+        let archives = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains(".quarantine-") }
+        XCTAssertEqual(archives.count, 1, "Retry must reuse the verified preservation copy")
+    }
+
+    func testNoOpPersistenceCannotClearRestoreFailure() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        try Data("invalid".utf8).write(to: url)
+        let hosts = PairedHostStore(secureStore: InMemorySecureStore())
+        try await hosts.save(makeHost(serverID: "server-a", fingerprint: String(repeating: "a", count: 64)))
+        let composition = MobileAppComposition(
+            transport: FakeTransport(), pairedHostStore: hosts,
+            workspaceCache: WorkspaceCache(baseDirectoryURL: directory)
+        )
+        await composition.restorePersistedWorkspaceIfAvailable()
+        XCTAssertNotNil(composition.workspaceCacheError)
+        try Data("{\"version\":1,\"records\":{}}".utf8).write(to: url)
+        let cleared = expectation(description: "No successful save, so no clearing")
+        cleared.isInverted = true
+        let observation = composition.$workspaceCacheError.dropFirst().sink {
+            if $0 == nil { cleared.fulfill() }
+        }
+        composition.workspaceStore.setDraft("unsaved", forPane: "pane-a")
+        await fulfillment(of: [cleared], timeout: 0.2)
+        withExtendedLifetime(observation) {}
+    }
+
+    func testNewHostIdentityCannotPersistThePreviousHostsStaleWorkspace() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hosts = PairedHostStore(secureStore: InMemorySecureStore())
+        let first = makeHost(serverID: "server-a", fingerprint: String(repeating: "a", count: 64))
+        let second = makeHost(serverID: "server-b", fingerprint: String(repeating: "b", count: 64))
+        try await hosts.save(first)
+        let cache = WorkspaceCache(baseDirectoryURL: directory)
+        let original = makeCachedState(
+            revision: 2, sequence: 2, selectedProjectID: nil,
+            primaryPaneID: "pane-a", secondaryPaneID: nil, drafts: ["pane-a": "host-a draft"]
+        )
+        try await cache.save(original, forServerID: first.serverID)
+        let composition = MobileAppComposition(
+            transport: FakeTransport(), pairedHostStore: hosts, workspaceCache: cache
+        )
+        await composition.restorePersistedWorkspaceIfAvailable()
+        try await hosts.save(second)
+        try composition.hostReadiness.adoptPersistedHost(second)
+        await composition.retryWorkspaceCachePersistence()
+        let firstRestored = try await cache.cachedState(forServerID: first.serverID)
+        let secondRestored = try await cache.cachedState(forServerID: second.serverID)
+        XCTAssertEqual(firstRestored, original)
+        XCTAssertNil(secondRestored)
+    }
+
+    func testRecoveryRetentionRefusesToEvictOrTruncateOriginal() async throws {
+        for oversized in [false, true] {
+            let directory = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let original = Data(repeating: 65, count: oversized ? 1024 * 1024 + 1 : 40)
+            let url = directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+            try original.write(to: url)
+            if !oversized {
+                for index in 0..<3 {
+                    try Data("preserved-\(index)".utf8).write(to: directory.appendingPathComponent(
+                        "\(WorkspaceCache.defaultFileName).quarantine-\(index)"
+                    ))
+                }
+            }
+            let cache = WorkspaceCache(baseDirectoryURL: directory)
+            do {
+                try await cache.save(makeCachedState(
+                    revision: 2, sequence: 2, selectedProjectID: nil,
+                    primaryPaneID: nil, secondaryPaneID: nil, drafts: [:]
+                ), forServerID: "server-a")
+                XCTFail("Expected explicit recovery-required state")
+            } catch {
+                XCTAssertEqual(error as? WorkspaceCacheError, .recoveryRequired)
+            }
+            XCTAssertEqual(try Data(contentsOf: url), original)
+        }
+    }
+
+    func testBoundedReaderHandlesFileGrowthAfterOpening() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("growing-record")
+        try Data(repeating: 65, count: 10).write(to: url)
+        let reader = try FileHandle(forReadingFrom: url)
+        defer { try? reader.close() }
+        let writer = try FileHandle(forWritingTo: url)
+        try writer.seekToEnd()
+        try writer.write(contentsOf: Data(repeating: 66, count: 1024 * 1024))
+        try writer.close()
+        let read = try SystemWorkspaceCacheFileManager.readBounded(reader, maxBytes: 128)
+        XCTAssertEqual(read.count, 129)
+        XCTAssertEqual(try reader.offset(), 129)
+    }
+
     func testSameHostRestoreRoundTripsWorkspaceSequenceSelectionAndDrafts() async throws {
         let directoryURL = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
@@ -482,7 +713,7 @@ final class WorkspaceCacheTests: XCTestCase {
     }
 
     private func makeTemporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
+        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
@@ -491,6 +722,7 @@ final class WorkspaceCacheTests: XCTestCase {
 
 private enum FaultingWorkspaceCacheFileManagerError: Error, Equatable {
     case replaceFailed
+    case preserveFailed
 }
 
 private final class RecordingWorkspaceCacheFileManager: WorkspaceCacheFileManaging, @unchecked Sendable {
@@ -506,7 +738,7 @@ private final class RecordingWorkspaceCacheFileManager: WorkspaceCacheFileManagi
         baseDirectoryURL
     }
 
-    func readData(at url: URL) throws -> Data? {
+    func readData(at url: URL, maxBytes: Int) throws -> Data? {
         do {
             return try Data(contentsOf: url)
         } catch let error as NSError {
@@ -568,6 +800,7 @@ private final class FaultingWorkspaceCacheFileManager: WorkspaceCacheFileManagin
     private let lock = NSLock()
     private let baseDirectoryURL: URL
     private var shouldFailNextReplace = false
+    var failPreservation = false
 
     init(baseDirectoryURL: URL) {
         self.baseDirectoryURL = baseDirectoryURL
@@ -583,7 +816,7 @@ private final class FaultingWorkspaceCacheFileManager: WorkspaceCacheFileManagin
         baseDirectoryURL
     }
 
-    func readData(at url: URL) throws -> Data? {
+    func readData(at url: URL, maxBytes: Int) throws -> Data? {
         do {
             return try Data(contentsOf: url)
         } catch let error as NSError {
@@ -604,6 +837,9 @@ private final class FaultingWorkspaceCacheFileManager: WorkspaceCacheFileManagin
     }
 
     func createFile(at url: URL, contents: Data, protection: FileProtectionType) throws {
+        if failPreservation && url.lastPathComponent.contains(".quarantine-") {
+            throw FaultingWorkspaceCacheFileManagerError.preserveFailed
+        }
         let created = FileManager.default.createFile(
             atPath: url.path,
             contents: contents,

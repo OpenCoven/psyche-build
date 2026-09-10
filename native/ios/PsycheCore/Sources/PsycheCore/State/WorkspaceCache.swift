@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum WorkspaceCacheError: Error, Sendable, Equatable, LocalizedError {
@@ -8,6 +9,7 @@ public enum WorkspaceCacheError: Error, Sendable, Equatable, LocalizedError {
     case corruptedRecord
     case unreadableRecord(String)
     case unwritableRecord(String)
+    case recoveryRequired
 
     public var errorDescription: String? {
         switch self {
@@ -15,19 +17,21 @@ public enum WorkspaceCacheError: Error, Sendable, Equatable, LocalizedError {
             "The workspace cache requires a non-empty host identity."
         case .tooManyDrafts(let actualCount, let limit):
             "The workspace cache refuses \(actualCount) drafts because the limit is \(limit)."
-        case .draftTooLong(let paneID, let actualLength, let limit):
+        case .draftTooLong(_, let actualLength, let limit):
             """
-            The draft for pane \(paneID) is \(actualLength) characters long, \
+            A draft is \(actualLength) characters long, \
             exceeding the cache limit of \(limit).
             """
         case .cacheTooLarge(let actualBytes, let limit):
             "The workspace cache is \(actualBytes) bytes, exceeding the limit of \(limit)."
         case .corruptedRecord:
-            "The workspace cache could not be read and was ignored."
-        case .unreadableRecord(let reason):
-            "The workspace cache could not be read: \(reason)"
-        case .unwritableRecord(let reason):
-            "The workspace cache could not be written: \(reason)"
+            "Saved workspace data is damaged or incompatible. Reconnect to recover after preserving the original data."
+        case .unreadableRecord:
+            "Saved workspace data could not be read safely. Keep the app data and retry after unlocking the device."
+        case .unwritableRecord:
+            "Workspace changes could not be saved. Keep the app open and retry after checking device storage."
+        case .recoveryRequired:
+            "Workspace recovery needs help: preservation storage is full or the record exceeds its limit. Keep the app data; do not reinstall or delete it."
         }
     }
 }
@@ -399,6 +403,7 @@ public struct CachedPublishedRitual: Codable, Sendable, Equatable, Identifiable 
 
 public actor WorkspaceCache {
     public static let defaultFileName = "workspace-cache.v1.json"
+    public static let recoveryNotice = "Original workspace data, including any drafts, is preserved on this device but has not been restored. Check for a saving error separately. Keep the app data for recovery; do not reinstall or delete it."
 
     private let limits: WorkspaceCacheLimits
     private let store: ProtectedAppSupportFileStore
@@ -442,16 +447,40 @@ public actor WorkspaceCache {
         return cache.records[cacheKey]
     }
 
+    @discardableResult
+    /// Returns true only when preservation and a fresh cache write both succeed.
     public func save(
         _ state: CachedWorkspaceState,
-        forServerID serverID: String
-    ) throws {
+        forServerID serverID: String,
+        recoverIfNeeded: Bool = true
+    ) throws -> Bool {
         let cacheKey = try Self.cacheKey(forServerID: serverID)
         try validate(state)
-        var cache = try readCache()
+        var cache: PersistedWorkspaceCache
+        var needsRecovery = false
+        do {
+            cache = try readCache()
+        } catch let error as WorkspaceCacheError {
+            switch error {
+            case .corruptedRecord, .cacheTooLarge, .tooManyDrafts, .draftTooLong:
+                guard recoverIfNeeded else { throw error }
+                cache = .empty
+                needsRecovery = true
+            default:
+                throw error
+            }
+        }
         cache.records[cacheKey] = state
         let data = try encode(cache)
+        if needsRecovery {
+            try store.preserveForRecovery()
+        }
         try store.write(data)
+        return needsRecovery
+    }
+
+    public func hasPreservedRecoveryRecords() throws -> Bool {
+        try store.hasPreservedRecoveryRecords()
     }
 
     public func removeCachedState(forServerID serverID: String) throws {
@@ -473,7 +502,7 @@ public actor WorkspaceCache {
 
     private func readData() throws -> Data? {
         do {
-            guard let data = try store.read() else { return nil }
+            guard let data = try store.read(maxBytes: limits.maxEncodedBytes) else { return nil }
             guard data.count <= limits.maxEncodedBytes else {
                 throw WorkspaceCacheError.cacheTooLarge(
                     actualBytes: data.count,
@@ -558,6 +587,8 @@ public actor WorkspaceCache {
 
 private struct ProtectedAppSupportFileStore: Sendable {
     private static let protection = FileProtectionType.completeUntilFirstUserAuthentication
+    private static let recoveryByteLimit = 1024 * 1024
+    private static let recoveryRecordLimit = 3
 
     private let baseDirectoryURL: URL?
     private let fileName: String
@@ -573,8 +604,47 @@ private struct ProtectedAppSupportFileStore: Sendable {
         self.fileManager = fileManager
     }
 
-    func read() throws -> Data? {
-        try fileManager.readData(at: fileURL)
+    func read(maxBytes: Int) throws -> Data? {
+        try fileManager.readData(at: fileURL, maxBytes: maxBytes)
+    }
+
+    func hasPreservedRecoveryRecords() throws -> Bool {
+        for index in 0..<Self.recoveryRecordLimit {
+            if try fileManager.fileExists(at: recoveryURL(index)) { return true }
+        }
+        return false
+    }
+
+    // Never evict drafts to make room. Exhaustion requires operator-assisted
+    // preservation, and leaves the active record untouched.
+    func preserveForRecovery() throws {
+        guard let data = try read(maxBytes: Self.recoveryByteLimit),
+              data.count <= Self.recoveryByteLimit else {
+            throw WorkspaceCacheError.recoveryRequired
+        }
+        try fileManager.createDirectory(at: directoryURL, protection: Self.protection)
+        for index in 0..<Self.recoveryRecordLimit {
+            let destination = recoveryURL(index)
+            if try fileManager.fileExists(at: destination) {
+                if try fileManager.readData(at: destination, maxBytes: Self.recoveryByteLimit) == data {
+                    return
+                }
+                continue
+            }
+            try fileManager.createFile(at: destination, contents: data, protection: Self.protection)
+            // Do not replace the original until the protected preservation copy
+            // has been read back successfully.
+            guard try fileManager.readData(at: destination, maxBytes: Self.recoveryByteLimit) == data,
+                  try read(maxBytes: Self.recoveryByteLimit) == data else {
+                throw WorkspaceCacheError.unwritableRecord("preservation verification failed")
+            }
+            return
+        }
+        throw WorkspaceCacheError.recoveryRequired
+    }
+
+    private func recoveryURL(_ index: Int) -> URL {
+        directoryURL.appendingPathComponent("\(fileName).quarantine-\(index)")
     }
 
     func write(_ data: Data) throws {
@@ -620,7 +690,7 @@ private struct ProtectedAppSupportFileStore: Sendable {
 
 protocol WorkspaceCacheFileManaging: Sendable {
     func applicationSupportDirectory() -> URL
-    func readData(at url: URL) throws -> Data?
+    func readData(at url: URL, maxBytes: Int) throws -> Data?
     func createDirectory(at url: URL, protection: FileProtectionType) throws
     func createFile(at url: URL, contents: Data, protection: FileProtectionType) throws
     func fileExists(at url: URL) throws -> Bool
@@ -630,7 +700,7 @@ protocol WorkspaceCacheFileManaging: Sendable {
     func attributesOfItem(at url: URL) throws -> [FileAttributeKey: Any]
 }
 
-private struct SystemWorkspaceCacheFileManager: WorkspaceCacheFileManaging {
+struct SystemWorkspaceCacheFileManager: WorkspaceCacheFileManaging {
     func applicationSupportDirectory() -> URL {
         FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -638,16 +708,53 @@ private struct SystemWorkspaceCacheFileManager: WorkspaceCacheFileManaging {
         )[0]
     }
 
-    func readData(at url: URL) throws -> Data? {
-        do {
-            return try Data(contentsOf: url)
-        } catch let error as NSError {
-            guard error.domain == NSCocoaErrorDomain,
-                  error.code == NSFileReadNoSuchFileError else {
-                throw error
-            }
-            return nil
+    func readData(at url: URL, maxBytes: Int) throws -> Data? {
+        let directory = open(
+            url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard directory >= 0 else {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+        defer { close(directory) }
+        let descriptor = openat(
+            directory, url.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        )
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var identity = stat()
+        guard fstat(descriptor, &identity) == 0,
+              identity.st_mode & S_IFMT == S_IFREG,
+              identity.st_nlink == 1 else {
+            throw WorkspaceCacheError.unreadableRecord("unsafe file identity")
+        }
+        let data = try Self.readBounded(handle, maxBytes: maxBytes)
+        var currentIdentity = stat()
+        guard fstatat(directory, url.lastPathComponent, &currentIdentity, AT_SYMLINK_NOFOLLOW) == 0,
+              currentIdentity.st_dev == identity.st_dev,
+              currentIdentity.st_ino == identity.st_ino,
+              currentIdentity.st_nlink == 1 else {
+            throw WorkspaceCacheError.unreadableRecord("file identity changed")
+        }
+        return data
+    }
+
+    static func readBounded(_ handle: FileHandle, maxBytes: Int) throws -> Data {
+        guard maxBytes >= 0, maxBytes < Int.max else {
+            throw WorkspaceCacheError.unreadableRecord("invalid read limit")
+        }
+        var data = Data()
+        while data.count <= maxBytes {
+            let remaining = maxBytes + 1 - data.count
+            guard let chunk = try handle.read(upToCount: min(16 * 1024, remaining)),
+                  !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        return data
     }
 
     func createDirectory(at url: URL, protection: FileProtectionType) throws {
@@ -659,14 +766,20 @@ private struct SystemWorkspaceCacheFileManager: WorkspaceCacheFileManaging {
     }
 
     func createFile(at url: URL, contents: Data, protection: FileProtectionType) throws {
-        let created = FileManager.default.createFile(
-            atPath: url.path,
-            contents: contents,
-            attributes: [.protectionKey: protection]
-        )
-        guard created else {
-            throw CocoaError(.fileWriteUnknown)
+        try contents.write(to: url, options: [
+            .withoutOverwriting, .completeFileProtectionUntilFirstUserAuthentication
+        ])
+        var protectedURL = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try protectedURL.setResourceValues(values)
+        let descriptor = open(url.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        try handle.synchronize()
     }
 
     func fileExists(at url: URL) throws -> Bool {
