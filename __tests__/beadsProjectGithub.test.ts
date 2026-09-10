@@ -1098,7 +1098,7 @@ describe('createGhClient', () => {
     const commentBody = parseStdin(runner.calls[0]!);
     expect(commentBody.body).toContain('#232');
     expect(commentBody.body).toContain('#420');
-    expect(commentBody.body).toContain('#424');
+    expect(commentBody.body).toContain('#425');
     // The comment must never contain a GitHub auto-close keyword immediately
     // before the survivor issue reference (see .beads/README.md).
     expect(commentBody.body).not.toMatch(/\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#232\b/i);
