@@ -14,15 +14,14 @@
 //! point its `gitdir` anywhere, so a linked worktree is accepted only after
 //! its root is confirmed.
 //!
-//! **The defence is not uniform, and this file contains both halves of the
-//! comparison.** `read_bounded_git_metadata_file` is the hardened reader:
-//! `symlink_metadata`, a reparse check, and a size bound.
-//! `git_dir_for_worktree` is not — it uses `Path::is_dir` and `Path::is_file`,
-//! which follow symlinks, then reads the `.git` file unbounded. It is
-//! reachable from the `git_log` command with a caller-chosen root, and the
-//! directory it returns is used to build the `index` and `objects` paths that
-//! are read afterwards. Treat the paragraph above as describing what most of
-//! this module does, not all of it, until that is fixed.
+//! `git_dir_for_worktree` classifies the `.git` marker with
+//! `symlink_metadata` (which does not follow symlinks or reparse points,
+//! unlike `Path::is_dir`/`Path::is_file`) and reads a linked worktree's
+//! `.git` file through `GitMetadataDirectory`, the same TOCTOU-safe,
+//! size-bounded primitive used elsewhere in this module. It is reachable
+//! from the `git_log` command with a caller-chosen root, and the directory
+//! it returns is used to build the `index` and `objects` paths that are read
+//! afterwards, so both checks matter.
 //!
 //! That is why the Windows file-identity helpers live here: they exist to
 //! answer "is this the same directory I checked a moment ago", which is a Git
@@ -475,23 +474,71 @@ fn resolve_git_path(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
+const MAX_LINKED_WORKTREE_GITDIR_FILE_BYTES: u64 = 64 * 1024;
+
+enum GitMarkerKind {
+    Directory,
+    File,
+    Missing,
+}
+
+/// Classifies a candidate `.git` marker without following symlinks or
+/// reparse points: `symlink_metadata` never follows the final path
+/// component, unlike `Path::is_dir`/`Path::is_file`, which call
+/// `metadata()` and do.
+fn git_marker_kind(dot_git: &Path, label: &str) -> Result<GitMarkerKind, String> {
+    match std::fs::symlink_metadata(dot_git) {
+        Ok(metadata) => {
+            if metadata_is_link_like(&metadata) {
+                return Err(format!(
+                    "{label} is a symlink, which is not a supported marker"
+                ));
+            }
+            if metadata.is_dir() {
+                Ok(GitMarkerKind::Directory)
+            } else if metadata.is_file() {
+                Ok(GitMarkerKind::File)
+            } else {
+                Err(format!("{label} is not a regular file or directory"))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(GitMarkerKind::Missing),
+        Err(error) => Err(format!("inspect {label}: {error}")),
+    }
+}
+
 fn git_dir_for_worktree(root: &Path) -> Result<(PathBuf, PathBuf), String> {
     let mut current = Some(root);
     while let Some(candidate) = current {
         let dot_git = candidate.join(".git");
-        if dot_git.is_dir() {
-            return Ok((candidate.to_path_buf(), dot_git));
-        }
-        if dot_git.is_file() {
-            let text = std::fs::read_to_string(&dot_git)
-                .map_err(|e| format!("read linked worktree Git directory: {e}"))?;
-            let raw = text
-                .trim()
-                .strip_prefix("gitdir:")
-                .ok_or_else(|| "linked worktree .git file is malformed".to_string())?
-                .trim();
-            let git_dir = resolve_git_path(candidate, raw);
-            return Ok((candidate.to_path_buf(), git_dir));
+        let label = "worktree .git marker";
+        match git_marker_kind(&dot_git, label)? {
+            GitMarkerKind::Directory => {
+                return Ok((candidate.to_path_buf(), dot_git));
+            }
+            GitMarkerKind::File => {
+                // Reuse the hardened, TOCTOU-safe, size-bounded reader:
+                // opening the parent directory and the child file with
+                // O_NOFOLLOW (or the platform equivalent) rejects a
+                // marker that is, or becomes, a symlink between the
+                // classification above and this read.
+                let label = "linked worktree Git directory marker";
+                let directory = GitMetadataDirectory::open(candidate, "worktree directory")?;
+                let bytes = directory
+                    .read_file(".git", label, MAX_LINKED_WORKTREE_GITDIR_FILE_BYTES)
+                    .map_err(|error| error.into_message(label))?;
+                directory.validate("worktree directory")?;
+                let text =
+                    String::from_utf8(bytes).map_err(|_| format!("{label} is not valid UTF-8"))?;
+                let raw = text
+                    .trim()
+                    .strip_prefix("gitdir:")
+                    .ok_or_else(|| "linked worktree .git file is malformed".to_string())?
+                    .trim();
+                let git_dir = resolve_git_path(candidate, raw);
+                return Ok((candidate.to_path_buf(), git_dir));
+            }
+            GitMarkerKind::Missing => {}
         }
         current = candidate.parent();
     }
@@ -4659,6 +4706,52 @@ mod tests {
 
         assert!(error.contains("not a regular file"));
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn git_dir_for_worktree_rejects_a_symlinked_git_directory_marker() {
+        let tree = TempTree::new("git-dir-for-worktree-symlinked-dir");
+        let root = tree.root.join("root");
+        let outside = tree.root.join("outside-git-dir");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        if !create_test_symlink(TestSymlinkKind::Directory, &outside, &root.join(".git")) {
+            return;
+        }
+
+        let error = git_dir_for_worktree(&root).unwrap_err();
+
+        assert!(error.contains("symlink"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn git_dir_for_worktree_rejects_a_symlinked_git_file_marker() {
+        let tree = TempTree::new("git-dir-for-worktree-symlinked-file");
+        let root = tree.root.join("root");
+        let outside = tree.root.join("outside-gitdir-marker");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, "gitdir: ../elsewhere\n").unwrap();
+        if !create_test_symlink(TestSymlinkKind::File, &outside, &root.join(".git")) {
+            return;
+        }
+
+        let error = git_dir_for_worktree(&root).unwrap_err();
+
+        assert!(error.contains("symlink"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn git_dir_for_worktree_rejects_an_oversized_linked_worktree_marker() {
+        let tree = TempTree::new("git-dir-for-worktree-oversized-marker");
+        let root = tree.root.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let oversized = "gitdir: ".to_string()
+            + &"a".repeat((MAX_LINKED_WORKTREE_GITDIR_FILE_BYTES + 1) as usize);
+        std::fs::write(root.join(".git"), oversized).unwrap();
+
+        let error = git_dir_for_worktree(&root).unwrap_err();
+
+        assert!(error.contains("too large"), "unexpected error: {error}");
     }
 
     #[test]
