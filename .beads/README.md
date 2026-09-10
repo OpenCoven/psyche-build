@@ -205,6 +205,25 @@ Tracker drift checks verify empty incoming/outgoing relationship connections
 before excluding retired aliases. An offline issues-only snapshot cannot prove
 that condition and fails closed; it is not recovery-completion evidence.
 
+Use an existing read-capable GitHub credential for the live drift checker:
+
+```bash
+node scripts/validate-beads-tracker.mjs
+```
+
+The checker reads exported `GH_TOKEN`, falling back to `GITHUB_TOKEN` when
+`GH_TOKEN` is absent or blank, following GitHub CLI precedence. If credentials
+are already stored by `gh auth login`, use
+`GH_TOKEN="$(gh auth token --hostname github.com)" node scripts/validate-beads-tracker.mjs`
+without printing the token or enabling shell tracing. No credential is created
+or changed. Inventory and all four relationship reads per retired alias use
+the same credential (96 relationship requests for 24 aliases), limited to the
+configured repository on `https://api.github.com`, with redirects refused.
+Without either exported token the checker remains anonymous; rate-limit or
+incomplete-read failures return exit code 2, never a passing partial report.
+`--inventory-file` can supply an existing Beads export without reading the
+database; `--issues-file` alone cannot prove relationship retirement.
+
 The normal mass-close guard still applies, including alias retirement.
 Summaries expose alias/survivor numbers, outgoing relationship targets, and
 whether the alias's Project item needs archiving, without copying bodies.
