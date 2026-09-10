@@ -112,6 +112,38 @@ final class WorkspaceCacheTests: XCTestCase {
         XCTAssertNil(restored)
     }
 
+    func testWhitespaceVariantServerIDsDoNotShareACacheRecord() async throws {
+        let directoryURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let cache = WorkspaceCache(baseDirectoryURL: directoryURL)
+        let exact = makeCachedState(
+            revision: 1,
+            sequence: 1,
+            selectedProjectID: "project-a",
+            primaryPaneID: "pane-a",
+            secondaryPaneID: nil,
+            drafts: ["pane-a": "exact host"]
+        )
+        let spaced = makeCachedState(
+            revision: 2,
+            sequence: 2,
+            selectedProjectID: "project-b",
+            primaryPaneID: "pane-b",
+            secondaryPaneID: nil,
+            drafts: ["pane-b": "spaced host"],
+            projectID: "project-b"
+        )
+
+        try await cache.save(exact, forServerID: "server-a")
+        try await cache.save(spaced, forServerID: " server-a ")
+
+        let exactRestored = try await cache.cachedState(forServerID: "server-a")
+        let spacedRestored = try await cache.cachedState(forServerID: " server-a ")
+
+        XCTAssertEqual(exactRestored, exact)
+        XCTAssertEqual(spacedRestored, spaced)
+    }
+
     func testRejectsTooManyDraftsExplicitlyAndKeepsPreviousCache() async throws {
         let directoryURL = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
@@ -326,13 +358,25 @@ final class WorkspaceCacheTests: XCTestCase {
             sequence: 1,
             selectedProjectID: "project-a",
             primaryPaneID: "pane-a",
-            secondaryPaneID: nil,
+            secondaryPaneID: "pane-b",
             drafts: ["pane-a": "echo ok"]
         )
 
         let data = try JSONEncoder().encode(state)
         let payload = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(payload.keys),
+            Set([
+                "workspace",
+                "sequence",
+                "lastConfirmedAt",
+                "selectedProjectID",
+                "primaryPaneID",
+                "secondaryPaneID",
+                "drafts"
+            ])
         )
         let keys = collectKeys(in: payload)
 

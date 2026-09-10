@@ -55,7 +55,7 @@ public struct WorkspaceCacheLimits: Sendable, Equatable {
 }
 
 public struct CachedWorkspaceState: Codable, Sendable, Equatable {
-    public let workspace: WorkspaceSnapshot
+    public let workspace: CachedWorkspaceSnapshot
     public let sequence: UInt64
     public let lastConfirmedAt: Date?
     public let selectedProjectID: String?
@@ -64,7 +64,7 @@ public struct CachedWorkspaceState: Codable, Sendable, Equatable {
     public let drafts: [String: String]
 
     public init(
-        workspace: WorkspaceSnapshot,
+        workspace: CachedWorkspaceSnapshot,
         sequence: UInt64,
         lastConfirmedAt: Date?,
         selectedProjectID: String?,
@@ -79,6 +79,321 @@ public struct CachedWorkspaceState: Codable, Sendable, Equatable {
         self.primaryPaneID = primaryPaneID
         self.secondaryPaneID = secondaryPaneID
         self.drafts = drafts
+    }
+
+    public init(
+        workspace: WorkspaceSnapshot,
+        sequence: UInt64,
+        lastConfirmedAt: Date?,
+        selectedProjectID: String?,
+        primaryPaneID: String?,
+        secondaryPaneID: String?,
+        drafts: [String: String]
+    ) {
+        self.init(
+            workspace: CachedWorkspaceSnapshot(workspace),
+            sequence: sequence,
+            lastConfirmedAt: lastConfirmedAt,
+            selectedProjectID: selectedProjectID,
+            primaryPaneID: primaryPaneID,
+            secondaryPaneID: secondaryPaneID,
+            drafts: drafts
+        )
+    }
+
+    public var restoredWorkspace: WorkspaceSnapshot {
+        workspace.workspaceSnapshot
+    }
+}
+
+public struct CachedWorkspaceSnapshot: Codable, Sendable, Equatable {
+    public let revision: Int
+    public let projects: [CachedWorkspaceProjectSnapshot]
+
+    public init(
+        revision: Int,
+        projects: [CachedWorkspaceProjectSnapshot]
+    ) {
+        self.revision = revision
+        self.projects = projects
+    }
+
+    public init(_ workspace: WorkspaceSnapshot) {
+        revision = workspace.revision
+        projects = workspace.projects.map(CachedWorkspaceProjectSnapshot.init)
+    }
+
+    public var workspaceSnapshot: WorkspaceSnapshot {
+        WorkspaceSnapshot(
+            revision: revision,
+            projects: projects.map(\.workspaceProjectSnapshot)
+        )
+    }
+}
+
+public struct CachedWorkspaceProjectSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let root: String
+    public let title: String
+    public let worktrees: [CachedWorkspaceWorktreeSnapshot]
+    public let projectPanes: [CachedWorkspacePaneSnapshot]
+    public let runningCount: Int
+    public let attentionCount: Int
+    public let rituals: CachedRitualPublicationSnapshot?
+
+    public init(
+        id: String,
+        root: String,
+        title: String,
+        worktrees: [CachedWorkspaceWorktreeSnapshot],
+        projectPanes: [CachedWorkspacePaneSnapshot],
+        runningCount: Int,
+        attentionCount: Int,
+        rituals: CachedRitualPublicationSnapshot?
+    ) {
+        self.id = id
+        self.root = root
+        self.title = title
+        self.worktrees = worktrees
+        self.projectPanes = projectPanes
+        self.runningCount = runningCount
+        self.attentionCount = attentionCount
+        self.rituals = rituals
+    }
+
+    public init(_ project: WorkspaceProjectSnapshot) {
+        id = project.id
+        root = project.root
+        title = project.title
+        worktrees = project.worktrees.map(CachedWorkspaceWorktreeSnapshot.init)
+        projectPanes = project.projectPanes.map(CachedWorkspacePaneSnapshot.init)
+        runningCount = project.runningCount
+        attentionCount = project.attentionCount
+        rituals = project.rituals.map(CachedRitualPublicationSnapshot.init)
+    }
+
+    public var workspaceProjectSnapshot: WorkspaceProjectSnapshot {
+        WorkspaceProjectSnapshot(
+            id: id,
+            root: root,
+            title: title,
+            worktrees: worktrees.map(\.workspaceWorktreeSnapshot),
+            projectPanes: projectPanes.map(\.workspacePaneSnapshot),
+            runningCount: runningCount,
+            attentionCount: attentionCount,
+            rituals: rituals?.ritualPublicationSnapshot
+        )
+    }
+}
+
+public struct CachedWorkspaceWorktreeSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { path }
+    public let path: String
+    public let head: String
+    public let branch: String?
+    public let isMain: Bool
+    public let detached: Bool
+    public let bare: Bool
+    public let locked: Bool
+    public let lockReason: String?
+    public let prunable: Bool
+    public let pruneReason: String?
+    public let dirty: Bool
+    public let missing: Bool
+    public let panes: [CachedWorkspacePaneSnapshot]
+    public let runningCount: Int
+    public let attentionCount: Int
+
+    public init(
+        path: String,
+        head: String,
+        branch: String?,
+        isMain: Bool,
+        detached: Bool,
+        bare: Bool,
+        locked: Bool,
+        lockReason: String?,
+        prunable: Bool,
+        pruneReason: String?,
+        dirty: Bool,
+        missing: Bool,
+        panes: [CachedWorkspacePaneSnapshot],
+        runningCount: Int,
+        attentionCount: Int
+    ) {
+        self.path = path
+        self.head = head
+        self.branch = branch
+        self.isMain = isMain
+        self.detached = detached
+        self.bare = bare
+        self.locked = locked
+        self.lockReason = lockReason
+        self.prunable = prunable
+        self.pruneReason = pruneReason
+        self.dirty = dirty
+        self.missing = missing
+        self.panes = panes
+        self.runningCount = runningCount
+        self.attentionCount = attentionCount
+    }
+
+    public init(_ worktree: WorkspaceWorktreeSnapshot) {
+        path = worktree.path
+        head = worktree.head
+        branch = worktree.branch
+        isMain = worktree.isMain
+        detached = worktree.detached
+        bare = worktree.bare
+        locked = worktree.locked
+        lockReason = worktree.lockReason
+        prunable = worktree.prunable
+        pruneReason = worktree.pruneReason
+        dirty = worktree.dirty
+        missing = worktree.missing
+        panes = worktree.panes.map(CachedWorkspacePaneSnapshot.init)
+        runningCount = worktree.runningCount
+        attentionCount = worktree.attentionCount
+    }
+
+    public var workspaceWorktreeSnapshot: WorkspaceWorktreeSnapshot {
+        WorkspaceWorktreeSnapshot(
+            path: path,
+            head: head,
+            branch: branch,
+            isMain: isMain,
+            detached: detached,
+            bare: bare,
+            locked: locked,
+            lockReason: lockReason,
+            prunable: prunable,
+            pruneReason: pruneReason,
+            dirty: dirty,
+            missing: missing,
+            panes: panes.map(\.workspacePaneSnapshot),
+            runningCount: runningCount,
+            attentionCount: attentionCount
+        )
+    }
+}
+
+public struct CachedWorkspacePaneSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let cwd: String
+    public let title: String?
+    public let kind: String
+    public let agent: String?
+    public let status: String
+    public let needsAttention: Bool?
+    public let lastActivity: String?
+    public let recoverability: String
+
+    public init(
+        id: String,
+        cwd: String,
+        title: String?,
+        kind: String,
+        agent: String?,
+        status: String,
+        needsAttention: Bool?,
+        lastActivity: String?,
+        recoverability: String
+    ) {
+        self.id = id
+        self.cwd = cwd
+        self.title = title
+        self.kind = kind
+        self.agent = agent
+        self.status = status
+        self.needsAttention = needsAttention
+        self.lastActivity = lastActivity
+        self.recoverability = recoverability
+    }
+
+    public init(_ pane: WorkspacePaneSnapshot) {
+        id = pane.id
+        cwd = pane.cwd
+        title = pane.title
+        kind = pane.kind
+        agent = pane.agent
+        status = pane.status
+        needsAttention = pane.needsAttention
+        lastActivity = pane.lastActivity
+        recoverability = pane.recoverability
+    }
+
+    public var workspacePaneSnapshot: WorkspacePaneSnapshot {
+        WorkspacePaneSnapshot(
+            id: id,
+            cwd: cwd,
+            title: title,
+            kind: kind,
+            agent: agent,
+            status: status,
+            needsAttention: needsAttention,
+            lastActivity: lastActivity,
+            recoverability: recoverability
+        )
+    }
+}
+
+public struct CachedRitualPublicationSnapshot: Codable, Sendable, Equatable {
+    public let state: RitualPublicationState
+    public let rituals: [CachedPublishedRitual]
+
+    public init(
+        state: RitualPublicationState,
+        rituals: [CachedPublishedRitual]
+    ) {
+        self.state = state
+        self.rituals = rituals
+    }
+
+    public init(_ snapshot: RitualPublicationSnapshot) {
+        state = snapshot.state
+        rituals = snapshot.rituals.map(CachedPublishedRitual.init)
+    }
+
+    public var ritualPublicationSnapshot: RitualPublicationSnapshot {
+        RitualPublicationSnapshot(
+            state: state,
+            rituals: rituals.map(\.publishedRitual)
+        )
+    }
+}
+
+public struct CachedPublishedRitual: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let displayName: String
+    public let description: String?
+    public let scope: RitualScope
+
+    public init(
+        id: String,
+        displayName: String,
+        description: String?,
+        scope: RitualScope
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.description = description
+        self.scope = scope
+    }
+
+    public init(_ ritual: PublishedRitual) {
+        id = ritual.id
+        displayName = ritual.displayName
+        description = ritual.description
+        scope = ritual.scope
+    }
+
+    public var publishedRitual: PublishedRitual {
+        PublishedRitual(
+            id: id,
+            displayName: displayName,
+            description: description,
+            scope: scope
+        )
     }
 }
 
@@ -121,28 +436,28 @@ public actor WorkspaceCache {
     }
 
     public func cachedState(forServerID serverID: String) throws -> CachedWorkspaceState? {
-        let normalizedServerID = try Self.normalizedServerID(serverID)
+        let cacheKey = try Self.cacheKey(forServerID: serverID)
         guard let data = try readData() else { return nil }
         let cache = try decodeCache(from: data)
-        return cache.records[normalizedServerID]
+        return cache.records[cacheKey]
     }
 
     public func save(
         _ state: CachedWorkspaceState,
         forServerID serverID: String
     ) throws {
-        let normalizedServerID = try Self.normalizedServerID(serverID)
+        let cacheKey = try Self.cacheKey(forServerID: serverID)
         try validate(state)
         var cache = try readCache()
-        cache.records[normalizedServerID] = state
+        cache.records[cacheKey] = state
         let data = try encode(cache)
         try store.write(data)
     }
 
     public func removeCachedState(forServerID serverID: String) throws {
-        let normalizedServerID = try Self.normalizedServerID(serverID)
+        let cacheKey = try Self.cacheKey(forServerID: serverID)
         var cache = try readCache()
-        guard cache.records.removeValue(forKey: normalizedServerID) != nil else { return }
+        guard cache.records.removeValue(forKey: cacheKey) != nil else { return }
         let data = try encode(cache)
         try store.write(data)
     }
@@ -224,12 +539,11 @@ public actor WorkspaceCache {
         }
     }
 
-    private static func normalizedServerID(_ serverID: String) throws -> String {
-        let trimmed = serverID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+    private static func cacheKey(forServerID serverID: String) throws -> String {
+        guard !serverID.isEmpty else {
             throw WorkspaceCacheError.invalidHostIdentity
         }
-        return trimmed
+        return serverID
     }
 
     private struct PersistedWorkspaceCache: Codable, Equatable {

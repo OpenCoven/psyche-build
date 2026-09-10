@@ -504,7 +504,7 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func restoreCachedState(_ state: CachedWorkspaceState) {
-        workspace = state.workspace
+        workspace = state.restoredWorkspace
         sequence = state.sequence
         lastConfirmedAt = state.lastConfirmedAt
         selectedProjectID = state.selectedProjectID
@@ -516,7 +516,7 @@ public final class WorkspaceStore: ObservableObject {
         needsFullSnapshot = true
         isAwaitingConnectionSnapshot = false
         reconcileSelection()
-        nowSections = Self.makeNowSections(state.workspace)
+        nowSections = Self.makeNowSections(state.restoredWorkspace)
     }
 
     private func accept(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
