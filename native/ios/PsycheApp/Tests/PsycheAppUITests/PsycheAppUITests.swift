@@ -6,6 +6,7 @@ import XCTest
 /// or the device keychain. Tests that only make sense at one width guard on
 /// the window and skip on the other device class rather than quietly asserting
 /// something weaker.
+@MainActor
 final class PsycheAppUITests: XCTestCase {
 
     // MARK: - Both device classes
@@ -420,7 +421,13 @@ final class PsycheAppUITests: XCTestCase {
 
         let sheet = element("remote-action-sheet", in: app)
         XCTAssertTrue(sheet.waitForExistence(timeout: 10))
-        XCTAssertTrue(sheet.exists, "Rename should present the production remote action sheet")
+        XCTAssertTrue(
+            app.staticTexts["Rename homepage polish. Leave blank to keep the current name."]
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertFalse(
+            app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
+        )
     }
 
     /// Stopping is confirmed, names what is about to stop, and says the work
@@ -469,7 +476,10 @@ final class PsycheAppUITests: XCTestCase {
 
         let sheet = element("remote-action-sheet", in: app)
         XCTAssertTrue(sheet.waitForExistence(timeout: 10))
-        XCTAssertTrue(sheet.exists, "Cleanup should route into the production close workflow")
+        XCTAssertTrue(app.staticTexts["Choose how to close homepage polish."].waitForExistence(timeout: 10))
+        XCTAssertFalse(
+            app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
+        )
     }
 
     // MARK: - Split layout and focus

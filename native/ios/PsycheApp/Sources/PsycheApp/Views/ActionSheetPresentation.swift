@@ -58,6 +58,10 @@ enum ActionSheetPresentation {
         1...min(max(requestedMaximum ?? 6, 1), 12)
     }
 
+    static func prefersMultilineInput(_ requestedMaximum: Int?) -> Bool {
+        inputLineRange(requestedMaximum).upperBound > 1
+    }
+
     static func editingDisabled(isSubmitting: Bool) -> Bool { isSubmitting }
 
     static func status(for kind: RemoteActionTerminalKind) -> ActionSheetStatus {

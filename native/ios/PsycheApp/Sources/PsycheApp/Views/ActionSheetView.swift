@@ -95,13 +95,7 @@ struct ActionSheetView: View {
         case .input(let input):
             Section("Details") {
                 Text(presentation.message)
-                TextField(
-                    input.placeholder ?? "Response",
-                    text: $draft,
-                    axis: .vertical
-                )
-                .lineLimit(ActionSheetPresentation.inputLineRange(input.maxVisibleLines))
-                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+                inputField(for: input)
             }
         case .pullRequestReview(let review):
             pullRequestReviewSection(
@@ -127,6 +121,25 @@ struct ActionSheetView: View {
     private func messageSection(_ message: String) -> some View {
         Section("Details") {
             Text(message)
+        }
+    }
+
+    @ViewBuilder
+    private func inputField(for input: RemoteActionInput) -> some View {
+        if ActionSheetPresentation.prefersMultilineInput(input.maxVisibleLines) {
+            TextField(
+                input.placeholder ?? "Response",
+                text: $draft,
+                axis: .vertical
+            )
+            .lineLimit(ActionSheetPresentation.inputLineRange(input.maxVisibleLines))
+            .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+            .accessibilityIdentifier("remote-action-input")
+        } else {
+            TextField(input.placeholder ?? "Response", text: $draft)
+                .lineLimit(1)
+                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+                .accessibilityIdentifier("remote-action-input")
         }
     }
 
@@ -268,6 +281,10 @@ struct ActionSheetView: View {
                         choiceLabel(for: option)
                     }
                     .disabled(store.isSubmitting)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(option.label)
+                    .accessibilityValue(option.description ?? "")
+                    .accessibilityIdentifier("remote-action-choice-\(option.id)")
                 }
                 responseButton("Cancel", response: .cancel)
             }
@@ -334,10 +351,12 @@ struct ActionSheetView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(option.label)
+                    .accessibilityIdentifier("remote-action-choice-label-\(option.id)")
                 if let description = option.description {
                     Text(description)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("remote-action-choice-description-\(option.id)")
                 }
             }
             Spacer()
@@ -349,6 +368,8 @@ struct ActionSheetView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("remote-action-choice-\(option.id)")
     }
 
     private func respond(
