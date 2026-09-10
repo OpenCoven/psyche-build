@@ -155,8 +155,79 @@ Remote issue discovery follows GitHub's next-page links even when a page is
 short, retaining the cursor within the configured repository. Non-array
 responses, invalid or repeated continuation links, and inventories exceeding
 1,000 pages fail closed rather than becoming an empty or partial mirror plan.
-Duplicate Bead markers still stop reconciliation; this inventory safeguard
-does not authorize manual mirror retirement or choose a duplicate survivor.
+Duplicate Bead markers stop reconciliation except for the exact owner-approved
+incident #420 manifest in `scripts/beads-project-sync/recovery.mjs`. This
+inventory safeguard does not authorize manual mirror retirement or choose a
+duplicate survivor.
+
+### Incident #420 duplicate recovery
+
+The source-owned manifest pins 24 Bead identities, their original survivor
+issue numbers, and the newer aliases. It is not a general oldest/newest-wins
+policy. Both issue creators must be the pinned trusted actor; repository,
+markers, survivor membership, and authoritative source membership must match.
+Missing survivors, unknown duplicates, mismatches, and forged retirement
+markers fail closed. Known Beads cannot be recreated from an empty/partial
+remote inventory, so an offline first-run plan is not recovery evidence.
+
+The ordinary synchronizer repairs canonical bodies, Project items, parents,
+and blockers using the original issue numbers, then reconciles aliases through
+`closeIssue` operations carrying `survivorIssueNumber`. The generator appends
+an exact retirement notice to the existing alias body and marks only the alias
+closed as not planned; it preserves the issue and its history. It detaches the
+alias's outgoing parent/blocker relationships and archives its Project item.
+Unmanaged issues are not rewritten. Retirement does not complete or cancel an
+active Bead or change Beads source.
+
+Closed canonical mirrors also reconcile incident-owned incoming dependencies.
+An alias reference must agree with the Bead's source parent or blocker before
+repair. Source dependencies on active incident Beads use their pinned survivors,
+including reattachment after an interrupted detach. Dependencies on closed
+Beads do not create new GitHub relationships; already canonical closed history
+and unrelated historical relationships are preserved. Unknown, foreign,
+source-disagreeing, or cyclic repair graphs fail closed rather than moving
+arbitrary links.
+
+Each individual recovery write and retry revalidates the owned lease and
+issue identity. Canonical recovery operations also re-read the pinned pair
+before each write. Archive requests re-read the alias's Project item identity.
+A crash after marking, closing, detaching, or archiving is resumable through
+the same command. Inventories retain aliases for unfinished cleanup but never
+promote them to canonical mirrors; completed retirement plans no further work.
+Incoming repairs additionally compare exact relationship sets before each write
+and after each detach/reattach. Retirement refuses remaining canonical or
+unknown incoming links; approved aliases may retain incoming links only until
+their own outgoing cleanup. Before apply reports success, a fresh bounded
+reread requires every incident alias to be marked, closed, archived when present
+in the Project, and free of incoming and outgoing relationships.
+
+Tracker drift checks verify empty incoming/outgoing relationship connections
+before excluding retired aliases. An offline issues-only snapshot cannot prove
+that condition and fails closed; it is not recovery-completion evidence.
+
+The normal mass-close guard still applies, including alias retirement.
+Summaries expose alias/survivor numbers, outgoing relationship targets, and
+whether the alias's Project item needs archiving, without copying bodies.
+For this 24-pair incident, an ordinary dry-run is expected to refuse the
+close-count bound while still emitting the reviewable plan. Only after
+reviewing that exact plan may a maintainer run a second dry-run with
+`--allow-mass-close`, then authorize protected application with the same
+override. Scheduled runs never enable it. Do not dispatch an apply or approve
+an environment as part of code review.
+
+After independently reviewed source merges, use the protected workflow on
+`main`: first `dry_run=true, allow_mass_close=false`, then review the summary;
+use `dry_run=true, allow_mass_close=true` for the approved complete plan; only
+then use `dry_run=false, allow_mass_close=true` for protected application.
+Retain sanitized exact-head apply evidence, a subsequent zero-operation sync,
+and a passing tracker-drift report before claiming incident recovery. The
+initiating cause remains unestablished; #425 fixed the independently reproduced
+pagination defect, not proof of the incident's initiating cause.
+
+Before application, rollback is a source revert. After any partial application,
+keep this manifest/reader support and resume the reviewed synchronizer; do not
+remove retirement recognition, reopen aliases, or edit generated bodies by
+hand. A different survivor policy requires a separately reviewed migration.
 
 With `BEADS_PROJECT_TOKEN` exported, the check compares against the current
 Project. Without it, the command produces a first-run plan without contacting

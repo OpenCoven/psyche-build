@@ -1,4 +1,6 @@
 // @ts-check
+import { partitionRecoveryIssues, RECOVERY_PAIRS, retirementNotice } from './recovery.mjs';
+import { assertIssueBodyWithinLimit } from './render.mjs';
 
 import {
   DEFAULT_ISSUE_MARKER,
@@ -1625,6 +1627,13 @@ export function createGhClient(options) {
   async function runLeaseManagedMutation(description, action) {
     await trustedActorLogin();
     await assertManagedMutationLease();
+    for (const pair of operationRecoveryPairs) {
+      await readRecoveryPair(pair);
+    }
+    if (recoveryMutationGuard) {
+      await recoveryMutationGuard();
+    }
+    if (operationRecoveryPairs.length > 0 || recoveryMutationGuard) await assertManagedMutationLease();
     try {
       const result = await action();
       await activeApplyLockLease?.settleManagedMutation(description);
@@ -2908,9 +2917,13 @@ export function createGhClient(options) {
    * @returns {Promise<unknown[]>}
    */
   async function listRepositoryIssues() {
+    return listIssueConnection(`repos/${owner}/${repo}/issues`, true);
+  }
+
+  /** @param {string} repositoryPath @param {boolean} [allStates] */
+  async function listIssueConnection(repositoryPath, allStates = false) {
     const issues = [];
-    const repositoryPath = `repos/${owner}/${repo}/issues`;
-    let endpoint = `${repositoryPath}?state=all&per_page=100&page=1`;
+    let endpoint = `${repositoryPath}?${allStates ? 'state=all&' : ''}per_page=100&page=1`;
     let followsLinks = false;
     const seenEndpoints = new Set();
     for (let page = 1; page <= 1_000; page += 1) {
@@ -2942,9 +2955,9 @@ export function createGhClient(options) {
           || url.username || url.password || url.hash
           || (
             url.pathname.toLowerCase() !== `/${repositoryPath}`.toLowerCase()
-            && !/^\/repositories\/[1-9]\d*\/issues$/u.test(url.pathname)
+            && !(allStates && /^\/repositories\/[1-9]\d*\/issues$/u.test(url.pathname))
           )
-          || parameters.get('state') !== 'all'
+          || (allStates ? parameters.get('state') !== 'all' : parameters.has('state'))
           || parameters.get('per_page') !== '100'
           || !/^[1-9]\d*$/u.test(parameters.get('page') ?? '')
           || [...parameters.keys()].some((key) =>
@@ -3048,22 +3061,14 @@ export function createGhClient(options) {
    * @returns {Promise<IssueIdentity[]>}
    */
   async function listBlockerIssues(issueNumber) {
-    const blockers = [];
-    for (let page = 1; ; page += 1) {
-      const pageItems = array(await rest(
-        'GET',
-        `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by?per_page=100&page=${page}`,
-      ));
-      for (const rawBlocker of pageItems) {
-        blockers.push(normalizeIssueIdentity(rawBlocker, 'blocker issue'));
-      }
-      if (pageItems.length < 100) {
-        const byNodeId = new Map(blockers.map((blocker) => [blocker.nodeId, blocker]));
-        return [...byNodeId.values()].sort((left, right) =>
-          left.repository.localeCompare(right.repository) || left.number - right.number
-        );
-      }
+    const blockers = (await listIssueConnection(
+      `repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by`,
+    )).map((raw) => normalizeIssueIdentity(raw, 'blocker issue'));
+    if (new Set(blockers.map((issue) => issue.nodeId)).size !== blockers.length) {
+      throw new GhClientError('relationship', 'Duplicate blocker identity');
     }
+    return blockers.sort((left, right) =>
+      left.repository.localeCompare(right.repository) || left.number - right.number);
   }
 
   /**
@@ -3099,6 +3104,16 @@ export function createGhClient(options) {
    */
   async function listManagedIssues() {
     const rawIssues = await listRepositoryIssues();
+    const recovery = partitionRecoveryIssues(rawIssues.map((raw) => {
+      const issue = record(raw);
+      return {
+        number: positiveInteger(issue.number, 'issue number'),
+        repository: repositoryIdentity,
+        author: stringOrEmpty(record(issue.user).login),
+        body: stringOrEmpty(issue.body),
+      };
+    }));
+    const aliasNumbers = new Set(recovery.aliases.map(({ issue }) => issue.number));
     /** @type {Array<{
      *   beadId: string,
      *   number: number,
@@ -3138,20 +3153,22 @@ export function createGhClient(options) {
       if (beadId == null) {
         continue;
       }
-      const priorIssueNumber = seen.get(beadId);
+      const priorIssueNumber = aliasNumbers.has(number) ? null : seen.get(beadId);
       if (priorIssueNumber != null) {
         throw new GhClientError(
           'marker',
           `Duplicate managed Bead id "${beadId}" on issues #${priorIssueNumber} and #${number}`,
         );
       }
-      seen.set(beadId, number);
+      if (!aliasNumbers.has(number)) seen.set(beadId, number);
 
       const assignees = assigneeLogins(array(issue.assignees), 'issue assignees');
       const renderHash = extractRenderHash(body, recognizedIssueMarkerValues);
       managed.push({
         beadId,
         number,
+        ...(RECOVERY_PAIRS.some((pair) => pair.alias === number || pair.survivor === number)
+          ? { author: stringOrEmpty(record(issue.user).login) } : {}),
         ...(typeof issue.id === 'number' ? { issueDatabaseId: positiveInteger(issue.id, 'issue database id') } : {}),
         ...(typeof issue.node_id === 'string' ? { issueNodeId: issue.node_id } : {}),
         title: typeof issue.title === 'string' ? issue.title : null,
@@ -3225,6 +3242,27 @@ export function createGhClient(options) {
       issue.blockerIssueNumbers = issue.blockerIssues.map((blocker) => blocker.number);
     }
 
+    for (const alias of recovery.aliases) {
+      for (const suffix of ['sub_issues', 'dependencies/blocking']) {
+        for (const raw of await listIssueConnection(
+          `repos/${owner}/${repo}/issues/${alias.issue.number}/${suffix}`,
+        )) {
+          const target = normalizeIssueIdentity(raw, 'incoming recovery issue');
+          const consumer = managed.find((issue) => issue.number === target.number);
+          const rawConsumer = record(rawIssues.find((issue) => record(issue).number === target.number));
+          if (!consumer || target.repository !== repositoryIdentity
+            || target.nodeId !== consumer.issueNodeId || target.id !== rawConsumer.id) {
+            throw new GhClientError('ownership', 'Recovery #420 unknown incoming relationship identity');
+          }
+          const outgoing = suffix === 'sub_issues'
+            ? (consumer.parentIssue == null ? [] : [consumer.parentIssue]) : consumer.blockerIssues;
+          if (!outgoing.some((issue) =>
+            issue.repository === repositoryIdentity && issue.number === alias.issue.number)) {
+            throw new GhClientError('relationship', 'Recovery #420 inconsistent incoming relationship inventory');
+          }
+        }
+      }
+    }
     return managed;
   }
 
@@ -3876,10 +3914,182 @@ export function createGhClient(options) {
    * @returns {Promise<Record<string, unknown>>}
    */
   async function closeIssue(operation) {
+    const recoveryOperation = record(operation);
+    if (recoveryOperation.survivorIssueNumber != null) {
+      return retireAlias(recoveryOperation);
+    }
     const issueNumber = issueNumberFrom(operation);
     return record(await rest('PATCH', `repos/${owner}/${repo}/issues/${issueNumber}`, {
       state: 'closed',
     }));
+  }
+
+  /** @type {null | (() => Promise<void>)} */
+  let recoveryMutationGuard = null;
+  /** @type {(typeof RECOVERY_PAIRS)[number][]} */
+  let operationRecoveryPairs = [];
+  /** @type {import('./reconcile.mjs').ReconciliationOperation | null} */
+  let preparedOperation = null;
+
+  /** @param {import('./reconcile.mjs').ReconciliationOperation} operation */
+  function prepareReconciliationOperation(operation) {
+    preparedOperation = operation;
+    const ids = new Set([
+      ...('beadId' in operation ? [operation.beadId] : []),
+      ...(operation.type === 'syncParent' ? [operation.parentBeadId] : []),
+      ...(operation.type === 'syncBlocker' ? operation.blockerBeadIds : []),
+    ]);
+    const currentNumbers = operation.type === 'syncParent' ? [operation.currentParentIssueNumber]
+      : operation.type === 'syncBlocker' ? operation.currentBlockerIssueNumbers : [];
+    operationRecoveryPairs = RECOVERY_PAIRS.filter((pair) =>
+      ids.has(pair.beadId) || currentNumbers.includes(pair.alias));
+  }
+
+  /** @param {number} alias @param {boolean} [allowAliases] */
+  async function assertNoCanonicalIncoming(alias, allowAliases = true) {
+    for (const suffix of ['sub_issues', 'dependencies/blocking']) {
+      for (const raw of await listIssueConnection(`repos/${owner}/${repo}/issues/${alias}/${suffix}`)) {
+        const target = normalizeIssueIdentity(raw, 'incoming recovery issue');
+        const pair = RECOVERY_PAIRS.find((entry) => entry.alias === target.number);
+        if (!allowAliases || !pair || target.repository !== repositoryIdentity) {
+          throw new GhClientError('relationship', `Recovery #420 unresolved incoming relationship on #${alias}`);
+        }
+        const current = (await readRecoveryPair(pair))[1];
+        if (current.id !== target.id || current.node_id !== target.nodeId) {
+          throw new GhClientError('ownership', 'Recovery #420 incoming identity changed');
+        }
+      }
+    }
+  }
+
+  /** @param {(typeof RECOVERY_PAIRS)[number]} pair */
+  async function readRecoveryPair(pair) {
+    const issues = [];
+    for (const number of [pair.survivor, pair.alias]) {
+      const raw = record(await rest('GET', `repos/${owner}/${repo}/issues/${number}`));
+      if (raw.number !== number || raw.pull_request != null || !isTrustedManagedIssue(raw)
+        || normalizeUrl(raw.html_url) !== `https://github.com/${owner}/${repo}/issues/${number}`) {
+        throw new GhClientError('ownership', `Recovery #420 identity mismatch on issue #${number}`);
+      }
+      issues.push({
+        number, repository: repositoryIdentity,
+        id: positiveInteger(raw.id, 'recovery issue database id'),
+        node_id: requiredString(raw.node_id, 'recovery issue node id'),
+        author: stringOrEmpty(record(raw.user).login), body: stringOrEmpty(raw.body),
+        state: stringOrEmpty(raw.state),
+      });
+    }
+    partitionRecoveryIssues(issues);
+    return issues;
+  }
+
+  /** @param {readonly number[]} aliasNumbers */
+  async function verifyRecoveryComplete(aliasNumbers) {
+    await assertManagedMutationLease();
+    for (const number of aliasNumbers) {
+      const pair = RECOVERY_PAIRS.find((entry) => entry.alias === number)
+        ?? fail('Recovery #420 unknown alias in final reread');
+      const alias = (await readRecoveryPair(pair))[1];
+      if (alias.state !== 'closed'
+        || !alias.body.endsWith(retirementNotice(pair.beadId, pair.survivor, pair.alias))) {
+        fail('Recovery #420 retirement is incomplete');
+      }
+      await assertNoCanonicalIncoming(number, false);
+      if (await getOrNull(`repos/${owner}/${repo}/issues/${number}/parent`) != null
+        || (await listBlockerIssues(number)).length > 0) {
+        fail('Recovery #420 outgoing relationships remain');
+      }
+      const item = await findProjectItemByIssueUrl(
+        `https://github.com/${owner}/${repo}/issues/${number}`, true,
+      );
+      if (item && item.isArchived !== true) fail('Recovery #420 Project archive is incomplete');
+    }
+    await assertManagedMutationLease();
+  }
+
+  /** @param {Record<string, unknown>} operation */
+  async function retireAlias(operation) {
+    const pair = RECOVERY_PAIRS.find((candidate) =>
+      candidate.alias === operation.issueNumber
+      && candidate.survivor === operation.survivorIssueNumber
+      && candidate.beadId === operation.beadId);
+    if (!pair || repositoryIdentity !== 'OpenCoven/psyche-build') {
+      throw new GhClientError('ownership', 'Recovery #420 operation is not in the approved manifest');
+    }
+    await assertManagedMutationLease();
+    const project = requireProject();
+    if (project.id !== 'PVT_kwDOECXnmc4BhMIA' || !project.public) {
+      throw new GhClientError('ownership', 'Recovery #420 requires the pinned public Project');
+    }
+    if (recoveryMutationGuard) fail('Recovery #420 cannot run concurrently');
+    const initial = await readRecoveryPair(pair);
+    await assertNoCanonicalIncoming(pair.alias);
+    const alias = initial[1];
+    const notice = retirementNotice(pair.beadId, pair.survivor, pair.alias);
+    const body = alias.body.endsWith(notice) ? alias.body : alias.body + notice;
+    assertIssueBodyWithinLimit(pair.beadId, body);
+    const rawParent = await getOrNull(`repos/${owner}/${repo}/issues/${pair.alias}/parent`);
+    const parent = rawParent == null ? null : normalizeIssueIdentity(rawParent, 'alias parent');
+    const blockers = await listBlockerIssues(pair.alias);
+    const validateRelationshipTargets = async () => {
+      for (const target of [...(parent == null ? [] : [parent]), ...blockers]) {
+        const targetPair = RECOVERY_PAIRS.find((candidate) =>
+          candidate.survivor === target.number || candidate.alias === target.number);
+        if (!targetPair || target.repository !== repositoryIdentity) {
+          throw new GhClientError('ownership', 'Recovery #420 relationship identity is outside the manifest');
+        }
+        const current = (await readRecoveryPair(targetPair)).find((issue) => issue.number === target.number);
+        if (current?.id !== target.id || current.node_id !== target.nodeId) {
+          throw new GhClientError('ownership', 'Recovery #420 relationship identity changed');
+        }
+      }
+    };
+    await validateRelationshipTargets();
+    await assertNoCanonicalIncoming(pair.alias);
+    recoveryMutationGuard = async () => {
+      const current = await readRecoveryPair(pair);
+      if (current.some((issue, index) => issue.id !== initial[index].id
+        || issue.node_id !== initial[index].node_id)
+        || (current[1].body !== alias.body && current[1].body !== body)) {
+        throw new GhClientError('ownership', 'Recovery #420 identity or body changed before write');
+      }
+      await validateRelationshipTargets();
+    };
+    try {
+      await rest('PATCH', `repos/${owner}/${repo}/issues/${pair.alias}`, {
+        body, state: 'closed', state_reason: 'not_planned',
+      });
+      await syncParent({
+        issueNumber: pair.alias, parentIssueNumber: null,
+        currentParentIssueNumber: parent?.number ?? null,
+        currentParentIssue: parent,
+      });
+      await syncBlocker({
+        issueNumber: pair.alias, blockerIssueNumbers: [],
+        currentBlockerIssueNumbers: blockers.map((issue) => issue.number),
+        currentBlockerIssues: blockers,
+      });
+      const item = await findProjectItemByIssueUrl(
+        `https://github.com/${owner}/${repo}/issues/${pair.alias}`, true,
+      );
+      if (item && item.isArchived !== true) {
+        const itemId = requiredString(item.id, 'retired Project item id');
+        const identityGuard = recoveryMutationGuard;
+        recoveryMutationGuard = async () => {
+          await identityGuard();
+          const fresh = await findProjectItemByIssueUrl(
+            `https://github.com/${owner}/${repo}/issues/${pair.alias}`, true,
+          );
+          if (fresh?.id !== itemId) {
+            throw new GhClientError('ownership', 'Recovery #420 Project item identity changed');
+          }
+        };
+        await archiveItem({ itemId });
+      }
+      return { number: pair.alias };
+    } finally {
+      recoveryMutationGuard = null;
+    }
   }
 
   /**
@@ -4293,6 +4503,132 @@ ${selections.join('\n')}
   }
 
   /**
+   * Recovery repairs use fresh identities and exact relationship sets, not the
+   * ordinary adapter's cached IDs. Each individual write/retry accepts only its
+   * before/after state, so an ambiguous response is resumable but drift is not.
+   * @param {Record<string, unknown>} operation
+   * @param {boolean} parent
+   */
+  async function syncRecoveryRelationship(operation, parent) {
+    const prepared = preparedOperation;
+    if (!prepared || (prepared.type !== 'syncParent' && prepared.type !== 'syncBlocker')) {
+      fail('Recovery #420 relationship operation was not prepared');
+    }
+    await assertManagedMutationLease();
+    const number = positiveInteger(operation.issueNumber, 'recovery source issue number');
+    const desiredNumbers = parent
+      ? (operation.parentIssueNumber == null ? [] : [positiveInteger(operation.parentIssueNumber, 'parent')])
+      : array(operation.blockerIssueNumbers).map((value) => positiveInteger(value, 'blocker'));
+    const expectedInput = parent
+      ? (operation.currentParentIssue == null ? [] : [operation.currentParentIssue])
+      : array(operation.currentBlockerIssues);
+    const expected = expectedInput.map((raw) => {
+      const target = record(raw);
+      return {
+        id: positiveInteger(target.id, 'recovery relationship database id'),
+        nodeId: requiredString(target.nodeId, 'recovery relationship node id'),
+        number: positiveInteger(target.number, 'recovery relationship number'),
+        repository: requiredString(target.repository, 'recovery relationship repository'),
+      };
+    });
+    /** @param {number} issueNumber @param {string} [beadId] */
+    const readIdentity = async (issueNumber, beadId) => {
+      const raw = record(await rest('GET', `repos/${owner}/${repo}/issues/${issueNumber}`));
+      const identity = normalizeIssueIdentity(raw, 'recovery relationship issue');
+      const marker = extractBeadId(stringOrEmpty(raw.body), issueNumber, recognizedIssueMarkerValues);
+      if (!isTrustedManagedIssue(raw) || raw.pull_request != null || !marker
+        || (beadId != null && marker !== beadId)
+        || identity.number !== issueNumber || identity.repository !== repositoryIdentity
+        || normalizeUrl(raw.html_url) !== `https://github.com/${owner}/${repo}/issues/${issueNumber}`) {
+        throw new GhClientError('ownership', 'Recovery #420 relationship identity changed');
+      }
+      return identity;
+    };
+    const child = await readIdentity(number, prepared.beadId);
+    const desiredIds = prepared.type === 'syncParent'
+      ? (prepared.parentBeadId == null ? [] : [prepared.parentBeadId]) : prepared.blockerBeadIds;
+    const desired = [];
+    for (const [index, target] of desiredNumbers.entries()) {
+      desired.push(await readIdentity(target, desiredIds[index]));
+    }
+    /** @param {readonly IssueIdentity[]} values */
+    const key = (values) => JSON.stringify(values.map((value) =>
+      [value.repository, value.number, value.id, value.nodeId]).sort());
+    /** @param {number} issueNumber */
+    const readRelationships = async (issueNumber) => {
+      if (!parent) return listBlockerIssues(issueNumber);
+      const raw = await getOrNull(`repos/${owner}/${repo}/issues/${issueNumber}/parent`);
+      return raw == null ? [] : [normalizeIssueIdentity(raw, 'recovery parent')];
+    };
+    let before = expected;
+    /** @type {IssueIdentity[] | null} */
+    let after = null;
+    const pins = new Map([child, ...expected, ...desired].map((identity) => [identity.number, identity]));
+    const guard = async () => {
+      for (const identity of pins.values()) {
+        if (identity.repository !== repositoryIdentity
+          || key([await readIdentity(identity.number, identity.number === number ? prepared.beadId : undefined)])
+            !== key([identity])) {
+          throw new GhClientError('ownership', 'Recovery #420 relationship identity changed');
+        }
+      }
+      const current = key(await readRelationships(number));
+      if (current !== key(before) && (after == null || current !== key(after))) {
+        throw new GhClientError('relationship', 'Recovery #420 relationship changed before write');
+      }
+      const visited = new Set();
+      /** @param {number} target @param {Set<number>} path */
+      const visit = async (target, path) => {
+        if (target === number || path.has(target)) {
+          throw new GhClientError('relationship', 'Recovery #420 relationship cycle');
+        }
+        if (visited.has(target)) return;
+        if (visited.size >= 1_000) fail('Recovery #420 relationship graph exceeds safety bound');
+        visited.add(target);
+        await readIdentity(target);
+        for (const next of await readRelationships(target)) {
+          if (next.repository !== repositoryIdentity) fail('Recovery #420 unknown relationship graph');
+          await visit(next.number, new Set(path).add(target));
+        }
+      };
+      for (const target of desiredNumbers) await visit(target, new Set());
+    };
+    recoveryMutationGuard = guard;
+    try {
+      await guard();
+      /** @param {IssueIdentity[]} next @param {() => Promise<unknown>} write */
+      const mutate = async (next, write) => {
+        after = next;
+        await write();
+        await guard();
+        if (key(await readRelationships(number)) !== key(next)) {
+          throw new GhClientError('relationship', 'Recovery #420 relationship reread did not match');
+        }
+        before = next;
+        after = null;
+      };
+      for (const target of expected) {
+        if (desired.some((value) => key([value]) === key([target]))) continue;
+        await mutate(before.filter((value) => value.number !== target.number), () => parent
+          ? removeSubIssue({ parentIssueNumber: target.number, subIssueId: child.id })
+          : removeBlockedBy({ issueNumber: number, blockerIssueId: target.id }));
+      }
+      for (const target of desired) {
+        if (before.some((value) => key([value]) === key([target]))) continue;
+        await mutate([...before, target], () => parent
+          ? addSubIssue({ parentIssueNumber: target.number, subIssueId: child.id })
+          : addBlockedBy({ issueNumber: number, blockerIssueId: target.id }));
+      }
+      await guard();
+      if (key(await readRelationships(number)) !== key(desired)) {
+        throw new GhClientError('relationship', 'Recovery #420 relationship reread did not match');
+      }
+    } finally {
+      recoveryMutationGuard = null;
+    }
+  }
+
+  /**
    * Reconciliation adapter mapping:
    * syncParent -> removeSubIssue(current parent) + addSubIssue(desired parent).
    *
@@ -4305,6 +4641,9 @@ ${selections.join('\n')}
    * @returns {Promise<void>}
    */
   async function syncParent(operation) {
+    if (!recoveryMutationGuard && preparedOperation?.type === 'syncParent' && operationRecoveryPairs.length) {
+      return syncRecoveryRelationship(record(operation), true);
+    }
     const childIssueNumber = positiveInteger(operation?.issueNumber, 'child issue number');
     const childIssueId = await resolveIssueDatabaseId(childIssueNumber);
     const currentParentIssue = operation?.currentParentIssue == null
@@ -4360,6 +4699,9 @@ ${selections.join('\n')}
    * @returns {Promise<void>}
    */
   async function syncBlocker(operation) {
+    if (!recoveryMutationGuard && preparedOperation?.type === 'syncBlocker' && operationRecoveryPairs.length) {
+      return syncRecoveryRelationship(record(operation), false);
+    }
     const issueNumber = positiveInteger(operation?.issueNumber, 'issue number');
     const desired = new Set(
       array(operation?.blockerIssueNumbers).map((value) => positiveInteger(value, 'blocker issue number')),
@@ -4496,6 +4838,8 @@ ${selections.join('\n')}
     startApplyLockLease,
     listRepositoryIssues,
     listManagedIssues,
+    prepareReconciliationOperation,
+    verifyRecoveryComplete,
     ensureLabels,
     discoverProject,
     refreshProject,

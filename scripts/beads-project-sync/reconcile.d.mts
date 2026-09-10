@@ -7,6 +7,7 @@ export function normalizeCanonicalBody(
 ): string;
 
 export function hashRenderedBody(body: string): string;
+export function preflightSourceReadme(inventory: readonly PublicBead[], renderContext: RenderContext): string;
 
 export type ReconciliationFieldValue = string | number | boolean | null;
 
@@ -40,6 +41,7 @@ export interface IssueIdentity {
 
 export interface IssueSnapshotInput {
   number: number;
+  author?: string | null;
   title?: string | null;
   body?: string | null;
   state?: string | null;
@@ -59,6 +61,7 @@ export interface IssueSnapshotInput {
 
 export interface IssueSnapshot {
   number: number;
+  author?: string | null;
   title: string | null;
   body: string | null;
   state: string;
@@ -151,6 +154,7 @@ export interface CloseIssueOperation {
   phase: 'closeIssues';
   beadId: string;
   issueNumber: number;
+  survivorIssueNumber?: number;
 }
 
 export interface EnsureProjectItemOperation {
@@ -241,6 +245,12 @@ export interface ReconciliationClosureCandidate {
   beadId: string;
   issueNumber: number;
   issueTitle: string | null;
+  survivorIssueNumber?: number;
+  retirement?: {
+    detachParentIssueNumber: number | null;
+    detachBlockerIssueNumbers: number[];
+    archiveProjectItem: boolean;
+  };
 }
 
 export interface ReconciliationSummary {
@@ -289,6 +299,7 @@ export interface EnsureProjectItemResult {
 export type Awaitable<T> = T | PromiseLike<T>;
 
 export interface ReconciliationAdapters {
+  prepareReconciliationOperation?: (operation: ReconciliationOperation) => void;
   assertApplyLockOwned?(): Awaitable<void>;
   createIssue(operation: CreateIssueOperation): Awaitable<CreateIssueResult>;
   updateIssue(
