@@ -328,12 +328,16 @@ export async function runTrackerDriftCheck(argv, suppliedDependencies = {}) {
       LEGACY_ISSUE_MARKERS,
       'tracker drift issue marker',
     );
-    const recovery = partitionRecoveryIssues(rawIssues.map((raw) => ({
-      ...raw,
-      number: raw.number,
-      repository: `${config.owner}/${config.repository}`,
-      author: objectRecord(raw.user).login,
-    })));
+    const recovery = partitionRecoveryIssues(rawIssues.map((raw) => {
+      const issue = objectRecord(raw);
+      return {
+        number: issue.number,
+        body: issue.body,
+        state: issue.state,
+        repository: `${config.owner}/${config.repository}`,
+        author: objectRecord(issue.user).login,
+      };
+    }));
     const retired = new Set(recovery.aliases.filter(({ issue, beadId, survivor }) =>
       issue.state === 'closed'
       && issue.body?.endsWith(retirementNotice(beadId, survivor, issue.number)))
