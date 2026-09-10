@@ -437,8 +437,7 @@ public actor WorkspaceCache {
 
     public func cachedState(forServerID serverID: String) throws -> CachedWorkspaceState? {
         let cacheKey = try Self.cacheKey(forServerID: serverID)
-        guard let data = try readData() else { return nil }
-        let cache = try decodeCache(from: data)
+        let cache = try readCache()
         return cache.records[cacheKey]
     }
 
@@ -468,7 +467,12 @@ public actor WorkspaceCache {
 
     private func readCache() throws -> PersistedWorkspaceCache {
         guard let data = try readData() else { return .empty }
-        return try decodeCache(from: data)
+        do {
+            return try decodeCache(from: data)
+        } catch WorkspaceCacheError.corruptedRecord {
+            reportIgnoredCorruptedCache()
+            return .empty
+        }
     }
 
     private func readData() throws -> Data? {
@@ -518,6 +522,10 @@ public actor WorkspaceCache {
         } catch {
             throw WorkspaceCacheError.unwritableRecord(error.localizedDescription)
         }
+    }
+
+    private func reportIgnoredCorruptedCache() {
+        NSLog("PsycheCore.WorkspaceCache ignored corrupted cache at %@", store.filePath)
     }
 
     private func validate(_ state: CachedWorkspaceState) throws {
@@ -615,6 +623,10 @@ private struct ProtectedAppSupportFileStore: Sendable {
 
     private var fileURL: URL {
         directoryURL.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    var filePath: String {
+        fileURL.path
     }
 }
 

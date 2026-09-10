@@ -144,6 +144,34 @@ final class WorkspaceCacheTests: XCTestCase {
         XCTAssertEqual(spacedRestored, spaced)
     }
 
+    func testCorruptedCacheIsIgnoredAndDoesNotBlockFutureWrites() async throws {
+        let directoryURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let cacheFileURL = directoryURL.appendingPathComponent(
+            WorkspaceCache.defaultFileName,
+            isDirectory: false
+        )
+        try Data("not valid cache json".utf8).write(to: cacheFileURL, options: .atomic)
+
+        let cache = WorkspaceCache(baseDirectoryURL: directoryURL)
+
+        let missing = try await cache.cachedState(forServerID: "server-a")
+        XCTAssertNil(missing)
+
+        let state = makeCachedState(
+            revision: 3,
+            sequence: 9,
+            selectedProjectID: "project-a",
+            primaryPaneID: "pane-a",
+            secondaryPaneID: nil,
+            drafts: ["pane-a": "echo repaired"]
+        )
+        try await cache.save(state, forServerID: "server-a")
+
+        let restored = try await cache.cachedState(forServerID: "server-a")
+        XCTAssertEqual(restored, state)
+    }
+
     func testRejectsTooManyDraftsExplicitlyAndKeepsPreviousCache() async throws {
         let directoryURL = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
