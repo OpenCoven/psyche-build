@@ -424,7 +424,10 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Close and Cleanup"].waitForExistence(timeout: 10))
 
         app.buttons["Rituals"].tap()
-        XCTAssertTrue(app.buttons["Launch Homepage"].waitForExistence(timeout: 10))
+        let unavailable = app.buttons["Ritual execution is not available on mobile yet"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
+        XCTAssertFalse(unavailable.isEnabled)
+        XCTAssertFalse(app.buttons["Launch Homepage"].exists)
     }
 
     func testRenamingAPaneUsesTheRemoteActionSheet() throws {
