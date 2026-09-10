@@ -8,6 +8,21 @@ import XCTest
 /// something weaker.
 @MainActor
 final class PsycheAppUITests: XCTestCase {
+    func testSettingsDisplaysAccessibleCacheRecoveryWarning() throws {
+        let app = launchApp(arguments: ["-uiFixture", "cache-recovery"])
+        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
+        if app.windows.firstMatch.frame.width < 700 {
+            app.tabBars.buttons["Settings"].tap()
+        } else {
+            row("source-settings", in: app).tap()
+        }
+        let warning = element("workspace-cache-error", in: app)
+        guard warning.waitForExistence(timeout: 5) else {
+            return XCTFail("Settings does not display the workspace cache error")
+        }
+        XCTAssertTrue(warning.label.contains("Reconnect"))
+        XCTAssertFalse(warning.label.contains("private draft"))
+    }
 
     // MARK: - Both device classes
 
