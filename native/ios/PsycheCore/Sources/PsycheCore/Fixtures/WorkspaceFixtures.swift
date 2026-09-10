@@ -74,7 +74,18 @@ public enum WorkspaceFixtures {
                     ],
                     projectPanes: [],
                     runningCount: 1,
-                    attentionCount: 0
+                    attentionCount: 0,
+                    rituals: RitualPublicationSnapshot(
+                        state: .available,
+                        rituals: [
+                            PublishedRitual(
+                                id: "daily-ship",
+                                displayName: "Daily Ship",
+                                description: "Open the release ritual for this project.",
+                                scope: .project
+                            ),
+                        ]
+                    )
                 ),
                 WorkspaceProjectSnapshot(
                     id: "website",
@@ -101,7 +112,18 @@ public enum WorkspaceFixtures {
                     ],
                     projectPanes: [],
                     runningCount: 0,
-                    attentionCount: 1
+                    attentionCount: 1,
+                    rituals: RitualPublicationSnapshot(
+                        state: .available,
+                        rituals: [
+                            PublishedRitual(
+                                id: "launch-homepage",
+                                displayName: "Launch Homepage",
+                                description: "Start the homepage ritual from this worktree.",
+                                scope: .project
+                            ),
+                        ]
+                    )
                 ),
                 WorkspaceProjectSnapshot(
                     id: "infra",
@@ -117,7 +139,8 @@ public enum WorkspaceFixtures {
                     ],
                     projectPanes: [],
                     runningCount: 0,
-                    attentionCount: 0
+                    attentionCount: 0,
+                    rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
                 )
             ]
         )

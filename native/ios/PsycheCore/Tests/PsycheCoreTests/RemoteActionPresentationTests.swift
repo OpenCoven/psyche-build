@@ -114,6 +114,7 @@ final class RemoteActionPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.requestID, "request-1")
         XCTAssertEqual(presentation.paneID, "pane-1")
         XCTAssertEqual(presentation.action, .merge)
+        XCTAssertEqual(presentation.actionLabel, "Merge")
         XCTAssertEqual(presentation.title, "Action")
         XCTAssertEqual(presentation.message, "Respond")
         XCTAssertEqual(presentation.sessionID, "session-1")
@@ -231,6 +232,7 @@ final class RemoteActionPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(presentation.id, "failure-1")
+        XCTAssertEqual(presentation.actionLabel, "Merge")
         XCTAssertEqual(presentation.title, "That did not work")
         XCTAssertEqual(presentation.message, "The host disconnected.")
         XCTAssertNil(presentation.sessionID)
@@ -247,6 +249,22 @@ final class RemoteActionPresentationTests: XCTestCase {
             message: "Failed"
         ).requestID
         XCTAssertNotNil(UUID(uuidString: generatedID))
+    }
+
+    func testProgressFactoryUsesActionLabelAndStaysNonDismissableByDefault() {
+        let presentation = RemoteActionPresentation.progress(
+            paneID: "pane-1",
+            action: .createPR,
+            title: "Working",
+            message: "Waiting for the host..."
+        )
+
+        XCTAssertEqual(presentation.action, .createPR)
+        XCTAssertEqual(presentation.actionLabel, "Create Pull Request")
+        XCTAssertEqual(presentation.title, "Working")
+        XCTAssertEqual(presentation.message, "Waiting for the host...")
+        XCTAssertEqual(presentation.content, .progress(nil))
+        XCTAssertFalse(presentation.dismissable)
     }
 
     func testReducerErrorsHaveActionableDescriptions() {

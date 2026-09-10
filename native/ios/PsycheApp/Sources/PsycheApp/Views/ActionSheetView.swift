@@ -11,13 +11,16 @@ struct ActionSheetView: View {
             Form {
                 if let presentation = store.presentation {
                     headerSection(for: presentation)
-
-                    // Keep context ahead of every control, especially destructive choices.
-                    scopeSection(for: presentation)
-                    consequenceSection(for: presentation)
-                    contentSections(for: presentation)
-                    relatedFilesSection(for: presentation)
-                    controlsSection(for: presentation)
+                    ForEach(
+                        ActionSheetPresentation.sectionOrder(
+                            hasScope: !presentation.scope.rows.isEmpty,
+                            hasConsequence: presentation.scope.consequence != nil,
+                            hasRelatedFiles: !presentation.relatedFiles.isEmpty
+                        ),
+                        id: \.self
+                    ) { section in
+                        sectionView(section, presentation: presentation)
+                    }
                 } else {
                     Section {
                         ContentUnavailableView(
@@ -50,7 +53,7 @@ struct ActionSheetView: View {
     @ViewBuilder
     private func headerSection(for presentation: RemoteActionPresentation) -> some View {
         Section {
-            Text(ActionSheetPresentation.actionLabel(for: presentation.action))
+            Text(presentation.actionLabel)
                 .font(.headline)
             LabeledContent("Pane", value: presentation.paneID)
         }
@@ -58,16 +61,14 @@ struct ActionSheetView: View {
 
     @ViewBuilder
     private func scopeSection(for presentation: RemoteActionPresentation) -> some View {
-        if !presentation.scope.rows.isEmpty {
-            Section("Scope") {
-                ForEach(presentation.scope.rows) { row in
-                    LabeledContent {
-                        Text(row.value)
-                            .multilineTextAlignment(.trailing)
-                            .textSelection(.enabled)
-                    } label: {
-                        Text(row.label)
-                    }
+        Section("Scope") {
+            ForEach(presentation.scope.rows) { row in
+                LabeledContent {
+                    Text(row.value)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                } label: {
+                    Text(row.label)
                 }
             }
         }
@@ -217,12 +218,29 @@ struct ActionSheetView: View {
 
     @ViewBuilder
     private func relatedFilesSection(for presentation: RemoteActionPresentation) -> some View {
-        if !presentation.relatedFiles.isEmpty {
-            Section("Related Files") {
-                ForEach(presentation.relatedFiles.indices, id: \.self) { index in
-                    Label(presentation.relatedFiles[index], systemImage: "doc")
-                }
+        Section("Related Files") {
+            ForEach(presentation.relatedFiles.indices, id: \.self) { index in
+                Label(presentation.relatedFiles[index], systemImage: "doc")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionView(
+        _ section: ActionSheetSection,
+        presentation: RemoteActionPresentation
+    ) -> some View {
+        switch section {
+        case .scope:
+            scopeSection(for: presentation)
+        case .consequence:
+            consequenceSection(for: presentation)
+        case .content:
+            contentSections(for: presentation)
+        case .relatedFiles:
+            relatedFilesSection(for: presentation)
+        case .controls:
+            controlsSection(for: presentation)
         }
     }
 
