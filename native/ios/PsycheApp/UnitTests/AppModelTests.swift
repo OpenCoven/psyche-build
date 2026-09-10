@@ -24,6 +24,18 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.hostName, AppModel.fixtureHostName)
     }
 
+    func testFixtureRootConnectsRemoteActionStoreToFixtureControls() async throws {
+        let model = AppModel(fixture: WorkspaceFixtures.multiproject)
+        let workspace = try XCTUnwrap(model.workspaceStore.workspace)
+
+        await model.remoteActionStore.start(action: .rename, onPane: "web-home", in: workspace)
+
+        XCTAssertEqual(
+            model.remoteActionStore.presentation?.message,
+            "Rename homepage polish. Leave blank to keep the current name."
+        )
+    }
+
     func testFixtureStartIsANoOpRatherThanAConnectionAttempt() async {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 

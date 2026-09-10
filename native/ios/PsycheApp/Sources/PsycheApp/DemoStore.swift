@@ -9,11 +9,16 @@ import PsycheCore
 /// turn a named scenario into deterministic state.
 @MainActor
 enum DemoStore {
+    struct FixtureWorkspaceComposition {
+        let workspaceStore: WorkspaceStore
+        let controlRequests: FixtureControlRequests
+    }
+
     /// Builds the deterministic store a `-uiFixture` launch runs against.
-    static func makeWorkspaceStore(
+    static func makeFixtureWorkspace(
         fixture name: String,
         inspectionFails: Bool = false
-    ) -> WorkspaceStore {
+    ) -> FixtureWorkspaceComposition {
         let workspace = WorkspaceFixtures.workspace(named: name)
         // A fixture control client, so create/rename/stop actually run and
         // republish the workspace the way a host broadcast would. Without it
@@ -32,6 +37,9 @@ enum DemoStore {
                 store.applySnapshot(workspace: update.workspace, sequence: update.sequence)
             }
         }
-        return store
+        return FixtureWorkspaceComposition(
+            workspaceStore: store,
+            controlRequests: requests
+        )
     }
 }

@@ -141,3 +141,27 @@ enum StopPaneConfirmation {
             + ". The worktree and its branch are kept — this does not delete any work."
     }
 }
+
+/// The words shown before the cleanup flow begins.
+///
+/// The confirmation says a close will happen first and that the next screen
+/// controls whether the worktree or branch are removed, so "cleanup" cannot be
+/// mistaken for the cheaper stop action.
+enum CleanupPaneConfirmation {
+    static func title(paneTitle: String) -> String {
+        "Close and clean up \(paneTitle)?"
+    }
+
+    static func message(
+        paneTitle: String,
+        projectTitle: String,
+        hostName: String?
+    ) -> String {
+        var parts = ["Closes \(paneTitle) in \(projectTitle)"]
+        if let hostName, !hostName.isEmpty {
+            parts.append("on \(hostName)")
+        }
+        return parts.joined(separator: " ")
+            + ". The next screen lets you keep the worktree, remove the worktree, or remove the worktree and its branch."
+    }
+}

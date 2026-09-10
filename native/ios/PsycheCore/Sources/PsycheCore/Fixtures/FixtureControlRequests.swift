@@ -14,9 +14,11 @@ public actor FixtureControlRequests: ControlRequesting {
     private var workspace: WorkspaceSnapshot
     private var sequence: UInt64
     private var nextID = 0
+    private var nextActionSession = 0
     private let inspectionFails: Bool
     private let updates: AsyncStream<WorkspaceUpdate>
     private let continuation: AsyncStream<WorkspaceUpdate>.Continuation
+    private var pendingActions: [String: FixturePendingAction] = [:]
 
     public struct WorkspaceUpdate: Sendable {
         public let workspace: WorkspaceSnapshot
@@ -115,6 +117,34 @@ public actor FixtureControlRequests: ControlRequesting {
             apply { Self.retitlePane(meta.id, to: meta.title, in: $0) }
             return .ack(ControlAckResponse(requestID: requestID, ok: true))
 
+        case .launchRitual(let launch):
+            let paneID = "ritual-\(nextID)"
+            apply {
+                Self.insertPane(
+                    WorkspacePaneSnapshot(
+                        id: paneID,
+                        cwd: Self.ritualLaunchPath(in: $0, projectID: launch.projectID),
+                        title: launch.ritualID,
+                        kind: "ritual",
+                        agent: nil,
+                        status: "starting",
+                        needsAttention: false,
+                        lastActivity: nil,
+                        recoverability: "recoverable"
+                    ),
+                    into: $0,
+                    projectID: launch.projectID,
+                    cwd: Self.ritualLaunchPath(in: $0, projectID: launch.projectID)
+                )
+            }
+            return .ack(ControlAckResponse(requestID: requestID, ok: true))
+
+        case .startAction(let start):
+            return startAction(start, requestID: requestID)
+
+        case .respondToAction(let response):
+            return respondToAction(response, requestID: requestID)
+
         default:
             return .ack(ControlAckResponse(requestID: requestID, ok: true))
         }
@@ -156,7 +186,323 @@ public actor FixtureControlRequests: ControlRequesting {
         continuation.yield(WorkspaceUpdate(workspace: workspace, sequence: sequence))
     }
 
+    private func startAction(
+        _ request: MobileActionStartRequest,
+        requestID: String
+    ) -> MobileControlResponse {
+        guard let context = paneContext(for: request.paneID) else {
+            return .error(MobileProtocolErrorResponse(
+                requestID: requestID,
+                code: "unknown_pane",
+                message: "Pane \(request.paneID) is not published by this fixture."
+            ))
+        }
+
+        switch request.action {
+        case .merge:
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "progress",
+                    message: "Preparing merge status for \(context.paneTitle).",
+                    title: "Merge",
+                    progress: nil,
+                    data: actionScope(
+                        for: context,
+                        consequence: "Checks merge status before the host offers the next merge step."
+                    ),
+                    dismissable: true
+                )
+            ))
+
+        case .createPR:
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .createPullRequestConfirm(paneID: request.paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "confirm",
+                    message: "Push \(context.paneTitle) and create a pull request into \(context.targetBranch ?? "main")?",
+                    title: "Create Pull Request",
+                    confirmLabel: "Create PR",
+                    cancelLabel: "Cancel",
+                    data: actionScope(
+                        for: context,
+                        consequence: "Pushes the branch and creates a pull request on the paired host."
+                    ),
+                    relatedFiles: Self.pullRequestFiles
+                )
+            ))
+
+        case .rename:
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .rename(paneID: request.paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "input",
+                    message: "Rename \(context.paneTitle). Leave blank to keep the current name.",
+                    title: "Rename Pane",
+                    placeholder: "Pane title",
+                    defaultValue: context.paneTitle,
+                    inputMaxVisibleLines: 1,
+                    data: actionScope(
+                        for: context,
+                        consequence: "Updates the pane name shown on this device."
+                    )
+                )
+            ))
+
+        case .close:
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .close(paneID: request.paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "choice",
+                    message: "Choose how to close \(context.paneTitle).",
+                    title: "Close Pane",
+                    options: [
+                        MobileActionOption(
+                            id: "kill_only",
+                            label: "Just close pane",
+                            description: "Keep worktree and branch",
+                            isDefault: true
+                        ),
+                        MobileActionOption(
+                            id: "kill_and_clean",
+                            label: "Close and remove worktree",
+                            description: "Delete worktree but keep branch",
+                            danger: true
+                        ),
+                        MobileActionOption(
+                            id: "kill_clean_branch",
+                            label: "Close and delete everything",
+                            description: "Remove worktree and delete branch",
+                            danger: true
+                        ),
+                    ],
+                    data: actionScope(
+                        for: context,
+                        consequence: "Closes the pane and can remove its worktree or branch."
+                    )
+                )
+            ))
+
+        default:
+            return .error(MobileProtocolErrorResponse(
+                requestID: requestID,
+                code: "command_not_supported",
+                message: "Fixture action \(request.action.rawValue) is not supported."
+            ))
+        }
+    }
+
+    private func respondToAction(
+        _ request: MobileActionRespondRequest,
+        requestID: String
+    ) -> MobileControlResponse {
+        guard let pending = pendingActions.removeValue(forKey: request.sessionID) else {
+            return .error(MobileProtocolErrorResponse(
+                requestID: requestID,
+                code: "action_session_not_found",
+                message: "Action session expired."
+            ))
+        }
+
+        switch (pending, request.response) {
+        case let (.rename(paneID), .input(value)):
+            let title = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            apply { Self.retitlePane(paneID, to: title.isEmpty ? nil : title, in: $0) }
+            let savedTitle = paneContext(for: paneID)?.paneTitle ?? (title.isEmpty ? paneID : title)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "success",
+                    message: "Renamed pane to \(savedTitle).",
+                    title: "Rename Pane"
+                )
+            ))
+
+        case (.rename, .cancel):
+            return cancelledActionResult(requestID: requestID, title: "Rename Pane")
+
+        case let (.createPullRequestConfirm(paneID), .confirm):
+            guard let context = paneContext(for: paneID) else {
+                return .error(MobileProtocolErrorResponse(
+                    requestID: requestID,
+                    code: "unknown_pane",
+                    message: "Pane \(paneID) is not published by this fixture."
+                ))
+            }
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .createPullRequestSummary(paneID: paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "input",
+                    message: "Review the pull request title and body before sending it.",
+                    title: "Create Pull Request",
+                    placeholder: "Title, blank line, then body",
+                    defaultValue: "Ship \(context.paneTitle)\n\nSummary of the fixture change.",
+                    inputMaxVisibleLines: 6,
+                    data: actionScope(
+                        for: context,
+                        consequence: "Creates a pull request on the paired host."
+                    ),
+                    relatedFiles: Self.pullRequestFiles
+                )
+            ))
+
+        case (.createPullRequestConfirm, .cancel):
+            return cancelledActionResult(requestID: requestID, title: "Create Pull Request")
+
+        case let (.createPullRequestSummary(paneID), .input(summary)):
+            let paneTitle = paneContext(for: paneID)?.paneTitle ?? paneID
+            let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = trimmed.isEmpty
+                ? "Created a pull request for \(paneTitle)."
+                : "Created a pull request for \(paneTitle) with your edited summary."
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "success",
+                    message: message,
+                    title: "Create Pull Request"
+                )
+            ))
+
+        case (.createPullRequestSummary, .cancel):
+            return cancelledActionResult(requestID: requestID, title: "Create Pull Request")
+
+        case let (.close(paneID), .choice(optionID)):
+            let paneTitle = paneContext(for: paneID)?.paneTitle ?? paneID
+            apply { Self.removePane(paneID, from: $0) }
+            let message: String
+            switch optionID {
+            case "kill_only":
+                message = "Closed \(paneTitle)."
+            case "kill_and_clean":
+                message = "Closed \(paneTitle) and started worktree cleanup."
+            case "kill_clean_branch":
+                message = "Closed \(paneTitle) and started worktree and branch cleanup."
+            default:
+                return .error(MobileProtocolErrorResponse(
+                    requestID: requestID,
+                    code: "invalid_action_response",
+                    message: "Cleanup option \(optionID) is not supported by this fixture."
+                ))
+            }
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "success",
+                    message: message,
+                    title: "Close Pane"
+                )
+            ))
+
+        case (.close, .cancel):
+            return cancelledActionResult(requestID: requestID, title: "Close Pane")
+
+        default:
+            return .error(MobileProtocolErrorResponse(
+                requestID: requestID,
+                code: "invalid_action_response",
+                message: "Fixture action response did not match the current action state."
+            ))
+        }
+    }
+
+    private func nextActionSessionID() -> String {
+        nextActionSession += 1
+        return "fixture-action-\(nextActionSession)"
+    }
+
+    private func paneContext(for paneID: String) -> FixturePaneContext? {
+        for project in workspace.projects {
+            if let pane = project.projectPanes.first(where: { $0.id == paneID }) {
+                return FixturePaneContext(
+                    projectID: project.id,
+                    projectTitle: project.title,
+                    paneID: pane.id,
+                    paneTitle: pane.title ?? pane.id,
+                    worktreePath: nil,
+                    sourceBranch: nil,
+                    targetBranch: nil
+                )
+            }
+            for worktree in project.worktrees {
+                guard let pane = worktree.panes.first(where: { $0.id == paneID }) else { continue }
+                let sourceBranch = worktree.branch
+                let targetBranch = sourceBranch == "main" ? nil : "main"
+                return FixturePaneContext(
+                    projectID: project.id,
+                    projectTitle: project.title,
+                    paneID: pane.id,
+                    paneTitle: pane.title ?? pane.id,
+                    worktreePath: worktree.path,
+                    sourceBranch: sourceBranch,
+                    targetBranch: targetBranch
+                )
+            }
+        }
+        return nil
+    }
+
+    private func actionScope(
+        for context: FixturePaneContext,
+        consequence: String
+    ) -> [String: String] {
+        var data: [String: String] = [
+            "host": Self.fixtureHostName,
+            "projectId": context.projectID,
+            "projectTitle": context.projectTitle,
+            "consequence": consequence,
+        ]
+        if let worktreePath = context.worktreePath {
+            data["worktreePath"] = worktreePath
+        }
+        if let sourceBranch = context.sourceBranch {
+            data["sourceBranch"] = sourceBranch
+        }
+        if let targetBranch = context.targetBranch {
+            data["targetBranch"] = targetBranch
+        }
+        return data
+    }
+
+    private func cancelledActionResult(requestID: String, title: String) -> MobileControlResponse {
+        .actionResult(MobileActionsResultResponse(
+            requestID: requestID,
+            sessionID: nil,
+            result: MobileActionResult(
+                type: "info",
+                message: "Action cancelled.",
+                title: title
+            )
+        ))
+    }
+
     // MARK: - Snapshot edits
+
+    private static let fixtureHostName = "psyche-demo.local"
+    private static let pullRequestFiles = ["Sources/App.swift", "Tests/AppTests.swift"]
+
+    private static func ritualLaunchPath(
+        in workspace: WorkspaceSnapshot,
+        projectID: String
+    ) -> String {
+        workspace.projects.first(where: { $0.id == projectID })?.worktrees.first?.path ?? "/fixture"
+    }
 
     private static func insertPane(
         _ pane: WorkspacePaneSnapshot,
@@ -237,6 +583,23 @@ private enum FixtureControlRequestError: LocalizedError {
     var errorDescription: String? {
         "Fixture inspection unavailable."
     }
+}
+
+private enum FixturePendingAction {
+    case rename(paneID: String)
+    case createPullRequestConfirm(paneID: String)
+    case createPullRequestSummary(paneID: String)
+    case close(paneID: String)
+}
+
+private struct FixturePaneContext {
+    let projectID: String
+    let projectTitle: String
+    let paneID: String
+    let paneTitle: String
+    let worktreePath: String?
+    let sourceBranch: String?
+    let targetBranch: String?
 }
 
 extension WorkspaceProjectSnapshot {

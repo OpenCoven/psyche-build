@@ -28,11 +28,50 @@ final class RemoteActionStoreTests: XCTestCase {
             ),
         ])
         XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertFalse(store.canStartAction(onPane: paneID))
         XCTAssertEqual(store.presentation?.sessionID, "session-1")
         XCTAssertEqual(
             store.presentation?.content,
             .confirm(confirmLabel: "Continue", cancelLabel: "Cancel")
         )
+    }
+
+    func testBlockedStartShowsVisibleProgressUntilTheHostReplies() async {
+        let gate = ActionStartGate()
+        let requests = ActionControlRequests(
+            responses: [
+                .actionResult(actionResult(
+                    requestID: "req-1",
+                    sessionID: nil,
+                    type: "success"
+                )),
+            ],
+            startGate: gate
+        )
+        let store = RemoteActionStore(controlRequests: requests)
+        let workspace = workspace
+        let paneID = paneID
+
+        async let start: Void = store.start(action: .merge, onPane: paneID, in: workspace)
+        await gate.waitUntilBlocked()
+
+        XCTAssertEqual(store.presentation?.actionLabel, "Merge")
+        XCTAssertEqual(store.presentation?.title, "Working")
+        XCTAssertEqual(store.presentation?.message, "Waiting for the host...")
+        XCTAssertEqual(store.presentation?.content, .progress(nil))
+        XCTAssertFalse(store.presentation?.dismissable == true)
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertFalse(store.canStartAction(onPane: paneID))
+
+        await gate.release(with: .actionResult(actionResult(
+            requestID: "req-1",
+            sessionID: nil,
+            type: "success"
+        )))
+        await start
+
+        XCTAssertEqual(store.presentation?.content, .terminal(.success))
+        XCTAssertFalse(store.isBusy(paneID))
     }
 
     func testConfirmInputSuccessChainReplacesSessionAndContentUntilSuccess() async {
@@ -396,6 +435,8 @@ final class RemoteActionStoreTests: XCTestCase {
         XCTAssertEqual(store.presentation, terminalPresentation)
 
         store.dismiss()
+
+        XCTAssertTrue(store.canStartAction(onPane: "bridge-protocol"))
 
         await store.start(action: .close, onPane: "bridge-protocol", in: workspace)
 

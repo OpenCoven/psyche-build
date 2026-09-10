@@ -6,6 +6,7 @@ import XCTest
 /// or the device keychain. Tests that only make sense at one width guard on
 /// the window and skip on the other device class rather than quietly asserting
 /// something weaker.
+@MainActor
 final class PsycheAppUITests: XCTestCase {
 
     // MARK: - Both device classes
@@ -393,25 +394,39 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(element("pane-chip-pane-1", in: app).waitForExistence(timeout: 10))
     }
 
-    func testRenamingAPaneUpdatesWhatTheWorkspaceShows() throws {
+    func testPaneActionsMenuListsRemoteLifecycleAndRitualActions() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+
+        XCTAssertTrue(app.buttons["Merge"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Create Pull Request"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Browse Files"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Rituals"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Close and Cleanup"].waitForExistence(timeout: 10))
+
+        app.buttons["Rituals"].tap()
+        XCTAssertTrue(app.buttons["Launch Homepage"].waitForExistence(timeout: 10))
+    }
+
+    func testRenamingAPaneUsesTheRemoteActionSheet() throws {
         let app = launchApp()
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
         app.buttons["Rename"].tap()
 
-        // An alert's fields and buttons live in the alert, not the app root.
-        let alert = app.alerts.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        let field = alert.textFields.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
-        field.tap()
-        field.typeText(" reviewed")
-        alert.buttons["Rename"].tap()
-
+        let sheet = element("remote-action-sheet", in: app)
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
         XCTAssertTrue(
-            app.staticTexts["homepage polish reviewed"].waitForExistence(timeout: 10),
-            "The workspace should refresh with the new title"
+            app.staticTexts["Rename homepage polish. Leave blank to keep the current name."]
+                .waitForExistence(timeout: 10)
+        )
+        XCTAssertFalse(
+            app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
         )
     }
 
@@ -437,6 +452,33 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(
             element("pane-chip-web-home", in: app).waitForNonExistence(timeout: 10),
             "The stopped pane should leave the workspace"
+        )
+    }
+
+    func testCleanupConfirmationRoutesIntoRemoteCloseWorkflow() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Close and Cleanup"].tap()
+
+        XCTAssertTrue(
+            app.staticTexts["Close and clean up homepage polish?"].waitForExistence(timeout: 10)
+        )
+        let cleanupMessage = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS[c] %@", "keep the worktree")
+        ).firstMatch
+        XCTAssertTrue(cleanupMessage.waitForExistence(timeout: 10))
+
+        let dialog = app.sheets.firstMatch.exists ? app.sheets.firstMatch : app.alerts.firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 10))
+        dialog.buttons["Continue to cleanup"].tap()
+
+        let sheet = element("remote-action-sheet", in: app)
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Choose how to close homepage polish."].waitForExistence(timeout: 10))
+        XCTAssertFalse(
+            app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
         )
     }
 
