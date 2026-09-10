@@ -142,4 +142,48 @@ final class ActionSheetPresentationTests: XCTestCase {
         )
         XCTAssertEqual(ActionSheetPresentation.primaryInputLabel(for: .rename), "Continue")
     }
+
+    @MainActor
+    func testFixtureRenameActionProducesInteractiveInputPresentation() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let requests = FixtureControlRequests(workspace: workspace)
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .rename, onPane: "web-home", in: workspace)
+
+        XCTAssertEqual(store.presentation?.title, "Rename Pane")
+        XCTAssertEqual(
+            store.presentation?.content,
+            .input(RemoteActionInput(
+                placeholder: "Pane title",
+                defaultValue: "homepage polish",
+                maxVisibleLines: 1
+            ))
+        )
+        XCTAssertEqual(
+            store.presentation?.scope.consequence,
+            "Updates the pane name shown on this device."
+        )
+    }
+
+    @MainActor
+    func testFixtureCleanupActionProducesChoicePresentation() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let requests = FixtureControlRequests(workspace: workspace)
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .close, onPane: "web-home", in: workspace)
+
+        guard case let .choice(options)? = store.presentation?.content else {
+            return XCTFail("Expected cleanup to present choice controls")
+        }
+        XCTAssertEqual(store.presentation?.title, "Close Pane")
+        XCTAssertEqual(store.presentation?.scope.consequence, "Closes the pane and can remove its worktree or branch.")
+        XCTAssertEqual(options.map(\.label), [
+            "Just close pane",
+            "Close and remove worktree",
+            "Close and delete everything",
+        ])
+        XCTAssertEqual(options.map(\.danger), [nil, true, true])
+    }
 }

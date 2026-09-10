@@ -114,6 +114,7 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
     public let requestID: String
     public let paneID: String
     public let action: PaneAction
+    public let actionLabel: String
     public let title: String
     public let message: String
     public let sessionID: String?
@@ -207,6 +208,7 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
             requestID: response.requestID,
             paneID: paneID,
             action: action,
+            actionLabel: action.presentationLabel,
             title: result.title ?? "Action",
             message: result.message,
             sessionID: sessionID,
@@ -229,6 +231,7 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
             requestID: requestID,
             paneID: paneID,
             action: action,
+            actionLabel: action.presentationLabel,
             title: "That did not work",
             message: message,
             sessionID: nil,
@@ -239,6 +242,31 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
             recoveryText: recoveryText
         )
     }
+
+    public static func progress(
+        requestID: String = UUID().uuidString,
+        paneID: String,
+        action: PaneAction,
+        title: String = "Working",
+        message: String = "Waiting for the host...",
+        progress: Double? = nil,
+        dismissable: Bool = false
+    ) -> Self {
+        Self(
+            requestID: requestID,
+            paneID: paneID,
+            action: action,
+            actionLabel: action.presentationLabel,
+            title: title,
+            message: message,
+            sessionID: nil,
+            scope: RemoteActionScope(rows: [], consequence: nil),
+            relatedFiles: [],
+            dismissable: dismissable,
+            content: .progress(progress),
+            recoveryText: nil
+        )
+    }
 }
 
 extension RemoteActionPresentation {
@@ -247,6 +275,7 @@ extension RemoteActionPresentation {
             requestID: requestID,
             paneID: paneID,
             action: action,
+            actionLabel: actionLabel,
             title: title,
             message: message,
             sessionID: nil,
@@ -256,5 +285,46 @@ extension RemoteActionPresentation {
             content: content,
             recoveryText: recoveryText
         )
+    }
+}
+
+public extension PaneAction {
+    var presentationLabel: String {
+        switch self {
+        case .view:
+            "View"
+        case .setSource:
+            "Set Source"
+        case .close:
+            "Close"
+        case .merge:
+            "Merge"
+        case .createPR:
+            "Create Pull Request"
+        case .rename:
+            "Rename"
+        case .duplicate:
+            "Duplicate"
+        case .runTest:
+            "Run Tests"
+        case .runDev:
+            "Run Development Server"
+        case .openOutput:
+            "Open Output"
+        case .copyPath:
+            "Copy Path"
+        case .openInEditor:
+            "Open in Editor"
+        case .toggleAutopilot:
+            "Toggle Autopilot"
+        case .attachAgent:
+            "Attach Agent"
+        case .createChildWorktree:
+            "Create Child Worktree"
+        case .openTerminalInWorktree:
+            "Open Terminal in Worktree"
+        case .openFileBrowser:
+            "Open File Browser"
+        }
     }
 }

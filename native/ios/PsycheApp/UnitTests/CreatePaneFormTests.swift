@@ -185,4 +185,99 @@ final class CreatePaneFormTests: XCTestCase {
         XCTAssertFalse(message.contains("nil"), message)
         XCTAssertFalse(message.contains(" on ."), message)
     }
+
+    // MARK: - Cleanup confirmation
+
+    func testCleanupConfirmationNamesPaneProjectAndHost() {
+        let message = CleanupPaneConfirmation.message(
+            paneTitle: "homepage polish",
+            projectTitle: "open-coven.dev",
+            hostName: "studio.local"
+        )
+
+        XCTAssertTrue(message.contains("homepage polish"), message)
+        XCTAssertTrue(message.contains("open-coven.dev"), message)
+        XCTAssertTrue(message.contains("studio.local"), message)
+        XCTAssertEqual(
+            CleanupPaneConfirmation.title(paneTitle: "homepage polish"),
+            "Close and clean up homepage polish?"
+        )
+    }
+
+    func testCleanupConfirmationExplainsTheChoicesBeforeContinuing() {
+        let message = CleanupPaneConfirmation.message(
+            paneTitle: "p",
+            projectTitle: "proj",
+            hostName: nil
+        )
+
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("keep the worktree"), message)
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("remove the worktree"), message)
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("branch"), message)
+    }
+
+    func testStopAndCleanupMenuActionsStayDistinct() {
+        XCTAssertNotEqual(PaneControlsMenuAction.stop.label, PaneControlsMenuAction.cleanup.label)
+        XCTAssertNotEqual(
+            PaneControlsMenuAction.stop.systemImage,
+            PaneControlsMenuAction.cleanup.systemImage
+        )
+    }
+
+    func testPaneControlsDisableHostActionsForStaleOrBusyState() {
+        XCTAssertTrue(PaneControlsPresentation.hostActionDisabled(isStale: true, isBusy: false))
+        XCTAssertTrue(PaneControlsPresentation.hostActionDisabled(isStale: false, isBusy: true))
+        XCTAssertFalse(PaneControlsPresentation.hostActionDisabled(isStale: false, isBusy: false))
+
+        XCTAssertTrue(PaneControlsPresentation.filesDisabled(
+            hasInspectableWorktree: false,
+            isStale: false,
+            isBusy: false
+        ))
+        XCTAssertTrue(PaneControlsPresentation.filesDisabled(
+            hasInspectableWorktree: true,
+            isStale: true,
+            isBusy: false
+        ))
+        XCTAssertFalse(PaneControlsPresentation.filesDisabled(
+            hasInspectableWorktree: true,
+            isStale: false,
+            isBusy: false
+        ))
+    }
+
+    func testRitualMenuSurfaceExplainsEmptyAndUnavailableStates() {
+        let emptyProject = WorkspaceProjectSnapshot(
+            id: "psyche",
+            root: "/repo",
+            title: "psyche-build",
+            worktrees: [],
+            projectPanes: [],
+            runningCount: 0,
+            attentionCount: 0,
+            rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
+        )
+
+        XCTAssertEqual(
+            RitualMenuPresentation.make(project: nil, isStaleWorkspace: false),
+            .status(
+                label: "This pane is no longer published by the host",
+                systemImage: "exclamationmark.triangle"
+            )
+        )
+        XCTAssertEqual(
+            RitualMenuPresentation.make(project: emptyProject, isStaleWorkspace: false),
+            .status(
+                label: "No rituals are published for psyche-build",
+                systemImage: "sparkles"
+            )
+        )
+        XCTAssertEqual(
+            RitualMenuPresentation.make(project: emptyProject, isStaleWorkspace: true),
+            .status(
+                label: "Refresh the workspace to load rituals",
+                systemImage: "clock.arrow.trianglehead.2.counterclockwise.rotate.90"
+            )
+        )
+    }
 }

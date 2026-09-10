@@ -26,14 +26,19 @@ public final class RemoteActionStore: ObservableObject {
         busyPaneIDs.contains(paneID)
     }
 
+    public func canStartAction(onPane paneID: String) -> Bool {
+        operationToken == nil
+            && presentation == nil
+            && !isSubmitting
+            && !busyPaneIDs.contains(paneID)
+    }
+
     public func start(
         action: PaneAction,
         onPane paneID: String,
         in workspace: WorkspaceSnapshot
     ) async {
-        guard operationToken == nil,
-              presentation == nil,
-              !isSubmitting
+        guard canStartAction(onPane: paneID)
         else {
             return
         }
@@ -64,6 +69,7 @@ public final class RemoteActionStore: ObservableObject {
         }
 
         busyPaneIDs.insert(paneID)
+        presentation = .progress(paneID: paneID, action: action)
         let requestID = await controlRequests.nextRequestID()
 
         do {

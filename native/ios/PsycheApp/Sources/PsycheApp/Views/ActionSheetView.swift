@@ -11,13 +11,16 @@ struct ActionSheetView: View {
             Form {
                 if let presentation = store.presentation {
                     headerSection(for: presentation)
-
-                    // Keep context ahead of every control, especially destructive choices.
-                    scopeSection(for: presentation)
-                    consequenceSection(for: presentation)
-                    contentSections(for: presentation)
-                    relatedFilesSection(for: presentation)
-                    controlsSection(for: presentation)
+                    ForEach(
+                        ActionSheetPresentation.sectionOrder(
+                            hasScope: !presentation.scope.rows.isEmpty,
+                            hasConsequence: presentation.scope.consequence != nil,
+                            hasRelatedFiles: !presentation.relatedFiles.isEmpty
+                        ),
+                        id: \.self
+                    ) { section in
+                        sectionView(section, presentation: presentation)
+                    }
                 } else {
                     Section {
                         ContentUnavailableView(
@@ -50,7 +53,7 @@ struct ActionSheetView: View {
     @ViewBuilder
     private func headerSection(for presentation: RemoteActionPresentation) -> some View {
         Section {
-            Text(ActionSheetPresentation.actionLabel(for: presentation.action))
+            Text(presentation.actionLabel)
                 .font(.headline)
             LabeledContent("Pane", value: presentation.paneID)
         }
@@ -58,16 +61,14 @@ struct ActionSheetView: View {
 
     @ViewBuilder
     private func scopeSection(for presentation: RemoteActionPresentation) -> some View {
-        if !presentation.scope.rows.isEmpty {
-            Section("Scope") {
-                ForEach(presentation.scope.rows) { row in
-                    LabeledContent {
-                        Text(row.value)
-                            .multilineTextAlignment(.trailing)
-                            .textSelection(.enabled)
-                    } label: {
-                        Text(row.label)
-                    }
+        Section("Scope") {
+            ForEach(presentation.scope.rows) { row in
+                LabeledContent {
+                    Text(row.value)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                } label: {
+                    Text(row.label)
                 }
             }
         }
@@ -94,13 +95,7 @@ struct ActionSheetView: View {
         case .input(let input):
             Section("Details") {
                 Text(presentation.message)
-                TextField(
-                    input.placeholder ?? "Response",
-                    text: $draft,
-                    axis: .vertical
-                )
-                .lineLimit(ActionSheetPresentation.inputLineRange(input.maxVisibleLines))
-                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+                inputField(for: input)
             }
         case .pullRequestReview(let review):
             pullRequestReviewSection(
@@ -126,6 +121,25 @@ struct ActionSheetView: View {
     private func messageSection(_ message: String) -> some View {
         Section("Details") {
             Text(message)
+        }
+    }
+
+    @ViewBuilder
+    private func inputField(for input: RemoteActionInput) -> some View {
+        if ActionSheetPresentation.prefersMultilineInput(input.maxVisibleLines) {
+            TextField(
+                input.placeholder ?? "Response",
+                text: $draft,
+                axis: .vertical
+            )
+            .lineLimit(ActionSheetPresentation.inputLineRange(input.maxVisibleLines))
+            .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+            .accessibilityIdentifier("remote-action-input")
+        } else {
+            TextField(input.placeholder ?? "Response", text: $draft)
+                .lineLimit(1)
+                .disabled(ActionSheetPresentation.editingDisabled(isSubmitting: store.isSubmitting))
+                .accessibilityIdentifier("remote-action-input")
         }
     }
 
@@ -217,12 +231,29 @@ struct ActionSheetView: View {
 
     @ViewBuilder
     private func relatedFilesSection(for presentation: RemoteActionPresentation) -> some View {
-        if !presentation.relatedFiles.isEmpty {
-            Section("Related Files") {
-                ForEach(presentation.relatedFiles.indices, id: \.self) { index in
-                    Label(presentation.relatedFiles[index], systemImage: "doc")
-                }
+        Section("Related Files") {
+            ForEach(presentation.relatedFiles.indices, id: \.self) { index in
+                Label(presentation.relatedFiles[index], systemImage: "doc")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionView(
+        _ section: ActionSheetSection,
+        presentation: RemoteActionPresentation
+    ) -> some View {
+        switch section {
+        case .scope:
+            scopeSection(for: presentation)
+        case .consequence:
+            consequenceSection(for: presentation)
+        case .content:
+            contentSections(for: presentation)
+        case .relatedFiles:
+            relatedFilesSection(for: presentation)
+        case .controls:
+            controlsSection(for: presentation)
         }
     }
 
@@ -250,6 +281,10 @@ struct ActionSheetView: View {
                         choiceLabel(for: option)
                     }
                     .disabled(store.isSubmitting)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(option.label)
+                    .accessibilityValue(option.description ?? "")
+                    .accessibilityIdentifier("remote-action-choice-\(option.id)")
                 }
                 responseButton("Cancel", response: .cancel)
             }
@@ -316,10 +351,12 @@ struct ActionSheetView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(option.label)
+                    .accessibilityIdentifier("remote-action-choice-label-\(option.id)")
                 if let description = option.description {
                     Text(description)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("remote-action-choice-description-\(option.id)")
                 }
             }
             Spacer()
@@ -331,6 +368,8 @@ struct ActionSheetView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("remote-action-choice-\(option.id)")
     }
 
     private func respond(
