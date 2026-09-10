@@ -567,6 +567,38 @@ fn git_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
     Ok(resolve_git_path(git_dir, &raw))
 }
 
+const MAX_GIT_COMMONDIR_FILE_BYTES: u64 = 4 * 1024;
+
+/// Bounds a plain, unpacked `HEAD` file (`ref: refs/heads/<name>\n` or a
+/// bare object id): real Git HEAD contents are at most a few hundred
+/// bytes, so this is generous headroom, not a soft limit meant to be hit.
+const MAX_GIT_HEAD_BYTES: u64 = 4 * 1024;
+
+/// Same resolution as [`git_common_dir`], but classifies the `commondir`
+/// marker with `symlink_metadata` (no-follow) and reads it through a
+/// directory handle already pinned by identity, rather than trusting a
+/// plain path a second time after that identity was captured. This closes
+/// the same TOCTOU window `git_dir_for_worktree` already defends against
+/// for the `.git` marker itself: a hostile repository swapping its Git
+/// directory, or the `commondir` file inside it, for a symlink between
+/// resolution and this read must not redirect where the common directory
+/// is believed to live.
+fn git_common_dir_pinned(handle: &GitMetadataDirectory, git_dir: &Path) -> Result<PathBuf, String> {
+    let label = "Git commondir file";
+    match git_marker_kind(&git_dir.join("commondir"), label)? {
+        GitMarkerKind::Missing => Ok(git_dir.to_path_buf()),
+        GitMarkerKind::Directory => Err(format!("{label} is a directory, not a file")),
+        GitMarkerKind::File => {
+            let bytes = handle
+                .read_file("commondir", label, MAX_GIT_COMMONDIR_FILE_BYTES)
+                .map_err(|error| error.into_message(label))?;
+            let raw =
+                String::from_utf8(bytes).map_err(|_| format!("{label} is not valid UTF-8"))?;
+            Ok(resolve_git_path(git_dir, &raw))
+        }
+    }
+}
+
 fn is_valid_git_ref_name(name: &str) -> bool {
     if name == "@"
         || !name.contains('/')
@@ -1871,7 +1903,16 @@ impl GitInspectionRepository {
         config: Vec<(String, String)>,
     ) -> Result<Self, String> {
         let (work_tree, actual_git_dir) = git_repository_paths(Path::new(root))?;
-        let common_dir = git_common_dir(&actual_git_dir)?;
+        // Pin the Git directory's identity with a no-follow handle at the
+        // point it is resolved, and thread that handle through every read
+        // this snapshot takes from inside it (commondir, HEAD), rather than
+        // re-deriving and trusting plain paths a second time. This closes
+        // the same TOCTOU window `git_dir_for_worktree` already defends
+        // against for the `.git` marker: a hostile repository swapping its
+        // Git directory, or a file inside it, for a symlink between
+        // resolution and these reads must not redirect them.
+        let git_dir_handle = GitMetadataDirectory::open(&actual_git_dir, "Git directory")?;
+        let common_dir = git_common_dir_pinned(&git_dir_handle, &actual_git_dir)?;
         let index = work_tree.as_ref().map(|_| actual_git_dir.join("index"));
         let alternate_objects = common_dir.join("objects");
         let ref_storage = config
@@ -1895,8 +1936,14 @@ impl GitInspectionRepository {
         } else {
             HashMap::new()
         };
-        let actual_head = std::fs::read_to_string(actual_git_dir.join("HEAD"))
-            .map_err(|e| format!("snapshot Git HEAD: {e}"))?;
+        let head_label = "Git HEAD";
+        let actual_head = String::from_utf8(
+            git_dir_handle
+                .read_file("HEAD", head_label, MAX_GIT_HEAD_BYTES)
+                .map_err(|error| error.into_message(head_label))?,
+        )
+        .map_err(|_| format!("{head_label} is not valid UTF-8"))?;
+        git_dir_handle.validate("Git directory")?;
         let expected_head = head_override
             .filter(|head| {
                 !head.is_empty() && !is_null_git_oid(head, object_format.map(String::as_str))
@@ -4752,6 +4799,99 @@ mod tests {
         let error = git_dir_for_worktree(&root).unwrap_err();
 
         assert!(error.contains("too large"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn git_inspection_rejects_a_symlinked_head_marker() {
+        let tree = TempTree::new("git-inspection-symlinked-head");
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(tree.root.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&tree.root, &["add", "tracked.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+
+        let outside = tree.root.join("outside-head");
+        std::fs::write(&outside, "ref: refs/heads/main\n").unwrap();
+        std::fs::remove_file(tree.root.join(".git/HEAD")).unwrap();
+        if !create_test_symlink(
+            TestSymlinkKind::File,
+            &outside,
+            &tree.root.join(".git/HEAD"),
+        ) {
+            return;
+        }
+
+        // Call the repository snapshot directly rather than through
+        // `GitInspection::new`: the config-gathering step ahead of it shells
+        // out to the real `git` binary, which itself refuses a repository
+        // whose HEAD marker was replaced with a symlink (with an unrelated
+        // "not a git repository" style error) before this crate's own
+        // pinned-handle read is ever reached. Bypassing that lets this test
+        // isolate the guarantee this fix actually adds: `snapshot`'s own
+        // read of HEAD must reject a symlinked marker rather than follow it.
+        let error = match GitInspectionRepository::snapshot(path_text(&tree.root), None, Vec::new())
+        {
+            Ok(_) => panic!("a symlinked HEAD marker must be rejected"),
+            Err(error) => error,
+        };
+
+        // The pinned read classifies the marker with a no-follow check and
+        // rejects anything other than a regular file before ever opening
+        // it, so a symlink surfaces as "not a regular file" rather than
+        // being silently followed.
+        assert!(
+            error.contains("not a regular file"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_inspection_rejects_a_symlinked_commondir_marker() {
+        let tree = TempTree::new("git-inspection-symlinked-commondir");
+        let source = tree.root.join("source");
+        let linked = tree.root.join("linked");
+        std::fs::create_dir_all(&source).unwrap();
+        run_test_git(&source, &["init", "-q"]);
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&source, &["add", "tracked.txt"]);
+        run_test_git(&source, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                path_text(&linked),
+                "HEAD",
+            ],
+        );
+
+        let (_, linked_git_dir) = git_dir_for_worktree(&linked).unwrap();
+        let real_commondir = linked_git_dir.join("commondir");
+        assert!(real_commondir.is_file());
+        let outside = tree.root.join("outside-commondir");
+        std::fs::copy(&real_commondir, &outside).unwrap();
+        std::fs::remove_file(&real_commondir).unwrap();
+        if !create_test_symlink(TestSymlinkKind::File, &outside, &real_commondir) {
+            return;
+        }
+
+        let error = match GitInspection::new(path_text(&linked)) {
+            Ok(_) => panic!("a symlinked commondir marker must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("symlink"), "unexpected error: {error}");
     }
 
     #[test]
