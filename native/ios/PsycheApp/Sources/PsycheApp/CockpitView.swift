@@ -31,6 +31,7 @@ enum RootTab: String, Hashable, CaseIterable {
 /// throw away where you were.
 struct CockpitView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject private var remoteActionStore: RemoteActionStore
     @EnvironmentObject private var store: WorkspaceStore
 
     @State private var tab: RootTab = .now
@@ -48,7 +49,21 @@ struct CockpitView: View {
             }
         }
         .tint(PsycheTheme.mint)
+        .sheet(isPresented: remoteActionSheetBinding) {
+            ActionSheetView(store: remoteActionStore)
+        }
         .accessibilityIdentifier("main-cockpit")
+    }
+
+    private var remoteActionSheetBinding: Binding<Bool> {
+        Binding(
+            get: { remoteActionStore.presentation != nil },
+            set: { isPresented in
+                if !isPresented {
+                    remoteActionStore.dismiss()
+                }
+            }
+        )
     }
 
     // MARK: - Compact

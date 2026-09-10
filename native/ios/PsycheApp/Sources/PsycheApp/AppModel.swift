@@ -17,8 +17,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var hostName: String?
 
     let workspaceStore: WorkspaceStore
-    /// Shared host-owned action state. Fixture roots receive a disconnected
-    /// store so UI previews can exercise the state surface without a socket.
+    /// Shared host-owned action state. Fixture roots use the same deterministic
+    /// control client as the workspace store, so menu-driven remote actions
+    /// exercise the real action-sheet flows without a socket.
     let remoteActionStore: RemoteActionStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
     /// root incapable of talking to a host.
@@ -53,11 +54,12 @@ final class AppModel: ObservableObject {
         }
 
         composition = nil
-        workspaceStore = DemoStore.makeWorkspaceStore(
+        let fixtureWorkspace = DemoStore.makeFixtureWorkspace(
             fixture: fixture,
             inspectionFails: fixtureInspectionFails
         )
-        remoteActionStore = RemoteActionStore()
+        workspaceStore = fixtureWorkspace.workspaceStore
+        remoteActionStore = RemoteActionStore(controlRequests: fixtureWorkspace.controlRequests)
         // A fixture terminal client, so the fixture shell renders real output
         // through the real registry without opening a socket.
         terminalRegistry = TerminalSessionRegistry(

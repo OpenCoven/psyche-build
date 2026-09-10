@@ -1,6 +1,6 @@
 import PsycheCore
 
-enum ActionSheetSection: Equatable {
+enum ActionSheetSection: Equatable, Hashable {
     case scope
     case consequence
     case content
@@ -58,6 +58,10 @@ enum ActionSheetPresentation {
         1...min(max(requestedMaximum ?? 6, 1), 12)
     }
 
+    static func prefersMultilineInput(_ requestedMaximum: Int?) -> Bool {
+        inputLineRange(requestedMaximum).upperBound > 1
+    }
+
     static func editingDisabled(isSubmitting: Bool) -> Bool { isSubmitting }
 
     static func status(for kind: RemoteActionTerminalKind) -> ActionSheetStatus {
@@ -84,42 +88,7 @@ enum ActionSheetPresentation {
     }
 
     static func actionLabel(for action: PaneAction) -> String {
-        switch action {
-        case .view:
-            "View"
-        case .setSource:
-            "Set Source"
-        case .close:
-            "Close"
-        case .merge:
-            "Merge"
-        case .createPR:
-            "Create Pull Request"
-        case .rename:
-            "Rename"
-        case .duplicate:
-            "Duplicate"
-        case .runTest:
-            "Run Tests"
-        case .runDev:
-            "Run Development Server"
-        case .openOutput:
-            "Open Output"
-        case .copyPath:
-            "Copy Path"
-        case .openInEditor:
-            "Open in Editor"
-        case .toggleAutopilot:
-            "Toggle Autopilot"
-        case .attachAgent:
-            "Attach Agent"
-        case .createChildWorktree:
-            "Create Child Worktree"
-        case .openTerminalInWorktree:
-            "Open Terminal in Worktree"
-        case .openFileBrowser:
-            "Open File Browser"
-        }
+        action.presentationLabel
     }
 
     static func defaultMarker(for option: MobileActionOption) -> String? {
