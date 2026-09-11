@@ -197,7 +197,7 @@ public actor FixtureControlRequests: ControlRequesting {
                 message: "Pane \(request.paneID) is not published by this fixture."
             ))
         }
-        guard context.paneID != "action-error" else {
+        guard context.paneID != "action-error" || !usesLifecycleActionFixture else {
             return .error(MobileProtocolErrorResponse(
                 requestID: requestID,
                 code: "fixture_pre_dispatch_rejection",
@@ -680,10 +680,12 @@ public actor FixtureControlRequests: ControlRequesting {
             "host": Self.fixtureHostName,
             "projectId": context.projectID,
             "projectTitle": context.projectTitle,
-            "paneId": context.paneID,
-            "generation": String(sequence),
             "consequence": consequence,
         ]
+        if usesLifecycleActionFixture {
+            data["paneId"] = context.paneID
+            data["generation"] = String(sequence)
+        }
         if let worktreePath = context.worktreePath {
             data["worktreePath"] = worktreePath
         }
@@ -694,6 +696,10 @@ public actor FixtureControlRequests: ControlRequesting {
             data["targetBranch"] = targetBranch
         }
         return data
+    }
+
+    private var usesLifecycleActionFixture: Bool {
+        workspace.projects.allSatisfy { $0.root.hasPrefix("/fixture/projects/") }
     }
 
     private func cancelledActionResult(requestID: String, title: String) -> MobileControlResponse {
