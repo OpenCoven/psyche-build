@@ -769,8 +769,7 @@ fn collect_loose_refs(
                 continue;
             }
             Err(GitMetadataReadError::NotFound) => continue,
-            Err(GitMetadataReadError::Other(error))
-                if error == format!("{child_directory_label} is not a real directory") => {}
+            Err(GitMetadataReadError::NotDirectory) => {}
             Err(error) => return Err(error.into_message(&child_directory_label)),
         }
         if !is_valid_git_ref_name(&ref_name) {
@@ -1050,6 +1049,15 @@ struct WindowsIoStatusBlock {
 }
 
 #[cfg(windows)]
+#[repr(C)]
+struct WindowsFileNamesInformation {
+    next_entry_offset: u32,
+    file_index: u32,
+    file_name_length: u32,
+    file_name: [u16; 1],
+}
+
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetFileInformationByHandle(
@@ -1073,6 +1081,19 @@ extern "system" {
         create_options: u32,
         ea_buffer: *mut std::ffi::c_void,
         ea_length: u32,
+    ) -> i32;
+    fn NtQueryDirectoryFile(
+        file_handle: *mut std::ffi::c_void,
+        event: *mut std::ffi::c_void,
+        apc_routine: *mut std::ffi::c_void,
+        apc_context: *mut std::ffi::c_void,
+        io_status_block: *mut WindowsIoStatusBlock,
+        file_information: *mut std::ffi::c_void,
+        length: u32,
+        file_information_class: u32,
+        return_single_entry: u8,
+        file_name: *mut WindowsUnicodeString,
+        restart_scan: u8,
     ) -> i32;
     fn RtlNtStatusToDosError(status: i32) -> u32;
 }
@@ -1131,10 +1152,13 @@ fn windows_git_metadata_child_share_mode() -> u32 {
 fn windows_git_metadata_open_error(label: &str, error: u32) -> GitMetadataReadError {
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
+    const ERROR_DIRECTORY: u32 = 267;
     const ERROR_SHARING_VIOLATION: u32 = 32;
 
     if matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
         GitMetadataReadError::NotFound
+    } else if error == ERROR_DIRECTORY {
+        GitMetadataReadError::NotDirectory
     } else if error == ERROR_SHARING_VIOLATION {
         format!("{label} changed while being read").into()
     } else {
@@ -1143,6 +1167,96 @@ fn windows_git_metadata_open_error(label: &str, error: u32) -> GitMetadataReadEr
             std::io::Error::from_raw_os_error(error as i32)
         )
         .into()
+    }
+
+    #[cfg(windows)]
+    fn windows_git_metadata_directory_entries(
+        directory: &std::fs::File,
+        label: &str,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        use std::os::windows::ffi::OsStringExt;
+        use std::os::windows::io::AsRawHandle;
+
+        const FILE_NAMES_INFORMATION_CLASS: u32 = 12;
+        const STATUS_NO_MORE_FILES: u32 = 0x8000_0006;
+        const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
+
+        let mut entries = Vec::new();
+        let mut restart_scan = 1_u8;
+        loop {
+            let mut io_status = WindowsIoStatusBlock {
+                status: 0,
+                information: 0,
+            };
+            let mut buffer = vec![0_u8; DIRECTORY_BUFFER_BYTES];
+            let status = unsafe {
+                NtQueryDirectoryFile(
+                    directory.as_raw_handle(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut io_status,
+                    buffer.as_mut_ptr().cast(),
+                    u32::try_from(buffer.len()).expect("directory buffer length fits u32"),
+                    FILE_NAMES_INFORMATION_CLASS,
+                    0,
+                    std::ptr::null_mut(),
+                    restart_scan,
+                )
+            };
+            restart_scan = 0;
+            if status == 0 {
+                let returned = io_status.information;
+                if returned == 0 {
+                    break;
+                }
+                if returned > buffer.len() {
+                    return Err(format!(
+                        "read {label}: Windows returned too much directory data"
+                    ));
+                }
+                let mut offset = 0_usize;
+                while offset < returned {
+                    let info = unsafe {
+                        &*(buffer[offset..]
+                            .as_ptr()
+                            .cast::<WindowsFileNamesInformation>())
+                    };
+                    let name_units = usize::try_from(info.file_name_length)
+                        .expect("Windows directory entry name length fits usize")
+                        / std::mem::size_of::<u16>();
+                    let name =
+                        unsafe { std::slice::from_raw_parts(info.file_name.as_ptr(), name_units) };
+                    let name = std::ffi::OsString::from_wide(name);
+                    if name != "." && name != ".." {
+                        entries.push(name);
+                    }
+                    if info.next_entry_offset == 0 {
+                        break;
+                    }
+                    let next_offset = usize::try_from(info.next_entry_offset)
+                        .expect("Windows directory entry offset fits usize");
+                    if next_offset == 0 {
+                        return Err(format!(
+                            "read {label}: Windows returned an empty directory entry"
+                        ));
+                    }
+                    offset = offset.checked_add(next_offset).ok_or_else(|| {
+                        format!("read {label}: directory entry offset overflowed")
+                    })?;
+                }
+                continue;
+            }
+            if u32::from_ne_bytes(status.to_ne_bytes()) == STATUS_NO_MORE_FILES {
+                break;
+            }
+            let error = unsafe { RtlNtStatusToDosError(status) };
+            return Err(format!(
+                "read {label}: {}",
+                std::io::Error::from_raw_os_error(error as i32)
+            ));
+        }
+        Ok(entries)
     }
 }
 
@@ -1319,6 +1433,7 @@ enum GitMetadataReadError {
     /// markers like `commondir`; required markers like `HEAD` still treat
     /// this as an error via [`Self::into_message`].
     NotFound,
+    NotDirectory,
     Other(String),
 }
 
@@ -1333,6 +1448,7 @@ impl GitMetadataReadError {
         match self {
             Self::TooLarge => format!("{label} is too large"),
             Self::NotFound => format!("{label} does not exist"),
+            Self::NotDirectory => format!("{label} is not a real directory"),
             Self::Other(error) => error,
         }
     }
@@ -1643,13 +1759,13 @@ impl GitMetadataDirectory {
         if fd < 0 {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
-                return Err(format!("{label} is not a real directory").into());
+                return Err(GitMetadataReadError::NotDirectory);
             }
             if matches!(error.raw_os_error(), Some(libc::ENOENT)) {
                 return Err(GitMetadataReadError::NotFound);
             }
             if matches!(error.raw_os_error(), Some(libc::ENOTDIR)) {
-                return Err(format!("{label} is not a real directory").into());
+                return Err(GitMetadataReadError::NotDirectory);
             }
             return Err(format!("open {label}: {error}").into());
         }
@@ -1657,7 +1773,7 @@ impl GitMetadataDirectory {
         let state =
             file_state(&directory).map_err(|error| format!("inspect open {label}: {error}"))?;
         if state.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
-            return Err(format!("{label} is not a real directory").into());
+            return Err(GitMetadataReadError::NotDirectory);
         }
         Ok(Self {
             path: self.path.join(child_name),
@@ -1767,7 +1883,7 @@ impl GitMetadataDirectory {
         if state.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
             || state.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
         {
-            return Err(format!("{label} is not a real directory").into());
+            return Err(GitMetadataReadError::NotDirectory);
         }
         Ok(Self {
             path: self.path.join(name),
@@ -1777,7 +1893,7 @@ impl GitMetadataDirectory {
     }
 
     fn list_entries(&self, label: &str) -> Result<Vec<std::ffi::OsString>, String> {
-        git_metadata_path_entries(&self.path, label)
+        windows_git_metadata_directory_entries(&self.directory, label)
     }
 
     fn validate(&self, label: &str) -> Result<(), String> {
@@ -1857,7 +1973,7 @@ impl GitMetadataDirectory {
             Err(error) => return Err(format!("inspect {label}: {error}").into()),
         };
         if metadata_is_link_like(&metadata) || !metadata.is_dir() {
-            return Err(format!("{label} is not a real directory").into());
+            return Err(GitMetadataReadError::NotDirectory);
         }
         let state = other_git_metadata_state(&metadata, label)?;
         Ok(Self { path, state })
@@ -2090,11 +2206,24 @@ fn snapshot_git_index(
     git_dir: &GitMetadataDirectory,
     destination_git_dir: &Path,
 ) -> Result<(), String> {
+    snapshot_git_index_with_hook(git_dir, destination_git_dir, || ())
+}
+
+fn snapshot_git_index_with_hook<F, G>(
+    git_dir: &GitMetadataDirectory,
+    destination_git_dir: &Path,
+    after_git_dir_open: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> G,
+{
+    let _hook_guard = after_git_dir_open();
     let Some(bytes) =
         read_optional_git_metadata_file(git_dir, "index", "Git index", MAX_GIT_INDEX_BYTES)?
     else {
         return Ok(());
     };
+    git_dir.validate("Git directory")?;
     std::fs::write(destination_git_dir.join("index"), bytes)
         .map_err(|error| format!("snapshot Git index: {error}"))
 }
@@ -2107,7 +2236,19 @@ fn snapshot_git_objects(
     objects_directory: &GitMetadataDirectory,
     destination_git_dir: &Path,
 ) -> Result<(), String> {
+    snapshot_git_objects_with_hook(objects_directory, destination_git_dir, || ())
+}
+
+fn snapshot_git_objects_with_hook<F, G>(
+    objects_directory: &GitMetadataDirectory,
+    destination_git_dir: &Path,
+    after_objects_dir_open: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> G,
+{
     let mut visited = std::collections::HashSet::new();
+    let _hook_guard = after_objects_dir_open();
     snapshot_git_objects_from_directory(
         objects_directory,
         &destination_git_dir.join("objects"),
@@ -4989,6 +5130,78 @@ mod tests {
     }
 
     #[test]
+    fn git_index_snapshot_rejects_a_symlinked_index_marker() {
+        let tree = TempTree::new("git-index-symlinked-marker");
+        let git_dir = tree.root.join("git-dir");
+        let destination = tree.root.join("destination");
+        let outside = tree.root.join("outside-index");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(git_dir.join("index"), b"original index").unwrap();
+        std::fs::write(&outside, b"replacement index").unwrap();
+
+        let handle = GitMetadataDirectory::open(&git_dir, "Git directory").unwrap();
+        let error = snapshot_git_index_with_hook(&handle, &destination, || {
+            std::fs::remove_file(git_dir.join("index")).unwrap();
+            assert!(create_test_symlink(
+                TestSymlinkKind::File,
+                &outside,
+                &git_dir.join("index"),
+            ));
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("Git index is not a regular file"),
+            "unexpected error: {error}"
+        );
+        assert!(!destination.join("index").exists());
+    }
+
+    #[test]
+    fn git_objects_snapshot_anchors_to_open_objects_directory() {
+        let tree = TempTree::new("git-objects-anchored-directory");
+        let common_dir = tree.root.join("common");
+        let parked = tree.root.join("parked-objects");
+        let replacement = tree.root.join("replacement-objects");
+        let destination = tree.root.join("destination");
+        let object_name = "11111111111111111111111111111111111111";
+        let (fanout, suffix) = object_name.split_at(2);
+        std::fs::create_dir_all(common_dir.join("objects").join(fanout)).unwrap();
+        std::fs::create_dir_all(replacement.join(fanout)).unwrap();
+        std::fs::write(
+            common_dir.join("objects").join(fanout).join(suffix),
+            b"original object",
+        )
+        .unwrap();
+        std::fs::write(replacement.join(fanout).join(suffix), b"replacement object").unwrap();
+
+        let common_handle =
+            GitMetadataDirectory::open(&common_dir, "Git common directory").unwrap();
+        let objects_handle = common_handle
+            .open_directory("objects", "Git objects directory")
+            .unwrap();
+        snapshot_git_objects_with_hook(&objects_handle, &destination, || {
+            std::fs::rename(common_dir.join("objects"), &parked).unwrap();
+            assert!(create_test_symlink(
+                TestSymlinkKind::Directory,
+                &replacement,
+                &common_dir.join("objects"),
+            ));
+            DirectoryReplacementGuard {
+                path: common_dir.join("objects"),
+                parked: parked.clone(),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join("objects").join(fanout).join(suffix)).unwrap(),
+            b"original object"
+        );
+    }
+
+    #[test]
     fn git_attribute_source_snapshot_uses_snapshotted_objects_after_objects_swap() {
         let tree = TempTree::new("git-attribute-source-object-snapshot");
         let source = tree.root.join("source");
@@ -5212,6 +5425,14 @@ mod tests {
             windows_git_metadata_open_error("Git reftable table list", 32)
                 .into_message("Git reftable table list"),
             "Git reftable table list changed while being read"
+        );
+    }
+
+    #[test]
+    fn git_metadata_windows_directory_open_error_maps_not_directory() {
+        assert_eq!(
+            windows_git_metadata_open_error("Git ref directory refs/heads/main", 267),
+            GitMetadataReadError::NotDirectory
         );
     }
 
