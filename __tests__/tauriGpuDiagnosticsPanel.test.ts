@@ -53,6 +53,18 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(source).not.toContain('gpuDiagnosticsRowsEl.appendChild(term);\\n      description.textContent = "N/A"');
   });
 
+  it('routes diagnostics copy and stress failures through readable status errors', () => {
+    const source = readWebFile('main.js');
+
+    expect(source).toContain(
+      'copyGpuDiagnosticsJson().catch(function (error) { showStatusError(String(error && error.message || error)); })',
+    );
+    expect(source).toContain(
+      'runGpuDiagnosticsStress().catch(function (error) { showStatusError(String(error && error.message || error)); })',
+    );
+    expect(source).not.toContain('toast(String(error && error.message || error), "error")');
+  });
+
   it('uses the compositor transition helper and does not add layout-triggering transitions', () => {
     const source = readWebFile('main.js');
     const css = readWebFile('styles.css');

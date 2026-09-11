@@ -13735,8 +13735,8 @@
   onRailClick("rail-palette", function () { commandInput.focus(); openPalette("/", true); });
   onRailClick("gpu-diagnostics-toggle", function () { setGpuDiagnosticsOpen(!gpuDiagnosticsPanelEl || gpuDiagnosticsPanelEl.hidden); });
   onRailClick("gpu-diagnostics-close", function () { setGpuDiagnosticsOpen(false); });
-  onRailClick("gpu-diagnostics-copy", function () { copyGpuDiagnosticsJson().catch(function (error) { toast(String(error && error.message || error), "error"); }); });
-  onRailClick("gpu-diagnostics-run-stress", function () { runGpuDiagnosticsStress().catch(function (error) { toast(String(error && error.message || error), "error"); }); });
+  onRailClick("gpu-diagnostics-copy", function () { copyGpuDiagnosticsJson().catch(function (error) { showStatusError(String(error && error.message || error)); }); });
+  onRailClick("gpu-diagnostics-run-stress", function () { runGpuDiagnosticsStress().catch(function (error) { showStatusError(String(error && error.message || error)); }); });
   onRailClick("gpu-diagnostics-cancel-stress", function () {
     if (gpuDiagnosticsStressController) gpuDiagnosticsStressController.abort(new Error("stress run cancelled"));
   });
