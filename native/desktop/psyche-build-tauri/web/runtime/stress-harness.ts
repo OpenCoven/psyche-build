@@ -56,12 +56,13 @@ export interface StressResource {
   id: string;
   dispose(signal?: AbortSignal): void | Promise<void>;
   /**
-   * Synchronous native kill path used if graceful disposal exceeds its
-   * deadline or a resource arrives after the async cleanup quarantine closes.
+   * Native kill path used if graceful disposal exceeds its deadline or a
+   * resource arrives after the async cleanup quarantine closes. A returned
+   * promise must include any UI/workspace restoration that follows disposal.
    * Implementations must invalidate the resource before returning and make a
    * previously started dispose operation harmless and idempotent.
    */
-  forceDispose(): void;
+  forceDispose(): void | Promise<void>;
 }
 
 export interface StressScenarioResult {
@@ -650,7 +651,7 @@ const LATE_COMPLETION_SETTLEMENT_TIMEOUT_MS = 1_000;
 
 async function invokeBoundedCleanup<T>(
   operation: (signal: AbortSignal) => Promise<T> | T,
-  onTimeout?: () => void,
+  onTimeout?: () => void | Promise<void>,
   options: BoundedCleanupOptions = {},
 ): Promise<T> {
   const controller = new AbortController();

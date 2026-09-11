@@ -673,6 +673,76 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
+  it('does not settle the run before asynchronous force disposal completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const disposalStarted = deferred<void>();
+      const forceStarted = deferred<void>();
+      const forceCompleted = deferred<void>();
+      let now = 0;
+      const resource = (id: string): StressResource => ({
+        id,
+        async dispose() {
+          if (id === 'browser') {
+            disposalStarted.resolve();
+            await new Promise<void>(() => {});
+          }
+        },
+        forceDispose() {
+          if (id !== 'browser') return;
+          forceStarted.resolve();
+          return forceCompleted.promise;
+        },
+      });
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return resource(`terminal-${index}`);
+        },
+        async createEditor() {
+          return resource('editor');
+        },
+        async createBrowser() {
+          return resource('browser');
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms) {
+          now += ms;
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      let settled = false;
+      const run = runStressPlan(dependencies).catch((error: unknown) => error);
+      void run.finally(() => { settled = true; });
+      await disposalStarted.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await forceStarted.promise;
+
+      expect(settled).toBe(false);
+      forceCompleted.resolve();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(run).resolves.toBeInstanceOf(AggregateError);
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps warmup, measurement, and restore phases on fixed wall-clock budgets', async () => {
     const frames = createFrameDriver();
     let now = 0;

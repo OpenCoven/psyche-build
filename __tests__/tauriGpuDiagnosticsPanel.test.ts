@@ -65,6 +65,16 @@ function installGpuDiagnosticsGlobals(values: Record<string, unknown>): () => vo
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('Tauri GPU diagnostics panel', () => {
   it('installs runnable stress adapters only for an exact native debug authorization report', async () => {
     const calls: string[] = [];
@@ -270,10 +280,10 @@ describe('Tauri GPU diagnostics panel', () => {
     );
 
     expect(terminalAdapter).toMatch(
-      /if \(!thread\) \{\s*await restoreGpuDiagnosticsStressWorkspace\(\);\s*throw new Error/,
+      /if \(!thread\) \{\s*await restoreGpuDiagnosticsStressWorkspace\(workspace\);\s*throw new Error/,
     );
     expect(terminalAdapter).toMatch(
-      /catch \(error\) \{[\s\S]*await restoreGpuDiagnosticsStressWorkspace\(\);[\s\S]*throw error;/,
+      /catch \(error\) \{[\s\S]*await restoreGpuDiagnosticsStressWorkspace\(workspace\);[\s\S]*throw error;/,
     );
     expect(terminalAdapter).toMatch(
       /try \{\s*var controller = ensureThreadPtyController\(thread\);/,
@@ -293,7 +303,7 @@ describe('Tauri GPU diagnostics panel', () => {
     );
   });
 
-  it('waits for force cleanup to settle before removing a resource and restoring workspace', async () => {
+  it('waits for forced cleanup and restoration before rejecting graceful disposal', async () => {
     let resolveForceCleanup!: () => void;
     const forceCleanup = new Promise<void>((resolve) => {
       resolveForceCleanup = resolve;
@@ -326,14 +336,64 @@ describe('Tauri GPU diagnostics panel', () => {
         () => forceCleanup,
       );
 
-      await expect(resource.dispose()).rejects.toThrow('graceful cleanup failed');
+      let settled = false;
+      const disposal = resource.dispose().catch((error: unknown) => {
+        settled = true;
+        throw error;
+      });
+      await Promise.resolve();
+      expect(resources.has('diagnostic-tab')).toBe(true);
+      expect(restorationCalls).toEqual([]);
+      expect(settled).toBe(false);
+
+      resolveForceCleanup();
+      await expect(disposal).rejects.toThrow('graceful cleanup failed');
+
+      expect(resources.has('diagnostic-tab')).toBe(false);
+      expect(restorationCalls).toEqual(['restored']);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('returns force cleanup only after workspace restoration completes', async () => {
+    let resolveForceCleanup!: () => void;
+    const forceCleanup = new Promise<void>((resolve) => {
+      resolveForceCleanup = resolve;
+    });
+    const resources = new Map();
+    const restorationCalls: string[] = [];
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressResources: resources,
+    });
+    try {
+      const createGpuDiagnosticsStressResource = compileFunction<
+        (
+          id: string,
+          record: Record<string, unknown>,
+          dispose: () => Promise<void>,
+          forceDispose: () => Promise<void>,
+        ) => { forceDispose(): Promise<void> }
+      >(readWebFile('main.js'), 'createGpuDiagnosticsStressResource', {
+        throwIfGpuDiagnosticsStressAborted: () => {},
+        restoreGpuDiagnosticsStressWorkspace: async () => {
+          restorationCalls.push('restored');
+        },
+      });
+      const resource = createGpuDiagnosticsStressResource(
+        'diagnostic-tab',
+        { kind: 'browser' },
+        async () => {},
+        () => forceCleanup,
+      );
+
+      const completed = resource.forceDispose();
+      expect(completed).toBeInstanceOf(Promise);
       expect(resources.has('diagnostic-tab')).toBe(true);
       expect(restorationCalls).toEqual([]);
 
       resolveForceCleanup();
-      await forceCleanup;
-      await Promise.resolve();
-      await Promise.resolve();
+      await completed;
 
       expect(resources.has('diagnostic-tab')).toBe(false);
       expect(restorationCalls).toEqual(['restored']);
@@ -402,6 +462,7 @@ describe('Tauri GPU diagnostics panel', () => {
       source.indexOf('async function restoreGpuDiagnosticsStressWorkspace'),
     );
 
+    expect(workspaceGuard).toContain('activeWorkspaceRoot(project) !== snapshot.worktreePath');
     expect(workspaceGuard).toContain('state.threads.length !== snapshot.threadIds.length');
     expect(workspaceGuard).toContain('state.openFiles.length !== snapshot.fileIds.length');
   });
@@ -469,12 +530,17 @@ describe('Tauri GPU diagnostics panel', () => {
         state,
         sidebarOpen: () => true,
         findBrowserPane: () => null,
+        invalidateGpuDiagnosticsStressOperations: () => 1,
       });
       const restoreGpuDiagnosticsStressWorkspace = compileFunction<
         () => Promise<void>
       >(readWebFile('main.js'), 'restoreGpuDiagnosticsStressWorkspace', {
         findProject: () => project,
         gpuDiagnosticsStressWorkspaceIsUnchanged: () => true,
+        activeSurface: 'browser',
+        discardGpuDiagnosticsStressWorkspace: () => {
+          (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace = null;
+        },
         paneLayouts: new Map(),
         cloneGpuDiagnosticsLayout: (layout: unknown) => layout,
         scheduleSidebarWidth: () => {},
@@ -492,6 +558,7 @@ describe('Tauri GPU diagnostics panel', () => {
         activateFileTab: async () => false,
         findThread: () => null,
         focusThread: async () => false,
+        activateBrowserTab: async () => true,
       });
 
       expect(beginGpuDiagnosticsStressWorkspace()).toMatchObject({
@@ -534,6 +601,290 @@ describe('Tauri GPU diagnostics panel', () => {
         activeTabId: 'user-tab',
         tabs: [{ id: 'user-tab', created: false, url: 'https://example.test' }],
       });
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it.each([
+    ['terminal', ['thread:terminal-thread']],
+    ['browser', ['browser:user-tab']],
+  ] as const)(
+    'restores the original %s focus instead of an editor selection',
+    async (focusedSurface, expectedCalls) => {
+      const resources = new Map();
+      const browser = {
+        activeTabId: 'diagnostic-tab',
+        tabs: [{ id: 'user-tab' }, { id: 'diagnostic-tab' }],
+      };
+      const project = {
+        id: 'project-a',
+        selectedWorktreePath: '/workspace',
+        closing: false,
+        browsersByWorktree: { '/workspace': browser },
+      };
+      const state = {
+        activeProjectId: project.id,
+        activeThreadId: 'diagnostic-thread',
+        activeFileId: 'editor-selected',
+        threads: [{ id: 'terminal-thread' }],
+        openFiles: [{ id: 'editor-selected' }],
+      };
+      const calls: string[] = [];
+      const restoreGlobals = installGpuDiagnosticsGlobals({
+        gpuDiagnosticsStressResources: resources,
+        gpuDiagnosticsStressWorkspace: {
+          projectId: project.id,
+          worktreePath: '/workspace',
+          selectedWorktreePath: '/workspace',
+          activeProjectId: project.id,
+          activeThreadId: 'terminal-thread',
+          activeFileId: 'editor-selected',
+          activeSurface: focusedSurface,
+          focusedSurface,
+          focusedThreadId: 'terminal-thread',
+          focusedFileId: 'editor-selected',
+          focusedBrowserTabId: 'user-tab',
+          sidebarOpen: true,
+          sidebarWidth: null,
+          layoutKey: 'project-a:/workspace',
+          layout: null,
+          threadIds: ['terminal-thread'],
+          fileIds: ['editor-selected'],
+          browserPaneId: 'browser-pane',
+          browserActiveTabId: 'user-tab',
+        },
+      });
+      try {
+        const restoreGpuDiagnosticsStressWorkspace = compileFunction<
+          () => Promise<void>
+        >(readWebFile('main.js'), 'restoreGpuDiagnosticsStressWorkspace', {
+          findProject: () => project,
+          gpuDiagnosticsStressWorkspaceIsUnchanged: () => true,
+          activeSurface: 'terminal',
+          discardGpuDiagnosticsStressWorkspace: () => {
+            (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace = null;
+          },
+          paneLayouts: new Map(),
+          cloneGpuDiagnosticsLayout: (layout: unknown) => layout,
+          scheduleSidebarWidth: () => {},
+          setSidebarOpen: () => {},
+          assignActiveProjectId: () => {},
+          state,
+          renderPaneWorkspace: () => {},
+          refreshSidebar: () => {},
+          refreshTabs: () => {},
+          renderBrowserTabs: () => {},
+          syncUrlInput: () => {},
+          findOpenFile: (id: string) => state.openFiles.find((file) => file.id === id) ?? null,
+          activateFileTab: async (id: string) => {
+            calls.push(`file:${id}`);
+            return true;
+          },
+          findThread: (id: string) => state.threads.find((thread) => thread.id === id) ?? null,
+          focusThread: async (id: string) => {
+            calls.push(`thread:${id}`);
+            return true;
+          },
+          activateBrowserTab: async (_project: unknown, id: string) => {
+            calls.push(`browser:${id}`);
+            return true;
+          },
+        });
+
+        await restoreGpuDiagnosticsStressWorkspace();
+
+        expect(state.activeFileId).toBe('editor-selected');
+        expect(browser.activeTabId).toBe('user-tab');
+        expect(calls).toEqual(expectedCalls);
+      } finally {
+        restoreGlobals();
+      }
+    },
+  );
+
+  it('discards a drifted workspace snapshot so the next run captures the current workspace', async () => {
+    const resources = new Map();
+    const staleProject = {
+      id: 'project-a',
+      selectedWorktreePath: '/stale',
+      closing: false,
+      browsersByWorktree: {},
+    };
+    const currentProject = {
+      id: 'project-b',
+      selectedWorktreePath: '/current',
+      closing: false,
+      browsersByWorktree: {},
+    };
+    const state = {
+      activeProjectId: currentProject.id,
+      activeThreadId: null,
+      activeFileId: null,
+      threads: [],
+      openFiles: [],
+    };
+    const staleWorkspace = {
+      projectId: staleProject.id,
+      worktreePath: '/stale',
+      selectedWorktreePath: '/stale',
+      activeProjectId: staleProject.id,
+      activeThreadId: null,
+      activeFileId: null,
+      activeSurface: 'terminal',
+      sidebarOpen: true,
+      sidebarWidth: null,
+      layoutKey: 'project-a:/stale',
+      layout: null,
+      threadIds: [],
+      fileIds: [],
+      browserPaneId: null,
+      browserActiveTabId: null,
+    };
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressResources: resources,
+      gpuDiagnosticsStressWorkspace: staleWorkspace,
+      gpuDiagnosticsStressOperationGeneration: 1,
+      activeSurface: 'terminal',
+      window: {
+        getComputedStyle: () => ({
+          getPropertyValue: () => '240',
+        }),
+      },
+      document: { documentElement: {} },
+    });
+    try {
+      const globals = globalThis as Record<string, unknown>;
+      const restoreGpuDiagnosticsStressWorkspace = compileFunction<
+        () => Promise<void>
+      >(readWebFile('main.js'), 'restoreGpuDiagnosticsStressWorkspace', {
+        findProject: () => staleProject,
+        gpuDiagnosticsStressWorkspaceIsUnchanged: () => false,
+        discardGpuDiagnosticsStressWorkspace: () => {
+          globals.gpuDiagnosticsStressWorkspace = null;
+        },
+      });
+      const beginGpuDiagnosticsStressWorkspace = compileFunction<
+        () => { projectId: string; worktreePath: string }
+      >(readWebFile('main.js'), 'beginGpuDiagnosticsStressWorkspace', {
+        activeProject: () => currentProject,
+        activeWorkspaceRoot: () => '/current',
+        paneLayoutKey: () => 'project-b:/current',
+        paneLayouts: new Map(),
+        cloneGpuDiagnosticsLayout: (layout: unknown) => layout,
+        state,
+        sidebarOpen: () => true,
+        findBrowserPane: () => null,
+        invalidateGpuDiagnosticsStressOperations: () => 2,
+      });
+
+      await restoreGpuDiagnosticsStressWorkspace();
+
+      expect(globals.gpuDiagnosticsStressWorkspace).toBeNull();
+      expect(beginGpuDiagnosticsStressWorkspace()).toMatchObject({
+        projectId: currentProject.id,
+        worktreePath: '/current',
+      });
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('does not mutate or dereference a workspace after queued layout work is invalidated', () => {
+    const workspace = {
+      operationGeneration: 1,
+      layoutKey: 'project-a:/workspace',
+    };
+    const calls: string[] = [];
+    let queuedLayout: (() => void) | undefined;
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressWorkspace: workspace,
+      gpuDiagnosticsStressLayoutGeneration: null,
+    });
+    try {
+      const resizeGpuDiagnosticsStressWorkspace = compileFunction<
+        (step: number, geometry: { splitRatios: readonly number[]; sidebarWidth: number }) => void
+      >(readWebFile('main.js'), 'resizeGpuDiagnosticsStressWorkspace', {
+        captureGpuDiagnosticsStressOperation: () => workspace,
+        gpuDiagnosticsStressOperationIsCurrent: (
+          candidate: unknown,
+          generation: number,
+        ) => candidate === (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace
+          && generation === 1,
+        terminalFrameScheduler: {
+          schedule(_key: string, callback: () => void) {
+            queuedLayout = callback;
+          },
+        },
+        paneLayouts: new Map(),
+        applyGpuDiagnosticsStressSplitRatios: () => calls.push('ratios'),
+        setSidebarOpen: () => calls.push('sidebar-open'),
+        scheduleSidebarWidth: () => calls.push('sidebar-width'),
+        renderPaneWorkspace: () => calls.push('workspace'),
+        scheduleTerminalPaneFits: () => calls.push('terminal-fits'),
+        scheduleBrowserBounds: () => calls.push('browser-bounds'),
+      });
+
+      resizeGpuDiagnosticsStressWorkspace(0, {
+        splitRatios: [0.5],
+        sidebarWidth: 240,
+      });
+      (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace = null;
+
+      expect(() => queuedLayout?.()).not.toThrow();
+      expect(calls).toEqual([]);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('rejects an old-generation focus completion while the next generation still focuses', async () => {
+    const oldWorkspace = { operationGeneration: 1 };
+    const nextWorkspace = { operationGeneration: 2 };
+    const resources = new Map([
+      ['terminal', { kind: 'terminal', thread: { id: 'terminal-thread' } }],
+    ]);
+    const lateFocus = deferred<boolean>();
+    let focusCalls = 0;
+    let focusOptions: { isCurrent?: () => boolean } | undefined;
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressWorkspace: oldWorkspace,
+      gpuDiagnosticsStressResources: resources,
+    });
+    try {
+      const focusGpuDiagnosticsStressResource = compileFunction<
+        (id: string, signal?: AbortSignal) => Promise<void>
+      >(readWebFile('main.js'), 'focusGpuDiagnosticsStressResource', {
+        throwIfGpuDiagnosticsStressAborted: () => {},
+        captureGpuDiagnosticsStressOperation: () => (
+          (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace
+        ),
+        assertGpuDiagnosticsStressOperationCurrent: (
+          workspace: unknown,
+          _signal?: AbortSignal,
+        ) => {
+          if (workspace !== (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace) {
+            throw new Error('diagnostics stress operation was invalidated');
+          }
+        },
+        gpuDiagnosticsStressOperationIsCurrent: (workspace: unknown) => (
+          workspace === (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace
+        ),
+        focusThread: async (_id: string, options?: { isCurrent?: () => boolean }) => {
+          focusCalls += 1;
+          focusOptions = options;
+          return focusCalls === 1 ? lateFocus.promise : true;
+        },
+      });
+
+      const staleFocus = focusGpuDiagnosticsStressResource('terminal');
+      (globalThis as Record<string, unknown>).gpuDiagnosticsStressWorkspace = nextWorkspace;
+      expect(focusOptions?.isCurrent?.()).toBe(false);
+      lateFocus.resolve(true);
+
+      await expect(staleFocus).rejects.toThrow('diagnostics stress operation was invalidated');
+      await expect(focusGpuDiagnosticsStressResource('terminal')).resolves.toBeUndefined();
+      expect(focusCalls).toBe(2);
     } finally {
       restoreGlobals();
     }
