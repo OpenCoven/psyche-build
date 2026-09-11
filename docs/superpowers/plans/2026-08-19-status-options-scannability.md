@@ -128,7 +128,7 @@ Expected: all controller tests pass.
 - [ ] **Step 1: Replace card styling with a ruled matrix**
 
 Set the menu width to 320px, reduce outer gaps, add a four-label column header,
-and make each row a three-column grid:
+and make each row a split metadata grid:
 
 ```css
 .status-more-row {

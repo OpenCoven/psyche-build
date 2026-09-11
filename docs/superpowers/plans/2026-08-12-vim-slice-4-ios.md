@@ -29,7 +29,7 @@ public mutating func reset(_ reason: VimResetReason) -> VimResult
 
 ### Task 2: Route hardware and software keyboard actions
 
-**Files:** Modify `native/ios/PsycheApp/Sources/PsycheApp/{AppModel.swift,CockpitView.swift}` and `Views/{PaneWorkspaceView,PaneComposer,CodingKeyRow,SettingsView}.swift`; add `UnitTests/VimKeyboardTests.swift` and UI tests.
+**Files:** Modify `native/ios/PsycheApp/Sources/PsycheApp/{AppModel.swift,<then-current-cockpit-root>.swift}` and `Views/{PaneWorkspaceView,PaneComposer,CodingKeyRow,SettingsView}.swift`; add `UnitTests/VimKeyboardTests.swift` and UI tests.
 
 - [ ] Write RED tests proving F6/Chrome key enter without terminal bytes, Escape exits without bytes, passthrough uses existing `sendInput`, modal/text-field precedence wins, and disappearance restores nearest focus.
 - [ ] Add `VimChromeController` as app-window state. Register F6 through SwiftUI keyboard commands; add a `.chrome` control beside terminal keys with identifier `coding-key-chrome`, label `Chrome navigation`, and selected trait while active.

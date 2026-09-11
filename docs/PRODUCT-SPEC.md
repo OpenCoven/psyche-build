@@ -30,6 +30,138 @@ Psyche Build cockpit
     └─ optional project-scoped sessions
 ```
 
+## Mobile companion shape
+
+The iOS codebase is a planned companion surface, not a released product and
+not an independent authority. The shipped source opens into a **Now-first**
+information architecture:
+
+| Width class | Root navigation | Detail behavior |
+|---|---|---|
+| Compact | Tabs ordered **Now**, Projects, Settings | Now rows and project panes push `PaneWorkspaceView` on a navigation stack |
+| Regular | Sidebar ordered **Now**, Projects, Settings, with project rows under Projects | A detail stack shows Now, all projects, one selected project, or Settings |
+
+Now is a cross-project inbox generated from the authoritative workspace
+snapshot. It groups every published pane by state: needs attention, running, and
+recent. A row opens the pane; if the store is stale it shows "Showing last known
+state" with the last confirmation time instead of presenting the workspace as
+live. The root keeps tab, selected project, and pushed pane identity stable
+across size-class changes, so rotating an iPad preserves the equivalent screen.
+
+iOS source currently has two composition roots:
+
+- **Production root:** `MobileAppComposition.production()` wires
+  `URLSessionControlTransport`, `ControlRequestClient`, `WorkspaceStore`,
+  `RemoteActionStore`, `PairedHostStore`, `HostReadinessMachine`,
+  `WorkspaceCache`, and `TerminalSessionRegistry`, then reconnects only to the
+  stored host.
+- **Fixture root:** `-uiFixture` launches deterministic in-memory state through
+  `DemoStore`, `FixtureControlRequests`, and `FixtureTerminalClient`. Fixture
+  roots construct no transport and no Keychain-backed store. Fixture names,
+  fixture roots, `DemoStore`, `-uiFixture`, and fixture-only debug controls such
+  as `fixture-deliver-live-snapshot` are test scaffolding, not production
+  behavior.
+
+### Mobile bridge contract
+
+The bridge supports protocol versions **2** and **3**
+(`SUPPORTED_PROTOCOL_VERSIONS = [2, 3]`). A connection initially receives a
+legacy v2 welcome. The client sends `hello` with one supported version; v3 gets
+a v3 welcome and may use top-level `control` envelopes and `workspaceChanged`
+events. v2 remains the legacy pane/project/ritual message set.
+
+The v3 mobile control envelope currently accepts these production request
+families when the host has wired the corresponding executor:
+
+| Area | Requests | Contract |
+|---|---|---|
+| Workspace | `workspace.snapshot`, `workspaceChanged` | Complete snapshots carry a monotonic per-bridge sequence. Incremental changes are ignored across gaps until a full snapshot is accepted. |
+| Terminal streams | `panes.attach`, `panes.detach`, `panes.input`, `panes.resize` | Streams attach only to tmux-backed published panes; binary frames are ordered after attach metadata. |
+| Pane lifecycle | `panes.spawn`, `panes.kill`, `panes.meta` | Spawn targets must be the published project root or one of its worktrees. Kill stops the process but preserves branch and worktree. |
+| Inspection | `files.list`, `files.read`, `files.diff` | Inspection is scoped to the selected pane's published available worktree and rejects absolute, escaping, missing, bare, or prunable targets. |
+| Actions | `actions.start`, `actions.respond` | Action sessions are host-owned, one-shot for each reply, scoped to a published pane, and cleared on owner/session loss. |
+| Rituals | `rituals.launch` / legacy `launchRitual` | Publication is wired; production execution is not a supported mobile claim until #242 completes. PR #434 keeps published rituals unavailable for execution where the live launcher is not ready. |
+
+Unsupported or unwired control commands return `command_not_supported`,
+`control_unavailable`, or a correlated error; they must not be documented as
+working production UI.
+
+### Exact mobile limits and guarantees
+
+These limits are source constants, not product aspirations:
+
+| Limit or guarantee | Exact value | Source |
+|---|---:|---|
+| Bridge protocol versions | `2`, `3` | `src/services/bridge/wireProtocol.ts` |
+| LAN WebSocket client frame cap | `1 MiB` | `src/services/bridge/WSSListener.ts` |
+| Legacy pairing code | `6` digits | `src/services/bridge/PairingFlow.ts` |
+| Legacy pairing window | `5 minutes` | `src/services/bridge/PairingFlow.ts` |
+| Legacy pairing wrong-code budget | `5` attempts | `src/services/bridge/PairingFlow.ts` |
+| Invite protocol profile | `bridge.v3` only | `src/services/bridge/inviteAuth.ts` |
+| Invite lifetime | `10 minutes` | `src/services/bridge/inviteAuth.ts` |
+| Invite secret entropy | `32` bytes | `src/services/bridge/inviteAuth.ts` |
+| Invite ID entropy | `16` bytes | `src/services/bridge/inviteAuth.ts` |
+| Invite wrong-presentation budget | `5` attempts | `src/services/bridge/inviteAuth.ts` |
+| Retained invite audit tail | `16` records | `src/services/bridge/inviteAuth.ts` |
+| Invite payload cap | `2,048` bytes | `src/services/bridge/inviteAuth.ts` |
+| Invite expiry clock skew tolerance | `60 seconds` | `src/services/bridge/inviteAuth.ts` |
+| Pane output ring buffer on host | `256 KiB` per pane | `src/services/bridge/PaneOutputBuffer.ts` |
+| v3 terminal streams per bridge connection | `4` | `src/services/bridge/BridgeDaemon.ts` |
+| Mobile attached terminal sessions | `2` | `native/ios/PsycheCore/Sources/PsycheCore/Terminal/TerminalSessionRegistry.swift` |
+| Mobile retained output per pane | `64 KiB` | `native/ios/PsycheCore/Sources/PsycheCore/Terminal/TerminalSessionRegistry.swift` |
+| Mobile control request timeout | `15 seconds` | `native/ios/PsycheCore/Sources/PsycheCore/Connection/ControlRequestClient.swift` |
+| Workspace cache encoded record cap | `256 KiB` | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
+| Workspace cache draft count | `24` | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
+| Workspace cache draft length | `4,096` characters | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
+| Mobile pane-spawn idempotency hot cache | `128` keys | `src/services/bridge/MobileControlGateway.ts` |
+| Pending remote action sessions | `64` | `src/actions/remoteActionSessions.ts` |
+| Remote action session TTL | `5 minutes` | `src/services/bridge/MobileControlGateway.ts` |
+| Mobile file preview cap | `200,000` bytes | `src/utils/fileBrowser.ts` |
+| Git buffer for browser/diff inspection | `16 MiB` | `src/utils/fileBrowser.ts` |
+| Published rituals per project | `50` | `src/workspace/ritualPublication.ts` |
+| Project ritual store read cap | `512 KiB` store + `16 KiB` manifest | `src/utils/rituals.ts` |
+| Published ritual metadata caps | ID `128` bytes, name `256` bytes, description `1,024` bytes | `src/utils/rituals.ts` |
+
+### Mobile lifecycle and recovery
+
+`HostReadinessMachine` is the authority for whether iOS may present a host as
+ready. The legal spine is:
+
+```text
+pairing → authenticating → host_committed → synchronizing → ready
+```
+
+Host identity must commit durably before any workspace snapshot can become
+authoritative. The machine treats transport, authentication, secure-store,
+decode/revision, workspace-apply, and revocation failures as named boundaries.
+Proven failures preserve prior authoritative state only as stale; indeterminate
+secure-store or workspace publication fails closed instead of guessing. Stored
+hosts may be adopted for reconnect, but adoption creates no new authority.
+
+`WorkspaceStore` applies events only in order. Duplicate or old sequences are
+ignored. A sequence gap marks the workspace stale and requires a full snapshot;
+the store does not patch across holes. Restored cache state is immediately
+stale and awaiting a connection snapshot. Live commands, file inspection, pane
+creation, renames, stops, and ritual launches require a live workspace and a
+published target.
+
+`WorkspaceCache` stores only the last confirmed workspace, sequence,
+confirmation timestamp, selection, and drafts within the bounds listed above.
+Corrupt or unreadable cache records surface explicit recovery errors and preserve
+the original data where possible; they are not silently replaced with an empty
+workspace.
+
+Bonjour parsing is currently a discovery adapter only. It validates TXT
+metadata, certificate fingerprint shape, supported protocol versions, and
+deduplicates on server ID, but no production caller has shipped the complete
+discovery/connect flow yet (Bead i7c.11 remains open).
+
+Known open gaps: #435 tracks the lost-reply unknown-outcome guard; #241 still
+requires physical-device acceptance and real-Keychain partial-write evidence;
+#280 has only the invite protocol/fixture slice merged; #242 still owns ritual
+execution; Bead i7c.11 owns discovery/connect; Beads i7c.10.3 and i7c.10.4
+remain in progress.
+
 ## Core model
 
 The public model uses four definitions everywhere:

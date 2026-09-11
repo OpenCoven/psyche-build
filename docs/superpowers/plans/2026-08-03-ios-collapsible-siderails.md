@@ -1,10 +1,10 @@
-# iOS Collapsible Siderails Implementation Plan
+# Superseded iOS side-rail visibility implementation plan
 
 > **For agentic workers:** Implement this plan task-by-task and keep progress tracked with checkbox (`- [ ]`) syntax.
 
 **Goal:** Make the Projects and Panes rails collapse together so an iPhone terminal opens at full width and can restore navigation from one accessible toolbar control.
 
-**Architecture:** Keep the existing three-column `NavigationSplitView` and bind it to local visibility and preferred-compact-column state in `CockpitView`. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one toolbar control — carried by every column that can be on screen in compact width, so it collapses as well as reveals — without changing project, pane, or connection state.
+**Architecture:** Kept the then-current split-view root and bound it to local visibility and preferred-compact-column state. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one toolbar control — carried by every column that can be on screen in compact width, so it collapses as well as reveals — without changing project, pane, or connection state.
 
 **Tech Stack:** Swift 6, SwiftUI, XCTest/XCUITest, XcodeGen, `xcodebuild`
 
@@ -12,14 +12,14 @@
 
 ## File Structure
 
-- Modify `native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift` to own split-view visibility, apply the device-width default, expose the toolbar toggle, and identify the two rail views for UI automation.
+- Modify the then-current iOS cockpit root to own split-view visibility, apply the device-width default, expose the toolbar toggle, and identify the two rail views for UI automation.
 - Modify `native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift` to cover the compact launch state, reveal both navigation levels, collapse back to terminal-only mode, and preserve pairing access.
 
 ### Task 1: Add Compact Siderail Behavior
 
 **Files:**
 - Modify: `native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift`
-- Modify: `native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift:4-69`
+- Modify: the then-current iOS cockpit root
 
 - [ ] **Step 1: Write the failing compact-layout UI test**
 
@@ -122,11 +122,11 @@ exist and the current split view does not explicitly prefer the detail column.
 
 - [ ] **Step 3: Bind the native split view to local visibility state**
 
-At the top of `CockpitView`, add the size-class environment value, split-view
+At the top of the then-current cockpit root, add the size-class environment value, split-view
 state, and one-time initialization flag:
 
 ```swift
-struct CockpitView: View {
+struct SupersededCockpitRoot: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: DemoStore
     @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
@@ -173,7 +173,7 @@ After the existing `.sheet` modifier, apply the initial visibility once:
 }
 ```
 
-Add the toggle method inside `CockpitView`:
+Add the toggle method inside the then-current cockpit root:
 
 ```swift
 private func toggleSiderails() {
@@ -186,7 +186,7 @@ private func toggleSiderails() {
 ```
 
 This keeps compact devices terminal-first and gives SwiftUI an explicit compact
-navigation destination while preserving the current three-column default on
+navigation destination while preserving the then-current split-view default on
 regular-width iPads. SwiftUI updates `preferredCompactColumn` to `.detail` when
 the user selects a pane, so the button label returns to "Show siderails".
 
@@ -252,7 +252,7 @@ Expected: PASS for `PsycheCoreTests` and `PsycheAppUITests`.
 
 ```sh
 git add \
-  native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift \
+  native/ios/PsycheApp/Sources/PsycheApp/<then-current-cockpit-root>.swift \
   native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift
 git commit -m "fix: collapse iOS cockpit siderails" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"

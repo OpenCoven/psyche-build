@@ -17,7 +17,7 @@ either protocol.
 | Started by | the TUI, automatically (`src/index.ts`) | `psyche daemon`, explicitly |
 | Binds | `0.0.0.0`, ephemeral port, TLS | `127.0.0.1:47123`, plaintext |
 | Discovery | Bonjour `_psyche._tcp` | none |
-| Auth | device token from a pairing code | 256-bit token in `~/.config/psyche/token` |
+| Auth | device token from a bounded pairing code, or the invite-auth protocol slice where explicitly wired | 256-bit token in `~/.config/psyche/token` |
 | Clients | the iOS / macOS companion apps | local tooling, MCP-adjacent callers |
 | Runs inside | the psyche TUI process | its own process |
 
@@ -145,7 +145,8 @@ Three distinct crash routes, all of which were reachable:
 
 ### 6. Resources a client controls are bounded
 
-- `maxPayload` is 1 MiB on both servers (`ws` defaults to 100 MB, which an
+- The LAN bridge `maxPayload` is 1 MiB
+  (`MAX_CLIENT_FRAME_BYTES = 1024 * 1024`; `ws` defaults to 100 MB, which an
   unauthenticated peer can send repeatedly to exhaust the heap).
 - The loopback daemon closes a connection that has not authenticated within
   `AUTH_DEADLINE_MS` (10 s).
@@ -153,6 +154,24 @@ Three distinct crash routes, all of which were reachable:
   streams.
 - A connection registers **one** `output` listener on the shared `TmuxControl`
   emitter and fans out internally, rather than one per attached stream.
+- A v3 mobile bridge connection may hold at most
+  `MAX_CONTROL_STREAMS_PER_CONNECTION` (4) terminal streams.
+- Each LAN bridge pane output ring is bounded to 256 KiB
+  (`PaneOutputBuffer` default capacity). The iOS terminal registry attaches at
+  most two visible panes and retains at most 64 KiB of output per pane.
+- Mobile control requests time out on the client after 15 seconds
+  (`ControlRequestClient.defaultTimeout`). A timeout is not proof the host did
+  not act.
+- Mobile pane-spawn idempotency remembers 128 hot keys. Pending remote action
+  sessions are capped at 64 and expire after five minutes.
+- Mobile file preview reads are capped at 200,000 bytes and browser/diff git
+  output is capped at 16 MiB.
+- Workspace cache records are capped at 256 KiB encoded, 24 drafts, and 4,096
+  characters per draft.
+- Invite authentication, where used, is profile `bridge.v3` only: 10-minute
+  lifetime, 32-byte secret, 16-byte invite ID, five wrong presentations,
+  16 retained records, 2,048-byte payload cap, and 60-second clock-skew
+  tolerance.
 
 ### 7. Destructive git operations are not remotely reachable
 
@@ -180,6 +199,28 @@ in-progress work, so it gets treated as data, not as a cache:
 
 Adding a new config mutation means using `mutateBridgeConfig`. Doing the
 read-parse-write inline is the bug, every time.
+
+## Mobile protocol boundary
+
+The LAN bridge supports wire protocol versions 2 and 3. Version 2 is the legacy
+pane/project/ritual message set. Version 3 keeps those messages and adds the
+top-level `control` and `workspaceChanged` envelopes. A client must negotiate a
+supported version in `hello`; `control` requests on non-v3 sessions fail with
+`protocol_mismatch`.
+
+The v3 gateway is a bridge adapter, not durable OpenCoven protocol ownership.
+It validates every target against the host-published workspace snapshot:
+terminal streams require a tmux-backed published pane; pane creation requires a
+published project root or worktree; inspection requires an available worktree
+for the pane and rejects absolute or escaping paths; action replies must belong
+to an owner-scoped pending action session. Unsupported, missing, or unwired
+executors return correlated errors such as `command_not_supported` rather than
+fixture-shaped success.
+
+Ritual metadata publication is wired and bounded, but production mobile ritual
+execution is still a gap until #242 completes. Fixture roots, `DemoStore`,
+`-uiFixture`, and fixture-only debug controls are test scaffolding and must not
+be used as evidence for production bridge behavior.
 
 ## Tests
 

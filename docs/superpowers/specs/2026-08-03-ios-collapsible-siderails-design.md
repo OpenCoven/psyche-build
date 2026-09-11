@@ -1,4 +1,4 @@
-# iOS Collapsible Siderails Design
+# Superseded iOS side-rail visibility design
 
 ## Goal
 
@@ -7,7 +7,7 @@ Projects and Panes rails available on demand.
 
 ## Design
 
-`CockpitView` will bind `NavigationSplitView` to
+The former cockpit root was expected to bind `NavigationSplitView` to
 `NavigationSplitViewVisibility` and `NavigationSplitViewColumn` state. On
 compact-width iPhones, the preferred column is `.detail`, so both left rails
 are collapsed and the terminal fills the screen. On regular-width iPads, the
@@ -18,11 +18,11 @@ the compact split view between `.detail` and `.sidebar`; selecting a pane
 returns to `.detail`. On iPad it switches visibility between `.detailOnly` and
 `.all`, collapsing or restoring Projects and Panes together. The implementation
 will retain native split-view navigation rather than introducing a custom
-drawer or replacing the existing three-column iPad layout.
+drawer or replacing the existing split-view iPad layout.
 
 ## State and Data Flow
 
-The visibility state is local presentation state owned by `CockpitView`.
+The visibility state was local presentation state owned by the cockpit root.
 Changing it does not alter the selected project, selected pane, connection
 state, terminal output, or protocol model. Restoring the rails therefore shows
 the same project and pane selections.
