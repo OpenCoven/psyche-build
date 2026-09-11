@@ -1000,6 +1000,94 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
+  it('keeps an attempted next run behind a delayed old window operation', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const delayedWindowCycle = deferred<void>();
+      const capturedGenerations: Array<number | null> = [];
+      const invalidatedGenerations: number[] = [];
+      let now = 0;
+      let terminalCreations = 0;
+      let windowCycles = 0;
+      let activeGeneration: number | null = 1;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          terminalCreations += 1;
+          if (activeGeneration === null) activeGeneration = 2;
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {
+          windowCycles += 1;
+          if (windowCycles === 1) {
+            await delayedWindowCycle.promise;
+          }
+        },
+        async loseGraphicsContext() {
+          return false;
+        },
+        captureLateOperationGeneration() {
+          capturedGenerations.push(activeGeneration);
+          return activeGeneration;
+        },
+        invalidateLateOperation(_operation, generation) {
+          if (generation === activeGeneration && generation !== null) {
+            invalidatedGenerations.push(generation);
+          }
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+          now += ms;
+          frames.flush(now);
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      const oldRun = runStressPlan(dependencies).catch((error: unknown) => error);
+      for (let attempt = 0; attempt < 4_000 && windowCycles === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(windowCycles).toBe(1);
+      await vi.advanceTimersByTimeAsync(11_001);
+      await expect(oldRun).resolves.toBeInstanceOf(AggregateError);
+
+      activeGeneration = null;
+      const oldTerminalCreations = terminalCreations;
+      const nextRun = runStressPlan(dependencies);
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(terminalCreations).toBe(oldTerminalCreations);
+
+      delayedWindowCycle.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nextRun).resolves.toBeDefined();
+
+      expect(capturedGenerations).toContain(1);
+      expect(invalidatedGenerations).toEqual([]);
+      expect(activeGeneration).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps focus operations on absolute 250 ms boundaries when focusing is slow', async () => {
     const controller = new AbortController();
     const focusTimes: number[] = [];

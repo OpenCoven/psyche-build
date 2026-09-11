@@ -76,8 +76,9 @@ export function isGpuDiagnosticsStressRunEnabled(
   authorized: boolean,
   adaptersInstalled: boolean,
   runActive: boolean,
+  cleanupRecoveryRequired = false,
 ): boolean {
-  return authorized && adaptersInstalled && !runActive;
+  return authorized && adaptersInstalled && !runActive && !cleanupRecoveryRequired;
 }
 
 export function isGpuDiagnosticsContextLossConfirmed(

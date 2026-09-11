@@ -149,7 +149,7 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(calls).toContain('terminal:0:steady');
   });
 
-  it('fails closed for malformed reports and enables Run only with installed adapters and no active run', () => {
+  it('fails closed for malformed reports and enables Run only with installed adapters, no active run, and no owned cleanup', () => {
     const target: { PsycheDiagnosticsStressAdapters?: unknown } = {
       PsycheDiagnosticsStressAdapters: { stale: true },
     };
@@ -165,6 +165,7 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(isGpuDiagnosticsStressRunEnabled(false, true, false)).toBe(false);
     expect(isGpuDiagnosticsStressRunEnabled(true, false, false)).toBe(false);
     expect(isGpuDiagnosticsStressRunEnabled(true, true, true)).toBe(false);
+    expect(isGpuDiagnosticsStressRunEnabled(true, true, false, true)).toBe(false);
   });
 
   it('does not translate alternate native diagnostics authorization properties', () => {
@@ -410,6 +411,7 @@ describe('Tauri GPU diagnostics panel', () => {
     const restoreGlobals = installGpuDiagnosticsGlobals({
       gpuDiagnosticsStressResources: resources,
     });
+
     try {
       const createGpuDiagnosticsStressResource = compileFunction<
         (
@@ -449,6 +451,74 @@ describe('Tauri GPU diagnostics panel', () => {
       expect(attempts).toBe(2);
       expect(resources.has('diagnostic-tab')).toBe(false);
       expect(restorationCalls).toEqual(['restored']);
+    } finally {
+      restoreGlobals();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('keeps Run non-runnable after graceful and forced cleanup fail until owned recovery retries', async () => {
+    const resources = new Map();
+    const cleanupHandles = new Map();
+    const restorationCalls: string[] = [];
+    let forceAttempts = 0;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressResources: resources,
+      gpuDiagnosticsStressCleanupHandles: cleanupHandles,
+      gpuDiagnosticsStressRecoveryFlight: null,
+    });
+    try {
+      const createGpuDiagnosticsStressResource = compileFunction<
+        (
+          id: string,
+          record: Record<string, unknown>,
+          dispose: () => Promise<void>,
+          forceDispose: () => Promise<void>,
+        ) => { dispose(): Promise<void> }
+      >(readWebFile('main.js'), 'createGpuDiagnosticsStressResource', {
+        throwIfGpuDiagnosticsStressAborted: () => {},
+        restoreGpuDiagnosticsStressWorkspace: async () => {
+          restorationCalls.push('restored');
+        },
+      });
+      const retryGpuDiagnosticsStressCleanup = compileFunction<
+        () => Promise<void>
+      >(readWebFile('main.js'), 'retryGpuDiagnosticsStressCleanup', {
+        restoreGpuDiagnosticsStressWorkspace: async () => {
+          restorationCalls.push('restored');
+        },
+        renderGpuDiagnostics: () => {},
+      });
+      const resource = createGpuDiagnosticsStressResource(
+        'diagnostic-tab',
+        { kind: 'browser' },
+        async () => {
+          throw new Error('graceful cleanup failed');
+        },
+        async () => {
+          forceAttempts += 1;
+          if (forceAttempts === 1) throw new Error('forced cleanup failed');
+        },
+      );
+
+      await expect(resource.dispose()).rejects.toThrow(
+        'diagnostics cleanup and forced cleanup failed',
+      );
+      expect(resources.has('diagnostic-tab')).toBe(true);
+      expect(cleanupHandles.has('diagnostic-tab')).toBe(true);
+      expect(restorationCalls).toEqual([]);
+      expect(isGpuDiagnosticsStressRunEnabled(true, true, false, resources.size > 0))
+        .toBe(false);
+
+      await retryGpuDiagnosticsStressCleanup();
+
+      expect(forceAttempts).toBe(2);
+      expect(resources.size).toBe(0);
+      expect(cleanupHandles.size).toBe(0);
+      expect(restorationCalls).toEqual(['restored']);
+      expect(isGpuDiagnosticsStressRunEnabled(true, true, false, resources.size > 0))
+        .toBe(true);
     } finally {
       restoreGlobals();
       errorSpy.mockRestore();
@@ -851,6 +921,7 @@ describe('Tauri GPU diagnostics panel', () => {
       gpuDiagnosticsStressWorkspace: oldWorkspace,
       gpuDiagnosticsStressResources: resources,
     });
+
     try {
       const focusGpuDiagnosticsStressResource = compileFunction<
         (id: string, signal?: AbortSignal) => Promise<void>
@@ -885,6 +956,54 @@ describe('Tauri GPU diagnostics panel', () => {
       await expect(staleFocus).rejects.toThrow('diagnostics stress operation was invalidated');
       await expect(focusGpuDiagnosticsStressResource('terminal')).resolves.toBeUndefined();
       expect(focusCalls).toBe(2);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('does not let a late old-generation invalidation change a new diagnostics workspace', () => {
+    const oldWorkspace = { operationGeneration: 1 };
+    const nextWorkspace = { operationGeneration: 2 };
+    const globals = globalThis as Record<string, unknown>;
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressWorkspace: oldWorkspace,
+      gpuDiagnosticsStressOperationGeneration: 1,
+    });
+    try {
+      const createGpuDiagnosticsStressAdapterHost = compileFunction<
+        () => {
+          captureLateOperationGeneration(): number | null;
+          invalidateLateOperation(operation: 'window', generation: number | null): void;
+        }
+      >(readWebFile('main.js'), 'createGpuDiagnosticsStressAdapterHost', {
+        createGpuDiagnosticsStressTerminal: async () => ({}),
+        createGpuDiagnosticsStressEditor: async () => ({}),
+        createGpuDiagnosticsStressBrowser: async () => ({}),
+        focusGpuDiagnosticsStressResource: async () => {},
+        resizeGpuDiagnosticsStressWorkspace: () => {},
+        setGpuDiagnosticsStressResourceVisibility: async () => {},
+        loseGpuDiagnosticsStressGraphicsContext: async () => false,
+        restoreGpuDiagnosticsStressGraphicsContext: async () => {},
+        gpuDiagnosticsStressOperationIsCurrent: (
+          workspace: { operationGeneration: number } | null,
+          generation: number,
+        ) => workspace === globals.gpuDiagnosticsStressWorkspace
+          && generation === globals.gpuDiagnosticsStressOperationGeneration,
+        invalidateGpuDiagnosticsStressOperations: () => {
+          globals.gpuDiagnosticsStressOperationGeneration = (
+            globals.gpuDiagnosticsStressOperationGeneration as number
+          ) + 1;
+        },
+      });
+      const host = createGpuDiagnosticsStressAdapterHost();
+      const oldGeneration = host.captureLateOperationGeneration();
+
+      globals.gpuDiagnosticsStressWorkspace = nextWorkspace;
+      globals.gpuDiagnosticsStressOperationGeneration = 2;
+      host.invalidateLateOperation('window', oldGeneration);
+
+      expect(globals.gpuDiagnosticsStressOperationGeneration).toBe(2);
+      expect(globals.gpuDiagnosticsStressWorkspace).toBe(nextWorkspace);
     } finally {
       restoreGlobals();
     }
