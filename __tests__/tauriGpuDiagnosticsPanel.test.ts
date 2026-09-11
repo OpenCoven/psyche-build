@@ -93,6 +93,7 @@ describe('Tauri GPU diagnostics panel', () => {
   it('keeps the diagnostics titlebar label unclipped by the chrome button base width', () => {
     const css = readWebFile('styles.css');
 
-    expect(css).toMatch(/\.chrome-btn\.agent-control-toggle,\s*\.chrome-btn\.gpu-diagnostics-toggle\s*\{\s*width:\s*auto;/);
+    expect(css).toMatch(/\.chrome-btn\.agent-control-toggle\s*\{\s*width:\s*auto;\s*padding-inline:\s*9px;\s*\}/);
+    expect(css).toMatch(/\.chrome-btn\.gpu-diagnostics-toggle\s*\{\s*width:\s*auto;\s*padding-inline:\s*9px;\s*\}/);
   });
 });

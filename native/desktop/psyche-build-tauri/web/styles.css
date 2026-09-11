@@ -3944,7 +3944,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   height: 28px;
   border-radius: 8px;
 }
-.chrome-btn.agent-control-toggle,
+.chrome-btn.agent-control-toggle {
+  width: auto;
+  padding-inline: 9px;
+}
 .chrome-btn.gpu-diagnostics-toggle {
   width: auto;
   padding-inline: 9px;
