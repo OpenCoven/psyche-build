@@ -115,6 +115,36 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(label.contains("needs you"), label)
     }
 
+    func testAccessibleTextSizeAndReduceMotionCompleteNowPaneActionSheetPath() throws {
+        let app = launchApp(arguments: [
+            "-uiFixture", "multiproject",
+            "-uiDynamicTypeSize", "accessibility3",
+            "-uiReduceMotion",
+        ])
+
+        let paneRow = element("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
+        XCTAssertTrue(paneRow.label.contains("open-coven.dev"), paneRow.label)
+        XCTAssertTrue(paneRow.label.contains("psyche-demo.local"), paneRow.label)
+        paneRow.tap()
+
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+        let focusedPane = element("terminal-pane-web-home", in: app)
+        XCTAssertTrue(focusedPane.waitForExistence(timeout: 10))
+        XCTAssertTrue(focusedPane.isSelected)
+
+        openPaneActions(in: app)
+        let rename = element("pane-action-rename", in: app)
+        XCTAssertTrue(rename.waitForExistence(timeout: 10))
+        rename.tap()
+
+        let sheet = element("remote-action-sheet", in: app)
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        let input = element("remote-action-input", in: app)
+        reveal(input, in: sheet)
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+    }
+
     // MARK: - Terminal workspace
 
     /// Opening a pane has to show its terminal, not an empty frame. The
@@ -441,8 +471,8 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Browse Files"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Rituals"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Close and Cleanup"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Stop pane and keep work"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Close pane and choose cleanup"].waitForExistence(timeout: 10))
 
         app.buttons["Rituals"].tap()
         let unavailable = app.buttons["Ritual execution is not available on mobile yet"]
@@ -476,7 +506,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Stop"].tap()
+        element("pane-action-stop", in: app).tap()
 
         XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForExistence(timeout: 10))
         let message = app.staticTexts.containing(
@@ -499,7 +529,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Stop"].tap()
+        element("pane-action-stop", in: app).tap()
 
         XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForExistence(timeout: 10))
         let dialog = app.sheets.firstMatch.exists ? app.sheets.firstMatch : app.alerts.firstMatch
@@ -516,7 +546,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Close and Cleanup"].tap()
+        element("pane-action-cleanup", in: app).tap()
 
         XCTAssertTrue(
             app.staticTexts["Close and clean up homepage polish?"].waitForExistence(timeout: 10)
@@ -543,7 +573,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Close and Cleanup"].tap()
+        element("pane-action-cleanup", in: app).tap()
 
         XCTAssertTrue(
             app.staticTexts["Close and clean up homepage polish?"].waitForExistence(timeout: 10)
