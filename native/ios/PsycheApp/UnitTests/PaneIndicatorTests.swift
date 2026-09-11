@@ -54,6 +54,12 @@ final class PaneIndicatorTests: XCTestCase {
         XCTAssertEqual(PaneIndicator.forStatus("Waiting", needsAttention: false), .needsAttention)
     }
 
+    func testEveryIndicatorHasTextSemantics() {
+        XCTAssertEqual(PaneIndicator.needsAttention.text, "Needs you")
+        XCTAssertEqual(PaneIndicator.running.text, "Running")
+        XCTAssertEqual(PaneIndicator.quiet.text, "Idle")
+    }
+
     /// The dot and the Now section have to agree: anything grouped under Needs
     /// You shows the attention colour, anything under Running shows the live
     /// colour, and everything else stays quiet.

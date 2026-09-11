@@ -106,16 +106,50 @@ final class PaneAccessibilityTests: XCTestCase {
         )
     }
 
+    func testContextLineCanIncludeHostForCombinedVisibleIdentity() {
+        XCTAssertEqual(
+            PaneAccessibility.contextLine(
+                projectTitle: "psyche-build",
+                agent: "Copilot",
+                status: "working",
+                hostName: "studio.local"
+            ),
+            "psyche-build · Copilot · host studio.local"
+        )
+    }
+
     // MARK: - Project rows
 
     func testProjectSubtitleHidesAZeroAttentionCount() {
         XCTAssertEqual(
-            PaneAccessibility.projectSubtitle(branch: "main", runningCount: 2, attentionCount: 0),
+            PaneAccessibility.projectSubtitle(
+                branch: "main",
+                hostName: nil,
+                runningCount: 2,
+                attentionCount: 0
+            ),
             "main · 2 running"
         )
         XCTAssertEqual(
-            PaneAccessibility.projectSubtitle(branch: "main", runningCount: 2, attentionCount: 1),
+            PaneAccessibility.projectSubtitle(
+                branch: "main",
+                hostName: nil,
+                runningCount: 2,
+                attentionCount: 1
+            ),
             "main · 2 running · 1 needs you"
+        )
+    }
+
+    func testProjectSubtitleCanIncludeHostForCombinedVisibleIdentity() {
+        XCTAssertEqual(
+            PaneAccessibility.projectSubtitle(
+                branch: "main",
+                hostName: "studio.local",
+                runningCount: 2,
+                attentionCount: 1
+            ),
+            "main · host studio.local · 2 running · 1 needs you"
         )
     }
 
@@ -126,6 +160,7 @@ final class PaneAccessibilityTests: XCTestCase {
             PaneAccessibility.projectLabel(
                 title: "psyche-build",
                 branch: "main",
+                hostName: nil,
                 runningCount: 2,
                 attentionCount: 0
             ),
@@ -138,10 +173,24 @@ final class PaneAccessibilityTests: XCTestCase {
             PaneAccessibility.projectLabel(
                 title: "psyche-build",
                 branch: nil,
+                hostName: nil,
                 runningCount: 0,
                 attentionCount: 0
             ),
             "psyche-build, 0 running, 0 needing attention"
+        )
+    }
+
+    func testProjectLabelCanIncludeHost() {
+        XCTAssertEqual(
+            PaneAccessibility.projectLabel(
+                title: "psyche-build",
+                branch: "main",
+                hostName: "studio.local",
+                runningCount: 2,
+                attentionCount: 0
+            ),
+            "psyche-build, branch main, host studio.local, 2 running, 0 needing attention"
         )
     }
 

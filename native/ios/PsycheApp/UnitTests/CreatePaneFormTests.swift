@@ -218,6 +218,8 @@ final class CreatePaneFormTests: XCTestCase {
 
     func testStopAndCleanupMenuActionsStayDistinct() {
         XCTAssertNotEqual(PaneControlsMenuAction.stop.label, PaneControlsMenuAction.cleanup.label)
+        XCTAssertEqual(PaneControlsMenuAction.stop.consequenceLabel, "Stop pane and keep work")
+        XCTAssertEqual(PaneControlsMenuAction.cleanup.consequenceLabel, "Close pane and choose cleanup")
         XCTAssertNotEqual(
             PaneControlsMenuAction.stop.systemImage,
             PaneControlsMenuAction.cleanup.systemImage

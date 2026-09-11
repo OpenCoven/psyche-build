@@ -31,6 +31,7 @@ enum RootTab: String, Hashable, CaseIterable {
 /// throw away where you were.
 struct CockpitView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var remoteActionStore: RemoteActionStore
     @EnvironmentObject private var store: WorkspaceStore
 
@@ -51,6 +52,12 @@ struct CockpitView: View {
         .tint(PsycheTheme.mint)
         .sheet(isPresented: remoteActionSheetBinding) {
             ActionSheetView(store: remoteActionStore)
+        }
+        .transaction { transaction in
+            if reduceMotion || ProcessInfo.processInfo.arguments.contains("-uiReduceMotion") {
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+            }
         }
         .accessibilityIdentifier("main-cockpit")
     }

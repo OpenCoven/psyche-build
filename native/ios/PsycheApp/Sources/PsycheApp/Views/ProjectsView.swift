@@ -5,6 +5,7 @@ import SwiftUI
 /// you need to look: how much is running, and how much is waiting on you.
 struct ProjectsView: View {
     @EnvironmentObject private var store: WorkspaceStore
+    @EnvironmentObject private var model: AppModel
 
     private var projects: [WorkspaceProjectSnapshot] {
         store.workspace?.projects ?? []
@@ -17,6 +18,7 @@ struct ProjectsView: View {
                     ProjectDetailView(projectID: project.id)
                 } label: {
                     ProjectRow(project: project)
+                        .environmentObject(model)
                 }
                 .accessibilityIdentifier("project-\(project.id)")
             }
@@ -38,6 +40,7 @@ struct ProjectsView: View {
 }
 
 struct ProjectRow: View {
+    @EnvironmentObject private var model: AppModel
     let project: WorkspaceProjectSnapshot
 
     private var branch: String? {
@@ -48,10 +51,24 @@ struct ProjectRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(project.title)
                 .font(.body.weight(.semibold))
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            ViewThatFits(in: .horizontal) {
+                Text(subtitle)
+                VStack(alignment: .leading, spacing: 2) {
+                    if let branch, !branch.isEmpty {
+                        Text(branch)
+                    }
+                    if let hostName = model.hostName, !hostName.isEmpty {
+                        Text("Host \(hostName)")
+                    }
+                    Text("\(project.runningCount) running")
+                    if project.attentionCount > 0 {
+                        Text("\(project.attentionCount) needs you")
+                    }
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
         }
         .padding(.vertical, 4)
         .frame(minHeight: PsycheTheme.minimumTapTarget, alignment: .leading)
@@ -62,6 +79,7 @@ struct ProjectRow: View {
     private var subtitle: String {
         PaneAccessibility.projectSubtitle(
             branch: branch,
+            hostName: model.hostName,
             runningCount: project.runningCount,
             attentionCount: project.attentionCount
         )
@@ -71,6 +89,7 @@ struct ProjectRow: View {
         PaneAccessibility.projectLabel(
             title: project.title,
             branch: branch,
+            hostName: model.hostName,
             runningCount: project.runningCount,
             attentionCount: project.attentionCount
         )
@@ -192,10 +211,22 @@ struct WorkspacePaneRow: View {
                 Text(pane.title ?? pane.id)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
-                Text([pane.agent, pane.status].compactMap { $0 }.joined(separator: " · "))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                ViewThatFits(in: .horizontal) {
+                    Text(contextLine)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(projectTitle)
+                        if let agent = pane.agent {
+                            Text(agent)
+                        }
+                        Text(pane.status)
+                        if let hostName, !hostName.isEmpty {
+                            Text("Host \(hostName)")
+                        }
+                    }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
             }
         }
         .padding(.vertical, 6)
@@ -207,5 +238,14 @@ struct WorkspacePaneRow: View {
 
     private var accessibilityLabel: String {
         PaneAccessibility.label(for: pane, projectTitle: projectTitle, hostName: hostName)
+    }
+
+    private var contextLine: String {
+        PaneAccessibility.contextLine(
+            projectTitle: projectTitle,
+            agent: pane.agent,
+            status: pane.status,
+            hostName: hostName
+        )
     }
 }
