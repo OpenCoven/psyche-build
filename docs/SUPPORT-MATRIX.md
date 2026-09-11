@@ -84,7 +84,7 @@ for the source, workflow, and pinned Cask distinction.
 | Merge, pull request, and cleanup workflows | Supported / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
 | Pane/browser control over MCP | Source-supported bounded interface | Not a direct mobile claim | Requires project scope, exact generations, leases, approvals where necessary, receipts, and revocation |
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
-| Bonjour host discovery | Not a desktop product claim | Planned pending the #241/#200 discovery and reconnect slice | Local discovery only; not identity, authority, or the remote-connectivity architecture |
+| Bonjour host discovery | Not a desktop product claim | Parser/discovery adapter source only; production connect flow planned under i7c.11/#200 | Validates advertised identity metadata for local discovery; it is not identity, authority, a production caller, or the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
 | Diagnostics/support bundle | Current visible diagnostics only; the support-bundle v1 schema merged under #243 (PR #278) without production collector wiring, CLI, or UI | Planned | `v0.0.1` does not claim a support bundle; #199's recovery harness is source-only, including the bounded pre-Git cleanup-owner interruption scenario, not packaged operator acceptance |
 | Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
@@ -117,6 +117,29 @@ observe bounded state, and invoke explicitly supported mobile commands.
 
 Until then, source, simulator, and UI-test behavior are development evidence,
 not a live TestFlight availability claim.
+
+Current source implements a Now-first mobile information architecture: compact
+width uses tabs ordered Now, Projects, Settings; regular width uses a sidebar in
+the same order with project rows under Projects. Now is a cross-project inbox
+derived from the last accepted workspace snapshot. Restored or disconnected
+state remains visible only as last-known/stale state until readiness accepts a
+fresh host snapshot.
+
+The mobile bridge contract is v2/v3. v3 adds `control` and
+`workspaceChanged` envelopes to the legacy v2 message set, but it remains a
+Psyche Build bridge adapter rather than a claim of Psyche protocol conformance.
+Exact source limits include a 1 MiB LAN frame cap, 256 KiB host pane-output
+buffer, four v3 terminal streams per bridge connection, two attached iOS
+terminal sessions, 64 KiB retained iOS output per pane, 15-second mobile
+control request timeout, 256 KiB encoded workspace-cache file cap, 24 drafts
+per cached state, 4,096-character drafts, 128 remembered pane-spawn idempotency
+keys, 64 pending remote action sessions with five-minute TTL, 200,000-byte file
+previews, and 50 published rituals per project.
+
+Demo-only roots and controls — including `DemoStore`, fixture roots,
+`-uiFixture`, `FixtureControlRequests`, `FixtureTerminalClient`, and
+fixture-only debug controls — are simulator/test scaffolding and do not change
+the production support state.
 
 The companion must not:
 

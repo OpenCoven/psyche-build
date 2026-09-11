@@ -324,7 +324,7 @@ render main-thread stall exceeds 100 ms.
 
 Test VoiceOver labels/actions, Dynamic Type chrome, contrast/status labels,
 reduced motion, haptic toggle, external keyboard navigation, iPhone portrait/
-landscape, iPad three-column layout, and focus mode. Test real tmux with a
+landscape, iPad split-view layout, and focus mode. Test real tmux with a
 fake agent under output burst, host restart, host sleep, relay interruption,
 duplicate delivery, stale approval, symlink escape, device revocation, and
 malformed frame faults. Document TLS 1.3, pinning, E2EE, Keychain, Data
