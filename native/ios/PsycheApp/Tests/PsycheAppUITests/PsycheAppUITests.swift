@@ -16,12 +16,31 @@ final class PsycheAppUITests: XCTestCase {
         } else {
             row("source-settings", in: app).tap()
         }
+
         let warning = element("workspace-cache-error", in: app)
         guard warning.waitForExistence(timeout: 5) else {
             return XCTFail("Settings does not display the workspace cache error")
         }
         XCTAssertTrue(warning.label.contains("Reconnect"))
         XCTAssertFalse(warning.label.contains("private draft"))
+    }
+
+    func testStaleFixtureShowsDisabledControlsThenClearsAfterLiveSnapshot() throws {
+        let app = launchApp(arguments: ["-uiFixture", "stale-recovery"])
+
+        let banner = element("stale-state-notice", in: app)
+        XCTAssertTrue(banner.waitForExistence(timeout: 10))
+        XCTAssertTrue(banner.label.contains("Showing last known state"), banner.label)
+        XCTAssertTrue((banner.value as? String ?? "").contains("Last confirmed"), "\(banner.value ?? "")")
+
+        openPane("cached-pane", in: app)
+        XCTAssertTrue(element("pane-workspace-cached-pane", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(element("pane-composer-send", in: app).isEnabled)
+        XCTAssertFalse(app.buttons["pane-files"].isEnabled)
+
+        XCTAssertTrue(element("pane-workspace-live-pane", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(element("pane-workspace-cached-pane", in: app).exists)
+        XCTAssertTrue(app.buttons["pane-files"].isEnabled)
     }
 
     // MARK: - Both device classes

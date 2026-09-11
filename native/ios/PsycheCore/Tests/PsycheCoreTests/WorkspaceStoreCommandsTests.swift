@@ -37,6 +37,24 @@ final class WorkspaceStoreCommandsTests: XCTestCase {
         }
     }
 
+    func testEveryMutationCommandRefusesStaleWorkspaceBeforeSending() async {
+        let requests = FakeControlRequests()
+        let store = makeStore(requests)
+        store.markDisconnected()
+
+        await assertThrows(.staleWorkspace) {
+            _ = try await store.createPane(kind: .terminal, projectID: self.projectID, cwd: self.projectRoot)
+        }
+        await assertThrows(.staleWorkspace) {
+            try await store.renamePane(self.publishedPane, title: "x")
+        }
+        await assertThrows(.staleWorkspace) {
+            try await store.stopPane(self.publishedPane)
+        }
+        let sent = await requests.sentCount
+        XCTAssertEqual(sent, 0, "Stale state must not reach host mutation APIs")
+    }
+
     // MARK: - Scope
 
     func testCreateRefusesAnUnpublishedProject() async {
@@ -284,6 +302,21 @@ final class WorkspaceStoreRitualTests: XCTestCase {
         XCTAssertEqual(launch?.projectID, "psyche")
         XCTAssertEqual(launch?.ritualID, "daily-standup")
         XCTAssertEqual(launch?.params, ["branch": "main"])
+    }
+
+    func testRefusesRitualLaunchWhileWorkspaceIsStale() async {
+        let requests = FakeRitualRequests()
+        let store = makeStore(requests)
+        store.markDisconnected()
+
+        do {
+            try await store.launchRitual("r", inProject: "psyche")
+            XCTFail("Expected a stale store to refuse")
+        } catch {
+            XCTAssertEqual(error as? WorkspaceStoreError, .staleWorkspace)
+        }
+        let sent = await requests.sentCount
+        XCTAssertEqual(sent, 0)
     }
 
     func testOmitsEmptyParamsRatherThanSendingAnEmptyObject() async throws {

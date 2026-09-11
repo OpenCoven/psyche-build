@@ -29,7 +29,26 @@ enum DemoStore {
             inspectionFails: inspectionFails
         )
         let store = WorkspaceStore(controlRequests: requests)
-        store.applySnapshot(workspace: workspace, sequence: 1)
+        if name == WorkspaceFixtures.staleRecovery {
+            store.restoreCachedState(CachedWorkspaceState(
+                workspace: workspace,
+                sequence: 40,
+                lastConfirmedAt: Date(timeIntervalSince1970: 1_786_286_400),
+                selectedProjectID: nil,
+                primaryPaneID: "cached-pane",
+                secondaryPaneID: nil,
+                drafts: ["cached-pane": "do not send while stale"]
+            ))
+            Task { @MainActor [weak store] in
+                try? await Task.sleep(for: .seconds(10))
+                store?.applySnapshot(
+                    workspace: WorkspaceFixtures.staleRecoveryLiveWorkspace(),
+                    sequence: 41
+                )
+            }
+        } else {
+            store.applySnapshot(workspace: workspace, sequence: 1)
+        }
 
         Task { @MainActor [weak store] in
             for await update in await requests.workspaceUpdates() {

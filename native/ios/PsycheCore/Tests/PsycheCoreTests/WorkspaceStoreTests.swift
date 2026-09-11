@@ -14,6 +14,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertTrue(store.isStale)
         XCTAssertTrue(store.needsFullSnapshot)
         XCTAssertNil(store.lastConfirmedAt)
+        XCTAssertEqual(store.liveness, .recovering(lastConfirmedAt: nil))
         XCTAssertEqual(store.nowSections, [])
     }
 
@@ -295,8 +296,38 @@ final class WorkspaceStoreTests: XCTestCase {
         store.markDisconnected()
 
         XCTAssertTrue(store.isStale)
+        XCTAssertEqual(store.liveness, .stale(lastConfirmedAt: confirmedAt))
         XCTAssertEqual(store.workspace?.revision, 1, "Offline state stays visible")
         XCTAssertEqual(store.lastConfirmedAt, confirmedAt, "The confirmation time must not move")
+    }
+
+    func testRestoredCacheIsPresentedAsStaleUntilAuthoritativeSnapshotArrives() {
+        let clock = TestClock()
+        let store = WorkspaceStore(now: clock.now)
+        let cached = CachedWorkspaceState(
+            workspace: Fixtures.workspace(revision: 7),
+            sequence: 7,
+            lastConfirmedAt: Date(timeIntervalSince1970: 900),
+            selectedProjectID: nil,
+            primaryPaneID: nil,
+            secondaryPaneID: nil,
+            drafts: [:]
+        )
+
+        store.restoreCachedState(cached)
+
+        XCTAssertEqual(store.workspace?.revision, 7)
+        XCTAssertTrue(store.isStale)
+        XCTAssertTrue(store.needsFullSnapshot)
+        XCTAssertEqual(store.liveness, .stale(lastConfirmedAt: Date(timeIntervalSince1970: 900)))
+
+        clock.advance(by: 60)
+        store.applySnapshot(workspace: Fixtures.workspace(revision: 8), sequence: 8)
+
+        XCTAssertFalse(store.isStale)
+        XCTAssertFalse(store.needsFullSnapshot)
+        XCTAssertEqual(store.workspace?.revision, 8)
+        XCTAssertEqual(store.liveness, .live(lastConfirmedAt: Date(timeIntervalSince1970: 1_060)))
     }
 
     func testLastConfirmedAtAdvancesWithEveryAcceptedUpdate() {
