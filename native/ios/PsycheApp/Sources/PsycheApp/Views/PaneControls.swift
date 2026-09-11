@@ -197,6 +197,10 @@ struct PaneControlsMenu: View {
     }
 
     private func startRemoteAction(_ action: PaneAction) {
+        guard store.liveness.allowsLiveActions else {
+            errorMessage = WorkspaceStoreError.staleWorkspace.localizedDescription
+            return
+        }
         guard let workspace = store.workspace else {
             errorMessage = WorkspaceStoreError.staleWorkspace.localizedDescription
             return

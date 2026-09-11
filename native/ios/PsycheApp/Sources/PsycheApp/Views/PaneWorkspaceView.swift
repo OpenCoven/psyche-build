@@ -65,6 +65,14 @@ struct PaneWorkspaceView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let pane = primaryPane {
+                if appModel.fixtureName == WorkspaceFixtures.staleRecovery {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Deliver live snapshot") {
+                            appModel.deliverFixtureLiveSnapshot()
+                        }
+                        .accessibilityIdentifier("fixture-deliver-live-snapshot")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         inspectionTarget = InspectionTarget(

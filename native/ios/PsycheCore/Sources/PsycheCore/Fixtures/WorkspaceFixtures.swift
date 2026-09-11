@@ -8,6 +8,7 @@ import Foundation
 public enum WorkspaceFixtures {
     public static let multiproject = "multiproject"
     public static let lifecycleActions = "lifecycle-actions"
+    public static let staleRecovery = "stale-recovery"
 
     /// Unknown names trap rather than falling back. A UI test that asks for a
     /// scenario nobody built must fail loudly, not quietly assert against
@@ -18,13 +19,15 @@ public enum WorkspaceFixtures {
             multiprojectWorkspace()
         case lifecycleActions:
             lifecycleActionsWorkspace()
+        case staleRecovery:
+            staleRecoveryCachedWorkspace()
         default:
             preconditionFailure("Unknown workspace fixture '\(name)'")
         }
     }
 
     public static func names() -> [String] {
-        [multiproject, lifecycleActions]
+        [multiproject, lifecycleActions, staleRecovery]
     }
 
     /// Three projects that between them populate every Now section — a waiting
@@ -220,6 +223,78 @@ public enum WorkspaceFixtures {
                                     status: "idle",
                                     needsAttention: false,
                                     lastActivity: "2026-08-09T17:30:00.000Z"
+                                )
+                            ]
+                        ),
+                    ],
+                    projectPanes: [],
+                    runningCount: 1,
+                    attentionCount: 0,
+                    rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
+                ),
+            ]
+        )
+    }
+
+    public static func staleRecoveryCachedWorkspace() -> WorkspaceSnapshot {
+        WorkspaceSnapshot(
+            revision: 40,
+            projects: [
+                WorkspaceProjectSnapshot(
+                    id: "cached",
+                    root: "/fixture/projects/cached",
+                    title: "cached workspace",
+                    worktrees: [
+                        worktree(
+                            path: "/fixture/projects/cached",
+                            branch: "main",
+                            isMain: true,
+                            panes: [
+                                pane(
+                                    id: "cached-pane",
+                                    cwd: "/fixture/projects/cached",
+                                    title: "cached pane",
+                                    kind: "agent",
+                                    agent: "Copilot",
+                                    status: "waiting",
+                                    needsAttention: true,
+                                    lastActivity: "2026-08-09T17:50:00.000Z"
+                                )
+                            ]
+                        ),
+                    ],
+                    projectPanes: [],
+                    runningCount: 0,
+                    attentionCount: 1,
+                    rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
+                ),
+            ]
+        )
+    }
+
+    public static func staleRecoveryLiveWorkspace() -> WorkspaceSnapshot {
+        WorkspaceSnapshot(
+            revision: 41,
+            projects: [
+                WorkspaceProjectSnapshot(
+                    id: "live",
+                    root: "/fixture/projects/live",
+                    title: "live workspace",
+                    worktrees: [
+                        worktree(
+                            path: "/fixture/projects/live",
+                            branch: "main",
+                            isMain: true,
+                            panes: [
+                                pane(
+                                    id: "live-pane",
+                                    cwd: "/fixture/projects/live",
+                                    title: "live pane",
+                                    kind: "agent",
+                                    agent: "Copilot",
+                                    status: "working",
+                                    needsAttention: false,
+                                    lastActivity: "2026-08-09T18:00:00.000Z"
                                 )
                             ]
                         ),

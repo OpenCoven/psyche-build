@@ -123,6 +123,15 @@ struct StaleStateNotice: View {
                 .foregroundStyle(PsycheTheme.amber)
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("Showing last known state")
+        .accessibilityValue(accessibilityValue)
         .accessibilityIdentifier("stale-state-notice")
+    }
+
+    private var accessibilityValue: String {
+        if let lastConfirmedAt {
+            return "Last confirmed \(lastConfirmedAt.formatted(date: .abbreviated, time: .shortened))"
+        }
+        return "Not yet confirmed by a host"
     }
 }

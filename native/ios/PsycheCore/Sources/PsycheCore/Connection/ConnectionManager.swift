@@ -423,6 +423,7 @@ public actor ConnectionManager {
         if activeTeardown != nil {
             transition(to: .disconnecting)
             teardownFinalStateOverride = .disconnected
+            await waitForTeardownCompletion()
             return
         }
         guard state != .disconnected else {

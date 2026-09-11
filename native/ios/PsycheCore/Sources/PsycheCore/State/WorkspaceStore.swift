@@ -15,7 +15,7 @@ public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
         case .noControlRequests:
             "This workspace is not connected to a host."
         case .staleWorkspace:
-            "File inspection is unavailable while this workspace is out of date."
+            "Live workspace actions are unavailable while this workspace is out of date."
         case .unexpectedResponse:
             "The host answered the workspace request with something else."
         case .unknownProject(let projectID):
@@ -27,6 +27,17 @@ public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
         case .rejected:
             "The host refused the request."
         }
+    }
+}
+
+public enum WorkspaceLiveness: Equatable, Sendable {
+    case live(lastConfirmedAt: Date)
+    case stale(lastConfirmedAt: Date?)
+    case recovering(lastConfirmedAt: Date?)
+
+    public var allowsLiveActions: Bool {
+        if case .live = self { return true }
+        return false
     }
 }
 
@@ -57,6 +68,7 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var isStale = true
     @Published public private(set) var needsFullSnapshot = true
     @Published public private(set) var lastConfirmedAt: Date?
+    @Published public private(set) var liveness: WorkspaceLiveness = .recovering(lastConfirmedAt: nil)
     @Published public var selectedProjectID: String?
     @Published public var primaryPaneID: String?
     @Published public var secondaryPaneID: String?
@@ -103,12 +115,16 @@ public final class WorkspaceStore: ObservableObject {
         guard !isAwaitingConnectionSnapshot else {
             isStale = true
             needsFullSnapshot = true
+            liveness = self.workspace == nil
+                ? .recovering(lastConfirmedAt: lastConfirmedAt)
+                : .stale(lastConfirmedAt: lastConfirmedAt)
             return
         }
         guard nextSequence > sequence else { return }
         guard sequence == 0 || nextSequence == sequence + 1 else {
             isStale = true
             needsFullSnapshot = true
+            liveness = .stale(lastConfirmedAt: lastConfirmedAt)
             return
         }
         accept(workspace: workspace, sequence: nextSequence)
@@ -203,6 +219,9 @@ public final class WorkspaceStore: ObservableObject {
         isStale = state.isStale
         needsFullSnapshot = state.needsFullSnapshot
         lastConfirmedAt = state.lastConfirmedAt
+        liveness = state.isStale
+            ? .stale(lastConfirmedAt: state.lastConfirmedAt)
+            : .live(lastConfirmedAt: state.lastConfirmedAt ?? now())
         selectedProjectID = state.selectedProjectID
         primaryPaneID = state.primaryPaneID
         secondaryPaneID = state.secondaryPaneID
@@ -217,6 +236,7 @@ public final class WorkspaceStore: ObservableObject {
         isStale = true
         needsFullSnapshot = true
         lastConfirmedAt = nil
+        liveness = .recovering(lastConfirmedAt: nil)
         selectedProjectID = nil
         primaryPaneID = nil
         secondaryPaneID = nil
@@ -280,11 +300,13 @@ public final class WorkspaceStore: ObservableObject {
         title: String? = nil,
         prompt: String? = nil
     ) async throws -> PaneSpawnedResponse {
-        let requests = try requireControlRequests()
+        let requests = try requireLiveControlRequests()
         try requireLaunchTarget(projectID: projectID, cwd: cwd)
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         let response = try await requests.send(.spawnPane(MobilePaneSpawnRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             idempotencyKey: idempotencyKey,
             kind: kind,
             projectID: projectID,
@@ -303,11 +325,13 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func renamePane(_ paneID: String, title: String?, agent: String? = nil) async throws {
-        let requests = try requireControlRequests()
+        let requests = try requireLiveControlRequests()
         try requirePublishedPane(paneID)
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         try requireAck(await requests.send(.paneMeta(PaneMetaRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             id: paneID,
             title: title,
             agent: agent
@@ -317,11 +341,13 @@ public final class WorkspaceStore: ObservableObject {
     /// Stops the pane's process. The worktree and branch survive — this is not
     /// a cleanup, and the UI must not present it as one.
     public func stopPane(_ paneID: String) async throws {
-        let requests = try requireControlRequests()
+        let requests = try requireLiveControlRequests()
         try requirePublishedPane(paneID)
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         try requireAck(await requests.send(.killPane(PaneIDControlRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             paneID: paneID
         ))))
     }
@@ -333,13 +359,15 @@ public final class WorkspaceStore: ObservableObject {
         inProject projectID: String,
         params: [String: String] = [:]
     ) async throws {
-        let requests = try requireControlRequests()
+        let requests = try requireLiveControlRequests()
         guard workspace?.projects.contains(where: { $0.id == projectID }) == true else {
             throw WorkspaceStoreError.unknownProject(projectID)
         }
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         try requireAck(await requests.send(.launchRitual(MobileRitualLaunchRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             projectID: projectID,
             ritualID: ritualID,
             params: params.isEmpty ? nil : params
@@ -408,6 +436,16 @@ public final class WorkspaceStore: ObservableObject {
         return controlRequests
     }
 
+    private func requireLiveControlRequests() throws -> any ControlRequesting {
+        let requests = try requireControlRequests()
+        try requireLiveWorkspace()
+        return requests
+    }
+
+    private func requireLiveWorkspace() throws {
+        guard liveness.allowsLiveActions else { throw WorkspaceStoreError.staleWorkspace }
+    }
+
     private func requireInspectionRequests(
         forPane paneID: String
     ) throws -> any ControlRequesting {
@@ -448,16 +486,19 @@ public final class WorkspaceStore: ObservableObject {
     public func markDisconnected() {
         activeConnectionGeneration = nil
         isStale = true
+        liveness = .stale(lastConfirmedAt: lastConfirmedAt)
     }
 
     func markReadinessStale() {
         isStale = true
+        liveness = .stale(lastConfirmedAt: lastConfirmedAt)
     }
 
     func markDisconnected(for generation: ConnectionGeneration) {
         guard activeConnectionGeneration === generation else { return }
         activeConnectionGeneration = nil
         isStale = true
+        liveness = .stale(lastConfirmedAt: lastConfirmedAt)
     }
 
     /// A new transport connection has its own sequence space. Keep the last
@@ -480,6 +521,7 @@ public final class WorkspaceStore: ObservableObject {
         isStale = true
         needsFullSnapshot = true
         isAwaitingConnectionSnapshot = true
+        liveness = .recovering(lastConfirmedAt: lastConfirmedAt)
     }
 
     public func setDraft(_ draft: String?, forPane paneID: String) {
@@ -514,7 +556,8 @@ public final class WorkspaceStore: ObservableObject {
         activeConnectionGeneration = nil
         isStale = true
         needsFullSnapshot = true
-        isAwaitingConnectionSnapshot = false
+        isAwaitingConnectionSnapshot = true
+        liveness = .stale(lastConfirmedAt: lastConfirmedAt)
         reconcileSelection()
         nowSections = Self.makeNowSections(state.restoredWorkspace)
     }
@@ -522,9 +565,11 @@ public final class WorkspaceStore: ObservableObject {
     private func accept(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
         self.workspace = workspace
         sequence = nextSequence
-        lastConfirmedAt = now()
+        let confirmedAt = now()
+        lastConfirmedAt = confirmedAt
         isStale = false
         needsFullSnapshot = false
+        liveness = .live(lastConfirmedAt: confirmedAt)
         reconcileSelection()
         nowSections = Self.makeNowSections(workspace)
     }
