@@ -586,15 +586,29 @@ fn git_dir_for_worktree(root: &Path) -> Result<(PathBuf, PathBuf), String> {
 }
 
 fn git_repository_paths(root: &Path) -> Result<(Option<PathBuf>, PathBuf), String> {
-    if root.join(".git").is_dir() || root.join(".git").is_file() {
-        return git_dir_for_worktree(root).map(|(work_tree, git_dir)| (Some(work_tree), git_dir));
+    let worktree_paths =
+        || git_dir_for_worktree(root).map(|(work_tree, git_dir)| (Some(work_tree), git_dir));
+    match git_marker_kind(&root.join(".git"), "worktree .git marker")? {
+        GitMarkerKind::Directory | GitMarkerKind::File => return worktree_paths(),
+        GitMarkerKind::Missing => {}
     }
-    if root.join("HEAD").is_file()
-        && (root.join("objects").is_dir() || root.join("commondir").is_file())
-    {
+
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_link_like(&metadata) => {}
+        Ok(_) => return worktree_paths(),
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return worktree_paths();
+            }
+            return Err(format!("inspect Git directory: {error}"));
+        }
+    }
+
+    let git_dir = GitMetadataDirectory::open(root, "Git directory")?;
+    if git_directory_looks_bare(&git_dir)? {
         return Ok((None, root.to_path_buf()));
     }
-    git_dir_for_worktree(root).map(|(work_tree, git_dir)| (Some(work_tree), git_dir))
+    worktree_paths()
 }
 
 #[cfg(test)]
@@ -617,6 +631,53 @@ const MAX_GIT_HEAD_BYTES: u64 = 4 * 1024;
 const MAX_GIT_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_GIT_LOOSE_REF_BYTES: u64 = 4 * 1024;
 const MAX_GIT_PACKED_REFS_BYTES: u64 = 64 * 1024 * 1024;
+
+fn git_directory_has_metadata_file(
+    git_dir: &GitMetadataDirectory,
+    name: &str,
+    label: &str,
+    max_bytes: u64,
+) -> Result<bool, String> {
+    match git_dir.read_file(name, label, max_bytes) {
+        Ok(_) => Ok(true),
+        Err(GitMetadataReadError::NotFound) => Ok(false),
+        Err(error) => Err(error.into_message(label)),
+    }
+}
+
+fn git_directory_has_metadata_directory(
+    git_dir: &GitMetadataDirectory,
+    name: &str,
+    label: &str,
+) -> Result<bool, String> {
+    match git_dir.open_directory(name, label) {
+        Ok(directory) => {
+            directory.validate(label)?;
+            Ok(true)
+        }
+        Err(GitMetadataReadError::NotFound) => Ok(false),
+        Err(error) => Err(error.into_message(label)),
+    }
+}
+
+fn git_directory_looks_bare(git_dir: &GitMetadataDirectory) -> Result<bool, String> {
+    let has_head =
+        git_directory_has_metadata_file(git_dir, "HEAD", "Git HEAD", MAX_GIT_HEAD_BYTES)?;
+    if !has_head {
+        git_dir.validate("Git directory")?;
+        return Ok(false);
+    }
+    let has_objects =
+        git_directory_has_metadata_directory(git_dir, "objects", "Git objects directory")?;
+    let has_commondir = git_directory_has_metadata_file(
+        git_dir,
+        "commondir",
+        "Git commondir file",
+        MAX_GIT_COMMONDIR_FILE_BYTES,
+    )?;
+    git_dir.validate("Git directory")?;
+    Ok(has_objects || has_commondir)
+}
 
 /// Same resolution as [`git_common_dir`], but classifies the `commondir`
 /// marker via the pinned directory handle's own no-follow, fd-relative
@@ -5544,6 +5605,104 @@ mod tests {
         let error = git_dir_for_worktree(&root).unwrap_err();
 
         assert!(error.contains("too large"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn git_repository_paths_rejects_a_symlinked_bare_head_marker() {
+        let tree = TempTree::new("git-repository-paths-symlinked-bare-head");
+        let source = tree.root.join("source");
+        let bare = tree.root.join("bare.git");
+        let outside = tree.root.join("outside-head");
+        std::fs::create_dir_all(&source).unwrap();
+        run_test_git(&source, &["init", "-q"]);
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&source, &["add", "tracked.txt"]);
+        run_test_git(&source, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &tree.root,
+            &["clone", "--bare", path_text(&source), path_text(&bare)],
+        );
+
+        std::fs::copy(bare.join("HEAD"), &outside).unwrap();
+        std::fs::remove_file(bare.join("HEAD")).unwrap();
+        if !create_test_symlink(TestSymlinkKind::File, &outside, &bare.join("HEAD")) {
+            return;
+        }
+
+        let error = git_repository_paths(&bare).unwrap_err();
+
+        assert!(
+            error.contains("Git HEAD is not a regular file"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_repository_paths_rejects_a_symlinked_bare_objects_directory() {
+        let tree = TempTree::new("git-repository-paths-symlinked-bare-objects");
+        let source = tree.root.join("source");
+        let bare = tree.root.join("bare.git");
+        let outside = tree.root.join("outside-objects");
+        std::fs::create_dir_all(&source).unwrap();
+        run_test_git(&source, &["init", "-q"]);
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&source, &["add", "tracked.txt"]);
+        run_test_git(&source, &["commit", "-qm", "baseline"]);
+        run_test_git(
+            &tree.root,
+            &["clone", "--bare", path_text(&source), path_text(&bare)],
+        );
+
+        std::fs::rename(bare.join("objects"), &outside).unwrap();
+        if !create_test_symlink(TestSymlinkKind::Directory, &outside, &bare.join("objects")) {
+            std::fs::rename(&outside, bare.join("objects")).unwrap();
+            return;
+        }
+        let _restore = DirectoryReplacementGuard {
+            path: bare.join("objects"),
+            parked: outside,
+        };
+
+        let error = git_repository_paths(&bare).unwrap_err();
+
+        assert!(
+            error.contains("Git objects directory is not a real directory"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn git_repository_paths_rejects_a_symlinked_bare_commondir_marker() {
+        let tree = TempTree::new("git-repository-paths-symlinked-bare-commondir");
+        let bare = tree.root.join("bare.git");
+        let outside = tree.root.join("outside-commondir");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(
+            bare.join("HEAD"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(&outside, "../shared\n").unwrap();
+        if !create_test_symlink(TestSymlinkKind::File, &outside, &bare.join("commondir")) {
+            return;
+        }
+
+        let error = git_repository_paths(&bare).unwrap_err();
+
+        assert!(
+            error.contains("Git commondir file is not a regular file"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
