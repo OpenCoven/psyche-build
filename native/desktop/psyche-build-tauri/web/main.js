@@ -644,10 +644,17 @@
     });
   }
 
-  async function restoreGpuDiagnosticsStressWorkspace(workspace) {
+  async function restoreGpuDiagnosticsStressWorkspace(
+    workspace,
+    completingResourceId,
+    completingResource,
+  ) {
     var snapshot = workspace || gpuDiagnosticsStressWorkspace;
+    var completingFinalResource =
+      gpuDiagnosticsStressResources.size === 1 &&
+      gpuDiagnosticsStressResources.get(completingResourceId) === completingResource;
     if (!snapshot || gpuDiagnosticsStressWorkspace !== snapshot ||
-        gpuDiagnosticsStressResources.size) {
+        (gpuDiagnosticsStressResources.size && !completingFinalResource)) {
       return;
     }
     var project = findProject(snapshot.projectId);
@@ -710,7 +717,8 @@
     gpuDiagnosticsStressResources.set(id, record);
     function finish() {
       if (finishFlight) return finishFlight;
-      finishFlight = Promise.resolve().then(async function () {
+      var flight = Promise.resolve().then(async function () {
+        await restoreGpuDiagnosticsStressWorkspace(workspace, id, record);
         if (gpuDiagnosticsStressResources.get(id) === record) {
           gpuDiagnosticsStressResources.delete(id);
         }
@@ -718,24 +726,30 @@
             gpuDiagnosticsStressCleanupHandles.get(id) === resource) {
           gpuDiagnosticsStressCleanupHandles.delete(id);
         }
-        await restoreGpuDiagnosticsStressWorkspace(workspace);
       });
-      return finishFlight;
+      finishFlight = flight;
+      void flight.catch(function (error) {
+        if (finishFlight === flight) finishFlight = null;
+        console.error("[psyche:graphics] diagnostics workspace restoration failed: " + String(error));
+      });
+      return flight;
     }
     function forceCleanup() {
+      if (cleanupCompleted) return finish();
       if (forceFlight) return forceFlight;
-      cleanupCompleted = true;
       var flight = Promise.resolve().then(function () {
         return forceDispose();
       }).then(function () {
+        cleanupCompleted = true;
         return finish();
       });
       forceFlight = flight;
       void flight.catch(
         function (error) {
-          cleanupCompleted = false;
           if (forceFlight === flight) forceFlight = null;
-          console.error("[psyche:graphics] diagnostics force cleanup failed: " + String(error));
+          if (!cleanupCompleted) {
+            console.error("[psyche:graphics] diagnostics force cleanup failed: " + String(error));
+          }
         },
       );
       return flight;
@@ -743,7 +757,7 @@
     resource = {
       id: id,
       dispose: function (signal) {
-        if (cleanupCompleted) return forceFlight || Promise.resolve();
+        if (cleanupCompleted) return finish();
         if (cleanupFlight) return cleanupFlight;
         throwIfGpuDiagnosticsStressAborted(signal);
         cleanupFlight = Promise.resolve().then(function () {

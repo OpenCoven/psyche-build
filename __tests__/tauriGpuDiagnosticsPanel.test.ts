@@ -291,7 +291,7 @@ describe('Tauri GPU diagnostics panel', () => {
     );
   });
 
-  it('keeps force disposal available when graceful diagnostics cleanup rejects', () => {
+  it('routes completed cleanup through restoration recovery', () => {
     const source = readWebFile('main.js');
     const resourceFactory = source.slice(
       source.indexOf('function createGpuDiagnosticsStressResource'),
@@ -300,7 +300,7 @@ describe('Tauri GPU diagnostics panel', () => {
 
     expect(resourceFactory).toContain('var cleanupCompleted = false;');
     expect(resourceFactory).toContain(
-      'if (cleanupCompleted) return forceFlight || Promise.resolve();',
+      'if (cleanupCompleted) return finish();',
     );
   });
 
@@ -400,6 +400,88 @@ describe('Tauri GPU diagnostics panel', () => {
       expect(restorationCalls).toEqual(['restored']);
     } finally {
       restoreGlobals();
+    }
+  });
+
+  it('keeps restoration ownership retryable without disposing resources twice', async () => {
+    const resources = new Map();
+    const cleanupHandles = new Map();
+    const restorationCalls: string[] = [];
+    let disposalAttempts = 0;
+    let forceDisposalAttempts = 0;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const restoreGlobals = installGpuDiagnosticsGlobals({
+      gpuDiagnosticsStressResources: resources,
+      gpuDiagnosticsStressCleanupHandles: cleanupHandles,
+      gpuDiagnosticsStressRecoveryFlight: null,
+    });
+
+    try {
+      const createGpuDiagnosticsStressResource = compileFunction<
+        (
+          id: string,
+          record: Record<string, unknown>,
+          dispose: () => Promise<void>,
+          forceDispose: () => Promise<void>,
+        ) => { dispose(): Promise<void>; forceDispose(): Promise<void> }
+      >(readWebFile('main.js'), 'createGpuDiagnosticsStressResource', {
+        throwIfGpuDiagnosticsStressAborted: () => {},
+        restoreGpuDiagnosticsStressWorkspace: async (
+          _workspace: unknown,
+          resourceId?: string,
+          record?: Record<string, unknown>,
+        ) => {
+          restorationCalls.push(`${resourceId}:${record?.kind}`);
+          if (restorationCalls.length === 1) {
+            throw new Error('workspace restoration failed');
+          }
+        },
+      });
+      const retryGpuDiagnosticsStressCleanup = compileFunction<
+        () => Promise<void>
+      >(readWebFile('main.js'), 'retryGpuDiagnosticsStressCleanup', {
+        restoreGpuDiagnosticsStressWorkspace: async () => {
+          restorationCalls.push('fallback-restore');
+        },
+        renderGpuDiagnostics: () => {},
+      });
+      const resource = createGpuDiagnosticsStressResource(
+        'diagnostic-tab',
+        { kind: 'browser' },
+        async () => {
+          disposalAttempts += 1;
+        },
+        async () => {
+          forceDisposalAttempts += 1;
+        },
+      );
+
+      await expect(resource.dispose()).rejects.toThrow('workspace restoration failed');
+      expect(disposalAttempts).toBe(1);
+      expect(forceDisposalAttempts).toBe(0);
+      expect(resources.has('diagnostic-tab')).toBe(true);
+      expect(cleanupHandles.has('diagnostic-tab')).toBe(true);
+      expect(isGpuDiagnosticsStressRunEnabled(true, true, false, resources.size > 0))
+        .toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[psyche:graphics] diagnostics workspace restoration failed: Error: workspace restoration failed',
+      );
+
+      await retryGpuDiagnosticsStressCleanup();
+
+      expect(restorationCalls).toEqual([
+        'diagnostic-tab:browser',
+        'diagnostic-tab:browser',
+      ]);
+      expect(disposalAttempts).toBe(1);
+      expect(forceDisposalAttempts).toBe(0);
+      expect(resources.size).toBe(0);
+      expect(cleanupHandles.size).toBe(0);
+      expect(isGpuDiagnosticsStressRunEnabled(true, true, false, resources.size > 0))
+        .toBe(true);
+    } finally {
+      restoreGlobals();
+      errorSpy.mockRestore();
     }
   });
 
