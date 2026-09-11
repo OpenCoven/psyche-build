@@ -86,6 +86,7 @@ struct PaneControlsMenu: View {
             titleVisibility: .visible
         ) {
             Button("Stop pane", role: .destructive) { stop() }
+            Button("Keep pane open") {}
             Button("Cancel", role: .cancel) {}
         } message: {
             // The consequence comes first so the destructive button is never
@@ -104,6 +105,7 @@ struct PaneControlsMenu: View {
             Button("Continue to cleanup", role: .destructive) {
                 startRemoteAction(.close)
             }
+            Button("Keep pane open") {}
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(CleanupPaneConfirmation.message(

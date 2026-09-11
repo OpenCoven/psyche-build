@@ -7,6 +7,7 @@ import Foundation
 /// network or the Keychain: a fixture launch composes state directly.
 public enum WorkspaceFixtures {
     public static let multiproject = "multiproject"
+    public static let lifecycleActions = "lifecycle-actions"
 
     /// Unknown names trap rather than falling back. A UI test that asks for a
     /// scenario nobody built must fail loudly, not quietly assert against
@@ -15,13 +16,15 @@ public enum WorkspaceFixtures {
         switch name {
         case multiproject:
             multiprojectWorkspace()
+        case lifecycleActions:
+            lifecycleActionsWorkspace()
         default:
             preconditionFailure("Unknown workspace fixture '\(name)'")
         }
     }
 
     public static func names() -> [String] {
-        [multiproject]
+        [multiproject, lifecycleActions]
     }
 
     /// Three projects that between them populate every Now section — a waiting
@@ -142,6 +145,90 @@ public enum WorkspaceFixtures {
                     attentionCount: 0,
                     rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
                 )
+            ]
+        )
+    }
+
+    /// Sanitized lifecycle-action scenario. The paths are deliberately fixture
+    /// paths so UI evidence never retains a contributor's local checkout.
+    static func lifecycleActionsWorkspace(revision: Int = 1) -> WorkspaceSnapshot {
+        WorkspaceSnapshot(
+            revision: revision,
+            projects: [
+                WorkspaceProjectSnapshot(
+                    id: "website",
+                    root: "/fixture/projects/open-coven.dev",
+                    title: "open-coven.dev",
+                    worktrees: [
+                        worktree(
+                            path: "/fixture/projects/open-coven.dev/.worktrees/home-polish",
+                            branch: "feat/home-polish",
+                            isMain: false,
+                            panes: [
+                                pane(
+                                    id: "web-home",
+                                    cwd: "/fixture/projects/open-coven.dev/.worktrees/home-polish",
+                                    title: "homepage polish",
+                                    kind: "agent",
+                                    agent: "Claude",
+                                    status: "waiting",
+                                    needsAttention: true,
+                                    lastActivity: "2026-08-09T17:50:00.000Z"
+                                )
+                            ]
+                        ),
+                    ],
+                    projectPanes: [],
+                    runningCount: 0,
+                    attentionCount: 1,
+                    rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
+                ),
+                WorkspaceProjectSnapshot(
+                    id: "psyche",
+                    root: "/fixture/projects/psyche-build",
+                    title: "psyche-build",
+                    worktrees: [
+                        worktree(
+                            path: "/fixture/projects/psyche-build/.worktrees/native-ios-cloud-terminal",
+                            branch: "feat/native-ios-cloud-terminal",
+                            isMain: false,
+                            dirty: true,
+                            panes: [
+                                pane(
+                                    id: "ios-cockpit",
+                                    cwd: "/fixture/projects/psyche-build/.worktrees/native-ios-cloud-terminal",
+                                    title: "native-ios-cloud-terminal",
+                                    kind: "agent",
+                                    agent: "Copilot",
+                                    status: "working",
+                                    needsAttention: false,
+                                    lastActivity: "2026-08-09T17:45:00.000Z"
+                                )
+                            ]
+                        ),
+                        worktree(
+                            path: "/fixture/projects/psyche-build/.worktrees/action-error",
+                            branch: "feat/action-error",
+                            isMain: false,
+                            panes: [
+                                pane(
+                                    id: "action-error",
+                                    cwd: "/fixture/projects/psyche-build/.worktrees/action-error",
+                                    title: "pre-dispatch rejection",
+                                    kind: "agent",
+                                    agent: "Copilot",
+                                    status: "idle",
+                                    needsAttention: false,
+                                    lastActivity: "2026-08-09T17:30:00.000Z"
+                                )
+                            ]
+                        ),
+                    ],
+                    projectPanes: [],
+                    runningCount: 1,
+                    attentionCount: 0,
+                    rituals: RitualPublicationSnapshot(state: .empty, rituals: [])
+                ),
             ]
         )
     }
