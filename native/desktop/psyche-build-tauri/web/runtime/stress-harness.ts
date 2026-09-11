@@ -226,6 +226,12 @@ function draw() {
 requestAnimationFrame(draw);
 function reportContextStatus(status) {
   document.title = status;
+  try {
+    const core = window.__TAURI__ && window.__TAURI__.core;
+    if (core && typeof core.invoke === 'function') {
+      core.invoke('browser_report_title', { title: status });
+    }
+  } catch (_) {}
 }
 window.losePsycheDiagnosticsContext = function () {
   const extension = gl && gl.getExtension('WEBGL_lose_context');

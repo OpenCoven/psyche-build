@@ -201,7 +201,7 @@ describe('Tauri diagnostics stress harness', () => {
     expect(page.html).toContain('context-unavailable');
     expect(page.html).toContain('context-lost');
     expect(page.html).toContain('webglcontextlost');
-    expect(page.html).not.toContain('browser_report_title');
+    expect(page.html).toContain('browser_report_title');
     await expect(browserWindow.losePsycheDiagnosticsContext?.()).resolves.toBe(true);
     expect(contextLost).toBe(true);
     expect(browserDocument.title).toBe(
