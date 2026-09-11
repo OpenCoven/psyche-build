@@ -57,6 +57,8 @@ public struct RemoteActionScope: Sendable, Equatable {
             ("host", "Host"),
             ("projectId", "Project ID"),
             ("projectTitle", "Project"),
+            ("paneId", "Pane ID"),
+            ("generation", "Generation"),
             ("worktreePath", "Worktree"),
             ("sourceBranch", "Source branch"),
             ("targetBranch", "Target branch"),

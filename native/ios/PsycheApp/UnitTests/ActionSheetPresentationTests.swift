@@ -226,7 +226,7 @@ final class ActionSheetPresentationTests: XCTestCase {
 
     @MainActor
     func testFixtureCleanupActionProducesChoicePresentation() async {
-        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
         let requests = FixtureControlRequests(workspace: workspace)
         let store = RemoteActionStore(controlRequests: requests)
 
@@ -237,6 +237,20 @@ final class ActionSheetPresentationTests: XCTestCase {
         }
         XCTAssertEqual(store.presentation?.title, "Close Pane")
         XCTAssertEqual(store.presentation?.scope.consequence, "Closes the pane and can remove its worktree or branch.")
+        XCTAssertEqual(store.presentation?.scope.rows, [
+            RemoteActionScopeRow(key: "host", label: "Host", value: "psyche-demo.local"),
+            RemoteActionScopeRow(key: "projectId", label: "Project ID", value: "website"),
+            RemoteActionScopeRow(key: "projectTitle", label: "Project", value: "open-coven.dev"),
+            RemoteActionScopeRow(key: "paneId", label: "Pane ID", value: "web-home"),
+            RemoteActionScopeRow(key: "generation", label: "Generation", value: "1"),
+            RemoteActionScopeRow(
+                key: "worktreePath",
+                label: "Worktree",
+                value: "/fixture/projects/open-coven.dev/.worktrees/home-polish"
+            ),
+            RemoteActionScopeRow(key: "sourceBranch", label: "Source branch", value: "feat/home-polish"),
+            RemoteActionScopeRow(key: "targetBranch", label: "Target branch", value: "main"),
+        ])
         XCTAssertEqual(options.map(\.label), [
             "Just close pane",
             "Close and remove worktree",
@@ -247,7 +261,7 @@ final class ActionSheetPresentationTests: XCTestCase {
 
     @MainActor
     func testFixtureMergeFallbackChainSurfacesHostDrivenConfirmations() async {
-        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
         let requests = FixtureControlRequests(workspace: workspace)
         let store = RemoteActionStore(controlRequests: requests)
 
@@ -267,11 +281,119 @@ final class ActionSheetPresentationTests: XCTestCase {
         await store.respond(.confirm)
         XCTAssertEqual(store.presentation?.title, "Merge Worktree")
         XCTAssertEqual(store.presentation?.message, "Merge \"homepage polish\" into main?")
+        XCTAssertEqual(
+            store.presentation?.scope.consequence,
+            "The host performs the merge and reports the terminal result."
+        )
+        XCTAssertEqual(
+            store.presentation?.scope.rows.first(where: { $0.key == "paneId" })?.value,
+            "web-home"
+        )
+    }
+
+    @MainActor
+    func testFixtureMergeConfirmationCancelPathsStopBeforeSuccess() async {
+        for cancelledTitle in [
+            "Sibling Agents Active",
+            "Parent Merge Target Unavailable",
+            "Merge Worktree",
+        ] {
+            let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
+            let requests = FixtureControlRequests(workspace: workspace)
+            let store = RemoteActionStore(controlRequests: requests)
+
+            await store.start(action: .merge, onPane: "web-home", in: workspace)
+            if cancelledTitle != "Sibling Agents Active" {
+                await store.respond(.confirm)
+            }
+            if cancelledTitle == "Merge Worktree" {
+                await store.respond(.confirm)
+            }
+
+            XCTAssertEqual(store.presentation?.title, cancelledTitle)
+            await store.respond(.cancel)
+
+            XCTAssertEqual(store.presentation?.message, "Merge cancelled")
+            XCTAssertEqual(store.presentation?.content, .terminal(.info))
+            XCTAssertFalse(store.isBusy("web-home"))
+        }
+    }
+
+    @MainActor
+    func testFixturePullRequestCancelPathsStopBeforeCreation() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
+        let confirmationRequests = FixtureControlRequests(workspace: workspace)
+        let confirmationStore = RemoteActionStore(controlRequests: confirmationRequests)
+
+        await confirmationStore.start(action: .createPR, onPane: "web-home", in: workspace)
+        await confirmationStore.respond(.cancel)
+
+        XCTAssertEqual(confirmationStore.presentation?.message, "Action cancelled.")
+        XCTAssertEqual(confirmationStore.presentation?.content, .terminal(.info))
+        XCTAssertFalse(confirmationStore.isBusy("web-home"))
+
+        let reviewRequests = FixtureControlRequests(workspace: workspace)
+        let reviewStore = RemoteActionStore(controlRequests: reviewRequests)
+
+        await reviewStore.start(action: .createPR, onPane: "web-home", in: workspace)
+        await reviewStore.respond(.confirm)
+        await reviewStore.respond(.cancel)
+
+        XCTAssertEqual(reviewStore.presentation?.message, "Action cancelled.")
+        XCTAssertEqual(reviewStore.presentation?.content, .terminal(.info))
+        XCTAssertFalse(reviewStore.isBusy("web-home"))
+    }
+
+    @MainActor
+    func testFixtureCleanupCancelAndDangerousChoicesAreDeterministic() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
+        let cancelRequests = FixtureControlRequests(workspace: workspace)
+        let cancelStore = RemoteActionStore(controlRequests: cancelRequests)
+
+        await cancelStore.start(action: .close, onPane: "web-home", in: workspace)
+        await cancelStore.respond(.cancel)
+
+        XCTAssertEqual(cancelStore.presentation?.message, "Action cancelled.")
+        XCTAssertEqual(cancelStore.presentation?.content, .terminal(.info))
+        XCTAssertFalse(cancelStore.isBusy("web-home"))
+
+        for (optionID, consequence) in [
+            ("kill_only", "Closed homepage polish."),
+            ("kill_and_clean", "Closed homepage polish and started worktree cleanup."),
+            ("kill_clean_branch", "Closed homepage polish and started worktree and branch cleanup."),
+        ] {
+            let requests = FixtureControlRequests(workspace: workspace)
+            let store = RemoteActionStore(controlRequests: requests)
+
+            await store.start(action: .close, onPane: "web-home", in: workspace)
+            await store.respond(.choice(optionID: optionID))
+
+            XCTAssertEqual(store.presentation?.message, consequence)
+            XCTAssertEqual(store.presentation?.content, .terminal(.success))
+            XCTAssertFalse(store.isBusy("web-home"))
+        }
+    }
+
+    @MainActor
+    func testFixturePreDispatchRejectionSurfacesOrdinaryError() async {
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
+        let requests = FixtureControlRequests(workspace: workspace)
+        let store = RemoteActionStore(controlRequests: requests)
+
+        await store.start(action: .merge, onPane: "action-error", in: workspace)
+
+        XCTAssertEqual(store.presentation?.title, "That did not work")
+        XCTAssertEqual(
+            store.presentation?.message,
+            "Fixture host rejected pre-dispatch rejection before dispatch."
+        )
+        XCTAssertEqual(store.presentation?.content, .terminal(.error))
+        XCTAssertFalse(store.isBusy("action-error"))
     }
 
     @MainActor
     func testFixturePullRequestStartsSpecializedReviewFlow() async {
-        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
         let requests = FixtureControlRequests(workspace: workspace)
         let store = RemoteActionStore(controlRequests: requests)
 
@@ -283,6 +405,13 @@ final class ActionSheetPresentationTests: XCTestCase {
         }
         XCTAssertEqual(store.presentation?.title, "Create Pull Request")
         XCTAssertEqual(review.details.files, ["Sources/App.swift", "Sources/Deleted.swift"])
+        XCTAssertEqual(review.details.repoPath, "/fixture/projects/open-coven.dev/.worktrees/home-polish")
+        XCTAssertEqual(review.details.sourceBranch, "feat/home-polish")
+        XCTAssertEqual(review.details.targetBranch, "main")
+        XCTAssertEqual(
+            store.presentation?.scope.consequence,
+            "Creates a pull request on the paired host."
+        )
         XCTAssertEqual(
             ActionSheetPresentation.pullRequestDraft(from: review.defaultSummary),
             ActionSheetPullRequestDraft(
@@ -300,7 +429,7 @@ final class ActionSheetPresentationTests: XCTestCase {
 
     @MainActor
     func testFixturePullRequestSubmissionPreservesEditedTitleAndBody() async {
-        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject)
+        let workspace = WorkspaceFixtures.workspace(named: WorkspaceFixtures.lifecycleActions)
         let requests = FixtureControlRequests(workspace: workspace)
         let store = RemoteActionStore(controlRequests: requests)
 

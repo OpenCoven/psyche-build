@@ -197,6 +197,13 @@ public actor FixtureControlRequests: ControlRequesting {
                 message: "Pane \(request.paneID) is not published by this fixture."
             ))
         }
+        guard context.paneID != "action-error" else {
+            return .error(MobileProtocolErrorResponse(
+                requestID: requestID,
+                code: "fixture_pre_dispatch_rejection",
+                message: "Fixture host rejected \(context.paneTitle) before dispatch."
+            ))
+        }
 
         switch request.action {
         case .merge:
@@ -673,6 +680,8 @@ public actor FixtureControlRequests: ControlRequesting {
             "host": Self.fixtureHostName,
             "projectId": context.projectID,
             "projectTitle": context.projectTitle,
+            "paneId": context.paneID,
+            "generation": String(sequence),
             "consequence": consequence,
         ]
         if let worktreePath = context.worktreePath {

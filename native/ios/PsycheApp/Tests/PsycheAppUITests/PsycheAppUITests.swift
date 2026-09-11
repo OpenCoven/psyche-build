@@ -473,6 +473,23 @@ final class PsycheAppUITests: XCTestCase {
         )
     }
 
+    func testStoppingAPaneCanBeCancelledWithoutRemovingIt() throws {
+        let app = launchLifecycleActionsFixture()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Stop"].tap()
+
+        XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForExistence(timeout: 10))
+        let dialog = app.sheets.firstMatch.exists ? app.sheets.firstMatch : app.alerts.firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 10))
+        dialog.buttons["Keep pane open"].tap()
+
+        XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForNonExistence(timeout: 10))
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pane-chip-web-home", in: app).waitForExistence(timeout: 10))
+    }
+
     func testCleanupConfirmationRoutesIntoRemoteCloseWorkflow() throws {
         let app = launchApp()
         openWebHomePane(in: app)
@@ -498,6 +515,25 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertFalse(
             app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
         )
+    }
+
+    func testCleanupConfirmationCanBeCancelledWithoutOpeningRemoteAction() throws {
+        let app = launchLifecycleActionsFixture()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Close and Cleanup"].tap()
+
+        XCTAssertTrue(
+            app.staticTexts["Close and clean up homepage polish?"].waitForExistence(timeout: 10)
+        )
+        let dialog = app.sheets.firstMatch.exists ? app.sheets.firstMatch : app.alerts.firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 10))
+        dialog.buttons["Keep pane open"].tap()
+
+        XCTAssertTrue(app.staticTexts["Close and clean up homepage polish?"].waitForNonExistence(timeout: 10))
+        XCTAssertFalse(element("remote-action-sheet", in: app).exists)
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
     }
 
     func testMergeWorkflowHandlesSiblingAndFallbackConfirmationsBeforeSuccess() throws {
@@ -529,6 +565,28 @@ final class PsycheAppUITests: XCTestCase {
             ).firstMatch.waitForExistence(timeout: 10)
         )
         XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10))
+    }
+
+    func testMergeWorkflowCanCancelAHostDrivenConfirmation() throws {
+        let app = launchLifecycleActionsFixture()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Merge"].tap()
+
+        XCTAssertTrue(app.staticTexts["Sibling Agents Active"].waitForExistence(timeout: 10))
+        let sheet = element("remote-action-sheet", in: app)
+        let host = app.staticTexts["psyche-demo.local"]
+        reveal(host, in: sheet)
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+        let paneID = app.staticTexts["web-home"]
+        reveal(paneID, in: sheet)
+        XCTAssertTrue(paneID.waitForExistence(timeout: 10))
+
+        tapControl("Cancel", in: app)
+
+        XCTAssertTrue(app.staticTexts["Merge cancelled"].waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pane-chip-web-home", in: app).waitForExistence(timeout: 10))
     }
 
     func testMergeWorkflowUsesSingleExplicitCancelPathForUncommittedChoice() throws {
@@ -615,6 +673,44 @@ final class PsycheAppUITests: XCTestCase {
             (bodyField.value as? String ?? "").contains("Confirmed from iOS"),
             "Edited PR summary should remain in the review form"
         )
+    }
+
+    func testPullRequestCanBeCancelledFromConfirmationAndReview() throws {
+        let confirmationApp = launchLifecycleActionsFixture()
+        openWebHomePane(in: confirmationApp)
+
+        openPaneActions(in: confirmationApp)
+        confirmationApp.buttons["Create Pull Request"].tap()
+        XCTAssertTrue(confirmationApp.staticTexts["Create Pull Request"].waitForExistence(timeout: 10))
+        tapControl("Cancel", in: confirmationApp)
+        XCTAssertTrue(confirmationApp.staticTexts["Action cancelled."].waitForExistence(timeout: 10))
+
+        let reviewApp = launchLifecycleActionsFixture()
+        openWebHomePane(in: reviewApp)
+
+        openPaneActions(in: reviewApp)
+        reviewApp.buttons["Create Pull Request"].tap()
+        tapControl("Create PR", in: reviewApp)
+        XCTAssertTrue(element("remote-action-pr-title", in: reviewApp).waitForExistence(timeout: 10))
+        tapControl("Cancel", in: reviewApp)
+
+        XCTAssertTrue(reviewApp.staticTexts["Action cancelled."].waitForExistence(timeout: 10))
+    }
+
+    func testRemoteActionPreDispatchErrorIsVisibleAndDismissable() throws {
+        let app = launchLifecycleActionsFixture()
+        openPane("action-error", in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Merge"].tap()
+
+        XCTAssertTrue(app.staticTexts["That did not work"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "rejected pre-dispatch rejection before dispatch")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10))
     }
 
     // MARK: - Split layout and focus
@@ -889,10 +985,15 @@ final class PsycheAppUITests: XCTestCase {
     private func launchApp(
         arguments: [String] = ["-uiFixture", "multiproject"]
     ) -> XCUIApplication {
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments += arguments
         app.launch()
         return app
+    }
+
+    private func launchLifecycleActionsFixture() -> XCUIApplication {
+        launchApp(arguments: ["-uiFixture", "lifecycle-actions"])
     }
 
     private func requireCompactWidth(in app: XCUIApplication) throws {
