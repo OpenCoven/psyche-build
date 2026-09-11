@@ -131,10 +131,10 @@ Psyche Build bridge adapter rather than a claim of Psyche protocol conformance.
 Exact source limits include a 1 MiB LAN frame cap, 256 KiB host pane-output
 buffer, four v3 terminal streams per bridge connection, two attached iOS
 terminal sessions, 64 KiB retained iOS output per pane, 15-second mobile
-control request timeout, 256 KiB workspace-cache record cap, 24 drafts,
-4,096-character drafts, 128 remembered pane-spawn idempotency keys, 64 pending
-remote action sessions with five-minute TTL, 200,000-byte file previews, and
-50 published rituals per project.
+control request timeout, 256 KiB encoded workspace-cache file cap, 24 drafts
+per cached state, 4,096-character drafts, 128 remembered pane-spawn idempotency
+keys, 64 pending remote action sessions with five-minute TTL, 200,000-byte file
+previews, and 50 published rituals per project.
 
 Demo-only roots and controls — including `DemoStore`, fixture roots,
 `-uiFixture`, `FixtureControlRequests`, `FixtureTerminalClient`, and

@@ -45,8 +45,10 @@ Now is a cross-project inbox generated from the authoritative workspace
 snapshot. It groups every published pane by state: needs attention, running, and
 recent. A row opens the pane; if the store is stale it shows "Showing last known
 state" with the last confirmation time instead of presenting the workspace as
-live. The root keeps tab, selected project, and pushed pane identity stable
-across size-class changes, so rotating an iPad preserves the equivalent screen.
+live. The root keeps tab state across size-class changes, and the Now route's
+pushed pane path is shared with the regular detail stack. The compact Projects
+route is hosted in its own unbound navigation stack, so rotating from a compact
+project or project pane reconstructs the regular shell at the Projects root.
 
 iOS source currently has two composition roots:
 
@@ -110,9 +112,9 @@ These limits are source constants, not product aspirations:
 | Mobile attached terminal sessions | `2` | `native/ios/PsycheCore/Sources/PsycheCore/Terminal/TerminalSessionRegistry.swift` |
 | Mobile retained output per pane | `64 KiB` | `native/ios/PsycheCore/Sources/PsycheCore/Terminal/TerminalSessionRegistry.swift` |
 | Mobile control request timeout | `15 seconds` | `native/ios/PsycheCore/Sources/PsycheCore/Connection/ControlRequestClient.swift` |
-| Workspace cache encoded record cap | `256 KiB` | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
-| Workspace cache draft count | `24` | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
-| Workspace cache draft length | `4,096` characters | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
+| Workspace cache encoded file cap | `256 KiB` for the whole encoded `PersistedWorkspaceCache` file | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
+| Workspace cache draft count | `24` per cached state | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
+| Workspace cache draft length | `4,096` characters per draft | `native/ios/PsycheCore/Sources/PsycheCore/State/WorkspaceCache.swift` |
 | Mobile pane-spawn idempotency hot cache | `128` keys | `src/services/bridge/MobileControlGateway.ts` |
 | Pending remote action sessions | `64` | `src/actions/remoteActionSessions.ts` |
 | Remote action session TTL | `5 minutes` | `src/services/bridge/MobileControlGateway.ts` |
@@ -145,11 +147,12 @@ stale and awaiting a connection snapshot. Live commands, file inspection, pane
 creation, renames, stops, and ritual launches require a live workspace and a
 published target.
 
-`WorkspaceCache` stores only the last confirmed workspace, sequence,
-confirmation timestamp, selection, and drafts within the bounds listed above.
-Corrupt or unreadable cache records surface explicit recovery errors and preserve
-the original data where possible; they are not silently replaced with an empty
-workspace.
+`WorkspaceCache` stores host-keyed cached states containing the last confirmed
+workspace, sequence, confirmation timestamp, selection, and drafts. The encoded
+cache file is capped as a whole; draft count and draft length are enforced per
+cached state. Corrupt or unreadable cache files surface explicit recovery errors
+and preserve the original data where possible; they are not silently replaced
+with an empty workspace.
 
 Bonjour parsing is currently a discovery adapter only. It validates TXT
 metadata, certificate fingerprint shape, supported protocol versions, and

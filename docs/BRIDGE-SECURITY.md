@@ -166,8 +166,9 @@ Three distinct crash routes, all of which were reachable:
   sessions are capped at 64 and expire after five minutes.
 - Mobile file preview reads are capped at 200,000 bytes and browser/diff git
   output is capped at 16 MiB.
-- Workspace cache records are capped at 256 KiB encoded, 24 drafts, and 4,096
-  characters per draft.
+- The encoded workspace-cache file is capped at 256 KiB total, across its
+  host-keyed records. Draft count is capped at 24 per cached state, and each
+  draft is capped at 4,096 characters.
 - Invite authentication, where used, is profile `bridge.v3` only: 10-minute
   lifetime, 32-byte secret, 16-byte invite ID, five wrong presentations,
   16 retained records, 2,048-byte payload cap, and 60-second clock-skew
