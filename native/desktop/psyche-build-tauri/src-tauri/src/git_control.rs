@@ -597,6 +597,7 @@ fn git_repository_paths(root: &Path) -> Result<(Option<PathBuf>, PathBuf), Strin
     git_dir_for_worktree(root).map(|(work_tree, git_dir)| (Some(work_tree), git_dir))
 }
 
+#[cfg(test)]
 fn git_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
     let commondir = git_dir.join("commondir");
     if !commondir.is_file() {
@@ -1840,6 +1841,7 @@ fn read_git_info_file_from_handle(
     )
 }
 
+#[cfg(test)]
 fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
     let git_dir = GitMetadataDirectory::open(git_dir, "Git directory")?;
     read_git_info_file_from_handle(&git_dir, name)
@@ -2036,21 +2038,129 @@ fn snapshot_git_index(
         .map_err(|error| format!("snapshot Git index: {error}"))
 }
 
-fn write_isolated_git_alternates(
+struct GitAlternatesHandoff {}
+
+const MAX_GIT_OBJECT_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn snapshot_git_objects(
     objects_directory: &GitMetadataDirectory,
     destination_git_dir: &Path,
 ) -> Result<(), String> {
-    objects_directory
-        .validate_path_identity("Git objects directory", "before subprocess handoff")?;
-    let alternate_objects = git_subprocess_root(&objects_directory.path);
-    let alternate_objects = alternate_objects.to_string_lossy();
-    #[cfg(windows)]
-    let alternate_objects = alternate_objects.replace('\\', "/");
-    std::fs::write(
-        destination_git_dir.join("objects/info/alternates"),
-        format!("{alternate_objects}\n"),
+    let mut visited = std::collections::HashSet::new();
+    snapshot_git_objects_from_directory(
+        objects_directory,
+        &destination_git_dir.join("objects"),
+        &mut visited,
     )
-    .map_err(|error| format!("write isolated Git alternates file: {error}"))
+}
+
+fn snapshot_git_objects_from_directory(
+    objects_directory: &GitMetadataDirectory,
+    destination_objects_dir: &Path,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+    if !visited.insert(objects_directory.path.clone()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(destination_objects_dir)
+        .map_err(|error| format!("create isolated Git objects directory: {error}"))?;
+    copy_git_objects_directory_tree(
+        objects_directory,
+        destination_objects_dir,
+        "Git objects directory",
+    )?;
+    snapshot_git_alternate_object_directories(objects_directory, destination_objects_dir, visited)
+}
+
+fn copy_git_objects_directory_tree(
+    source_directory: &GitMetadataDirectory,
+    destination_directory: &Path,
+    label: &str,
+) -> Result<(), String> {
+    for entry in source_directory.list_entries(label)? {
+        let name = entry
+            .to_str()
+            .ok_or_else(|| format!("{label} contains a non-utf8 entry name"))?;
+        if name == "alternates"
+            && source_directory
+                .path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                == Some("info")
+        {
+            continue;
+        }
+        let child_label = format!("{label} entry {name}");
+        match source_directory.open_directory(name, &child_label) {
+            Ok(child_directory) => {
+                let child_destination = destination_directory.join(name);
+                std::fs::create_dir_all(&child_destination)
+                    .map_err(|error| format!("create isolated {child_label}: {error}"))?;
+                copy_git_objects_directory_tree(
+                    &child_directory,
+                    &child_destination,
+                    &child_label,
+                )?;
+                child_directory.validate(&child_label)?;
+            }
+            Err(GitMetadataReadError::NotFound) => {
+                return Err(format!("{child_label} disappeared while being read"));
+            }
+            Err(_) => {
+                let bytes = source_directory
+                    .read_file(name, &child_label, MAX_GIT_OBJECT_FILE_BYTES)
+                    .map_err(|error| error.into_message(&child_label))?;
+                std::fs::write(destination_directory.join(name), bytes)
+                    .map_err(|error| format!("write isolated {child_label}: {error}"))?;
+            }
+        }
+    }
+    source_directory.validate(label)
+}
+
+fn snapshot_git_alternate_object_directories(
+    objects_directory: &GitMetadataDirectory,
+    destination_objects_dir: &Path,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+    let info_directory =
+        match objects_directory.open_directory("info", "Git objects info directory") {
+            Ok(directory) => directory,
+            Err(GitMetadataReadError::NotFound) => return Ok(()),
+            Err(error) => return Err(error.into_message("Git objects info directory")),
+        };
+    let alternates = match info_directory.read_file(
+        "alternates",
+        "Git alternates file",
+        MAX_GIT_INFO_FILE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(GitMetadataReadError::NotFound) => return Ok(()),
+        Err(error) => return Err(error.into_message("Git alternates file")),
+    };
+    let alternates = String::from_utf8(alternates)
+        .map_err(|_| "Git alternates file is not valid utf-8".to_string())?;
+    for alternate in alternates
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let alternate_path = Path::new(alternate);
+        let alternate_path = if alternate_path.is_absolute() {
+            normalize_git_metadata_path(alternate_path)
+        } else {
+            normalize_git_metadata_path(&objects_directory.path.join(alternate_path))
+        };
+        let alternate_directory =
+            GitMetadataDirectory::open(&alternate_path, "Git alternate objects directory")?;
+        snapshot_git_objects_from_directory(
+            &alternate_directory,
+            destination_objects_dir,
+            visited,
+        )?;
+    }
+    info_directory.validate("Git objects info directory")?;
+    Ok(())
 }
 
 fn isolated_git_metadata_command(root: &str, git_dir: &Path) -> std::process::Command {
@@ -2066,11 +2176,17 @@ fn isolated_git_metadata_command(root: &str, git_dir: &Path) -> std::process::Co
     command
 }
 
-fn resolve_isolated_git_attribute_source(
+fn resolve_isolated_git_attribute_source_with_hook<F>(
     root: &str,
     git_dir: &Path,
-) -> Result<Option<String>, String> {
-    let output = isolated_git_metadata_command(root, git_dir)
+    before_spawn: &mut F,
+) -> Result<Option<String>, String>
+where
+    F: FnMut(),
+{
+    let mut command = isolated_git_metadata_command(root, git_dir);
+    before_spawn();
+    let output = command
         .args(["rev-parse", "--verify", "HEAD"])
         .output()
         .map_err(|e| format!("resolve isolated Git attribute source: {e}"))?;
@@ -2083,6 +2199,36 @@ fn resolve_isolated_git_attribute_source(
     } else {
         Ok(Some(source))
     }
+}
+
+fn create_empty_git_attribute_source_with_hook<F>(
+    root: &str,
+    git_dir: &Path,
+    before_spawn: &mut F,
+) -> Result<String, String>
+where
+    F: FnMut(),
+{
+    let mut command = isolated_git_metadata_command(root, git_dir);
+    before_spawn();
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .args(["hash-object", "-t", "tree", "-w", "--stdin"])
+        .spawn()
+        .map_err(|e| format!("create empty Git attribute tree: {e}"))?;
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("create empty Git attribute tree: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "create empty Git attribute tree: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn is_null_git_oid(value: &str, object_format: Option<&str>) -> bool {
@@ -2257,7 +2403,6 @@ struct GitInspectionRepository {
     index: Option<PathBuf>,
     attribute_source: Option<String>,
     config: Vec<(String, String)>,
-    common_objects_handle: GitMetadataDirectory,
 }
 
 impl GitInspectionRepository {
@@ -2266,6 +2411,18 @@ impl GitInspectionRepository {
         head_override: Option<&str>,
         config: Vec<(String, String)>,
     ) -> Result<Self, String> {
+        Self::snapshot_with_handoff_hook(root, head_override, config, &mut || {})
+    }
+
+    fn snapshot_with_handoff_hook<F>(
+        root: &str,
+        head_override: Option<&str>,
+        config: Vec<(String, String)>,
+        before_git_spawn: &mut F,
+    ) -> Result<Self, String>
+    where
+        F: FnMut(),
+    {
         let (work_tree, actual_git_dir) = git_repository_paths(Path::new(root))?;
         // Pin the Git directory's identity with a no-follow handle at the
         // point it is resolved, and thread that handle through every read
@@ -2371,6 +2528,7 @@ impl GitInspectionRepository {
             git_dir.path(),
             object_format.map(String::as_str),
         )?;
+        snapshot_git_objects(&common_objects_handle, git_dir.path())?;
         if ref_storage == "reftable" {
             snapshot_git_reftable(
                 &common_dir.join("reftable"),
@@ -2406,29 +2564,18 @@ impl GitInspectionRepository {
             .map_err(|e| format!("snapshot Git refs: {e}"))?;
         }
         if attribute_source.is_none() {
-            write_isolated_git_alternates(&common_objects_handle, git_dir.path())?;
-            attribute_source = resolve_isolated_git_attribute_source(root, git_dir.path())?;
+            attribute_source = resolve_isolated_git_attribute_source_with_hook(
+                root,
+                git_dir.path(),
+                before_git_spawn,
+            )?;
         }
         if attribute_source.is_none() {
-            write_isolated_git_alternates(&common_objects_handle, git_dir.path())?;
-            let mut child = isolated_git_metadata_command(root, git_dir.path())
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .args(["hash-object", "-t", "tree", "-w", "--stdin"])
-                .spawn()
-                .map_err(|e| format!("create empty Git attribute tree: {e}"))?;
-            drop(child.stdin.take());
-            let output = child
-                .wait_with_output()
-                .map_err(|e| format!("create empty Git attribute tree: {e}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "create empty Git attribute tree: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-            attribute_source = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            attribute_source = Some(create_empty_git_attribute_source_with_hook(
+                root,
+                git_dir.path(),
+                before_git_spawn,
+            )?);
         }
 
         Ok(Self {
@@ -2437,12 +2584,11 @@ impl GitInspectionRepository {
             index,
             attribute_source,
             config,
-            common_objects_handle,
         })
     }
 
-    fn prepare_subprocess_handoff(&self) -> Result<(), String> {
-        write_isolated_git_alternates(&self.common_objects_handle, self.git_dir.path())
+    fn prepare_subprocess_handoff(&self) -> Result<GitAlternatesHandoff, String> {
+        Ok(GitAlternatesHandoff {})
     }
 }
 
@@ -2579,7 +2725,7 @@ impl<'a> GitInspection<'a> {
         extra_config: &[(String, String)],
     ) -> Result<String, String> {
         let mut command = self.git_command_with_config(extra_config);
-        self.repository.prepare_subprocess_handoff()?;
+        let _alternates_handoff = self.repository.prepare_subprocess_handoff()?;
         let out = command
             .args(args)
             .output()
@@ -4782,6 +4928,71 @@ mod tests {
     }
 
     #[test]
+    fn git_attribute_source_snapshot_uses_snapshotted_objects_after_objects_swap() {
+        let tree = TempTree::new("git-attribute-source-object-snapshot");
+        let source = tree.root.join("source");
+        let parked = tree.root.join("parked-objects");
+        let replacement = tree.root.join("replacement-objects");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+
+        let init = std::process::Command::new("git")
+            .current_dir(&source)
+            .args(["init", "-q", "-b", "main", "--ref-format=reftable"])
+            .output()
+            .expect("git init must run in tests");
+        if !init.status.success() {
+            assert!(
+                !String::from_utf8_lossy(&init.stderr).trim().is_empty(),
+                "Git without reftable support must reject the requested ref format clearly"
+            );
+            return;
+        }
+        run_test_git(&source, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &source,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        std::fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        run_test_git(&source, &["add", "tracked.txt"]);
+        run_test_git(&source, &["commit", "-qm", "baseline"]);
+        let expected_head = run_test_git_stdout_with_env(&source, &["rev-parse", "HEAD"], &[])
+            .trim()
+            .to_string();
+
+        let config = git_inspection_repository_config(path_text(&source)).unwrap();
+        let objects_dir = source.join(".git/objects");
+        let mut restore = None;
+        let snapshot = GitInspectionRepository::snapshot_with_handoff_hook(
+            path_text(&source),
+            Some("stale-head-override"),
+            config,
+            &mut || {
+                if restore.is_some() {
+                    return;
+                }
+                std::fs::rename(&objects_dir, &parked).unwrap();
+                assert!(create_test_symlink(
+                    TestSymlinkKind::Directory,
+                    &replacement,
+                    &objects_dir,
+                ));
+                restore = Some(DirectoryReplacementGuard {
+                    path: objects_dir.clone(),
+                    parked: parked.clone(),
+                });
+            },
+        )
+        .unwrap();
+        drop(restore);
+
+        assert_eq!(
+            snapshot.attribute_source.as_deref(),
+            Some(expected_head.as_str())
+        );
+    }
+
+    #[test]
     fn git_info_snapshot_anchors_to_open_common_directory() {
         let tree = TempTree::new("git-info-anchored-common-dir");
         let common_dir = tree.root.join("common");
@@ -5515,8 +5726,8 @@ mod tests {
     }
 
     #[test]
-    fn git_inspection_rejects_common_dir_replacement_before_subprocess_handoff() {
-        let tree = TempTree::new("git-alternates-handoff-dir-swap");
+    fn git_inspection_uses_snapshotted_objects_after_common_dir_replacement() {
+        let tree = TempTree::new("git-object-snapshot-dir-swap");
         let parked = tree.root.join("parked-common-git-dir");
         let replacement = tree.root.join("replacement-common-git-dir");
         std::fs::create_dir_all(replacement.join("objects")).unwrap();
@@ -5529,6 +5740,9 @@ mod tests {
         std::fs::write(tree.root.join("tracked.txt"), "baseline\n").unwrap();
         run_test_git(&tree.root, &["add", "tracked.txt"]);
         run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        let expected_head = run_test_git_stdout_with_env(&tree.root, &["rev-parse", "HEAD"], &[])
+            .trim()
+            .to_string();
 
         let inspection = GitInspection::new(path_text(&tree.root)).unwrap();
         let common_dir = tree.root.join(".git");
@@ -5542,12 +5756,9 @@ mod tests {
             parked: parked.clone(),
         };
 
-        let error = inspection
-            .execute(&["status", "--porcelain", "--", "tracked.txt"])
-            .unwrap_err();
+        let head = inspection.execute(&["rev-parse", "HEAD"]).unwrap();
 
-        assert!(error.contains("Git objects directory"));
-        assert!(error.contains("before subprocess handoff"));
+        assert_eq!(head.trim(), expected_head);
     }
 
     #[test]
