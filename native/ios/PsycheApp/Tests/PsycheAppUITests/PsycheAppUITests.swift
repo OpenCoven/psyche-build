@@ -579,9 +579,10 @@ final class PsycheAppUITests: XCTestCase {
         let host = app.staticTexts["psyche-demo.local"]
         reveal(host, in: sheet)
         XCTAssertTrue(host.waitForExistence(timeout: 10))
-        let paneID = app.staticTexts["web-home"]
+        let paneID = element("remote-action-scope-paneId", in: app)
         reveal(paneID, in: sheet)
         XCTAssertTrue(paneID.waitForExistence(timeout: 10))
+        XCTAssertEqual(paneID.label, "web-home")
 
         tapControl("Cancel", in: app)
 
@@ -601,6 +602,7 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(control("AI commit (automatic)", in: app).waitForExistence(timeout: 10))
         XCTAssertTrue(control("Manual commit message", in: app).waitForExistence(timeout: 10))
         XCTAssertTrue(control("Cancel merge", in: app).waitForExistence(timeout: 10))
+        revealControl("Cancel", in: app)
         XCTAssertFalse(control("Cancel", in: app).exists)
 
         tapControl("Cancel merge", in: app)
