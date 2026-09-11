@@ -114,6 +114,17 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(isGpuDiagnosticsStressRunEnabled(true, true, true)).toBe(false);
   });
 
+  it('does not translate alternate native diagnostics authorization properties', () => {
+    const source = readWebFile('main.js');
+    const normalizer = source.slice(
+      source.indexOf('function normalizeNativeDiagnostics'),
+      source.indexOf('function presentGpuDiagnosticsRows'),
+    );
+
+    expect(normalizer).not.toContain('report.debug_build');
+    expect(normalizer).not.toContain('report.stress_authorized');
+  });
+
   it('omits metrics without a production producer while retaining present native process metrics', () => {
     expect(presentGpuDiagnosticRows({
       acceleration: 'accelerated',
@@ -157,6 +168,24 @@ describe('Tauri GPU diagnostics panel', () => {
     );
   });
 
+  it('restores or clears the workspace snapshot after every terminal setup failure', () => {
+    const source = readWebFile('main.js');
+    const terminalAdapter = source.slice(
+      source.indexOf('async function createGpuDiagnosticsStressTerminal'),
+      source.indexOf('async function createGpuDiagnosticsStressEditor'),
+    );
+
+    expect(terminalAdapter).toMatch(
+      /if \(!thread\) \{\s*await restoreGpuDiagnosticsStressWorkspace\(\);\s*throw new Error/,
+    );
+    expect(terminalAdapter).toMatch(
+      /catch \(error\) \{[\s\S]*await restoreGpuDiagnosticsStressWorkspace\(\);[\s\S]*throw error;/,
+    );
+    expect(terminalAdapter).toMatch(
+      /try \{\s*var controller = ensureThreadPtyController\(thread\);/,
+    );
+  });
+
   it('keeps force disposal available when graceful diagnostics cleanup rejects', () => {
     const source = readWebFile('main.js');
     const resourceFactory = source.slice(
@@ -179,6 +208,22 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(workspaceGuard).toContain('state.openFiles.length !== snapshot.fileIds.length');
   });
 
+  it('restores the pre-existing browser active tab after diagnostic tab cleanup', () => {
+    const source = readWebFile('main.js');
+    const snapshot = source.slice(
+      source.indexOf('function beginGpuDiagnosticsStressWorkspace'),
+      source.indexOf('function gpuDiagnosticsStressWorkspaceIsUnchanged'),
+    );
+    const restore = source.slice(
+      source.indexOf('async function restoreGpuDiagnosticsStressWorkspace'),
+      source.indexOf('function createGpuDiagnosticsStressResource'),
+    );
+
+    expect(snapshot).toContain('browserPaneId');
+    expect(snapshot).toContain('browserActiveTabId');
+    expect(restore).toContain('browser.activeTabId = snapshot.browserActiveTabId');
+  });
+
   it('cleans diagnostic browser tabs in their original worktree', () => {
     const source = readWebFile('main.js');
     const cleanup = source.slice(
@@ -187,6 +232,18 @@ describe('Tauri GPU diagnostics panel', () => {
     );
 
     expect(cleanup).toContain('closeBrowserTab(project, tab.id, pane.worktreePath)');
+  });
+
+  it('does not claim a user browser pane that appears during diagnostics setup', () => {
+    const source = readWebFile('main.js');
+    const browserAdapter = source.slice(
+      source.indexOf('async function createGpuDiagnosticsStressBrowser'),
+      source.indexOf('async function focusGpuDiagnosticsStressResource'),
+    );
+
+    expect(browserAdapter).toContain('onCreated: function (candidate)');
+    expect(browserAdapter).toContain('createdPane === pane');
+    expect(browserAdapter).not.toContain('createdPane: !existingPane');
   });
 
   it('adds a development titlebar action and hidden accessible diagnostics panel', () => {
@@ -219,7 +276,7 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(source).toContain('presentGpuDiagnosticRows');
     expect(source).toContain('function deterministicGpuDiagnosticsJson');
     expect(source).toContain('gpu-diagnostics-fallback');
-    expect(source).toContain('stress_authorized');
+    expect(source).not.toContain('stress_authorized');
     expect(source).toContain('stressAuthorized');
     expect(source).toContain('render diagnostics are not authorized');
     expect(source).not.toContain('["frameAverageMs", "Frame average"]');

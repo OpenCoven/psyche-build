@@ -2113,39 +2113,19 @@ fn browser_title_initialization_script() -> String {
             if (!core || typeof core.invoke !== "function") return;
             var invoke = core.invoke;
             var reflectApply = Reflect.apply;
-            var lastTitle = null;
-            var reportsRemaining = 32;
             var reportTitle = function() {
               try {
                 var title = document.title || location.hostname || location.href;
-                if (!title || title === lastTitle || reportsRemaining <= 0) return;
-                lastTitle = title;
-                reportsRemaining -= 1;
                 reflectApply(invoke, core, [
                   "browser_report_title",
                   { title: title }
                 ]);
               } catch (_) {}
             };
-            var observeTitle = function() {
-              try {
-                var target = document.head || document.documentElement;
-                if (!target || typeof MutationObserver !== "function") return;
-                new MutationObserver(reportTitle).observe(target, {
-                  childList: true,
-                  subtree: true,
-                  characterData: true
-                });
-              } catch (_) {}
-            };
             if (document.readyState === "loading") {
-              document.addEventListener("DOMContentLoaded", function() {
-                reportTitle();
-                observeTitle();
-              }, { once: true });
+              document.addEventListener("DOMContentLoaded", reportTitle, { once: true });
             } else {
               reportTitle();
-              observeTitle();
             }
           } catch (_) {}
         })();"#
@@ -5384,12 +5364,12 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
-    fn browser_title_bridge_reports_title_mutations_after_initial_load() {
+    fn browser_title_bridge_does_not_observe_document_mutations() {
         let script = browser_title_initialization_script();
 
-        assert!(script.contains("MutationObserver"));
-        assert!(script.contains("childList: true"));
-        assert!(script.contains("subtree: true"));
+        assert!(!script.contains("MutationObserver"));
+        assert!(!script.contains("childList: true"));
+        assert!(!script.contains("subtree: true"));
     }
 
     #[test]

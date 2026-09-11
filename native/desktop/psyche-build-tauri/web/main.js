@@ -222,15 +222,22 @@
 
   function normalizeNativeDiagnostics(report) {
     var normalized = {};
-    if (!report || typeof report !== "object") return normalized;
-    function copy(name) {
-      var value = report[name];
-      if (value === undefined && name === "engineVersion") value = report.engine_version;
-      if (value === undefined && name === "debugBuild") value = report.debug_build;
-      if (value === undefined && name === "stressAuthorized") value = report.stress_authorized;
-      if (value !== undefined) normalized[name] = value;
+    if (!report || typeof report !== "object" || Array.isArray(report)) return normalized;
+    var fields = ["os", "arch", "engine", "engineVersion", "debugBuild", "stressAuthorized", "process"];
+    if (Object.keys(report).some(function (name) { return fields.indexOf(name) === -1; }) ||
+        typeof report.os !== "string" ||
+        typeof report.arch !== "string" ||
+        typeof report.engine !== "string" ||
+        typeof report.debugBuild !== "boolean" ||
+        typeof report.stressAuthorized !== "boolean" ||
+        (report.engineVersion !== undefined && typeof report.engineVersion !== "string") ||
+        (report.process !== undefined &&
+          (!report.process || typeof report.process !== "object" || Array.isArray(report.process)))) {
+      return normalized;
     }
-    ["os", "arch", "engine", "engineVersion", "debugBuild", "stressAuthorized", "process"].forEach(copy);
+    fields.forEach(function (name) {
+      if (report[name] !== undefined) normalized[name] = report[name];
+    });
     return normalized;
   }
 
@@ -465,6 +472,8 @@
     var sidebarWidth = parseFloat(
       window.getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w")
     );
+    var browserPane = findBrowserPane(project.id, worktreePath);
+    var browser = browserPane && ensureBrowserModel(project, worktreePath);
     gpuDiagnosticsStressWorkspace = {
       projectId: project.id,
       worktreePath: worktreePath,
@@ -479,6 +488,8 @@
       layout: cloneGpuDiagnosticsLayout(paneLayouts.get(key)),
       threadIds: state.threads.map(function (thread) { return thread.id; }),
       fileIds: state.openFiles.map(function (file) { return file.id; }),
+      browserPaneId: browserPane ? browserPane.id : null,
+      browserActiveTabId: browser ? browser.activeTabId : null,
     };
     return gpuDiagnosticsStressWorkspace;
   }
@@ -513,6 +524,15 @@
     if (snapshot.activeProjectId && findProject(snapshot.activeProjectId)) {
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(snapshot.activeProjectId);
       else Object.assign(state, { activeProjectId: snapshot.activeProjectId });
+    }
+    var browserPane = snapshot.browserPaneId &&
+      findBrowserPane(project.id, snapshot.worktreePath);
+    var browser = browserPane && browserPane.id === snapshot.browserPaneId &&
+      ensureBrowserModel(project, snapshot.worktreePath);
+    if (browser && (snapshot.browserActiveTabId === null || browser.tabs.some(function (tab) {
+      return tab.id === snapshot.browserActiveTabId;
+    }))) {
+      browser.activeTabId = snapshot.browserActiveTabId;
     }
     state.activeThreadId = null;
     state.activeFileId = snapshot.activeFileId;
@@ -584,30 +604,40 @@
     var workspace = beginGpuDiagnosticsStressWorkspace();
     var project = findProject(workspace.projectId);
     if (!project || project.closing || activeWorkspaceRoot(project) !== workspace.worktreePath) {
+      await restoreGpuDiagnosticsStressWorkspace();
       throw new Error("diagnostics workspace is no longer available");
     }
-    var thread = await createThread({
-      project: project,
-      name: "render diagnostics " + fixture + " " + (index + 1),
-      kind: "shell",
-      launchKind: "diagnostics-fixture",
-      projectRoot: project.root,
-      cwd: workspace.worktreePath,
-      worktreePath: workspace.worktreePath,
-      deferStart: true,
-      focusTerminal: false,
-    });
-    if (!thread) throw new Error("diagnostics terminal pane could not be created");
+    var thread;
+    try {
+      thread = await createThread({
+        project: project,
+        name: "render diagnostics " + fixture + " " + (index + 1),
+        kind: "shell",
+        launchKind: "diagnostics-fixture",
+        projectRoot: project.root,
+        cwd: workspace.worktreePath,
+        worktreePath: workspace.worktreePath,
+        deferStart: true,
+        focusTerminal: false,
+      });
+    } catch (error) {
+      await restoreGpuDiagnosticsStressWorkspace();
+      throw error;
+    }
+    if (!thread) {
+      await restoreGpuDiagnosticsStressWorkspace();
+      throw new Error("diagnostics terminal pane could not be created");
+    }
 
-    var controller = ensureThreadPtyController(thread);
-    var startAttempt = controller && typeof controller.prepareForPtyStart === "function"
-      ? controller.prepareForPtyStart()
-      : null;
-    var operationGeneration = gpuDiagnosticsStressOperationGeneration;
-    thread.startInFlight = true;
     var fixtureStarted = false;
     var fixtureStopped = false;
     try {
+      var controller = ensureThreadPtyController(thread);
+      var startAttempt = controller && typeof controller.prepareForPtyStart === "function"
+        ? controller.prepareForPtyStart()
+        : null;
+      var operationGeneration = gpuDiagnosticsStressOperationGeneration;
+      thread.startInFlight = true;
       await invoke("diagnostics_spawn_fixture", { threadId: thread.id, fixture: fixture });
       fixtureStarted = true;
       var nativeGeneration = await invoke("pty_current_generation", {
@@ -655,19 +685,24 @@
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
+        await restoreGpuDiagnosticsStressWorkspace();
         throw new AggregateError(
           [error, new Error("diagnostics terminal cleanup was not confirmed")],
           "diagnostics terminal setup failed and native cleanup is incomplete",
           { cause: error },
         );
       }
-      await closeGpuDiagnosticsStressThread(thread).catch(function (cleanupError) {
+      try {
+        await closeGpuDiagnosticsStressThread(thread);
+      } catch (cleanupError) {
+        await restoreGpuDiagnosticsStressWorkspace();
         throw new AggregateError(
           [error, cleanupError],
           "diagnostics terminal setup and cleanup failed",
           { cause: error },
         );
-      });
+      }
+      await restoreGpuDiagnosticsStressWorkspace();
       throw error;
     }
 
@@ -788,12 +823,18 @@
     if (!project || project.closing || activeWorkspaceRoot(project) !== workspace.worktreePath) {
       throw new Error("diagnostics workspace is no longer available");
     }
-    var existingPane = findBrowserPane(project.id, workspace.worktreePath);
     var pane = null;
+    var createdPane = null;
     var tab = null;
     try {
-      pane = await createBrowserPane(project, { worktreePath: workspace.worktreePath });
+      pane = await createBrowserPane(project, {
+        worktreePath: workspace.worktreePath,
+        onCreated: function (candidate) {
+          createdPane = candidate;
+        },
+      });
       if (!pane) throw new Error("diagnostics browser pane could not be created");
+      var ownsPane = createdPane === pane;
       tab = createBrowserTab(project, "about:blank", true, workspace.worktreePath);
       if (!tab) throw new Error("diagnostics browser tab could not be created");
       if (!await navigateBrowser("about:blank", {
@@ -814,7 +855,7 @@
           project: project,
           tab: tab,
           pane: pane,
-          createdPane: !existingPane,
+          createdPane: ownsPane,
           page: page,
           visible: true,
         },
@@ -823,7 +864,7 @@
             project,
             tab,
             pane,
-            !existingPane,
+            ownsPane,
           );
         },
         function () {
@@ -831,7 +872,7 @@
             project,
             tab,
             pane,
-            !existingPane,
+            ownsPane,
           ).catch(function (error) {
             console.error("[psyche:graphics] diagnostics browser force cleanup failed: " + String(error));
           });
@@ -845,7 +886,7 @@
             project,
             tab,
             pane,
-            !existingPane,
+            createdPane === pane,
           );
         } catch (failure) {
           cleanupError = failure;
@@ -3804,6 +3845,7 @@
     await focusThread(id, focusOptions);
     if (!isCurrent() || browserPaneIsClosing(pane) ||
         findBrowserPane(project.id, worktreePath) !== pane) return null;
+    if (typeof options.onCreated === "function") options.onCreated(pane);
     refreshSidebar();
     refreshTabs();
     return pane;
