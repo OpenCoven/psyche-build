@@ -486,6 +486,39 @@ public final class WorkspaceStore: ObservableObject {
         drafts[paneID] = draft
     }
 
+    public func cachedState() -> CachedWorkspaceState? {
+        guard let workspace else { return nil }
+
+        let publishedPaneIDs = Set(Self.allPanes(in: workspace).map(\.pane.id))
+        let filteredDrafts = drafts.filter { publishedPaneIDs.contains($0.key) }
+
+        return CachedWorkspaceState(
+            workspace: workspace,
+            sequence: sequence,
+            lastConfirmedAt: lastConfirmedAt,
+            selectedProjectID: selectedProjectID,
+            primaryPaneID: primaryPaneID,
+            secondaryPaneID: secondaryPaneID,
+            drafts: filteredDrafts
+        )
+    }
+
+    public func restoreCachedState(_ state: CachedWorkspaceState) {
+        workspace = state.restoredWorkspace
+        sequence = state.sequence
+        lastConfirmedAt = state.lastConfirmedAt
+        selectedProjectID = state.selectedProjectID
+        primaryPaneID = state.primaryPaneID
+        secondaryPaneID = state.secondaryPaneID
+        drafts = state.drafts
+        activeConnectionGeneration = nil
+        isStale = true
+        needsFullSnapshot = true
+        isAwaitingConnectionSnapshot = false
+        reconcileSelection()
+        nowSections = Self.makeNowSections(state.restoredWorkspace)
+    }
+
     private func accept(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
         self.workspace = workspace
         sequence = nextSequence

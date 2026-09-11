@@ -1,10 +1,89 @@
+import Combine
 import Foundation
-import PsycheCore
+@testable import PsycheCore
 import XCTest
 @testable import Psyche_Build
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testProductionModelObservesCacheFailureWithoutWorkspaceEmission() async throws {
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("private draft must not appear in an error".utf8).write(
+            to: directory.appendingPathComponent(WorkspaceCache.defaultFileName)
+        )
+        let hosts = PairedHostStore(secureStore: InMemorySecureStore())
+        try await hosts.save(makeHost(
+            serverID: "server-a", serverName: "Host A", host: "a.local",
+            fingerprint: String(repeating: "a", count: 64)
+        ))
+        let composition = MobileAppComposition(
+            transport: FakeTransport(), pairedHostStore: hosts,
+            workspaceCache: WorkspaceCache(baseDirectoryURL: directory)
+        )
+        let model = AppModel(productionComposition: composition)
+        var notifications = 0
+        let observation = model.objectWillChange.sink { notifications += 1 }
+        await composition.restorePersistedWorkspaceIfAvailable()
+        XCTAssertNotNil(composition.workspaceCacheError)
+        XCTAssertGreaterThan(notifications, 0, "Settings must observe cache-only failures")
+        XCTAssertNil(model.workspaceStore.workspace)
+        XCTAssertEqual(model.workspaceCacheError, composition.workspaceCacheError)
+        XCTAssertFalse(model.workspaceCacheError?.contains("private draft") ?? true)
+        withExtendedLifetime(observation) {}
+    }
+
+    func testAuthoritativeSnapshotRecoversSavingAndDismissalKeepsPreservedData() async throws {
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = Data("preserve draft bytes".utf8)
+        try original.write(to: directory.appendingPathComponent(WorkspaceCache.defaultFileName))
+        let hosts = PairedHostStore(secureStore: InMemorySecureStore())
+        let host = makeHost(
+            serverID: "server-a", serverName: "Host A", host: "a.local",
+            fingerprint: String(repeating: "a", count: 64)
+        )
+        try await hosts.save(host)
+        let transport = FakeTransport()
+        let cache = WorkspaceCache(baseDirectoryURL: directory)
+        let composition = MobileAppComposition(
+            transport: transport, pairedHostStore: hosts, workspaceCache: cache
+        )
+        let model = AppModel(productionComposition: composition)
+        let start = Task { await model.start() }
+        try await waitForHello(on: transport)
+        XCTAssertNotNil(model.workspaceCacheError)
+        await transport.emit(.legacy(.welcome(makeWelcome(for: host))))
+        await start.value
+        let requestID = try await waitForSnapshotRequest(on: transport)
+        await transport.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: requestID, sequence: 1, workspace: try makeWorkspace(revision: 4)
+        ))))
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while (model.workspaceCacheRecoveryNotice == nil || model.workspaceCacheError != nil),
+              clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(model.workspaceCacheError)
+        XCTAssertEqual(model.workspaceCacheRecoveryNotice, WorkspaceCache.recoveryNotice)
+        let restored = try await cache.cachedState(forServerID: host.serverID)
+        XCTAssertEqual(restored?.workspace.revision, 4)
+        model.dismissWorkspaceCacheRecoveryNotice()
+        await model.retryWorkspaceCachePersistence()
+        XCTAssertNil(model.workspaceCacheRecoveryNotice)
+        let preserved = try await cache.hasPreservedRecoveryRecords()
+        XCTAssertTrue(preserved)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(
+            "\(WorkspaceCache.defaultFileName).quarantine-0"
+        )), original)
+        await composition.connectionManager.disconnect()
+    }
+
     func testFixtureRootComposesNoConnectionGraph() {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 

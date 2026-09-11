@@ -14,6 +14,42 @@ store rather than constructing a second transport or bypassing the host's
 validation, confirmation, choice, and review sessions. Fixture roots use a
 disconnected store so action-state UI can be tested without network access.
 
+## Workspace persistence and recovery
+
+The host-keyed workspace cache is presentation data, never readiness or action
+authority. Restored state stays stale until a fresh host snapshot is accepted.
+Credentials remain in the secure paired-host store, not the cache. Drafts and
+workspace metadata are sensitive; neither cache bytes nor preserved records
+belong in diagnostics, logs, or support uploads.
+
+Reads consume at most the configured encoded limit (256 KiB by default) plus
+one detection byte, using a no-follow regular-file handle. Missing, unsafe,
+unreadable, malformed, and oversized records remain distinct failure cases.
+Settings displays sanitized saving failures independently of connection errors.
+A missing workspace is not permission to delete a host's saved drafts.
+
+A fresh authoritative snapshot may recover malformed, unsupported-version, or
+oversized cache data only after preserving and verifying the original bytes
+locally. The app keeps up to three preservation records, each at most 1 MiB,
+with the same complete-until-first-authentication protection as the cache and
+excluded from backup. It does not evict or truncate old drafts to make room.
+Byte-matching records left by an interrupted preservation attempt are not
+assumed complete: new and reused copies must finish descriptor-bound protection,
+backup-exclusion verification, and synchronization before replacing the original.
+Larger records, unsafe paths, unreadable files, exhausted preservation slots,
+or failed preservation leave the original cache untouched and require help
+preserving the app data before retrying. Removing a host record is not a
+recovery operation.
+
+After a successful save the saving error clears; a separate Settings notice
+explains that preserved drafts were not restored. That notice alone is not
+proof that saving resumed. Dismissing it never deletes preserved data;
+the notice returns on relaunch while preserved records exist. There is no
+automatic import, deletion, or upload of those records. Keep the installation
+and app data when requesting operator-assisted recovery; do not reinstall to
+clear an error. Simulator tests exercise these flows and protection API usage,
+not physical-device at-rest protection, locked-device behavior, or distribution.
+
 The `v0.0.1` release identity is `Psyche Build` `0.0.1 (1)`. Distribution is
 internal TestFlight only for authorized OpenCoven testers. It is not an
 external TestFlight or public App Store release, and installation is possible

@@ -200,41 +200,10 @@ public actor FixtureControlRequests: ControlRequesting {
 
         switch request.action {
         case .merge:
-            return .actionResult(MobileActionsResultResponse(
-                requestID: requestID,
-                sessionID: nil,
-                result: MobileActionResult(
-                    type: "progress",
-                    message: "Preparing merge status for \(context.paneTitle).",
-                    title: "Merge",
-                    progress: nil,
-                    data: actionScope(
-                        for: context,
-                        consequence: "Checks merge status before the host offers the next merge step."
-                    ),
-                    dismissable: true
-                )
-            ))
+            return startMergeAction(for: context, requestID: requestID)
 
         case .createPR:
-            let sessionID = nextActionSessionID()
-            pendingActions[sessionID] = .createPullRequestConfirm(paneID: request.paneID)
-            return .actionResult(MobileActionsResultResponse(
-                requestID: requestID,
-                sessionID: sessionID,
-                result: MobileActionResult(
-                    type: "confirm",
-                    message: "Push \(context.paneTitle) and create a pull request into \(context.targetBranch ?? "main")?",
-                    title: "Create Pull Request",
-                    confirmLabel: "Create PR",
-                    cancelLabel: "Cancel",
-                    data: actionScope(
-                        for: context,
-                        consequence: "Pushes the branch and creates a pull request on the paired host."
-                    ),
-                    relatedFiles: Self.pullRequestFiles
-                )
-            ))
+            return startCreatePullRequestAction(for: context, requestID: requestID)
 
         case .rename:
             let sessionID = nextActionSessionID()
@@ -302,6 +271,90 @@ public actor FixtureControlRequests: ControlRequesting {
         }
     }
 
+    private func startMergeAction(
+        for context: FixturePaneContext,
+        requestID: String
+    ) -> MobileControlResponse {
+        if context.paneID == "web-home" {
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .mergeSiblingConfirmation(paneID: context.paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "confirm",
+                    message: "1 other agent (homepage preview) is using this worktree. Merging will close it. Proceed?",
+                    title: "Sibling Agents Active",
+                    confirmLabel: "Continue",
+                    cancelLabel: "Cancel",
+                    data: actionScope(
+                        for: context,
+                        consequence: "Closes sibling panes before the host merges this branch into main."
+                    )
+                )
+            ))
+        }
+
+        let sessionID = nextActionSessionID()
+        pendingActions[sessionID] = .mergeUncommittedChoice(paneID: context.paneID)
+        return .actionResult(MobileActionsResultResponse(
+            requestID: requestID,
+            sessionID: sessionID,
+            result: MobileActionResult(
+                type: "choice",
+                message: "This worktree has uncommitted changes that must be committed before merging.",
+                title: "Worktree Has Uncommitted Changes",
+                options: [
+                    MobileActionOption(
+                        id: "commit_automatic",
+                        label: "AI commit (automatic)",
+                        description: "Auto-generate and commit immediately",
+                        isDefault: true
+                    ),
+                    MobileActionOption(
+                        id: "commit_manual",
+                        label: "Manual commit message",
+                        description: "Write your own commit message"
+                    ),
+                    MobileActionOption(
+                        id: "cancel",
+                        label: "Cancel merge",
+                        description: "Resolve manually later"
+                    ),
+                ],
+                data: actionScope(
+                    for: context,
+                    consequence: "Requires the host to commit these changes before merging into main."
+                ),
+                relatedFiles: Self.mergeFiles
+            )
+        ))
+    }
+
+    private func startCreatePullRequestAction(
+        for context: FixturePaneContext,
+        requestID: String
+    ) -> MobileControlResponse {
+        let sessionID = nextActionSessionID()
+        pendingActions[sessionID] = .createPullRequestConfirm(paneID: context.paneID)
+        return .actionResult(MobileActionsResultResponse(
+            requestID: requestID,
+            sessionID: sessionID,
+            result: MobileActionResult(
+                type: "confirm",
+                message: "Push \(context.paneTitle) and create a GitHub pull request into \(context.targetBranch ?? "main")?",
+                title: "Create Pull Request",
+                confirmLabel: "Create PR",
+                cancelLabel: "Cancel",
+                data: actionScope(
+                    for: context,
+                    consequence: "Pushes the branch and creates a pull request on the paired host."
+                ),
+                relatedFiles: Self.pullRequestFiles
+            )
+        ))
+    }
+
     private func respondToAction(
         _ request: MobileActionRespondRequest,
         requestID: String
@@ -315,6 +368,144 @@ public actor FixtureControlRequests: ControlRequesting {
         }
 
         switch (pending, request.response) {
+        case let (.mergeSiblingConfirmation(paneID), .confirm):
+            guard let context = paneContext(for: paneID) else {
+                return .error(MobileProtocolErrorResponse(
+                    requestID: requestID,
+                    code: "unknown_pane",
+                    message: "Pane \(paneID) is not published by this fixture."
+                ))
+            }
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .mergeFallbackConfirmation(paneID: paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "confirm",
+                    message: "feat/home-preview is no longer available. Merge \"\(context.paneTitle)\" directly into \(context.targetBranch ?? "main") instead?",
+                    title: "Parent Merge Target Unavailable",
+                    confirmLabel: "Continue",
+                    cancelLabel: "Cancel",
+                    data: actionScope(
+                        for: context,
+                        consequence: "Confirms a fallback merge target before the host continues."
+                    )
+                )
+            ))
+
+        case (.mergeSiblingConfirmation, .cancel):
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "info",
+                    message: "Merge cancelled",
+                    title: "Sibling Agents Active"
+                )
+            ))
+
+        case let (.mergeFallbackConfirmation(paneID), .confirm):
+            guard let context = paneContext(for: paneID) else {
+                return .error(MobileProtocolErrorResponse(
+                    requestID: requestID,
+                    code: "unknown_pane",
+                    message: "Pane \(paneID) is not published by this fixture."
+                ))
+            }
+            let sessionID = nextActionSessionID()
+            pendingActions[sessionID] = .mergeFinalConfirmation(paneID: paneID)
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: sessionID,
+                result: MobileActionResult(
+                    type: "confirm",
+                    message: "Merge \"\(context.paneTitle)\" into \(context.targetBranch ?? "main")?",
+                    title: "Merge Worktree",
+                    confirmLabel: "Merge",
+                    cancelLabel: "Cancel",
+                    data: actionScope(
+                        for: context,
+                        consequence: "The host performs the merge and reports the terminal result."
+                    )
+                )
+            ))
+
+        case (.mergeFallbackConfirmation, .cancel):
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "info",
+                    message: "Merge cancelled",
+                    title: "Parent Merge Target Unavailable"
+                )
+            ))
+
+        case let (.mergeFinalConfirmation(paneID), .confirm):
+            let paneTitle = paneContext(for: paneID)?.paneTitle ?? paneID
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "success",
+                    message: "Merged \"\(paneTitle)\" into main.",
+                    title: "Merge Worktree"
+                )
+            ))
+
+        case (.mergeFinalConfirmation, .cancel):
+            return .actionResult(MobileActionsResultResponse(
+                requestID: requestID,
+                sessionID: nil,
+                result: MobileActionResult(
+                    type: "info",
+                    message: "Merge cancelled",
+                    title: "Merge Worktree"
+                )
+            ))
+
+        case let (.mergeUncommittedChoice(paneID), .choice(optionID)):
+            let paneTitle = paneContext(for: paneID)?.paneTitle ?? paneID
+            switch optionID {
+            case "commit_automatic":
+                return .actionResult(MobileActionsResultResponse(
+                    requestID: requestID,
+                    sessionID: nil,
+                    result: MobileActionResult(
+                        type: "error",
+                        message: "Fixture host could not auto-commit the changes for \"\(paneTitle)\".",
+                        title: "Merge Failed"
+                    )
+                ))
+            case "commit_manual":
+                return .actionResult(MobileActionsResultResponse(
+                    requestID: requestID,
+                    sessionID: nil,
+                    result: MobileActionResult(
+                        type: "error",
+                        message: "Fixture host needs a manual commit before it can merge \"\(paneTitle)\".",
+                        title: "Merge Failed"
+                    )
+                ))
+            case "cancel":
+                return .actionResult(MobileActionsResultResponse(
+                    requestID: requestID,
+                    sessionID: nil,
+                    result: MobileActionResult(
+                        type: "info",
+                        message: "Merge cancelled",
+                        title: "Worktree Has Uncommitted Changes"
+                    )
+                ))
+            default:
+                return .error(MobileProtocolErrorResponse(
+                    requestID: requestID,
+                    code: "invalid_action_response",
+                    message: "Merge option \(optionID) is not supported by this fixture."
+                ))
+            }
+
         case let (.rename(paneID), .input(value)):
             let title = value.trimmingCharacters(in: .whitespacesAndNewlines)
             apply { Self.retitlePane(paneID, to: title.isEmpty ? nil : title, in: $0) }
@@ -341,17 +532,22 @@ public actor FixtureControlRequests: ControlRequesting {
                 ))
             }
             let sessionID = nextActionSessionID()
-            pendingActions[sessionID] = .createPullRequestSummary(paneID: paneID)
+            pendingActions[sessionID] = .createPullRequestReview(paneID: paneID)
             return .actionResult(MobileActionsResultResponse(
                 requestID: requestID,
                 sessionID: sessionID,
                 result: MobileActionResult(
-                    type: "input",
+                    type: "pr_review",
                     message: "Review the pull request title and body before sending it.",
                     title: "Create Pull Request",
-                    placeholder: "Title, blank line, then body",
-                    defaultValue: "Ship \(context.paneTitle)\n\nSummary of the fixture change.",
-                    inputMaxVisibleLines: 6,
+                    defaultValue: "feat(website): ship \(context.paneTitle)\n\n## Summary\n- Publish the reviewed homepage polish changes.\n\n## Changes\n- Refresh the launch copy and supporting assets.",
+                    reviewData: MobileActionReviewData(
+                        repoPath: context.worktreePath ?? "/fixture",
+                        sourceBranch: context.sourceBranch ?? "feature",
+                        targetBranch: context.targetBranch ?? "main",
+                        files: Self.pullRequestFiles,
+                        aiFailed: false
+                    ),
                     data: actionScope(
                         for: context,
                         consequence: "Creates a pull request on the paired host."
@@ -363,12 +559,23 @@ public actor FixtureControlRequests: ControlRequesting {
         case (.createPullRequestConfirm, .cancel):
             return cancelledActionResult(requestID: requestID, title: "Create Pull Request")
 
-        case let (.createPullRequestSummary(paneID), .input(summary)):
+        case let (.createPullRequestReview(paneID), .input(summary)):
+            let parsed = Self.parsePullRequestSummary(summary)
+            guard !parsed.title.isEmpty else {
+                return .actionResult(MobileActionsResultResponse(
+                    requestID: requestID,
+                    sessionID: nil,
+                    result: MobileActionResult(
+                        type: "error",
+                        message: "PR title cannot be empty",
+                        title: "Create Pull Request"
+                    )
+                ))
+            }
             let paneTitle = paneContext(for: paneID)?.paneTitle ?? paneID
-            let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-            let message = trimmed.isEmpty
-                ? "Created a pull request for \(paneTitle)."
-                : "Created a pull request for \(paneTitle) with your edited summary."
+            let message = parsed.body.isEmpty
+                ? "Created PR \"\(parsed.title)\" for \(paneTitle): https://github.com/OpenCoven/psyche-build/pull/903"
+                : "Created PR \"\(parsed.title)\" with your edited summary: https://github.com/OpenCoven/psyche-build/pull/903"
             return .actionResult(MobileActionsResultResponse(
                 requestID: requestID,
                 sessionID: nil,
@@ -379,7 +586,7 @@ public actor FixtureControlRequests: ControlRequesting {
                 )
             ))
 
-        case (.createPullRequestSummary, .cancel):
+        case (.createPullRequestReview, .cancel):
             return cancelledActionResult(requestID: requestID, title: "Create Pull Request")
 
         case let (.close(paneID), .choice(optionID)):
@@ -492,10 +699,32 @@ public actor FixtureControlRequests: ControlRequesting {
         ))
     }
 
+    private static func parsePullRequestSummary(_ input: String) -> (title: String, body: String) {
+        let normalized = input
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return ("", "")
+        }
+        guard let newline = normalized.firstIndex(of: "\n") else {
+            return (normalized, "")
+        }
+
+        let title = String(normalized[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyStart = normalized.index(after: newline)
+        let body = String(
+            String(normalized[bodyStart...])
+                .drop(while: { $0 == "\n" })
+        )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title, body)
+    }
+
     // MARK: - Snapshot edits
 
     private static let fixtureHostName = "psyche-demo.local"
-    private static let pullRequestFiles = ["Sources/App.swift", "Tests/AppTests.swift"]
+    private static let mergeFiles = ["Sources/App.swift", "Sources/Deleted.swift"]
+    private static let pullRequestFiles = ["Sources/App.swift", "Sources/Deleted.swift"]
 
     private static func ritualLaunchPath(
         in workspace: WorkspaceSnapshot,
@@ -586,9 +815,13 @@ private enum FixtureControlRequestError: LocalizedError {
 }
 
 private enum FixturePendingAction {
+    case mergeSiblingConfirmation(paneID: String)
+    case mergeFallbackConfirmation(paneID: String)
+    case mergeFinalConfirmation(paneID: String)
+    case mergeUncommittedChoice(paneID: String)
     case rename(paneID: String)
     case createPullRequestConfirm(paneID: String)
-    case createPullRequestSummary(paneID: String)
+    case createPullRequestReview(paneID: String)
     case close(paneID: String)
 }
 

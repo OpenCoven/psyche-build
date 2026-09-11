@@ -293,6 +293,45 @@ final class RemoteActionStoreTests: XCTestCase {
         XCTAssertFalse(store.isSubmitting)
     }
 
+    func testDuplicateCancelTapSendsExactlyOnceWhileFirstCancelIsBlocked() async {
+        let gate = ActionResponseGate()
+        let requests = ActionControlRequests(
+            responses: [
+                .actionResult(actionResult(
+                    requestID: "req-1",
+                    sessionID: "session-1",
+                    type: "choice"
+                )),
+            ],
+            responseGate: gate
+        )
+        let store = RemoteActionStore(controlRequests: requests)
+        await store.start(action: .merge, onPane: paneID, in: workspace)
+
+        async let first: Void = store.respond(.choice(optionID: "cancel"))
+        await gate.waitUntilBlocked()
+        await store.respond(.choice(optionID: "cancel"))
+
+        let blockedRespondCount = await requests.responds.count
+        XCTAssertEqual(blockedRespondCount, 1)
+        XCTAssertTrue(store.isSubmitting)
+        XCTAssertNil(store.presentation?.sessionID)
+
+        await gate.release(with: .actionResult(actionResult(
+            requestID: "req-2",
+            sessionID: nil,
+            type: "info",
+            message: "Merge cancelled"
+        )))
+        await first
+
+        let finalRespondCount = await requests.responds.count
+        XCTAssertEqual(finalRespondCount, 1)
+        XCTAssertEqual(store.presentation?.message, "Merge cancelled")
+        XCTAssertFalse(store.isSubmitting)
+        XCTAssertFalse(store.isBusy(paneID))
+    }
+
     func testSecondStartWhileFirstIsBlockedSendsNothingAndPreservesFirstWorkflow() async {
         let gate = ActionStartGate()
         let requests = ActionControlRequests(

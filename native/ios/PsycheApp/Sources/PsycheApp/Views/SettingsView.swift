@@ -43,6 +43,32 @@ struct SettingsView: View {
                 }
             }
 
+            if let cacheError = model.workspaceCacheError {
+                Section("Workspace saving") {
+                    Label(cacheError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(PsycheTheme.amber)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("workspace-cache-error")
+                    Button("Retry saving") {
+                        Task { await model.retryWorkspaceCachePersistence() }
+                    }
+                    .frame(minHeight: PsycheTheme.minimumTapTarget)
+                    .accessibilityIdentifier("workspace-cache-retry")
+                }
+            }
+
+            if let notice = model.workspaceCacheRecoveryNotice {
+                Section("Preserved workspace data") {
+                    Text(notice)
+                        .accessibilityIdentifier("workspace-cache-recovery-notice")
+                    Button("Dismiss notice (keep preserved data)") {
+                        model.dismissWorkspaceCacheRecoveryNotice()
+                    }
+                    .frame(minHeight: PsycheTheme.minimumTapTarget)
+                    .accessibilityIdentifier("workspace-cache-dismiss-notice")
+                }
+            }
+
             Section {
                 Button("Pair a host") { isPairSheetPresented = true }
                     .frame(minHeight: PsycheTheme.minimumTapTarget)

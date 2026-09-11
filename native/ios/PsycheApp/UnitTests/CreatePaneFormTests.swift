@@ -246,6 +246,34 @@ final class CreatePaneFormTests: XCTestCase {
         ))
     }
 
+    func testPublishedRitualsDoNotAdvertiseExecution() {
+        let project = WorkspaceProjectSnapshot(
+            id: "psyche",
+            root: "/repo",
+            title: "psyche-build",
+            worktrees: [],
+            projectPanes: [],
+            runningCount: 0,
+            attentionCount: 0,
+            rituals: RitualPublicationSnapshot(state: .available, rituals: [
+                PublishedRitual(
+                    id: "homepage",
+                    displayName: "Launch Homepage",
+                    description: nil,
+                    scope: .project
+                ),
+            ])
+        )
+
+        XCTAssertEqual(
+            RitualMenuPresentation.make(project: project, isStaleWorkspace: false),
+            .status(
+                label: "Ritual execution is not available on mobile yet",
+                systemImage: "sparkles"
+            )
+        )
+    }
+
     func testRitualMenuSurfaceExplainsEmptyAndUnavailableStates() {
         let emptyProject = WorkspaceProjectSnapshot(
             id: "psyche",

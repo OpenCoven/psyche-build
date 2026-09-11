@@ -12,6 +12,8 @@ import PsycheCore
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var connectionError: String?
+    @Published private(set) var workspaceCacheError: String?
+    @Published private(set) var workspaceCacheRecoveryNotice: String?
     /// Which host the state on screen came from. Rows read it for VoiceOver,
     /// where the host is not otherwise recoverable from the visible text.
     @Published private(set) var hostName: String?
@@ -49,13 +51,17 @@ final class AppModel: ObservableObject {
             workspaceStore = composition.workspaceStore
             remoteActionStore = composition.remoteActionStore
             terminalRegistry = composition.terminalRegistry
+            composition.$workspaceCacheError
+                .assign(to: &$workspaceCacheError)
+            composition.$workspaceCacheRecoveryNotice
+                .assign(to: &$workspaceCacheRecoveryNotice)
             bindHostContextUpdates()
             return
         }
 
         composition = nil
         let fixtureWorkspace = DemoStore.makeFixtureWorkspace(
-            fixture: fixture,
+            fixture: fixture == "cache-recovery" ? WorkspaceFixtures.multiproject : fixture,
             inspectionFails: fixtureInspectionFails
         )
         workspaceStore = fixtureWorkspace.workspaceStore
@@ -67,6 +73,17 @@ final class AppModel: ObservableObject {
         )
         terminalRegistry.start()
         hostName = Self.fixtureHostName
+        if fixture == "cache-recovery" {
+            workspaceCacheError = WorkspaceCacheError.corruptedRecord.localizedDescription
+        }
+    }
+
+    func retryWorkspaceCachePersistence() async {
+        await composition?.retryWorkspaceCachePersistence()
+    }
+
+    func dismissWorkspaceCacheRecoveryNotice() {
+        composition?.dismissWorkspaceCacheRecoveryNotice()
     }
 
     /// Fixed so UI tests can assert host context without a paired record.

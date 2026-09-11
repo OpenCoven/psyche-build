@@ -1,3 +1,4 @@
+import Foundation
 import PsycheCore
 
 enum ActionSheetSection: Equatable, Hashable {
@@ -23,6 +24,16 @@ struct ActionSheetStatus: Equatable {
     let label: String
     let systemImage: String
     let tone: ActionSheetStatusTone
+}
+
+struct ActionSheetCancelControl: Equatable {
+    let label: String
+    let response: MobileActionResponse
+}
+
+struct ActionSheetPullRequestDraft: Equatable {
+    let title: String
+    let body: String
 }
 
 enum ActionSheetPresentation {
@@ -52,6 +63,23 @@ enum ActionSheetPresentation {
 
     static func optionRole(_ option: MobileActionOption) -> ActionSheetControlRole {
         option.danger == true ? .destructive : .normal
+    }
+
+    static func visibleChoiceOptions(_ options: [MobileActionOption]) -> [MobileActionOption] {
+        guard let cancelOption = cancelOption(in: options) else {
+            return options
+        }
+        return options.filter { $0.id != cancelOption.id }
+    }
+
+    static func cancelControl(for options: [MobileActionOption]) -> ActionSheetCancelControl {
+        if let cancelOption = cancelOption(in: options) {
+            return ActionSheetCancelControl(
+                label: cancelOption.label,
+                response: .choice(optionID: cancelOption.id)
+            )
+        }
+        return ActionSheetCancelControl(label: "Cancel", response: .cancel)
     }
 
     static func inputLineRange(_ requestedMaximum: Int?) -> ClosedRange<Int> {
@@ -97,5 +125,55 @@ enum ActionSheetPresentation {
 
     static func primaryInputLabel(for action: PaneAction) -> String {
         action == .createPR ? "Create Pull Request" : "Continue"
+    }
+
+    static func controlIdentifier(for label: String) -> String {
+        let slug = label
+            .lowercased()
+            .map { character -> String in
+                character.isLetter || character.isNumber ? String(character) : "-"
+            }
+            .joined()
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        return "remote-action-control-\(slug)"
+    }
+
+    static func pullRequestDraft(from summary: String) -> ActionSheetPullRequestDraft {
+        let normalized = summary
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return ActionSheetPullRequestDraft(title: "", body: "")
+        }
+        guard let newline = normalized.firstIndex(of: "\n") else {
+            return ActionSheetPullRequestDraft(title: normalized, body: "")
+        }
+
+        let title = String(normalized[..<newline])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyStart = normalized.index(after: newline)
+        let body = String(
+            String(normalized[bodyStart...])
+                .drop(while: { $0 == "\n" })
+        )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ActionSheetPullRequestDraft(title: title, body: body)
+    }
+
+    static func pullRequestSummary(title: String, body: String) -> String {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = body
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBody.isEmpty else {
+            return trimmedTitle
+        }
+        return "\(trimmedTitle)\n\n\(trimmedBody)"
+    }
+
+    private static func cancelOption(in options: [MobileActionOption]) -> MobileActionOption? {
+        options.first { $0.id == "cancel" }
     }
 }

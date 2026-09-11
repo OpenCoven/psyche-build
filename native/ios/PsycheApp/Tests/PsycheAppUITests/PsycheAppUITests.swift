@@ -8,6 +8,21 @@ import XCTest
 /// something weaker.
 @MainActor
 final class PsycheAppUITests: XCTestCase {
+    func testSettingsDisplaysAccessibleCacheRecoveryWarning() throws {
+        let app = launchApp(arguments: ["-uiFixture", "cache-recovery"])
+        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
+        if app.windows.firstMatch.frame.width < 700 {
+            app.tabBars.buttons["Settings"].tap()
+        } else {
+            row("source-settings", in: app).tap()
+        }
+        let warning = element("workspace-cache-error", in: app)
+        guard warning.waitForExistence(timeout: 5) else {
+            return XCTFail("Settings does not display the workspace cache error")
+        }
+        XCTAssertTrue(warning.label.contains("Reconnect"))
+        XCTAssertFalse(warning.label.contains("private draft"))
+    }
 
     // MARK: - Both device classes
 
@@ -409,7 +424,10 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Close and Cleanup"].waitForExistence(timeout: 10))
 
         app.buttons["Rituals"].tap()
-        XCTAssertTrue(app.buttons["Launch Homepage"].waitForExistence(timeout: 10))
+        let unavailable = app.buttons["Ritual execution is not available on mobile yet"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
+        XCTAssertFalse(unavailable.isEnabled)
+        XCTAssertFalse(app.buttons["Launch Homepage"].exists)
     }
 
     func testRenamingAPaneUsesTheRemoteActionSheet() throws {
@@ -479,6 +497,123 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Choose how to close homepage polish."].waitForExistence(timeout: 10))
         XCTAssertFalse(
             app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
+        )
+    }
+
+    func testMergeWorkflowHandlesSiblingAndFallbackConfirmationsBeforeSuccess() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Merge"].tap()
+
+        let sheet = element("remote-action-sheet", in: app)
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Sibling Agents Active"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "homepage preview")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+
+        tapControl("Continue", in: app)
+        XCTAssertTrue(app.staticTexts["Parent Merge Target Unavailable"].waitForExistence(timeout: 10))
+
+        tapControl("Continue", in: app)
+        XCTAssertTrue(app.staticTexts["Merge Worktree"].waitForExistence(timeout: 10))
+
+        tapControl("Merge", in: app)
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "Merged \"homepage polish\" into main.")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10))
+    }
+
+    func testMergeWorkflowUsesSingleExplicitCancelPathForUncommittedChoice() throws {
+        let app = launchApp()
+        openPane("ios-cockpit", in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Merge"].tap()
+
+        XCTAssertTrue(app.staticTexts["Worktree Has Uncommitted Changes"].waitForExistence(timeout: 10))
+        revealControl("AI commit (automatic)", in: app)
+        XCTAssertTrue(control("AI commit (automatic)", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(control("Manual commit message", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(control("Cancel merge", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(control("Cancel", in: app).exists)
+
+        tapControl("Cancel merge", in: app)
+
+        XCTAssertTrue(app.staticTexts["Merge cancelled"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10))
+        XCTAssertTrue(control("Cancel merge", in: app).waitForNonExistence(timeout: 10))
+        XCTAssertTrue(control("Manual commit message", in: app).waitForNonExistence(timeout: 10))
+    }
+
+    func testMergeWorkflowSurfacesHostFailureFromUncommittedChoice() throws {
+        let app = launchApp()
+        openPane("ios-cockpit", in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Merge"].tap()
+
+        XCTAssertTrue(app.staticTexts["Worktree Has Uncommitted Changes"].waitForExistence(timeout: 10))
+        tapControl("Manual commit message", in: app)
+
+        XCTAssertTrue(app.staticTexts["Merge Failed"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "needs a manual commit")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+    }
+
+    func testPullRequestReviewSupportsEditingAndRelatedFileNavigation() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Create Pull Request"].tap()
+
+        XCTAssertTrue(app.staticTexts["Create Pull Request"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "create a GitHub pull request")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+
+        tapControl("Create PR", in: app)
+
+        let sheet = element("remote-action-sheet", in: app)
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        let changedFile = element("remote-action-pr-file-Sources/App.swift", in: app)
+        reveal(changedFile, in: sheet)
+        XCTAssertTrue(changedFile.waitForExistence(timeout: 10))
+        changedFile.tap()
+
+        XCTAssertTrue(element("action-sheet-related-file", in: app).waitForExistence(timeout: 10))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+
+        let titleField = textInput("remote-action-pr-title", in: app)
+        let bodyField = textInput("remote-action-pr-body", in: app)
+        reveal(titleField, in: sheet)
+        XCTAssertTrue(titleField.waitForExistence(timeout: 10))
+        XCTAssertTrue(bodyField.waitForExistence(timeout: 10))
+
+        titleField.tap()
+        titleField.typeText(" safely")
+        bodyField.tap()
+        bodyField.typeText("\n- Confirmed from iOS")
+        XCTAssertTrue(
+            (titleField.value as? String ?? "").contains("safely"),
+            "Edited PR title should remain in the review form"
+        )
+        XCTAssertTrue(
+            (bodyField.value as? String ?? "").contains("Confirmed from iOS"),
+            "Edited PR summary should remain in the review form"
         )
     }
 
@@ -662,6 +797,43 @@ final class PsycheAppUITests: XCTestCase {
         split.tap()
     }
 
+    private func control(_ label: String, in app: XCUIApplication) -> XCUIElement {
+        element(controlIdentifier(for: label), in: app)
+    }
+
+    private func revealControl(_ label: String, in app: XCUIApplication) {
+        reveal(control(label, in: app), in: element("remote-action-sheet", in: app))
+    }
+
+    private func tapControl(_ label: String, in app: XCUIApplication) {
+        let target = control(label, in: app)
+        reveal(target, in: element("remote-action-sheet", in: app))
+        XCTAssertTrue(target.waitForExistence(timeout: 10), "Missing action control \(label)")
+        target.tap()
+    }
+
+    private func reveal(_ target: XCUIElement, in container: XCUIElement, attempts: Int = 6) {
+        guard container.waitForExistence(timeout: 10) else { return }
+        for _ in 0..<attempts where (!target.exists || !target.isHittable) {
+            container.swipeUp()
+        }
+        for _ in 0..<attempts where (!target.exists || !target.isHittable) {
+            container.swipeDown()
+        }
+    }
+
+    private func controlIdentifier(for label: String) -> String {
+        let slug = label
+            .lowercased()
+            .map { character in
+                character.isLetter || character.isNumber ? String(character) : "-"
+            }
+            .joined()
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        return "remote-action-control-\(slug)"
+    }
+
     /// Counts live terminals, which is how the two-session cap is observed
     /// from outside.
     private func renderedTerminalCount(in app: XCUIApplication) -> Int {
@@ -696,7 +868,14 @@ final class PsycheAppUITests: XCTestCase {
     /// synchronous `.exists` check. SwiftUI exposes this identifier on a row
     /// descendant rather than on the cell itself.
     private func openWebHomePane(in app: XCUIApplication) {
-        let paneRow = app.cells.containing(.any, identifier: "now-pane-web-home").firstMatch
+        openPane("web-home", in: app)
+    }
+
+    private func openPane(_ paneID: String, in app: XCUIApplication) {
+        let paneRow = app.cells.containing(
+            .any,
+            identifier: "now-pane-\(paneID)"
+        ).firstMatch
         XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
         paneRow.tap()
     }
@@ -771,6 +950,14 @@ final class PsycheAppUITests: XCTestCase {
     private func row(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         let cell = app.cells.matching(identifier: identifier).firstMatch
         return cell.exists ? cell : element(identifier, in: app)
+    }
+
+    private func textInput(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        let textView = app.textViews[identifier]
+        if textView.exists || textView.waitForExistence(timeout: 1) {
+            return textView
+        }
+        return app.textFields[identifier]
     }
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
