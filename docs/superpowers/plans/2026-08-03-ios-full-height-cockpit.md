@@ -12,14 +12,14 @@
 
 ## File Structure
 
-- Modify the then-current iOS cockpit root to make the cockpit, terminal detail, and terminal output explicitly flexible in the vertical axis.
+- Modify `native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift` to make the cockpit, terminal detail, and terminal output explicitly flexible in the vertical axis.
 - Modify `native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift` to assert the cockpit and terminal output occupy the iPhone window height without relying on a device-specific fixed pixel size.
 
 ### Task 1: Expand the Cockpit to Full Height
 
 **Files:**
 - Modify: `native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift`
-- Modify: the then-current iOS cockpit root
+- Modify: `native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift:11-53,255-282`
 
 - [ ] **Step 1: Add a failing full-height UI assertion**
 
@@ -152,7 +152,7 @@ report their existing expected skips.
 
 ```sh
 git add \
-  native/ios/PsycheApp/Sources/PsycheApp/<then-current-cockpit-root>.swift \
+  native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift \
   native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift
 git commit -m "fix: expand the iOS cockpit height" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"

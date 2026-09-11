@@ -7,7 +7,7 @@ Projects and Panes rails available on demand.
 
 ## Design
 
-The former cockpit root was expected to bind `NavigationSplitView` to
+`CockpitView` was expected to bind `NavigationSplitView` to
 `NavigationSplitViewVisibility` and `NavigationSplitViewColumn` state. On
 compact-width iPhones, the preferred column is `.detail`, so both left rails
 are collapsed and the terminal fills the screen. On regular-width iPads, the

@@ -12,14 +12,14 @@
 
 ## File Structure
 
-- Modify the then-current iOS cockpit root to own split-view visibility, apply the device-width default, expose the toolbar toggle, and identify the two rail views for UI automation.
+- Modify `native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift` to own split-view visibility, apply the device-width default, expose the toolbar toggle, and identify the two rail views for UI automation.
 - Modify `native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift` to cover the compact launch state, reveal both navigation levels, collapse back to terminal-only mode, and preserve pairing access.
 
 ### Task 1: Add Compact Siderail Behavior
 
 **Files:**
 - Modify: `native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift`
-- Modify: the then-current iOS cockpit root
+- Modify: `native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift:4-69`
 
 - [ ] **Step 1: Write the failing compact-layout UI test**
 
@@ -122,11 +122,11 @@ exist and the current split view does not explicitly prefer the detail column.
 
 - [ ] **Step 3: Bind the native split view to local visibility state**
 
-At the top of the then-current cockpit root, add the size-class environment value, split-view
+At the top of `CockpitView`, add the size-class environment value, split-view
 state, and one-time initialization flag:
 
 ```swift
-struct SupersededCockpitRoot: View {
+struct CockpitView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: DemoStore
     @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
@@ -173,7 +173,7 @@ After the existing `.sheet` modifier, apply the initial visibility once:
 }
 ```
 
-Add the toggle method inside the then-current cockpit root:
+Add the toggle method inside `CockpitView`:
 
 ```swift
 private func toggleSiderails() {
@@ -252,7 +252,7 @@ Expected: PASS for `PsycheCoreTests` and `PsycheAppUITests`.
 
 ```sh
 git add \
-  native/ios/PsycheApp/Sources/PsycheApp/<then-current-cockpit-root>.swift \
+  native/ios/PsycheApp/Sources/PsycheApp/CockpitView.swift \
   native/ios/PsycheApp/Tests/PsycheAppUITests/PsycheAppUITests.swift
 git commit -m "fix: collapse iOS cockpit siderails" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
