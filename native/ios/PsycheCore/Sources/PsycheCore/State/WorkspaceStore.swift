@@ -115,7 +115,7 @@ public final class WorkspaceStore: ObservableObject {
         guard !isAwaitingConnectionSnapshot else {
             isStale = true
             needsFullSnapshot = true
-            liveness = workspace == nil
+            liveness = self.workspace == nil
                 ? .recovering(lastConfirmedAt: lastConfirmedAt)
                 : .stale(lastConfirmedAt: lastConfirmedAt)
             return

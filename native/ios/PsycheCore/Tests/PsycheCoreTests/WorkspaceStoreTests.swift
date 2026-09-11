@@ -130,6 +130,19 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertFalse(store.needsFullSnapshot)
     }
 
+    func testColdConnectionBoundaryKeepsIncrementalEventRecoveringUntilSnapshot() {
+        let store = WorkspaceStore()
+
+        store.beginConnection()
+        store.applyEvent(workspace: Fixtures.workspace(revision: 1), sequence: 1)
+
+        XCTAssertNil(store.workspace)
+        XCTAssertEqual(store.sequence, 0)
+        XCTAssertTrue(store.isStale)
+        XCTAssertTrue(store.needsFullSnapshot)
+        XCTAssertEqual(store.liveness, .recovering(lastConfirmedAt: nil))
+    }
+
     func testSnapshotAtTheSameSequenceRefreshesState() {
         let store = WorkspaceStore()
         store.applySnapshot(workspace: Fixtures.workspace(revision: 5), sequence: 5)
