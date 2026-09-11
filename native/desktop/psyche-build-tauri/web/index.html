@@ -52,6 +52,15 @@
             aria-expanded="false"
             aria-controls="agent-control-drawer"
           >Agent control <span id="agent-control-count" hidden>0</span></button>
+          <button
+            id="gpu-diagnostics-toggle"
+            class="chrome-btn gpu-diagnostics-toggle"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="gpu-diagnostics-panel"
+            hidden
+          >GPU diagnostics</button>
         </div>
       </header>
 
@@ -181,6 +190,36 @@
 
         </main>
       </div>
+
+      <section
+        class="gpu-diagnostics-panel"
+        id="gpu-diagnostics-panel"
+        role="dialog"
+        aria-labelledby="gpu-diagnostics-title"
+        aria-describedby="gpu-diagnostics-status"
+        hidden
+      >
+        <header class="gpu-diagnostics-head">
+          <div>
+            <h2 id="gpu-diagnostics-title">GPU diagnostics</h2>
+            <p id="gpu-diagnostics-status" role="status" aria-live="polite">Diagnostics unavailable.</p>
+          </div>
+          <button id="gpu-diagnostics-close" class="icon-btn ghost-btn" type="button" aria-label="Close GPU diagnostics">×</button>
+        </header>
+        <div class="gpu-diagnostics-fallback" id="gpu-diagnostics-fallback" role="status" hidden></div>
+        <dl class="gpu-diagnostics-rows" id="gpu-diagnostics-rows"></dl>
+        <div class="gpu-diagnostics-actions">
+          <button id="gpu-diagnostics-copy" class="chrome-btn" type="button">Copy JSON</button>
+        </div>
+        <section class="gpu-diagnostics-stress" id="gpu-diagnostics-stress-controls" hidden>
+          <h3>Rendering stress scenarios</h3>
+          <p id="gpu-diagnostics-progress" role="status" aria-live="polite">Ready.</p>
+          <div class="gpu-diagnostics-actions">
+            <button id="gpu-diagnostics-run-stress" class="chrome-btn" type="button" disabled>Run scenarios</button>
+            <button id="gpu-diagnostics-cancel-stress" class="chrome-btn" type="button" disabled>Cancel</button>
+          </div>
+        </section>
+      </section>
 
       <div id="file-surface-staging" hidden>
             <div class="file-view" id="file-view" hidden>

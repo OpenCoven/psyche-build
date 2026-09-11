@@ -952,7 +952,8 @@ kbd {
   -webkit-app-region: drag;
   user-select: none;
 }
-.agent-control-toggle { white-space: nowrap; }
+.agent-control-toggle,
+.gpu-diagnostics-toggle { white-space: nowrap; }
 .agent-control-toggle span {
   display: inline-grid;
   place-items: center;
@@ -1000,6 +1001,77 @@ kbd {
   color: var(--accent);
   font-size: 10px;
 }
+.gpu-diagnostics-panel {
+  position: fixed;
+  top: calc(var(--titlebar-h) + 12px);
+  right: 12px;
+  bottom: calc(var(--status-h) + 12px);
+  z-index: 80;
+  width: min(420px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.96));
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  transition-property: opacity, transform;
+  transition-duration: 200ms, 200ms;
+  transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1), cubic-bezier(0.32, 0.72, 0, 1);
+  overflow: hidden;
+}
+.gpu-diagnostics-panel[hidden] { display: none; }
+.gpu-diagnostics-panel.is-transitioning { will-change: opacity, transform; }
+.gpu-diagnostics-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gpu-diagnostics-head h2 { margin: 0; font-size: 16px; }
+.gpu-diagnostics-head p,
+.gpu-diagnostics-stress p {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.gpu-diagnostics-fallback {
+  padding: 10px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--error);
+  font-weight: 700;
+}
+.gpu-diagnostics-rows {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.7fr) minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+  overflow: auto;
+}
+.gpu-diagnostics-rows dt { color: var(--muted); font-size: 11px; }
+.gpu-diagnostics-rows dd {
+  margin: 0;
+  color: var(--text);
+  font: 11px/1.45 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.gpu-diagnostics-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gpu-diagnostics-stress {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.gpu-diagnostics-stress h3 { margin: 0; font-size: 13px; }
 .titlebar-spacer { flex: 1 1 auto; -webkit-app-region: drag; }
 
 .app[data-sidebar="collapsed"] .titlebar {
@@ -3873,6 +3945,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 8px;
 }
 .chrome-btn.agent-control-toggle {
+  width: auto;
+  padding-inline: 9px;
+}
+.chrome-btn.gpu-diagnostics-toggle {
   width: auto;
   padding-inline: 9px;
 }
