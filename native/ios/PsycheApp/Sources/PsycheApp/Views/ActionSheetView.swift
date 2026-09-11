@@ -69,6 +69,7 @@ struct ActionSheetView: View {
                     Text(row.value)
                         .multilineTextAlignment(.trailing)
                         .textSelection(.enabled)
+                        .accessibilityIdentifier("remote-action-scope-\(row.key)")
                 } label: {
                     Text(row.label)
                 }
