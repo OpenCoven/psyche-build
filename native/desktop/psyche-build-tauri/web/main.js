@@ -222,17 +222,40 @@
 
   function normalizeNativeDiagnostics(report) {
     var normalized = {};
-    if (!report || typeof report !== "object" || Array.isArray(report)) return normalized;
+    if (!report || typeof report !== "object" || Array.isArray(report) ||
+        Object.getPrototypeOf(report) !== Object.prototype) {
+      return normalized;
+    }
     var fields = ["os", "arch", "engine", "engineVersion", "debugBuild", "stressAuthorized", "process"];
+    var processFields = ["cpuPercent", "rssBytes"];
+    var hasOwn = Object.prototype.hasOwnProperty;
+    var process = report.process;
     if (Object.keys(report).some(function (name) { return fields.indexOf(name) === -1; }) ||
+        !hasOwn.call(report, "os") ||
+        !hasOwn.call(report, "arch") ||
+        !hasOwn.call(report, "engine") ||
+        !hasOwn.call(report, "debugBuild") ||
+        !hasOwn.call(report, "stressAuthorized") ||
         typeof report.os !== "string" ||
         typeof report.arch !== "string" ||
         typeof report.engine !== "string" ||
         typeof report.debugBuild !== "boolean" ||
         typeof report.stressAuthorized !== "boolean" ||
         (report.engineVersion !== undefined && typeof report.engineVersion !== "string") ||
-        (report.process !== undefined &&
-          (!report.process || typeof report.process !== "object" || Array.isArray(report.process)))) {
+        (process !== undefined && (
+          !process ||
+          typeof process !== "object" ||
+          Array.isArray(process) ||
+          Object.getPrototypeOf(process) !== Object.prototype ||
+          Object.keys(process).length === 0 ||
+          Object.keys(process).some(function (name) { return processFields.indexOf(name) === -1; }) ||
+          (hasOwn.call(process, "cpuPercent") &&
+            (typeof process.cpuPercent !== "number" ||
+              !Number.isFinite(process.cpuPercent) ||
+              process.cpuPercent < 0)) ||
+          (hasOwn.call(process, "rssBytes") &&
+            (!Number.isSafeInteger(process.rssBytes) || process.rssBytes < 0))
+        ))) {
       return normalized;
     }
     fields.forEach(function (name) {
@@ -473,7 +496,7 @@
       window.getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w")
     );
     var browserPane = findBrowserPane(project.id, worktreePath);
-    var browser = browserPane && ensureBrowserModel(project, worktreePath);
+    var browser = project.browsersByWorktree && project.browsersByWorktree[worktreePath];
     gpuDiagnosticsStressWorkspace = {
       projectId: project.id,
       worktreePath: worktreePath,
@@ -511,10 +534,13 @@
   async function restoreGpuDiagnosticsStressWorkspace() {
     if (gpuDiagnosticsStressResources.size || !gpuDiagnosticsStressWorkspace) return;
     var snapshot = gpuDiagnosticsStressWorkspace;
-    gpuDiagnosticsStressWorkspace = null;
     var project = findProject(snapshot.projectId);
-    if (!project || project.closing) return;
+    if (!project || project.closing) {
+      gpuDiagnosticsStressWorkspace = null;
+      return;
+    }
     if (!gpuDiagnosticsStressWorkspaceIsUnchanged(snapshot, project)) return;
+    gpuDiagnosticsStressWorkspace = null;
 
     if (snapshot.layout) paneLayouts.set(snapshot.layoutKey, cloneGpuDiagnosticsLayout(snapshot.layout));
     else paneLayouts.delete(snapshot.layoutKey);
@@ -525,10 +551,8 @@
       if (typeof assignActiveProjectId === "function") assignActiveProjectId(snapshot.activeProjectId);
       else Object.assign(state, { activeProjectId: snapshot.activeProjectId });
     }
-    var browserPane = snapshot.browserPaneId &&
-      findBrowserPane(project.id, snapshot.worktreePath);
-    var browser = browserPane && browserPane.id === snapshot.browserPaneId &&
-      ensureBrowserModel(project, snapshot.worktreePath);
+    var browser = project.browsersByWorktree &&
+      project.browsersByWorktree[snapshot.worktreePath];
     if (browser && (snapshot.browserActiveTabId === null || browser.tabs.some(function (tab) {
       return tab.id === snapshot.browserActiveTabId;
     }))) {
@@ -540,6 +564,8 @@
     renderPaneWorkspace({ preserveTerminalFocus: false });
     refreshSidebar();
     refreshTabs();
+    renderBrowserTabs();
+    syncUrlInput();
 
     if (snapshot.activeFileId && findOpenFile(snapshot.activeFileId)) {
       await activateFileTab(snapshot.activeFileId);
@@ -551,22 +577,36 @@
   function createGpuDiagnosticsStressResource(id, record, dispose, forceDispose) {
     var cleanupCompleted = false;
     var cleanupFlight = null;
+    var forceFlight = null;
     gpuDiagnosticsStressResources.set(id, record);
     async function finish() {
       gpuDiagnosticsStressResources.delete(id);
       await restoreGpuDiagnosticsStressWorkspace();
     }
     function forceCleanup() {
-      if (cleanupCompleted) return;
+      if (forceFlight) return forceFlight;
       cleanupCompleted = true;
-      forceDispose();
-      gpuDiagnosticsStressResources.delete(id);
-      void restoreGpuDiagnosticsStressWorkspace();
+      forceFlight = Promise.resolve().then(function () {
+        return forceDispose();
+      });
+      void forceFlight.then(
+        function () {
+          return finish();
+        },
+        function (error) {
+          cleanupCompleted = false;
+          forceFlight = null;
+          console.error("[psyche:graphics] diagnostics force cleanup failed: " + String(error));
+        },
+      ).catch(function (error) {
+        console.error("[psyche:graphics] diagnostics force cleanup restoration failed: " + String(error));
+      });
+      return forceFlight;
     }
     return {
       id: id,
       dispose: function (signal) {
-        if (cleanupCompleted) return Promise.resolve();
+        if (cleanupCompleted) return forceFlight || Promise.resolve();
         if (cleanupFlight) return cleanupFlight;
         throwIfGpuDiagnosticsStressAborted(signal);
         cleanupFlight = Promise.resolve().then(function () {
@@ -576,13 +616,17 @@
           await finish();
         }, function (error) {
           cleanupFlight = null;
-          forceCleanup();
+          void forceCleanup().catch(function (forceError) {
+            console.error("[psyche:graphics] diagnostics force cleanup failed: " + String(forceError));
+          });
           throw error;
         });
         return cleanupFlight;
       },
       forceDispose: function () {
-        forceCleanup();
+        void forceCleanup().catch(function (error) {
+          console.error("[psyche:graphics] diagnostics force cleanup failed: " + String(error));
+        });
       },
     };
   }
@@ -717,10 +761,14 @@
         if (thread.terminalController && thread.terminalController.dispose) {
           thread.terminalController.dispose();
         }
-        void closeThread(thread.id, {
+        return closeThread(thread.id, {
           focus: false,
           persist: false,
           preserveTerminalFocus: false,
+        }).then(function (closed) {
+          if (!closed && findThread(thread.id)) {
+            throw new Error("diagnostics terminal force cleanup was not confirmed");
+          }
         });
       },
     );
@@ -868,14 +916,12 @@
           );
         },
         function () {
-          void cleanupGpuDiagnosticsStressBrowserResources(
+          return cleanupGpuDiagnosticsStressBrowserResources(
             project,
             tab,
             pane,
             ownsPane,
-          ).catch(function (error) {
-            console.error("[psyche:graphics] diagnostics browser force cleanup failed: " + String(error));
-          });
+          );
         },
       );
     } catch (error) {
