@@ -311,6 +311,8 @@
       beginCompositorTransition(gpuDiagnosticsPanelEl);
       renderGpuDiagnostics();
       if (gpuDiagnosticsCloseEl && gpuDiagnosticsCloseEl.focus) gpuDiagnosticsCloseEl.focus();
+    } else if (gpuDiagnosticsToggleEl.focus) {
+      gpuDiagnosticsToggleEl.focus();
     }
   }
 
@@ -320,6 +322,8 @@
       await clipboardManager.writeText(payload);
     } else if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(payload);
+    } else {
+      throw new Error("clipboard support is unavailable");
     }
     if (gpuDiagnosticsStatusEl) gpuDiagnosticsStatusEl.textContent = "Diagnostics JSON copied.";
   }
@@ -14093,6 +14097,7 @@
     // picker → help → menus → set picking → armed confirm → file return →
     // focus mode.
     if (event.key === "Escape") {
+      if (gpuDiagnosticsPanelEl && !gpuDiagnosticsPanelEl.hidden) { setGpuDiagnosticsOpen(false); return; }
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;

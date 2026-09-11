@@ -65,6 +65,22 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(source).not.toContain('toast(String(error && error.message || error), "error")');
   });
 
+  it('rejects copy when clipboard writers are unavailable instead of claiming success', () => {
+    const source = readWebFile('main.js');
+
+    expect(source).toContain('throw new Error("clipboard support is unavailable")');
+    expect(source.indexOf('throw new Error("clipboard support is unavailable")'))
+      .toBeLessThan(source.indexOf('"Diagnostics JSON copied."'));
+  });
+
+  it('restores focus to the titlebar toggle when the diagnostics panel closes', () => {
+    const source = readWebFile('main.js');
+
+    expect(source).toContain('} else if (gpuDiagnosticsToggleEl.focus) {');
+    expect(source).toContain('gpuDiagnosticsToggleEl.focus();');
+    expect(source).toContain('if (gpuDiagnosticsPanelEl && !gpuDiagnosticsPanelEl.hidden) { setGpuDiagnosticsOpen(false); return; }');
+  });
+
   it('uses the compositor transition helper and does not add layout-triggering transitions', () => {
     const source = readWebFile('main.js');
     const css = readWebFile('styles.css');
@@ -72,5 +88,11 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(source).toMatch(/beginCompositorTransition\(gpuDiagnosticsPanelEl\)/);
     expect(css).toMatch(/\.gpu-diagnostics-panel[\s\S]*transition-property:\s*opacity, transform/);
     expect(css).not.toMatch(/gpu-diagnostics[\s\S]{0,120}transition:\s*(?:all|height|width|top|left|right|bottom|margin|padding)/);
+  });
+
+  it('keeps the diagnostics titlebar label unclipped by the chrome button base width', () => {
+    const css = readWebFile('styles.css');
+
+    expect(css).toMatch(/\.chrome-btn\.agent-control-toggle,\s*\.chrome-btn\.gpu-diagnostics-toggle\s*\{\s*width:\s*auto;/);
   });
 });
