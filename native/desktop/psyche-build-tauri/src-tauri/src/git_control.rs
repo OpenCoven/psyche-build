@@ -465,12 +465,42 @@ fn run_git_metadata(root: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+fn normalize_git_metadata_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop = matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                );
+                if can_pop {
+                    normalized.pop();
+                } else if !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
 fn resolve_git_path(root: &Path, raw: &str) -> PathBuf {
     let path = PathBuf::from(raw.trim());
     if path.is_absolute() {
-        path
+        normalize_git_metadata_path(&path)
     } else {
-        root.join(path)
+        normalize_git_metadata_path(&root.join(path))
     }
 }
 
@@ -583,6 +613,7 @@ const MAX_GIT_COMMONDIR_FILE_BYTES: u64 = 4 * 1024;
 /// bare object id): real Git HEAD contents are at most a few hundred
 /// bytes, so this is generous headroom, not a soft limit meant to be hit.
 const MAX_GIT_HEAD_BYTES: u64 = 4 * 1024;
+const MAX_GIT_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_GIT_LOOSE_REF_BYTES: u64 = 4 * 1024;
 const MAX_GIT_PACKED_REFS_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -780,6 +811,19 @@ const GIT_REFTABLE_SNAPSHOT_LIMITS: GitReftableSnapshotLimits = GitReftableSnaps
     total_bytes: MAX_GIT_REFTABLE_TOTAL_BYTES,
 };
 
+fn read_optional_git_metadata_file(
+    directory: &GitMetadataDirectory,
+    name: &str,
+    label: &str,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, String> {
+    match directory.read_file(name, label, max_bytes) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(GitMetadataReadError::NotFound) => Ok(None),
+        Err(error) => Err(error.into_message(label)),
+    }
+}
+
 fn validate_git_shallow(bytes: &[u8], object_format: Option<&str>) -> Result<(), String> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| "invalid Git shallow boundary: content is not UTF-8".to_string())?;
@@ -793,80 +837,33 @@ fn validate_git_shallow(bytes: &[u8], object_format: Option<&str>) -> Result<(),
     Ok(())
 }
 
-#[cfg(unix)]
-fn read_git_shallow(common_dir: &Path) -> Result<Option<Vec<u8>>, String> {
-    let directory = open_directory_no_follow(common_dir, "Git common directory")?;
-    let name = CString::new("shallow").expect("static file name has no NUL");
-    let mut file = match open_target_no_follow(&directory, &name) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("open Git shallow boundary: {error}")),
-    };
-    let before = file_state(&file)?;
-    if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
-        return Err("Git shallow boundary is not a regular file".to_string());
-    }
-    if before.size > MAX_GIT_SHALLOW_BYTES {
-        return Err("Git shallow boundary is too large".to_string());
-    }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("read Git shallow boundary: {e}"))?;
-    let mut bytes = Vec::with_capacity(before.size as usize);
-    std::io::Read::by_ref(&mut file)
-        .take(MAX_GIT_SHALLOW_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read Git shallow boundary: {e}"))?;
-    let after = file_state(&file)?;
-    if before != after {
-        return Err("Git shallow boundary changed while being read".to_string());
-    }
-    if bytes.len() as u64 > MAX_GIT_SHALLOW_BYTES {
-        return Err("Git shallow boundary is too large".to_string());
-    }
-    Ok(Some(bytes))
-}
-
-#[cfg(not(unix))]
-fn read_git_shallow(common_dir: &Path) -> Result<Option<Vec<u8>>, String> {
-    let path = common_dir.join("shallow");
-    let before = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("inspect Git shallow boundary: {error}")),
-    };
-    if before.file_type().is_symlink() || !before.is_file() {
-        return Err("Git shallow boundary is not a regular file".to_string());
-    }
-    if before.len() > MAX_GIT_SHALLOW_BYTES {
-        return Err("Git shallow boundary is too large".to_string());
-    }
-    let mut file =
-        std::fs::File::open(&path).map_err(|e| format!("open Git shallow boundary: {e}"))?;
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    std::io::Read::by_ref(&mut file)
-        .take(MAX_GIT_SHALLOW_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read Git shallow boundary: {e}"))?;
-    let after = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("inspect Git shallow boundary after reading: {e}"))?;
-    if before.len() != after.len()
-        || before.modified().ok() != after.modified().ok()
-        || after.file_type().is_symlink()
-        || !after.is_file()
-    {
-        return Err("Git shallow boundary changed while being read".to_string());
-    }
-    if bytes.len() as u64 > MAX_GIT_SHALLOW_BYTES {
-        return Err("Git shallow boundary is too large".to_string());
-    }
-    Ok(Some(bytes))
+fn read_git_shallow(common_dir: &GitMetadataDirectory) -> Result<Option<Vec<u8>>, String> {
+    read_optional_git_metadata_file(
+        common_dir,
+        "shallow",
+        "Git shallow boundary",
+        MAX_GIT_SHALLOW_BYTES,
+    )
 }
 
 fn snapshot_git_shallow(
-    common_dir: &Path,
+    common_dir: &GitMetadataDirectory,
     destination: &Path,
     object_format: Option<&str>,
 ) -> Result<(), String> {
+    snapshot_git_shallow_with_hook(common_dir, destination, object_format, || ())
+}
+
+fn snapshot_git_shallow_with_hook<F, G>(
+    common_dir: &GitMetadataDirectory,
+    destination: &Path,
+    object_format: Option<&str>,
+    after_common_dir_open: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> G,
+{
+    let _hook_guard = after_common_dir_open();
     let Some(bytes) = read_git_shallow(common_dir)? else {
         return Ok(());
     };
@@ -1372,6 +1369,44 @@ fn record_git_metadata_read_limit(max_bytes: u64) {
 #[cfg(not(test))]
 fn record_git_metadata_read_limit(_max_bytes: u64) {}
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe fn git_directory_errno_location() -> *mut i32 {
+    libc::__error()
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+unsafe fn git_directory_errno_location() -> *mut i32 {
+    libc::__errno_location()
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android"
+)))]
+unsafe fn git_directory_errno_location() -> *mut i32 {
+    std::ptr::null_mut()
+}
+
+#[cfg(unix)]
+fn clear_git_directory_errno() {
+    unsafe {
+        let errno = git_directory_errno_location();
+        if !errno.is_null() {
+            *errno = 0;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn git_directory_errno() -> Option<i32> {
+    unsafe {
+        let errno = git_directory_errno_location();
+        (!errno.is_null()).then(|| *errno)
+    }
+}
+
 #[cfg(unix)]
 fn git_metadata_directory_entries(
     directory: &std::fs::File,
@@ -1403,9 +1438,14 @@ fn git_metadata_directory_entries(
         return Err(format!("read {label}: {error}"));
     }
     let mut entries = Vec::new();
+    let mut read_error = None;
     loop {
+        clear_git_directory_errno();
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
+            if let Some(errno) = git_directory_errno().filter(|errno| *errno != 0) {
+                read_error = Some(std::io::Error::from_raw_os_error(errno));
+            }
             break;
         }
         let bytes = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
@@ -1414,11 +1454,16 @@ fn git_metadata_directory_entries(
         }
         entries.push(std::ffi::OsString::from_vec(bytes.to_vec()));
     }
-    if unsafe { libc::closedir(stream) } != 0 {
-        return Err(format!(
-            "close {label} stream: {}",
-            std::io::Error::last_os_error()
-        ));
+    let close_error = if unsafe { libc::closedir(stream) } != 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+    if let Some(error) = read_error {
+        return Err(format!("read {label}: {error}"));
+    }
+    if let Some(error) = close_error {
+        return Err(format!("close {label} stream: {}", error));
     }
     Ok(entries)
 }
@@ -1770,104 +1815,42 @@ impl GitMetadataDirectory {
     }
 }
 
-fn inspect_real_git_info_directory(git_dir: &Path) -> Result<Option<PathBuf>, String> {
-    let info_dir = git_dir.join("info");
-    match std::fs::symlink_metadata(&info_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata_is_link_like(&metadata) => {
-            Ok(Some(info_dir))
-        }
-        Ok(_) => Err("Git info directory is not a real directory".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("inspect Git info directory: {error}")),
+fn open_git_info_directory(
+    git_dir: &GitMetadataDirectory,
+) -> Result<Option<GitMetadataDirectory>, String> {
+    match git_dir.open_directory("info", "Git info directory") {
+        Ok(directory) => Ok(Some(directory)),
+        Err(GitMetadataReadError::NotFound) => Ok(None),
+        Err(error) => Err(error.into_message("Git info directory")),
     }
 }
 
-#[cfg(unix)]
-fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
-    let Some(info_dir) = inspect_real_git_info_directory(git_dir)? else {
+fn read_git_info_file_from_handle(
+    git_dir: &GitMetadataDirectory,
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(info_dir) = open_git_info_directory(git_dir)? else {
         return Ok(None);
     };
-    let directory = open_directory_no_follow(&info_dir, "Git info directory")?;
-    let file_name = CString::new(name).expect("static file name has no NUL");
-    let mut file = match open_target_no_follow(&directory, &file_name) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP)) => {
-            return Err(format!("Git info/{name} is not a regular file"));
-        }
-        Err(error) => return Err(format!("open Git info/{name}: {error}")),
-    };
-    let before = file_state(&file)?;
-    if before.mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
-        return Err(format!("Git info/{name} is not a regular file"));
-    }
-    if before.size > MAX_GIT_INFO_FILE_BYTES {
-        return Err(format!("Git info/{name} is too large"));
-    }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("read Git info/{name}: {e}"))?;
-    let mut bytes = Vec::with_capacity(before.size as usize);
-    std::io::Read::by_ref(&mut file)
-        .take(MAX_GIT_INFO_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read Git info/{name}: {e}"))?;
-    let after = file_state(&file)?;
-    if before != after {
-        return Err(format!("Git info/{name} changed while being read"));
-    }
-    if bytes.len() as u64 > MAX_GIT_INFO_FILE_BYTES {
-        return Err(format!("Git info/{name} is too large"));
-    }
-    Ok(Some(bytes))
+    read_optional_git_metadata_file(
+        &info_dir,
+        name,
+        &format!("Git info/{name}"),
+        MAX_GIT_INFO_FILE_BYTES,
+    )
 }
 
-#[cfg(not(unix))]
 fn read_git_info_file(git_dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
-    let Some(info_dir) = inspect_real_git_info_directory(git_dir)? else {
-        return Ok(None);
-    };
-    let path = info_dir.join(name);
-    let before = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("inspect Git info/{name}: {error}")),
-    };
-    if metadata_is_link_like(&before) || !before.is_file() {
-        return Err(format!("Git info/{name} is not a regular file"));
-    }
-    if before.len() > MAX_GIT_INFO_FILE_BYTES {
-        return Err(format!("Git info/{name} is too large"));
-    }
-    let mut file = std::fs::File::open(&path).map_err(|e| format!("open Git info/{name}: {e}"))?;
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    std::io::Read::by_ref(&mut file)
-        .take(MAX_GIT_INFO_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read Git info/{name}: {e}"))?;
-    let after = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("inspect Git info/{name} after reading: {e}"))?;
-    if before.len() != after.len()
-        || before.modified().ok() != after.modified().ok()
-        || metadata_is_link_like(&after)
-        || !after.is_file()
-    {
-        return Err(format!("Git info/{name} changed while being read"));
-    }
-    if inspect_real_git_info_directory(git_dir)?.is_none() {
-        return Err(format!("Git info/{name} changed while being read"));
-    }
-    if bytes.len() as u64 > MAX_GIT_INFO_FILE_BYTES {
-        return Err(format!("Git info/{name} is too large"));
-    }
-    Ok(Some(bytes))
+    let git_dir = GitMetadataDirectory::open(git_dir, "Git directory")?;
+    read_git_info_file_from_handle(&git_dir, name)
 }
 
 fn snapshot_git_info_file(
-    source_git_dir: &Path,
+    source_git_dir: &GitMetadataDirectory,
     destination: &Path,
     name: &str,
 ) -> Result<(), String> {
-    let Some(bytes) = read_git_info_file(source_git_dir, name)? else {
+    let Some(bytes) = read_git_info_file_from_handle(source_git_dir, name)? else {
         return Ok(());
     };
     let info_dir = destination.join("info");
@@ -1876,7 +1859,22 @@ fn snapshot_git_info_file(
     std::fs::write(info_dir.join(name), bytes).map_err(|e| format!("snapshot Git info/{name}: {e}"))
 }
 
-fn snapshot_trusted_git_info(source_git_dir: &Path, destination: &Path) -> Result<(), String> {
+fn snapshot_trusted_git_info(
+    source_git_dir: &GitMetadataDirectory,
+    destination: &Path,
+) -> Result<(), String> {
+    snapshot_trusted_git_info_with_hook(source_git_dir, destination, || ())
+}
+
+fn snapshot_trusted_git_info_with_hook<F, G>(
+    source_git_dir: &GitMetadataDirectory,
+    destination: &Path,
+    after_common_dir_open: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> G,
+{
+    let _hook_guard = after_common_dir_open();
     snapshot_git_info_file(source_git_dir, destination, "attributes")?;
     snapshot_git_info_file(source_git_dir, destination, "exclude")
 }
@@ -2023,6 +2021,36 @@ fn snapshot_git_reftable_with_limits(
 
 fn snapshot_git_reftable(source: &Path, destination: &Path) -> Result<(), String> {
     snapshot_git_reftable_with_limits(source, destination, GIT_REFTABLE_SNAPSHOT_LIMITS)
+}
+
+fn snapshot_git_index(
+    git_dir: &GitMetadataDirectory,
+    destination_git_dir: &Path,
+) -> Result<(), String> {
+    let Some(bytes) =
+        read_optional_git_metadata_file(git_dir, "index", "Git index", MAX_GIT_INDEX_BYTES)?
+    else {
+        return Ok(());
+    };
+    std::fs::write(destination_git_dir.join("index"), bytes)
+        .map_err(|error| format!("snapshot Git index: {error}"))
+}
+
+fn write_isolated_git_alternates(
+    objects_directory: &GitMetadataDirectory,
+    destination_git_dir: &Path,
+) -> Result<(), String> {
+    objects_directory
+        .validate_path_identity("Git objects directory", "before subprocess handoff")?;
+    let alternate_objects = git_subprocess_root(&objects_directory.path);
+    let alternate_objects = alternate_objects.to_string_lossy();
+    #[cfg(windows)]
+    let alternate_objects = alternate_objects.replace('\\', "/");
+    std::fs::write(
+        destination_git_dir.join("objects/info/alternates"),
+        format!("{alternate_objects}\n"),
+    )
+    .map_err(|error| format!("write isolated Git alternates file: {error}"))
 }
 
 fn isolated_git_metadata_command(root: &str, git_dir: &Path) -> std::process::Command {
@@ -2229,8 +2257,7 @@ struct GitInspectionRepository {
     index: Option<PathBuf>,
     attribute_source: Option<String>,
     config: Vec<(String, String)>,
-    git_dir_handle: GitMetadataDirectory,
-    common_dir_handle: GitMetadataDirectory,
+    common_objects_handle: GitMetadataDirectory,
 }
 
 impl GitInspectionRepository {
@@ -2251,8 +2278,9 @@ impl GitInspectionRepository {
         let git_dir_handle = GitMetadataDirectory::open(&actual_git_dir, "Git directory")?;
         let common_dir = git_common_dir_pinned(&git_dir_handle, &actual_git_dir)?;
         let common_dir_handle = GitMetadataDirectory::open(&common_dir, "Git common directory")?;
-        let index = work_tree.as_ref().map(|_| actual_git_dir.join("index"));
-        let alternate_objects = common_dir.join("objects");
+        let common_objects_handle = common_dir_handle
+            .open_directory("objects", "Git objects directory")
+            .map_err(|error| error.into_message("Git objects directory"))?;
         let ref_storage = config
             .iter()
             .find_map(|(key, value)| (key == "extensions.refstorage").then_some(value.as_str()))
@@ -2307,17 +2335,10 @@ impl GitInspectionRepository {
             .map_err(|e| format!("create isolated Git object directory: {e}"))?;
         std::fs::create_dir_all(git_dir.path().join("objects/info"))
             .map_err(|e| format!("create isolated Git object info directory: {e}"))?;
-        common_dir_handle
-            .validate_path_identity("Git common directory", "before subprocess handoff")?;
-        let alternate_objects = git_subprocess_root(&alternate_objects);
-        let alternate_objects = alternate_objects.to_string_lossy();
-        #[cfg(windows)]
-        let alternate_objects = alternate_objects.replace('\\', "/");
-        std::fs::write(
-            git_dir.path().join("objects/info/alternates"),
-            format!("{alternate_objects}\n"),
-        )
-        .map_err(|e| format!("write isolated Git alternates file: {e}"))?;
+        let index = work_tree.as_ref().map(|_| git_dir.path().join("index"));
+        if work_tree.is_some() {
+            snapshot_git_index(&git_dir_handle, git_dir.path())?;
+        }
         std::fs::create_dir_all(git_dir.path().join("refs"))
             .map_err(|e| format!("create isolated Git refs directory: {e}"))?;
         let repository_format_version = config
@@ -2342,11 +2363,11 @@ impl GitInspectionRepository {
             .map_err(|e| format!("write isolated Git config: {e}"))?;
         std::fs::write(git_dir.path().join("empty-config"), "")
             .map_err(|e| format!("write isolated empty Git config: {e}"))?;
-        snapshot_trusted_git_info(&common_dir, git_dir.path())?;
+        snapshot_trusted_git_info(&common_dir_handle, git_dir.path())?;
         std::fs::write(git_dir.path().join("HEAD"), actual_head)
             .map_err(|e| format!("write isolated Git HEAD: {e}"))?;
         snapshot_git_shallow(
-            &common_dir,
+            &common_dir_handle,
             git_dir.path(),
             object_format.map(String::as_str),
         )?;
@@ -2385,13 +2406,11 @@ impl GitInspectionRepository {
             .map_err(|e| format!("snapshot Git refs: {e}"))?;
         }
         if attribute_source.is_none() {
-            common_dir_handle
-                .validate_path_identity("Git common directory", "before subprocess handoff")?;
+            write_isolated_git_alternates(&common_objects_handle, git_dir.path())?;
             attribute_source = resolve_isolated_git_attribute_source(root, git_dir.path())?;
         }
         if attribute_source.is_none() {
-            common_dir_handle
-                .validate_path_identity("Git common directory", "before subprocess handoff")?;
+            write_isolated_git_alternates(&common_objects_handle, git_dir.path())?;
             let mut child = isolated_git_metadata_command(root, git_dir.path())
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -2418,19 +2437,12 @@ impl GitInspectionRepository {
             index,
             attribute_source,
             config,
-            git_dir_handle,
-            common_dir_handle,
+            common_objects_handle,
         })
     }
 
-    fn validate_subprocess_handoff(&self) -> Result<(), String> {
-        if self.index.is_some() {
-            self.git_dir_handle
-                .validate_path_identity("Git directory", "before subprocess handoff")?;
-        }
-        self.common_dir_handle
-            .validate_path_identity("Git common directory", "before subprocess handoff")?;
-        Ok(())
+    fn prepare_subprocess_handoff(&self) -> Result<(), String> {
+        write_isolated_git_alternates(&self.common_objects_handle, self.git_dir.path())
     }
 }
 
@@ -2488,11 +2500,7 @@ impl<'a> GitInspection<'a> {
         })
     }
 
-    fn git_command_with_config(
-        &self,
-        extra_config: &[(String, String)],
-    ) -> Result<std::process::Command, String> {
-        self.repository.validate_subprocess_handoff()?;
+    fn git_command_with_config(&self, extra_config: &[(String, String)]) -> std::process::Command {
         let mut command = git_command(self.root);
         command
             .env("GIT_DIR", self.repository.git_dir.path())
@@ -2558,7 +2566,7 @@ impl<'a> GitInspection<'a> {
                 .arg("-c")
                 .arg(format!("filter.{}.required={required}", driver.driver));
         }
-        Ok(command)
+        command
     }
 
     fn execute(&self, args: &[&str]) -> Result<String, String> {
@@ -2570,8 +2578,9 @@ impl<'a> GitInspection<'a> {
         args: &[&str],
         extra_config: &[(String, String)],
     ) -> Result<String, String> {
-        let out = self
-            .git_command_with_config(extra_config)?
+        let mut command = self.git_command_with_config(extra_config);
+        self.repository.prepare_subprocess_handoff()?;
+        let out = command
             .args(args)
             .output()
             .map_err(|e| format!("git: {}", e))?;
@@ -4730,6 +4739,81 @@ mod tests {
         assert!(error.contains("invalid Git shallow boundary"));
     }
 
+    #[test]
+    fn git_shallow_snapshot_anchors_to_open_common_directory() {
+        let tree = TempTree::new("git-shallow-anchored-common-dir");
+        let common_dir = tree.root.join("common");
+        let parked = tree.root.join("parked-common");
+        let replacement = tree.root.join("replacement-common");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(&common_dir).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(
+            common_dir.join("shallow"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(
+            replacement.join("shallow"),
+            "2222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
+
+        let handle = GitMetadataDirectory::open(&common_dir, "Git common directory").unwrap();
+        snapshot_git_shallow_with_hook(&handle, &destination, None, || {
+            std::fs::rename(&common_dir, &parked).unwrap();
+            assert!(create_test_symlink(
+                TestSymlinkKind::Directory,
+                &replacement,
+                &common_dir,
+            ));
+            DirectoryReplacementGuard {
+                path: common_dir.clone(),
+                parked: parked.clone(),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("shallow")).unwrap(),
+            "1111111111111111111111111111111111111111\n"
+        );
+    }
+
+    #[test]
+    fn git_info_snapshot_anchors_to_open_common_directory() {
+        let tree = TempTree::new("git-info-anchored-common-dir");
+        let common_dir = tree.root.join("common");
+        let parked = tree.root.join("parked-common");
+        let replacement = tree.root.join("replacement-common");
+        let destination = tree.root.join("destination");
+        std::fs::create_dir_all(common_dir.join("info")).unwrap();
+        std::fs::create_dir_all(replacement.join("info")).unwrap();
+        std::fs::write(common_dir.join("info/attributes"), "tracked.txt text\n").unwrap();
+        std::fs::write(replacement.join("info/attributes"), "tracked.txt binary\n").unwrap();
+
+        let handle = GitMetadataDirectory::open(&common_dir, "Git common directory").unwrap();
+        snapshot_trusted_git_info_with_hook(&handle, &destination, || {
+            std::fs::rename(&common_dir, &parked).unwrap();
+            assert!(create_test_symlink(
+                TestSymlinkKind::Directory,
+                &replacement,
+                &common_dir,
+            ));
+            DirectoryReplacementGuard {
+                path: common_dir.clone(),
+                parked: parked.clone(),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("info/attributes")).unwrap(),
+            "tracked.txt text\n"
+        );
+    }
+
     fn tiny_git_reftable_snapshot_limits() -> GitReftableSnapshotLimits {
         GitReftableSnapshotLimits {
             list_bytes: 32,
@@ -5385,7 +5469,7 @@ mod tests {
     }
 
     #[test]
-    fn git_inspection_rejects_git_dir_replacement_before_subprocess_handoff() {
+    fn git_inspection_uses_snapshotted_index_after_git_dir_replacement() {
         let tree = TempTree::new("git-index-handoff-dir-swap");
         let source = tree.root.join("source");
         let linked = tree.root.join("linked");
@@ -5407,6 +5491,7 @@ mod tests {
             &["worktree", "add", "-q", "-b", "linked", path_text(&linked)],
         );
 
+        std::fs::write(linked.join("tracked.txt"), "after\n").unwrap();
         let inspection = GitInspection::new(path_text(&linked)).unwrap();
         let (_, linked_git_dir) = git_dir_for_worktree(&linked).unwrap();
         std::fs::rename(&linked_git_dir, &parked).unwrap();
@@ -5419,13 +5504,14 @@ mod tests {
             parked: parked.clone(),
         };
 
-        let error = inspection
-            .repository
-            .validate_subprocess_handoff()
-            .unwrap_err();
+        let status = inspection
+            .execute(&["status", "--porcelain", "--", "tracked.txt"])
+            .unwrap();
 
-        assert!(error.contains("Git directory"));
-        assert!(error.contains("before subprocess handoff"));
+        assert!(
+            status.contains(" M tracked.txt"),
+            "unexpected status: {status:?}"
+        );
     }
 
     #[test]
@@ -5457,12 +5543,10 @@ mod tests {
         };
 
         let error = inspection
-            .repository
-            .common_dir_handle
-            .validate_path_identity("Git common directory", "before subprocess handoff")
+            .execute(&["status", "--porcelain", "--", "tracked.txt"])
             .unwrap_err();
 
-        assert!(error.contains("Git common directory"));
+        assert!(error.contains("Git objects directory"));
         assert!(error.contains("before subprocess handoff"));
     }
 
