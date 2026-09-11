@@ -710,7 +710,8 @@ final class PsycheAppUITests: XCTestCase {
                 NSPredicate(format: "label CONTAINS[c] %@", "rejected pre-dispatch rejection before dispatch")
             ).firstMatch.waitForExistence(timeout: 10)
         )
-        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(element("remote-action-sheet", in: app).waitForNonExistence(timeout: 10))
     }
 
     // MARK: - Split layout and focus
