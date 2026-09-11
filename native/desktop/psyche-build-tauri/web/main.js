@@ -103,6 +103,20 @@
   var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
     ? window.__TAURI__.window.getCurrentWindow()
     : null;
+  var gpuDiagnosticsToggleEl = document.getElementById("gpu-diagnostics-toggle");
+  var gpuDiagnosticsPanelEl = document.getElementById("gpu-diagnostics-panel");
+  var gpuDiagnosticsCloseEl = document.getElementById("gpu-diagnostics-close");
+  var gpuDiagnosticsStatusEl = document.getElementById("gpu-diagnostics-status");
+  var gpuDiagnosticsRowsEl = document.getElementById("gpu-diagnostics-rows");
+  var gpuDiagnosticsFallbackEl = document.getElementById("gpu-diagnostics-fallback");
+  var gpuDiagnosticsCopyEl = document.getElementById("gpu-diagnostics-copy");
+  var gpuDiagnosticsStressControlsEl = document.getElementById("gpu-diagnostics-stress-controls");
+  var gpuDiagnosticsRunStressEl = document.getElementById("gpu-diagnostics-run-stress");
+  var gpuDiagnosticsCancelStressEl = document.getElementById("gpu-diagnostics-cancel-stress");
+  var gpuDiagnosticsProgressEl = document.getElementById("gpu-diagnostics-progress");
+  var gpuDiagnosticsReport = null;
+  var gpuDiagnosticsStressAuthorized = false;
+  var gpuDiagnosticsStressController = null;
 
   function invoke(command, args) {
     var startedAt = performance.now();
@@ -127,6 +141,241 @@
       }
       throw error;
     }
+  }
+
+  function classifyRenderer(renderer) {
+    var text = String(renderer || "");
+    var lower = text.toLowerCase();
+    var report = {};
+    if (!text) return report;
+    if (lower.indexOf("swiftshader") !== -1 ||
+        lower.indexOf("llvmpipe") !== -1 ||
+        lower.indexOf("microsoft basic render") !== -1 ||
+        lower.indexOf("software") !== -1) {
+      report.acceleration = "software";
+      report.fallbackReason = text;
+    } else {
+      report.acceleration = "accelerated";
+    }
+    if (lower.indexOf("metal") !== -1) report.backend = "Metal";
+    else if (lower.indexOf("d3d") !== -1 || lower.indexOf("direct3d") !== -1) report.backend = "Direct3D";
+    else if (lower.indexOf("vulkan") !== -1) report.backend = "Vulkan";
+    else if (lower.indexOf("opengl") !== -1 || lower.indexOf("gl ") !== -1) report.backend = "OpenGL";
+    report.adapter = text;
+    return report;
+  }
+
+  function collectWebglRenderer(strict) {
+    var canvas = document.createElement("canvas");
+    var context = null;
+    try {
+      context = canvas.getContext("webgl2", {
+        failIfMajorPerformanceCaveat: strict,
+        powerPreference: "high-performance",
+      }) || canvas.getContext("webgl", {
+        failIfMajorPerformanceCaveat: strict,
+        powerPreference: "high-performance",
+      });
+    } catch (_) {
+      return { context: null, renderer: "", unsupportedFields: ["strictWebgl"] };
+    }
+    if (!context) return { context: null, renderer: "", unsupportedFields: ["strictWebgl"] };
+    var unsupportedFields = [];
+    var renderer = "";
+    try {
+      var debugInfo = context.getExtension && context.getExtension("WEBGL_debug_renderer_info");
+      if (debugInfo) renderer = context.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+      else unsupportedFields.push("renderer");
+    } catch (_) {
+      unsupportedFields.push("renderer");
+    }
+    return { context: context, renderer: renderer, unsupportedFields: unsupportedFields };
+  }
+
+  function probeGraphicsDiagnostics() {
+    var strictProbe = collectWebglRenderer(true);
+    var classified = classifyRenderer(strictProbe.renderer);
+    if (strictProbe.context) {
+      if (!classified.acceleration) classified.acceleration = "unknown";
+      classified.supportingProbe = "strictWebgl";
+      classified.unsupportedFields = strictProbe.unsupportedFields;
+      return classified;
+    }
+
+    var relaxedProbe = collectWebglRenderer(false);
+    classified = classifyRenderer(relaxedProbe.renderer);
+    if (classified.acceleration === "software") {
+      classified.supportingProbe = "relaxedWebgl";
+      classified.unsupportedFields = strictProbe.unsupportedFields.concat(relaxedProbe.unsupportedFields);
+      return classified;
+    }
+    classified.acceleration = relaxedProbe.context ? "unknown" : "unavailable";
+    if (relaxedProbe.renderer) classified.supportingProbe = "relaxedWebgl";
+    classified.unsupportedFields = strictProbe.unsupportedFields.concat(relaxedProbe.unsupportedFields);
+    return classified;
+  }
+
+  function normalizeNativeDiagnostics(report) {
+    var normalized = {};
+    if (!report || typeof report !== "object") return normalized;
+    function copy(name) {
+      var value = report[name];
+      if (value === undefined && name === "engineVersion") value = report.engine_version;
+      if (value === undefined && name === "debugBuild") value = report.debug_build;
+      if (value === undefined && name === "stressAuthorized") value = report.stress_authorized;
+      if (value !== undefined) normalized[name] = value;
+    }
+    ["os", "arch", "engine", "engineVersion", "debugBuild", "stressAuthorized", "process"].forEach(copy);
+    return normalized;
+  }
+
+  function presentGpuDiagnosticsRows(report) {
+    if (!gpuDiagnosticsRowsEl) return;
+    gpuDiagnosticsRowsEl.innerHTML = "";
+    var labels = [
+      ["acceleration", "Acceleration"],
+      ["engine", "Engine"],
+      ["engineVersion", "Engine version"],
+      ["backend", "Backend"],
+      ["adapter", "Adapter"],
+      ["supportingProbe", "Probe"],
+      ["os", "OS"],
+      ["arch", "Architecture"],
+      ["debugBuild", "Debug build"],
+      ["stressAuthorized", "Stress authorized"],
+      ["frameAverageMs", "Frame average"],
+      ["frameP95Ms", "Frame p95"],
+      ["ipcLatencyMs", "IPC latency"],
+      ["queueHighWater", "Queue high-water"],
+      ["cpuPercent", "CPU percent"],
+      ["rssBytes", "Resident memory"],
+    ];
+    labels.forEach(function (entry) {
+      var key = entry[0];
+      var value = report && report[key];
+      if (value === undefined || value === null || value === "") return;
+      var term = document.createElement("dt");
+      var description = document.createElement("dd");
+      term.textContent = entry[1];
+      description.textContent = typeof value === "object" ? JSON.stringify(value) : String(value);
+      gpuDiagnosticsRowsEl.appendChild(term);
+      gpuDiagnosticsRowsEl.appendChild(description);
+    });
+  }
+
+  function deterministicGpuDiagnosticsJson(report) {
+    function stable(value) {
+      if (Array.isArray(value)) return value.map(stable);
+      if (value && typeof value === "object") {
+        return Object.keys(value).sort().reduce(function (acc, key) {
+          var entry = value[key];
+          if (entry !== undefined && entry !== null && entry !== "") acc[key] = stable(entry);
+          return acc;
+        }, {});
+      }
+      return value;
+    }
+    return JSON.stringify(stable(report || {}), null, 2) + "\n";
+  }
+
+  function renderGpuDiagnostics() {
+    var report = gpuDiagnosticsReport || {};
+    var stressAdaptersAvailable = Boolean(window.PsycheDiagnosticsStressAdapters);
+    presentGpuDiagnosticsRows(report);
+    if (gpuDiagnosticsStatusEl) {
+      gpuDiagnosticsStatusEl.textContent = report.acceleration
+        ? "Graphics diagnostics captured: " + report.acceleration + "."
+        : "Graphics diagnostics unavailable.";
+    }
+    if (gpuDiagnosticsFallbackEl) {
+      var software = report.acceleration === "software";
+      gpuDiagnosticsFallbackEl.hidden = !software;
+      gpuDiagnosticsFallbackEl.textContent = software
+        ? "Software rendering fallback detected: " + (report.fallbackReason || report.adapter || "renderer classified as software")
+        : "";
+    }
+    if (gpuDiagnosticsStressControlsEl) gpuDiagnosticsStressControlsEl.hidden = !gpuDiagnosticsStressAuthorized;
+    if (gpuDiagnosticsRunStressEl) gpuDiagnosticsRunStressEl.disabled =
+      !gpuDiagnosticsStressAuthorized || !stressAdaptersAvailable || Boolean(gpuDiagnosticsStressController);
+    if (gpuDiagnosticsCancelStressEl) gpuDiagnosticsCancelStressEl.disabled = !gpuDiagnosticsStressController;
+    if (gpuDiagnosticsProgressEl && gpuDiagnosticsStressAuthorized && !stressAdaptersAvailable) {
+      gpuDiagnosticsProgressEl.textContent = "Stress scenarios require the debug UI adapter.";
+    }
+  }
+
+  function setGpuDiagnosticsOpen(open) {
+    if (!gpuDiagnosticsPanelEl || !gpuDiagnosticsToggleEl) return;
+    gpuDiagnosticsPanelEl.hidden = !open;
+    gpuDiagnosticsToggleEl.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      beginCompositorTransition(gpuDiagnosticsPanelEl);
+      renderGpuDiagnostics();
+      if (gpuDiagnosticsCloseEl && gpuDiagnosticsCloseEl.focus) gpuDiagnosticsCloseEl.focus();
+    }
+  }
+
+  async function copyGpuDiagnosticsJson() {
+    var payload = deterministicGpuDiagnosticsJson(gpuDiagnosticsReport);
+    if (clipboardManager && clipboardManager.writeText) {
+      await clipboardManager.writeText(payload);
+    } else if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(payload);
+    }
+    if (gpuDiagnosticsStatusEl) gpuDiagnosticsStatusEl.textContent = "Diagnostics JSON copied.";
+  }
+
+  async function runGpuDiagnosticsStress() {
+    if (!gpuDiagnosticsStressAuthorized) {
+      throw new Error("render diagnostics are not authorized");
+    }
+    if (!window.PsycheRuntimeDebug || typeof window.PsycheRuntimeDebug.runStressPlan !== "function") {
+      throw new Error("render diagnostics stress bundle is unavailable");
+    }
+    if (!window.PsycheDiagnosticsStressAdapters) {
+      throw new Error("render diagnostics stress UI adapters are unavailable");
+    }
+    gpuDiagnosticsStressController = new AbortController();
+    renderGpuDiagnostics();
+    try {
+      var adapters = window.PsycheDiagnosticsStressAdapters;
+      await window.PsycheRuntimeDebug.runStressPlan(Object.assign({}, adapters, {
+        authorized: gpuDiagnosticsStressAuthorized,
+        onProgress: function (progress) {
+          if (typeof adapters.onProgress === "function") adapters.onProgress(progress);
+          if (gpuDiagnosticsProgressEl) {
+            gpuDiagnosticsProgressEl.textContent =
+              "Scenario " + (progress.scenarioIndex + 1) + " (" + progress.paneCount + " panes): " +
+              progress.phase + " " + progress.elapsedMs + "/" + progress.phaseDurationMs + " ms.";
+          }
+        },
+      }), { signal: gpuDiagnosticsStressController.signal });
+      if (gpuDiagnosticsProgressEl) gpuDiagnosticsProgressEl.textContent = "Stress scenarios complete.";
+    } catch (error) {
+      if (gpuDiagnosticsProgressEl) gpuDiagnosticsProgressEl.textContent = String(error && error.message || error);
+      throw error;
+    } finally {
+      gpuDiagnosticsStressController = null;
+      renderGpuDiagnostics();
+    }
+  }
+
+  async function initializeGpuDiagnostics() {
+    var graphics = probeGraphicsDiagnostics();
+    var nativeReport = {};
+    try {
+      nativeReport = normalizeNativeDiagnostics(await invoke("runtime_diagnostics", {}));
+    } catch (error) {
+      nativeReport = {};
+    }
+    gpuDiagnosticsStressAuthorized = Boolean(nativeReport.stressAuthorized);
+    gpuDiagnosticsReport = Object.assign({}, graphics, nativeReport);
+    if (gpuDiagnosticsReport.process) {
+      if (gpuDiagnosticsReport.process.cpuPercent !== undefined) gpuDiagnosticsReport.cpuPercent = gpuDiagnosticsReport.process.cpuPercent;
+      if (gpuDiagnosticsReport.process.rssBytes !== undefined) gpuDiagnosticsReport.rssBytes = gpuDiagnosticsReport.process.rssBytes;
+    }
+    console.info("[psyche:graphics]", deterministicGpuDiagnosticsJson(gpuDiagnosticsReport).trim());
+    if (gpuDiagnosticsToggleEl && gpuDiagnosticsReport.debugBuild) gpuDiagnosticsToggleEl.hidden = false;
+    renderGpuDiagnostics();
   }
 
   // ============================================================
@@ -13484,6 +13733,16 @@
   onRailClick("rail-new-tab", function () { toggleNewPaneMenu(); });
   onRailClick("rail-open-project", function () { openProjectPicker(); });
   onRailClick("rail-palette", function () { commandInput.focus(); openPalette("/", true); });
+  onRailClick("gpu-diagnostics-toggle", function () { setGpuDiagnosticsOpen(!gpuDiagnosticsPanelEl || gpuDiagnosticsPanelEl.hidden); });
+  onRailClick("gpu-diagnostics-close", function () { setGpuDiagnosticsOpen(false); });
+  onRailClick("gpu-diagnostics-copy", function () { copyGpuDiagnosticsJson().catch(function (error) { toast(String(error && error.message || error), "error"); }); });
+  onRailClick("gpu-diagnostics-run-stress", function () { runGpuDiagnosticsStress().catch(function (error) { toast(String(error && error.message || error), "error"); }); });
+  onRailClick("gpu-diagnostics-cancel-stress", function () {
+    if (gpuDiagnosticsStressController) gpuDiagnosticsStressController.abort(new Error("stress run cancelled"));
+  });
+  initializeGpuDiagnostics().catch(function (error) {
+    console.warn("[psyche:graphics]", String(error && error.message || error));
+  });
 
   // ============================================================
   // 11a. Shell chrome — sidebar, new-pane menu, help
