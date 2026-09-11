@@ -322,6 +322,13 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.liveness, .stale(lastConfirmedAt: Date(timeIntervalSince1970: 900)))
 
         clock.advance(by: 60)
+        store.applyEvent(workspace: Fixtures.workspace(revision: 99), sequence: 8)
+
+        XCTAssertEqual(store.workspace?.revision, 7)
+        XCTAssertTrue(store.isStale)
+        XCTAssertTrue(store.needsFullSnapshot)
+        XCTAssertEqual(store.liveness, .stale(lastConfirmedAt: Date(timeIntervalSince1970: 900)))
+
         store.applySnapshot(workspace: Fixtures.workspace(revision: 8), sequence: 8)
 
         XCTAssertFalse(store.isStale)

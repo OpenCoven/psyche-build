@@ -15,7 +15,7 @@ public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
         case .noControlRequests:
             "This workspace is not connected to a host."
         case .staleWorkspace:
-            "File inspection is unavailable while this workspace is out of date."
+            "Live workspace actions are unavailable while this workspace is out of date."
         case .unexpectedResponse:
             "The host answered the workspace request with something else."
         case .unknownProject(let projectID):
@@ -115,7 +115,9 @@ public final class WorkspaceStore: ObservableObject {
         guard !isAwaitingConnectionSnapshot else {
             isStale = true
             needsFullSnapshot = true
-            liveness = .recovering(lastConfirmedAt: lastConfirmedAt)
+            liveness = workspace == nil
+                ? .recovering(lastConfirmedAt: lastConfirmedAt)
+                : .stale(lastConfirmedAt: lastConfirmedAt)
             return
         }
         guard nextSequence > sequence else { return }
@@ -301,8 +303,10 @@ public final class WorkspaceStore: ObservableObject {
         let requests = try requireLiveControlRequests()
         try requireLaunchTarget(projectID: projectID, cwd: cwd)
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         let response = try await requests.send(.spawnPane(MobilePaneSpawnRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             idempotencyKey: idempotencyKey,
             kind: kind,
             projectID: projectID,
@@ -324,8 +328,10 @@ public final class WorkspaceStore: ObservableObject {
         let requests = try requireLiveControlRequests()
         try requirePublishedPane(paneID)
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         try requireAck(await requests.send(.paneMeta(PaneMetaRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             id: paneID,
             title: title,
             agent: agent
@@ -338,8 +344,10 @@ public final class WorkspaceStore: ObservableObject {
         let requests = try requireLiveControlRequests()
         try requirePublishedPane(paneID)
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         try requireAck(await requests.send(.killPane(PaneIDControlRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             paneID: paneID
         ))))
     }
@@ -356,8 +364,10 @@ public final class WorkspaceStore: ObservableObject {
             throw WorkspaceStoreError.unknownProject(projectID)
         }
 
+        let requestID = await requests.nextRequestID()
+        try requireLiveWorkspace()
         try requireAck(await requests.send(.launchRitual(MobileRitualLaunchRequest(
-            requestID: await requests.nextRequestID(),
+            requestID: requestID,
             projectID: projectID,
             ritualID: ritualID,
             params: params.isEmpty ? nil : params
@@ -428,8 +438,12 @@ public final class WorkspaceStore: ObservableObject {
 
     private func requireLiveControlRequests() throws -> any ControlRequesting {
         let requests = try requireControlRequests()
-        guard liveness.allowsLiveActions else { throw WorkspaceStoreError.staleWorkspace }
+        try requireLiveWorkspace()
         return requests
+    }
+
+    private func requireLiveWorkspace() throws {
+        guard liveness.allowsLiveActions else { throw WorkspaceStoreError.staleWorkspace }
     }
 
     private func requireInspectionRequests(
@@ -542,7 +556,7 @@ public final class WorkspaceStore: ObservableObject {
         activeConnectionGeneration = nil
         isStale = true
         needsFullSnapshot = true
-        isAwaitingConnectionSnapshot = false
+        isAwaitingConnectionSnapshot = true
         liveness = .stale(lastConfirmedAt: lastConfirmedAt)
         reconcileSelection()
         nowSections = Self.makeNowSections(state.restoredWorkspace)

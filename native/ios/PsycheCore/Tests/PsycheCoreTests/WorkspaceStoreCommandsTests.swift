@@ -55,6 +55,31 @@ final class WorkspaceStoreCommandsTests: XCTestCase {
         XCTAssertEqual(sent, 0, "Stale state must not reach host mutation APIs")
     }
 
+    func testMutationRevalidatesLivenessAfterRequestIDAllocation() async {
+        let requests = BlockingIDControlRequests()
+        let store = WorkspaceStore(controlRequests: requests)
+        store.applySnapshot(
+            workspace: WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject),
+            sequence: 1
+        )
+
+        let rename = Task { @MainActor in
+            try await store.renamePane(self.publishedPane, title: "x")
+        }
+        await requests.waitUntilRequestIDRequested()
+        store.markDisconnected()
+        await requests.resumeRequestID()
+
+        do {
+            try await rename.value
+            XCTFail("Expected the stale workspace to refuse before send")
+        } catch {
+            XCTAssertEqual(error as? WorkspaceStoreError, .staleWorkspace)
+        }
+        let sent = await requests.sentCount
+        XCTAssertEqual(sent, 0, "A stale transition during request-ID allocation must not reach send")
+    }
+
     // MARK: - Scope
 
     func testCreateRefusesAnUnpublishedProject() async {
@@ -275,6 +300,40 @@ private actor FakeControlRequests: ControlRequesting {
         default:
             return .ack(ControlAckResponse(requestID: request.requestID ?? "", ok: true))
         }
+    }
+}
+
+private actor BlockingIDControlRequests: ControlRequesting {
+    private(set) var sentCount = 0
+    private var requestIDContinuation: CheckedContinuation<String, Never>?
+    private var requestIDWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didRequestID = false
+
+    func waitUntilRequestIDRequested() async {
+        guard !didRequestID else { return }
+        await withCheckedContinuation { continuation in
+            requestIDWaiters.append(continuation)
+        }
+    }
+
+    func resumeRequestID() {
+        requestIDContinuation?.resume(returning: "req-1")
+        requestIDContinuation = nil
+    }
+
+    func nextRequestID() async -> String {
+        didRequestID = true
+        let waiters = requestIDWaiters
+        requestIDWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation in
+            requestIDContinuation = continuation
+        }
+    }
+
+    func send(_ request: MobileControlRequest) async throws -> MobileControlResponse {
+        sentCount += 1
+        return .ack(ControlAckResponse(requestID: request.requestID ?? "", ok: true))
     }
 }
 

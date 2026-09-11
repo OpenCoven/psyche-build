@@ -38,6 +38,8 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertFalse(element("pane-composer-send", in: app).isEnabled)
         XCTAssertFalse(app.buttons["pane-files"].isEnabled)
 
+        app.buttons["fixture-deliver-live-snapshot"].tap()
+
         XCTAssertTrue(element("pane-workspace-live-pane", in: app).waitForExistence(timeout: 10))
         XCTAssertFalse(element("pane-workspace-cached-pane", in: app).exists)
         XCTAssertTrue(app.buttons["pane-files"].isEnabled)

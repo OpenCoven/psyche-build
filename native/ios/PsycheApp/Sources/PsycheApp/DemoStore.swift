@@ -39,13 +39,6 @@ enum DemoStore {
                 secondaryPaneID: nil,
                 drafts: ["cached-pane": "do not send while stale"]
             ))
-            Task { @MainActor [weak store] in
-                try? await Task.sleep(for: .seconds(10))
-                store?.applySnapshot(
-                    workspace: WorkspaceFixtures.staleRecoveryLiveWorkspace(),
-                    sequence: 41
-                )
-            }
         } else {
             store.applySnapshot(workspace: workspace, sequence: 1)
         }
