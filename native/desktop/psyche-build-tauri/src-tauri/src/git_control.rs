@@ -1168,96 +1168,96 @@ fn windows_git_metadata_open_error(label: &str, error: u32) -> GitMetadataReadEr
         )
         .into()
     }
+}
 
-    #[cfg(windows)]
-    fn windows_git_metadata_directory_entries(
-        directory: &std::fs::File,
-        label: &str,
-    ) -> Result<Vec<std::ffi::OsString>, String> {
-        use std::os::windows::ffi::OsStringExt;
-        use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+fn windows_git_metadata_directory_entries(
+    directory: &std::fs::File,
+    label: &str,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
 
-        const FILE_NAMES_INFORMATION_CLASS: u32 = 12;
-        const STATUS_NO_MORE_FILES: u32 = 0x8000_0006;
-        const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
+    const FILE_NAMES_INFORMATION_CLASS: u32 = 12;
+    const STATUS_NO_MORE_FILES: u32 = 0x8000_0006;
+    const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 
-        let mut entries = Vec::new();
-        let mut restart_scan = 1_u8;
-        loop {
-            let mut io_status = WindowsIoStatusBlock {
-                status: 0,
-                information: 0,
-            };
-            let mut buffer = vec![0_u8; DIRECTORY_BUFFER_BYTES];
-            let status = unsafe {
-                NtQueryDirectoryFile(
-                    directory.as_raw_handle(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut io_status,
-                    buffer.as_mut_ptr().cast(),
-                    u32::try_from(buffer.len()).expect("directory buffer length fits u32"),
-                    FILE_NAMES_INFORMATION_CLASS,
-                    0,
-                    std::ptr::null_mut(),
-                    restart_scan,
-                )
-            };
-            restart_scan = 0;
-            if status == 0 {
-                let returned = io_status.information;
-                if returned == 0 {
-                    break;
-                }
-                if returned > buffer.len() {
-                    return Err(format!(
-                        "read {label}: Windows returned too much directory data"
-                    ));
-                }
-                let mut offset = 0_usize;
-                while offset < returned {
-                    let info = unsafe {
-                        &*(buffer[offset..]
-                            .as_ptr()
-                            .cast::<WindowsFileNamesInformation>())
-                    };
-                    let name_units = usize::try_from(info.file_name_length)
-                        .expect("Windows directory entry name length fits usize")
-                        / std::mem::size_of::<u16>();
-                    let name =
-                        unsafe { std::slice::from_raw_parts(info.file_name.as_ptr(), name_units) };
-                    let name = std::ffi::OsString::from_wide(name);
-                    if name != "." && name != ".." {
-                        entries.push(name);
-                    }
-                    if info.next_entry_offset == 0 {
-                        break;
-                    }
-                    let next_offset = usize::try_from(info.next_entry_offset)
-                        .expect("Windows directory entry offset fits usize");
-                    if next_offset == 0 {
-                        return Err(format!(
-                            "read {label}: Windows returned an empty directory entry"
-                        ));
-                    }
-                    offset = offset.checked_add(next_offset).ok_or_else(|| {
-                        format!("read {label}: directory entry offset overflowed")
-                    })?;
-                }
-                continue;
-            }
-            if u32::from_ne_bytes(status.to_ne_bytes()) == STATUS_NO_MORE_FILES {
+    let mut entries = Vec::new();
+    let mut restart_scan = 1_u8;
+    loop {
+        let mut io_status = WindowsIoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        let mut buffer = vec![0_u8; DIRECTORY_BUFFER_BYTES];
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                directory.as_raw_handle(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut io_status,
+                buffer.as_mut_ptr().cast(),
+                u32::try_from(buffer.len()).expect("directory buffer length fits u32"),
+                FILE_NAMES_INFORMATION_CLASS,
+                0,
+                std::ptr::null_mut(),
+                restart_scan,
+            )
+        };
+        restart_scan = 0;
+        if status == 0 {
+            let returned = io_status.information;
+            if returned == 0 {
                 break;
             }
-            let error = unsafe { RtlNtStatusToDosError(status) };
-            return Err(format!(
-                "read {label}: {}",
-                std::io::Error::from_raw_os_error(error as i32)
-            ));
+            if returned > buffer.len() {
+                return Err(format!(
+                    "read {label}: Windows returned too much directory data"
+                ));
+            }
+            let mut offset = 0_usize;
+            while offset < returned {
+                let info = unsafe {
+                    &*(buffer[offset..]
+                        .as_ptr()
+                        .cast::<WindowsFileNamesInformation>())
+                };
+                let name_units = usize::try_from(info.file_name_length)
+                    .expect("Windows directory entry name length fits usize")
+                    / std::mem::size_of::<u16>();
+                let name =
+                    unsafe { std::slice::from_raw_parts(info.file_name.as_ptr(), name_units) };
+                let name = std::ffi::OsString::from_wide(name);
+                if name != "." && name != ".." {
+                    entries.push(name);
+                }
+                if info.next_entry_offset == 0 {
+                    break;
+                }
+                let next_offset = usize::try_from(info.next_entry_offset)
+                    .expect("Windows directory entry offset fits usize");
+                if next_offset == 0 {
+                    return Err(format!(
+                        "read {label}: Windows returned an empty directory entry"
+                    ));
+                }
+                offset = offset
+                    .checked_add(next_offset)
+                    .ok_or_else(|| format!("read {label}: directory entry offset overflowed"))?;
+            }
+            continue;
         }
-        Ok(entries)
+        if u32::from_ne_bytes(status.to_ne_bytes()) == STATUS_NO_MORE_FILES {
+            break;
+        }
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(format!(
+            "read {label}: {}",
+            std::io::Error::from_raw_os_error(error as i32)
+        ));
     }
+    Ok(entries)
 }
 
 #[cfg(windows)]
