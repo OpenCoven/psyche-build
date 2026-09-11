@@ -403,12 +403,51 @@ describe('Tauri GPU diagnostics panel', () => {
     }
   });
 
-  it('keeps restoration ownership retryable without disposing resources twice', async () => {
+  it('retries rejected focus restoration before releasing cleanup ownership', async () => {
     const resources = new Map();
     const cleanupHandles = new Map();
-    const restorationCalls: string[] = [];
+    const browser = {
+      activeTabId: 'diagnostic-tab',
+      tabs: [{ id: 'user-tab' }, { id: 'diagnostic-tab' }],
+    };
+    const project = {
+      id: 'project-a',
+      selectedWorktreePath: '/workspace',
+      closing: false,
+      browsersByWorktree: { '/workspace': browser },
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: null,
+      threads: [],
+      openFiles: [],
+    };
+    const workspace = Object.freeze({
+      projectId: project.id,
+      worktreePath: '/workspace',
+      selectedWorktreePath: '/workspace',
+      activeProjectId: project.id,
+      activeThreadId: null,
+      activeFileId: null,
+      activeSurface: 'browser',
+      focusedSurface: 'browser',
+      focusedThreadId: null,
+      focusedFileId: null,
+      focusedBrowserTabId: 'user-tab',
+      sidebarOpen: true,
+      sidebarWidth: null,
+      layoutKey: 'project-a:/workspace',
+      layout: null,
+      threadIds: Object.freeze([]),
+      fileIds: Object.freeze([]),
+      browserPaneId: 'browser-pane',
+      browserActiveTabId: 'user-tab',
+    });
     let disposalAttempts = 0;
     let forceDisposalAttempts = 0;
+    let discardAttempts = 0;
+    let focusAttempts = 0;
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const restoreGlobals = installGpuDiagnosticsGlobals({
       gpuDiagnosticsStressResources: resources,
@@ -417,32 +456,63 @@ describe('Tauri GPU diagnostics panel', () => {
     });
 
     try {
+      const restoreGpuDiagnosticsStressWorkspace = compileFunction<
+        (
+          workspace: object,
+          resourceId?: string,
+          resource?: Record<string, unknown>,
+        ) => Promise<void>
+      >(readWebFile('main.js'), 'restoreGpuDiagnosticsStressWorkspace', {
+        gpuDiagnosticsStressWorkspace: workspace,
+        gpuDiagnosticsStressResources: resources,
+        activeSurface: 'browser',
+        findProject: () => project,
+        gpuDiagnosticsStressWorkspaceIsUnchanged: () => true,
+        discardGpuDiagnosticsStressWorkspace: () => {
+          discardAttempts += 1;
+        },
+        paneLayouts: new Map(),
+        cloneGpuDiagnosticsLayout: (layout: unknown) => layout,
+        scheduleSidebarWidth: () => {},
+        setSidebarOpen: () => {},
+        assignActiveProjectId: () => {},
+        state,
+        renderPaneWorkspace: () => {},
+        refreshSidebar: () => {},
+        refreshTabs: () => {},
+        renderBrowserTabs: () => {},
+        syncUrlInput: () => {},
+        findOpenFile: () => null,
+        activateFileTab: async () => false,
+        findThread: () => null,
+        focusThread: async () => false,
+        activateBrowserTab: async () => {
+          focusAttempts += 1;
+          if (focusAttempts === 1) throw new Error('browser focus rejected');
+          return true;
+        },
+      });
       const createGpuDiagnosticsStressResource = compileFunction<
         (
           id: string,
           record: Record<string, unknown>,
           dispose: () => Promise<void>,
           forceDispose: () => Promise<void>,
+          workspace?: object,
         ) => { dispose(): Promise<void>; forceDispose(): Promise<void> }
       >(readWebFile('main.js'), 'createGpuDiagnosticsStressResource', {
         throwIfGpuDiagnosticsStressAborted: () => {},
-        restoreGpuDiagnosticsStressWorkspace: async (
-          _workspace: unknown,
-          resourceId?: string,
-          record?: Record<string, unknown>,
-        ) => {
-          restorationCalls.push(`${resourceId}:${record?.kind}`);
-          if (restorationCalls.length === 1) {
-            throw new Error('workspace restoration failed');
-          }
-        },
+        gpuDiagnosticsStressResources: resources,
+        gpuDiagnosticsStressCleanupHandles: cleanupHandles,
+        restoreGpuDiagnosticsStressWorkspace,
       });
       const retryGpuDiagnosticsStressCleanup = compileFunction<
         () => Promise<void>
       >(readWebFile('main.js'), 'retryGpuDiagnosticsStressCleanup', {
-        restoreGpuDiagnosticsStressWorkspace: async () => {
-          restorationCalls.push('fallback-restore');
-        },
+        gpuDiagnosticsStressRecoveryFlight: null,
+        gpuDiagnosticsStressCleanupHandles: cleanupHandles,
+        gpuDiagnosticsStressResources: resources,
+        restoreGpuDiagnosticsStressWorkspace,
         renderGpuDiagnostics: () => {},
       });
       const resource = createGpuDiagnosticsStressResource(
@@ -454,25 +524,26 @@ describe('Tauri GPU diagnostics panel', () => {
         async () => {
           forceDisposalAttempts += 1;
         },
+        workspace,
       );
 
-      await expect(resource.dispose()).rejects.toThrow('workspace restoration failed');
+      await expect(resource.dispose()).rejects.toThrow('browser focus rejected');
       expect(disposalAttempts).toBe(1);
       expect(forceDisposalAttempts).toBe(0);
+      expect(focusAttempts).toBe(1);
+      expect(discardAttempts).toBe(0);
       expect(resources.has('diagnostic-tab')).toBe(true);
       expect(cleanupHandles.has('diagnostic-tab')).toBe(true);
       expect(isGpuDiagnosticsStressRunEnabled(true, true, false, resources.size > 0))
         .toBe(false);
       expect(errorSpy).toHaveBeenCalledWith(
-        '[psyche:graphics] diagnostics workspace restoration failed: Error: workspace restoration failed',
+        '[psyche:graphics] diagnostics workspace restoration failed: Error: browser focus rejected',
       );
 
       await retryGpuDiagnosticsStressCleanup();
 
-      expect(restorationCalls).toEqual([
-        'diagnostic-tab:browser',
-        'diagnostic-tab:browser',
-      ]);
+      expect(focusAttempts).toBe(2);
+      expect(discardAttempts).toBe(1);
       expect(disposalAttempts).toBe(1);
       expect(forceDisposalAttempts).toBe(0);
       expect(resources.size).toBe(0);

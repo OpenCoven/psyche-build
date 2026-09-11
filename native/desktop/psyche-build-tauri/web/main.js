@@ -350,6 +350,8 @@
   function renderGpuDiagnostics() {
     var report = gpuDiagnosticsReport || {};
     var stressAdaptersAvailable = gpuDiagnosticsStressAdaptersAvailable();
+    var cleanupRecoveryRequired = gpuDiagnosticsStressResources.size > 0 ||
+      (!gpuDiagnosticsStressController && gpuDiagnosticsStressWorkspace !== null);
     presentGpuDiagnosticsRows(report);
     if (gpuDiagnosticsStatusEl) {
       gpuDiagnosticsStatusEl.textContent = report.acceleration
@@ -371,19 +373,19 @@
           gpuDiagnosticsStressAuthorized,
           stressAdaptersAvailable,
           Boolean(gpuDiagnosticsStressController),
-          gpuDiagnosticsStressResources.size > 0,
+          cleanupRecoveryRequired,
         )
         : true;
     }
     if (gpuDiagnosticsCancelStressEl) gpuDiagnosticsCancelStressEl.disabled = !gpuDiagnosticsStressController;
     if (gpuDiagnosticsRetryCleanupEl) {
-      gpuDiagnosticsRetryCleanupEl.hidden = gpuDiagnosticsStressResources.size === 0;
+      gpuDiagnosticsRetryCleanupEl.hidden = !cleanupRecoveryRequired;
       gpuDiagnosticsRetryCleanupEl.disabled = (
-        gpuDiagnosticsStressResources.size === 0 ||
+        !cleanupRecoveryRequired ||
         Boolean(gpuDiagnosticsStressRecoveryFlight)
       );
     }
-    if (gpuDiagnosticsProgressEl && gpuDiagnosticsStressResources.size > 0) {
+    if (gpuDiagnosticsProgressEl && cleanupRecoveryRequired) {
       gpuDiagnosticsProgressEl.textContent = gpuDiagnosticsStressRecoveryFlight
         ? "Retrying owned diagnostics cleanup."
         : "Cleanup recovery required. Retry cleanup before running scenarios.";
@@ -604,7 +606,7 @@
       : (typeof filesPaneHasCanvasFocus === "function" && filesPaneHasCanvasFocus()
         ? "file"
         : "terminal");
-    gpuDiagnosticsStressWorkspace = {
+    gpuDiagnosticsStressWorkspace = Object.freeze({
       operationGeneration: invalidateGpuDiagnosticsStressOperations(),
       projectId: project.id,
       worktreePath: worktreePath,
@@ -621,11 +623,11 @@
       sidebarWidth: Number.isFinite(sidebarWidth) ? sidebarWidth : null,
       layoutKey: key,
       layout: cloneGpuDiagnosticsLayout(paneLayouts.get(key)),
-      threadIds: state.threads.map(function (thread) { return thread.id; }),
-      fileIds: state.openFiles.map(function (file) { return file.id; }),
+      threadIds: Object.freeze(state.threads.map(function (thread) { return thread.id; })),
+      fileIds: Object.freeze(state.openFiles.map(function (file) { return file.id; })),
       browserPaneId: browserPane ? browserPane.id : null,
       browserActiveTabId: browser ? browser.activeTabId : null,
-    };
+    });
     return gpuDiagnosticsStressWorkspace;
   }
 
@@ -666,8 +668,6 @@
       discardGpuDiagnosticsStressWorkspace(snapshot);
       return;
     }
-    discardGpuDiagnosticsStressWorkspace(snapshot);
-
     if (snapshot.layout) paneLayouts.set(snapshot.layoutKey, cloneGpuDiagnosticsLayout(snapshot.layout));
     else paneLayouts.delete(snapshot.layoutKey);
     if (snapshot.sidebarWidth !== null) scheduleSidebarWidth(snapshot.sidebarWidth);
@@ -698,14 +698,21 @@
         browser && browser.tabs.some(function (tab) {
           return tab.id === snapshot.focusedBrowserTabId;
         })) {
-      await activateBrowserTab(project, snapshot.focusedBrowserTabId);
+      if (!await activateBrowserTab(project, snapshot.focusedBrowserTabId)) {
+        throw new Error("diagnostics browser focus restoration failed");
+      }
     } else if (snapshot.focusedSurface === "file" &&
                snapshot.focusedFileId && findOpenFile(snapshot.focusedFileId)) {
-      await activateFileTab(snapshot.focusedFileId);
+      if (!await activateFileTab(snapshot.focusedFileId)) {
+        throw new Error("diagnostics editor focus restoration failed");
+      }
     } else if (snapshot.focusedSurface === "terminal" &&
                snapshot.focusedThreadId && findThread(snapshot.focusedThreadId)) {
-      await focusThread(snapshot.focusedThreadId);
+      if (!await focusThread(snapshot.focusedThreadId)) {
+        throw new Error("diagnostics terminal focus restoration failed");
+      }
     }
+    discardGpuDiagnosticsStressWorkspace(snapshot);
   }
 
   function createGpuDiagnosticsStressResource(id, record, dispose, forceDispose, workspace) {
