@@ -76,6 +76,292 @@ function deferred<T>() {
 }
 
 describe('Tauri GPU diagnostics panel', () => {
+  it.each(['pending spawn', 'pending pane', 'generation lookup', 'controller setup', 'orphaned pane',
+    'pane mount failure'] as const)(
+    'retains actual terminal cleanup and restoration after failed setup: %s', async (scenario) => {
+    const controller = new AbortController();
+    const pending = deferred<void>();
+    const entered = deferred<void>();
+    const thread = {
+      id: 'diagnostic', kind: 'shell', projectId: 'project',
+      ptyStarted: false, ptyGeneration: null, status: 'starting',
+      stopRequested: false, closeStarted: false, closing: false, metricsGeneration: 0,
+      terminalController: { dispose: vi.fn() },
+    };
+    const project = { id: 'project', selectedWorktreePath: '/workspace' };
+    const state = { activeProjectId: 'project', activeThreadId: null, activeFileId: null,
+      threads: [thread], openFiles: [] };
+    const workspace = {
+      projectId: 'project', activeProjectId: 'project', worktreePath: '/workspace',
+      selectedWorktreePath: '/workspace', operationGeneration: 0,
+      threadIds: [], fileIds: [], sidebarWidth: null, sidebarOpen: true,
+      layoutKey: 'layout', layout: null, activeThreadId: null, activeFileId: null,
+    };
+    const resources = new Map();
+    const handles = new Map();
+    const run = { disabled: false };
+    const retry = { hidden: true, disabled: true };
+    let stopSucceeds = false;
+    let setupFailed = false;
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'diagnostics_spawn_fixture' && scenario === 'pending spawn') {
+        entered.resolve();
+        await pending.promise;
+      }
+      if (command === 'diagnostics_spawn_fixture' && scenario === 'orphaned pane') {
+        state.threads = [];
+      }
+      if (command === 'pty_current_generation') {
+        if (scenario === 'generation lookup' && !setupFailed) {
+          setupFailed = true;
+          throw new Error('generation rejected');
+        }
+        return 7;
+      }
+      if (command === 'pty_stop' && !stopSucceeds) throw new Error('native stop rejected');
+    });
+    const deps = {
+      state, invoke, controller, gpuDiagnosticsStressWorkspace: workspace,
+      gpuDiagnosticsStressResources: resources, gpuDiagnosticsStressCleanupHandles: handles,
+      gpuDiagnosticsStressOperationGeneration: 0, gpuDiagnosticsStressRecoveryFlight: null,
+      gpuDiagnosticsStressController: null, gpuDiagnosticsStressAuthorized: true,
+      gpuDiagnosticsReport: null, gpuDiagnosticsRunStressEl: run, gpuDiagnosticsRetryCleanupEl: retry,
+      gpuDiagnosticsStatusEl: null, gpuDiagnosticsFallbackEl: null, gpuDiagnosticsStressControlsEl: null,
+      gpuDiagnosticsCancelStressEl: null, gpuDiagnosticsProgressEl: null,
+      window: { PsycheRuntimeDebug: { isGpuDiagnosticsStressRunEnabled, runStressPlan: vi.fn() } },
+      gpuDiagnosticsStressAdaptersAvailable: () => true, presentGpuDiagnosticsRows: () => {},
+      beginGpuDiagnosticsStressWorkspace: () => workspace,
+      findProject: () => project, activeWorkspaceRoot: () => '/workspace',
+      findThread: (id: string) => state.threads.find((t) => t.id === id),
+      createThread: async (options: { onCreated?: (candidate: typeof thread) => void }) => {
+        options.onCreated?.(thread);
+        if (scenario === 'pane mount failure') throw new Error('mount rejected');
+        if (scenario === 'pending pane') {
+          entered.resolve();
+          await pending.promise;
+        }
+        return thread;
+      },
+      ensureThreadPtyController: () => {
+        if (scenario === 'controller setup') throw new Error('controller rejected');
+        return thread.terminalController;
+      },
+      isLiveThread: () => state.threads.includes(thread), isPersistentThread: () => false,
+      setStatus: () => {}, forgetThreadInSets: () => {}, detachThreadPane: () => {},
+      renderPaneWorkspace: () => {}, refreshSidebar: () => {}, refreshTabs: () => {},
+      syncThreadPaneMetadata: () => {}, paneLayouts: new Map(), setSidebarOpen: () => {},
+      renderBrowserTabs: () => {}, syncUrlInput: () => {},
+      cancelGpuDiagnosticsStressLayout: () => {},
+    };
+    const source = readWebFile('main.js');
+    const api = Function(...Object.keys(deps), `
+      var activeSurface = "terminal";
+      ${['stopThreadPty', 'closeThread', 'closeGpuDiagnosticsStressThread',
+        'throwIfGpuDiagnosticsStressAborted', 'gpuDiagnosticsStressOperationIsCurrent',
+        'assertGpuDiagnosticsStressOperationCurrent', 'invalidateGpuDiagnosticsStressOperations',
+        'discardGpuDiagnosticsStressWorkspace', 'gpuDiagnosticsStressWorkspaceIsUnchanged',
+        'restoreGpuDiagnosticsStressWorkspace', 'createGpuDiagnosticsStressResource',
+        'createGpuDiagnosticsStressTerminal', 'retryGpuDiagnosticsStressCleanup',
+        'renderGpuDiagnostics', 'runGpuDiagnosticsStress'].map((name) => functionSource(source, name)).join('\n')}
+      return {
+        create: () => createGpuDiagnosticsStressTerminal(0, "steady", controller.signal),
+        retry: retryGpuDiagnosticsStressCleanup, render: renderGpuDiagnostics,
+        run: runGpuDiagnosticsStress, snapshot: () => gpuDiagnosticsStressWorkspace,
+      };
+    `)(...Object.values(deps)) as {
+      create(): Promise<unknown>; retry(): Promise<void>; render(): void;
+      run(): Promise<void>; snapshot(): unknown;
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const creation = api.create();
+      const rejected = expect(creation).rejects.toThrow();
+      if (scenario.startsWith('pending')) {
+        await entered.promise;
+        controller.abort(new Error('setup cancelled'));
+        pending.resolve();
+      }
+      await rejected;
+      expect(resources.size).toBe(1);
+      expect(handles.size).toBe(1);
+      expect(api.snapshot()).toBe(workspace);
+      expect(state.threads).toEqual(scenario === 'orphaned pane' ? [] : [thread]);
+      expect(thread.terminalController.dispose).not.toHaveBeenCalled();
+      api.render();
+      expect(run.disabled).toBe(true);
+      expect(retry).toEqual({ hidden: false, disabled: false });
+      await expect(api.run()).rejects.toThrow('cleanup recovery is required');
+      await expect(api.retry()).rejects.toThrow('diagnostics cleanup recovery failed');
+      expect(api.snapshot()).toBe(workspace);
+      stopSucceeds = true;
+      await api.retry();
+      expect(invoke.mock.calls.filter(([command]) => command === 'pty_stop').length).toBeGreaterThan(1);
+      expect(state.threads).toEqual([]);
+      expect(resources.size).toBe(0);
+      expect(handles.size).toBe(0);
+      expect(api.snapshot()).toBeNull();
+      expect(run.disabled).toBe(false);
+      expect(retry).toEqual({ hidden: true, disabled: true });
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it.each(['browser navigation', 'browser install', 'browser pending pane', 'browser pane failure',
+    'browser tab presentation', 'editor activation', 'editor cancellation', 'editor pane mount'] as const)(
+    'retains retryable ownership during coupled setup failures: %s', async (scenario) => {
+    const controller = new AbortController();
+    const pending = deferred<void>();
+    const entered = deferred<void>();
+    const ownsPane = scenario === 'browser pending pane' || scenario === 'browser pane failure';
+    const pane = { id: 'web', kind: 'web', closeStarted: ownsPane, metricsGeneration: 0 };
+    const userTab = { id: 'user-tab', created: true };
+    const browser = { tabs: [userTab] as { id: string; created?: boolean }[], activeTabId: userTab.id };
+    const project = { id: 'project', selectedWorktreePath: '/workspace',
+      browsersByWorktree: { '/workspace': browser } };
+    const state = { activeProjectId: 'project', activeThreadId: null, activeFileId: null,
+      threads: [pane], openFiles: [] as { id: string }[] };
+    const workspace = {
+      projectId: 'project', activeProjectId: 'project', worktreePath: '/workspace',
+      selectedWorktreePath: '/workspace', operationGeneration: 0,
+      threadIds: ownsPane ? [] : ['web'], fileIds: [], sidebarWidth: null,
+      sidebarOpen: true, layoutKey: 'layout', layout: null,
+      activeThreadId: null, activeFileId: null, browserActiveTabId: userTab.id,
+    };
+    const filesPane = { activeFileId: null };
+    const filesPanes = new Map<string, typeof filesPane>();
+    const lifecycle = { closing: false };
+    const resources = new Map();
+    const handles = new Map();
+    let cleanupSucceeds = false;
+    let presentationFailed = false;
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'browser_eval') throw new Error('page install rejected');
+      if (command === 'browser_destroy' && !cleanupSucceeds) throw new Error('native destroy rejected');
+    });
+    const deps = {
+      state, invoke, controller, gpuDiagnosticsStressWorkspace: workspace,
+      gpuDiagnosticsStressResources: resources, gpuDiagnosticsStressCleanupHandles: handles,
+      gpuDiagnosticsStressOperationGeneration: 0, gpuDiagnosticsStressRecoveryFlight: null,
+      gpuDiagnosticsStressController: null, beginGpuDiagnosticsStressWorkspace: () => workspace,
+      findProject: () => project, activeWorkspaceRoot: () => '/workspace',
+      findThread: (id: string) => state.threads.find((t) => t.id === id),
+      renderGpuDiagnostics: () => {}, cancelGpuDiagnosticsStressLayout: () => {},
+      renderPaneWorkspace: () => {}, refreshSidebar: () => {}, refreshTabs: () => {},
+      paneLayouts: new Map(), setSidebarOpen: () => {}, renderBrowserTabs: () => {
+        if (scenario === 'browser tab presentation' && !presentationFailed) {
+          presentationFailed = true;
+          throw new Error('tab presentation rejected');
+        }
+      },
+      syncUrlInput: () => {}, isPersistentThread: () => false, setStatus: () => {},
+      forgetThreadInSets: () => {}, detachThreadPane: () => {},
+      ensureBrowserModel: () => browser, browserTabLifecycle: () => lifecycle,
+      browserLabelForTab: () => 'diagnostic-label', boundedBrowserError: String,
+      installBrowserAutomationForPair: async () => true, invalidateBrowserNavigation: () => {},
+      syncProjectBrowser: () => {}, saveWorkspaceSoon: () => {},
+      createBrowserPane: async (_project: unknown, options: { onCreated: (candidate: typeof pane) => void }) => {
+        if (ownsPane) {
+          options.onCreated(pane);
+          if (scenario === 'browser pane failure') throw new Error('pane focus rejected');
+          entered.resolve();
+          await pending.promise;
+        }
+        return pane;
+      },
+      findBrowserPane: () => pane, browserPaneIsClosing: () => false,
+      settings: { maxBrowserTabsPerProject: 10 }, HARD_MAX_BROWSER_TABS_PER_PROJECT: 10,
+      makeBrowserTabId: () => 'diagnostic-tab', tabTitle: () => 'fixture', markActiveSurface: () => {},
+      navigateBrowser: async () => {
+        if (scenario === 'browser navigation') {
+          entered.resolve();
+          await pending.promise;
+        }
+        return true;
+      },
+      filesPanes, filesPaneKey: () => 'files', fileCounter: 0,
+      window: { PsycheCodeEditor: { createFileBuffer: (text: string) => ({ text }) } },
+      ensureFilesPane: () => {
+        filesPanes.set('files', filesPane);
+        if (scenario === 'editor pane mount') throw new Error('files pane mount rejected');
+        if (scenario === 'editor cancellation') controller.abort(new Error('setup cancelled'));
+        return filesPane;
+      },
+      activateFileTabNow: () => { throw new Error('editor activation rejected'); },
+      findOpenFile: (id: string) => state.openFiles.find((file) => file.id === id),
+      filesForPane: () => state.openFiles, fileNavigationInFlight: false, fileDecisionInFlight: false,
+      guardDirtyFile: async () => true,
+      removeFilesPaneNow: () => {
+        if (!cleanupSucceeds) throw new Error('pane removal rejected');
+        filesPanes.delete('files');
+      },
+    };
+    const source = readWebFile('main.js');
+    const api = Function(...Object.keys(deps), `
+      var activeSurface = "terminal";
+      ${['stopThreadPty', 'closeThread', 'closeGpuDiagnosticsStressThread', 'createBrowserTab', 'closeBrowserTab', 'closeFileTab',
+        'throwIfGpuDiagnosticsStressAborted', 'gpuDiagnosticsStressOperationIsCurrent',
+        'assertGpuDiagnosticsStressOperationCurrent', 'invalidateGpuDiagnosticsStressOperations',
+        'discardGpuDiagnosticsStressWorkspace', 'gpuDiagnosticsStressWorkspaceIsUnchanged',
+        'restoreGpuDiagnosticsStressWorkspace', 'createGpuDiagnosticsStressResource',
+        'createGpuDiagnosticsStressBrowser', 'cleanupGpuDiagnosticsStressBrowserResources',
+        'installGpuDiagnosticsBrowserPage', 'createGpuDiagnosticsStressEditor',
+        'retryGpuDiagnosticsStressCleanup'].map((name) => functionSource(source, name)).join('\n')}
+      return {
+        browser: () => createGpuDiagnosticsStressBrowser({ html: "fixture" }, controller.signal),
+        editor: () => createGpuDiagnosticsStressEditor({ name: "fixture", text: "text" }, controller.signal),
+        retry: retryGpuDiagnosticsStressCleanup, snapshot: () => gpuDiagnosticsStressWorkspace,
+      };
+    `)(...Object.values(deps)) as {
+      browser(): Promise<unknown>; editor(): Promise<unknown>; retry(): Promise<void>; snapshot(): unknown;
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const creation = scenario.startsWith('editor') ? api.editor() : api.browser();
+      const rejected = expect(creation).rejects.toThrow();
+      if (scenario === 'browser navigation' || scenario === 'browser pending pane') {
+        await entered.promise;
+        controller.abort(new Error('setup cancelled'));
+        pending.resolve();
+      }
+      await rejected;
+      expect(resources.size).toBe(1);
+      expect(handles.size).toBe(1);
+      expect(api.snapshot()).toBe(workspace);
+      expect(isGpuDiagnosticsStressRunEnabled(true, true, false, resources.size > 0)).toBe(false);
+      await expect(api.retry()).rejects.toThrow('diagnostics cleanup recovery failed');
+      cleanupSucceeds = true;
+      pane.closeStarted = false;
+      await api.retry();
+      expect(resources.size).toBe(0);
+      expect(handles.size).toBe(0);
+      expect(api.snapshot()).toBeNull();
+      expect(browser.tabs).toEqual([userTab]);
+      expect(browser.activeTabId).toBe(userTab.id);
+      expect(state.threads).toEqual(ownsPane ? [] : [pane]);
+      expect(state.openFiles).toEqual([]);
+      expect(filesPanes.size).toBe(0);
+      if (scenario === 'browser navigation' || scenario === 'browser install' ||
+          scenario === 'browser tab presentation') {
+        expect(invoke.mock.calls.filter(([command]) => command === 'browser_destroy')).toHaveLength(3);
+      }
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('registers pane ownership before fallible mounting or focus', () => {
+    const source = readWebFile('main.js');
+    const terminal = functionSource(source, 'createThread');
+    const browser = functionSource(source, 'createBrowserPane');
+    expect(terminal.indexOf('opts.onCreated(thread)')).toBeGreaterThan(terminal.indexOf('state.threads.push(thread)'));
+    expect(terminal.indexOf('opts.onCreated(thread)')).toBeLessThan(terminal.indexOf('mountTerminal(thread)'));
+    expect(browser.indexOf('options.onCreated(pane)')).toBeGreaterThan(browser.indexOf('state.threads.push(pane)'));
+    expect(browser.indexOf('options.onCreated(pane)')).toBeLessThan(browser.indexOf('mountBrowserPane(pane)'));
+  });
+
   it.each(['disposal', 'cancelled setup', 'ordinary close'] as const)(
     'confirms diagnostics shutdown without changing ordinary close semantics: %s', async (scenario) => {
     const thread = {
@@ -438,21 +724,6 @@ describe('Tauri GPU diagnostics panel', () => {
     expect(isGpuDiagnosticsContextLossConfirmed('unrelated title', title)).toBe(false);
   });
 
-  it('stops a fixture that starts after its diagnostics pane has been closed', () => {
-    const source = readWebFile('main.js');
-    const terminalAdapter = source.slice(
-      source.indexOf('async function createGpuDiagnosticsStressTerminal'),
-      source.indexOf('async function createGpuDiagnosticsStressEditor'),
-    );
-
-    expect(terminalAdapter).toMatch(
-      /if \(!isLiveThread\(thread\)[\s\S]*await stopThreadPty\(thread\)/,
-    );
-    expect(terminalAdapter).toContain(
-      'new Error("diagnostics terminal cleanup was not confirmed")',
-    );
-  });
-
   it('restores or clears the workspace snapshot after every terminal setup failure', () => {
     const source = readWebFile('main.js');
     const terminalAdapter = source.slice(
@@ -467,7 +738,7 @@ describe('Tauri GPU diagnostics panel', () => {
       /catch \(error\) \{[\s\S]*await restoreGpuDiagnosticsStressWorkspace\(workspace\);[\s\S]*throw error;/,
     );
     expect(terminalAdapter).toMatch(
-      /try \{\s*var controller = ensureThreadPtyController\(thread\);/,
+      /try \{\s*assertGpuDiagnosticsStressOperationCurrent\(workspace, signal\);\s*var controller = ensureThreadPtyController\(thread\);/,
     );
   });
 
