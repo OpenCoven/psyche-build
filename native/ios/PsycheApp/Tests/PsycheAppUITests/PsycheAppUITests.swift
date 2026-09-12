@@ -562,7 +562,9 @@ final class PsycheAppUITests: XCTestCase {
 
         let sheet = element("remote-action-sheet", in: app)
         XCTAssertTrue(sheet.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Choose how to close homepage polish."].waitForExistence(timeout: 10))
+        let closeMessage = app.staticTexts["Choose how to close homepage polish."]
+        reveal(closeMessage, in: sheet)
+        XCTAssertTrue(closeMessage.waitForExistence(timeout: 10))
         XCTAssertFalse(
             app.staticTexts["This action is not connected to a host. Reconnect and try again."].exists
         )
