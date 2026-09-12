@@ -86,6 +86,14 @@ final class AppModel: ObservableObject {
         composition?.dismissWorkspaceCacheRecoveryNotice()
     }
 
+    func deliverFixtureLiveSnapshot() {
+        guard fixtureName == WorkspaceFixtures.staleRecovery else { return }
+        workspaceStore.applySnapshot(
+            workspace: WorkspaceFixtures.staleRecoveryLiveWorkspace(),
+            sequence: 41
+        )
+    }
+
     /// Fixed so UI tests can assert host context without a paired record.
     static let fixtureHostName = "psyche-demo.local"
 

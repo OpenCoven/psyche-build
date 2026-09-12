@@ -1,10 +1,10 @@
-# iOS Collapsible Siderails Implementation Plan
+# Superseded iOS side-rail visibility implementation plan
 
 > **For agentic workers:** Implement this plan task-by-task and keep progress tracked with checkbox (`- [ ]`) syntax.
 
 **Goal:** Make the Projects and Panes rails collapse together so an iPhone terminal opens at full width and can restore navigation from one accessible toolbar control.
 
-**Architecture:** Keep the existing three-column `NavigationSplitView` and bind it to local visibility and preferred-compact-column state in `CockpitView`. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one toolbar control — carried by every column that can be on screen in compact width, so it collapses as well as reveals — without changing project, pane, or connection state.
+**Architecture:** Kept the then-current split-view root and bound it to local visibility and preferred-compact-column state. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one toolbar control — carried by every column that can be on screen in compact width, so it collapses as well as reveals — without changing project, pane, or connection state.
 
 **Tech Stack:** Swift 6, SwiftUI, XCTest/XCUITest, XcodeGen, `xcodebuild`
 
@@ -186,7 +186,7 @@ private func toggleSiderails() {
 ```
 
 This keeps compact devices terminal-first and gives SwiftUI an explicit compact
-navigation destination while preserving the current three-column default on
+navigation destination while preserving the then-current split-view default on
 regular-width iPads. SwiftUI updates `preferredCompactColumn` to `.detail` when
 the user selects a pane, so the button label returns to "Show siderails".
 

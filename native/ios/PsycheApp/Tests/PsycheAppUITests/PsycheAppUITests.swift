@@ -16,12 +16,33 @@ final class PsycheAppUITests: XCTestCase {
         } else {
             row("source-settings", in: app).tap()
         }
+
         let warning = element("workspace-cache-error", in: app)
         guard warning.waitForExistence(timeout: 5) else {
             return XCTFail("Settings does not display the workspace cache error")
         }
         XCTAssertTrue(warning.label.contains("Reconnect"))
         XCTAssertFalse(warning.label.contains("private draft"))
+    }
+
+    func testStaleFixtureShowsDisabledControlsThenClearsAfterLiveSnapshot() throws {
+        let app = launchApp(arguments: ["-uiFixture", "stale-recovery"])
+
+        let banner = element("stale-state-notice", in: app)
+        XCTAssertTrue(banner.waitForExistence(timeout: 10))
+        XCTAssertTrue(banner.label.contains("Showing last known state"), banner.label)
+        XCTAssertTrue((banner.value as? String ?? "").contains("Last confirmed"), "\(banner.value ?? "")")
+
+        openPane("cached-pane", in: app)
+        XCTAssertTrue(element("pane-workspace-cached-pane", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(element("pane-composer-send", in: app).isEnabled)
+        XCTAssertFalse(app.buttons["pane-files"].isEnabled)
+
+        app.buttons["fixture-deliver-live-snapshot"].tap()
+
+        XCTAssertTrue(element("pane-workspace-live-pane", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(element("pane-workspace-cached-pane", in: app).exists)
+        XCTAssertTrue(app.buttons["pane-files"].isEnabled)
     }
 
     // MARK: - Both device classes
@@ -92,6 +113,36 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(label.contains("open-coven.dev"), label)
         XCTAssertTrue(label.contains("waiting"), label)
         XCTAssertTrue(label.contains("needs you"), label)
+    }
+
+    func testAccessibleTextSizeAndReduceMotionCompleteNowPaneActionSheetPath() throws {
+        let app = launchApp(arguments: [
+            "-uiFixture", "multiproject",
+            "-uiDynamicTypeSize", "accessibility3",
+            "-uiReduceMotion",
+        ])
+
+        let paneRow = element("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
+        XCTAssertTrue(paneRow.label.contains("open-coven.dev"), paneRow.label)
+        XCTAssertTrue(paneRow.label.contains("psyche-demo.local"), paneRow.label)
+        paneRow.tap()
+
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+        let focusedPane = element("terminal-pane-web-home", in: app)
+        XCTAssertTrue(focusedPane.waitForExistence(timeout: 10))
+        XCTAssertTrue(focusedPane.isSelected)
+
+        openPaneActions(in: app)
+        let rename = element("pane-action-rename", in: app)
+        XCTAssertTrue(rename.waitForExistence(timeout: 10))
+        rename.tap()
+
+        let sheet = element("remote-action-sheet", in: app)
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        let input = element("remote-action-input", in: app)
+        reveal(input, in: sheet)
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
     }
 
     // MARK: - Terminal workspace
@@ -420,8 +471,8 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Browse Files"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Rituals"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Close and Cleanup"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Stop pane and keep work"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Close pane and choose cleanup"].waitForExistence(timeout: 10))
 
         app.buttons["Rituals"].tap()
         let unavailable = app.buttons["Ritual execution is not available on mobile yet"]
@@ -455,7 +506,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Stop"].tap()
+        element("pane-action-stop", in: app).tap()
 
         XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForExistence(timeout: 10))
         let message = app.staticTexts.containing(
@@ -478,7 +529,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Stop"].tap()
+        element("pane-action-stop", in: app).tap()
 
         XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForExistence(timeout: 10))
         let dialog = app.sheets.firstMatch.exists ? app.sheets.firstMatch : app.alerts.firstMatch
@@ -495,7 +546,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Close and Cleanup"].tap()
+        element("pane-action-cleanup", in: app).tap()
 
         XCTAssertTrue(
             app.staticTexts["Close and clean up homepage polish?"].waitForExistence(timeout: 10)
@@ -522,7 +573,7 @@ final class PsycheAppUITests: XCTestCase {
         openWebHomePane(in: app)
 
         openPaneActions(in: app)
-        app.buttons["Close and Cleanup"].tap()
+        element("pane-action-cleanup", in: app).tap()
 
         XCTAssertTrue(
             app.staticTexts["Close and clean up homepage polish?"].waitForExistence(timeout: 10)

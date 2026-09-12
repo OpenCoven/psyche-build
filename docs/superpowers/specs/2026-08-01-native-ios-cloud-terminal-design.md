@@ -200,7 +200,7 @@ than a replacement.
 
 Owns authentication state, adaptive navigation, deep links, lifecycle,
 background transitions, global error presentation, and dependency injection.
-Use SwiftUI navigation with an iPhone stack and an iPad three-column layout.
+Use SwiftUI navigation with an iPhone stack and an iPad split-view layout.
 
 #### Identity
 

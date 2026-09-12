@@ -40,6 +40,7 @@ struct PaneControlsMenu: View {
             } label: {
                 Label(PaneControlsMenuAction.files.label, systemImage: PaneControlsMenuAction.files.systemImage)
             }
+            .accessibilityIdentifier("pane-action-files")
             .disabled(PaneControlsPresentation.filesDisabled(
                 hasInspectableWorktree: hasInspectableWorktree,
                 isStale: store.isStale,
@@ -53,8 +54,9 @@ struct PaneControlsMenu: View {
             Button(role: .destructive) {
                 isConfirmingStop = true
             } label: {
-                Label(PaneControlsMenuAction.stop.label, systemImage: PaneControlsMenuAction.stop.systemImage)
+                Label(PaneControlsMenuAction.stop.consequenceLabel, systemImage: PaneControlsMenuAction.stop.systemImage)
             }
+            .accessibilityIdentifier("pane-action-stop")
             .disabled(PaneControlsPresentation.hostActionDisabled(
                 isStale: store.isStale,
                 isBusy: localActionBusy
@@ -63,8 +65,9 @@ struct PaneControlsMenu: View {
             Button(role: .destructive) {
                 isConfirmingCleanup = true
             } label: {
-                Label(PaneControlsMenuAction.cleanup.label, systemImage: PaneControlsMenuAction.cleanup.systemImage)
+                Label(PaneControlsMenuAction.cleanup.consequenceLabel, systemImage: PaneControlsMenuAction.cleanup.systemImage)
             }
+            .accessibilityIdentifier("pane-action-cleanup")
             .disabled(PaneControlsPresentation.hostActionDisabled(
                 isStale: store.isStale,
                 isBusy: remoteActionBusy
@@ -190,6 +193,7 @@ struct PaneControlsMenu: View {
         } label: {
             Label(ActionSheetPresentation.actionLabel(for: action), systemImage: systemImage)
         }
+        .accessibilityIdentifier("pane-action-\(action.rawValue)")
         .disabled(PaneControlsPresentation.hostActionDisabled(
             isStale: store.isStale,
             isBusy: remoteActionBusy
@@ -197,6 +201,10 @@ struct PaneControlsMenu: View {
     }
 
     private func startRemoteAction(_ action: PaneAction) {
+        guard store.liveness.allowsLiveActions else {
+            errorMessage = WorkspaceStoreError.staleWorkspace.localizedDescription
+            return
+        }
         guard let workspace = store.workspace else {
             errorMessage = WorkspaceStoreError.staleWorkspace.localizedDescription
             return
@@ -253,6 +261,17 @@ enum PaneControlsMenuAction: CaseIterable, Equatable {
             "Stop"
         case .cleanup:
             "Close and Cleanup"
+        }
+    }
+
+    var consequenceLabel: String {
+        switch self {
+        case .stop:
+            "Stop pane and keep work"
+        case .cleanup:
+            "Close pane and choose cleanup"
+        default:
+            label
         }
     }
 

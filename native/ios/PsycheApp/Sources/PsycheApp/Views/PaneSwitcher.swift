@@ -8,6 +8,7 @@ import SwiftUI
 /// would attach a stream for something nobody is looking at, which is exactly
 /// what the two-session cap exists to prevent.
 struct PaneSwitcher: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let panes: [PaneChoice]
     let primaryPaneID: String?
     let secondaryPaneID: String?
@@ -76,9 +77,13 @@ struct PaneSwitcher: View {
         } label: {
             HStack(spacing: 6) {
                 WorkspaceStatusDot(status: pane.status, needsAttention: pane.needsAttention)
-                Text(pane.title)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(pane.title)
+                    Text(pane.status)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption.weight(.semibold))
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
             }
             .padding(.horizontal, 12)
             .frame(minHeight: PsycheTheme.minimumTapTarget)

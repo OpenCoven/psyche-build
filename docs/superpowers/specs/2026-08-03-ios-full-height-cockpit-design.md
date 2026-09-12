@@ -1,4 +1,4 @@
-# iOS Full-Height Cockpit Design
+# Superseded iOS full-height design
 
 ## Goal
 
@@ -7,7 +7,7 @@ instead of rendering as a short content-sized panel.
 
 ## Design
 
-`CockpitView` and `TerminalDetail` will explicitly accept the full height
+`CockpitView` and `TerminalDetail` were intended to explicitly accept the full height
 proposed by their SwiftUI containers with `maxHeight: .infinity`. The terminal
 output `ScrollView` remains the flexible child inside `TerminalDetail`; the
 terminal header and coding-key row keep their intrinsic heights.

@@ -50,10 +50,18 @@ enum PaneIndicator: Equatable {
         case .quiet: .gray
         }
     }
+
+    var text: String {
+        switch self {
+        case .needsAttention: "Needs you"
+        case .running: "Running"
+        case .quiet: "Idle"
+        }
+    }
 }
 
-/// The dot beside a pane. Hidden from VoiceOver on purpose: the row's combined
-/// label already states the status, so exposing it again would say it twice.
+/// The dot beside a pane. It carries its own status text so the indicator is
+/// never only colour, even when it is reused outside a combined row.
 struct WorkspaceStatusDot: View {
     let status: String
     let needsAttention: Bool
@@ -66,6 +74,7 @@ struct WorkspaceStatusDot: View {
         Circle()
             .fill(indicator.color)
             .frame(width: 9, height: 9)
-            .accessibilityHidden(true)
+            .accessibilityLabel("Status")
+            .accessibilityValue(indicator.text)
     }
 }

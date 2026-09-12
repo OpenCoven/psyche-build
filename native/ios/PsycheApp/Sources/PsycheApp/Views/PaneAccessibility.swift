@@ -14,6 +14,18 @@ enum PaneAccessibility {
             .joined(separator: " · ")
     }
 
+    static func contextLine(
+        projectTitle: String,
+        agent: String?,
+        status: String,
+        hostName: String?
+    ) -> String {
+        [projectTitle, agent ?? status, hostName.map { "host \($0)" }]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
     static func label(
         title: String,
         projectTitle: String,
@@ -63,11 +75,13 @@ enum PaneAccessibility {
 
     static func projectSubtitle(
         branch: String?,
+        hostName: String?,
         runningCount: Int,
         attentionCount: Int
     ) -> String {
         var parts: [String] = []
         if let branch, !branch.isEmpty { parts.append(branch) }
+        if let hostName, !hostName.isEmpty { parts.append("host \(hostName)") }
         parts.append("\(runningCount) running")
         if attentionCount > 0 {
             parts.append("\(attentionCount) needs you")
@@ -78,11 +92,13 @@ enum PaneAccessibility {
     static func projectLabel(
         title: String,
         branch: String?,
+        hostName: String?,
         runningCount: Int,
         attentionCount: Int
     ) -> String {
         var parts = [title]
         if let branch, !branch.isEmpty { parts.append("branch \(branch)") }
+        if let hostName, !hostName.isEmpty { parts.append("host \(hostName)") }
         parts.append("\(runningCount) running")
         parts.append("\(attentionCount) needing attention")
         return parts.joined(separator: ", ")

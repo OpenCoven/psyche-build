@@ -67,10 +67,23 @@ struct NowPaneRow: View {
                 Text(item.title)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
-                Text(contextLine)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                ViewThatFits(in: .horizontal) {
+                    Text(contextLine)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.projectTitle)
+                        if let agent = item.agent {
+                            Text(agent)
+                        } else {
+                            Text(item.status)
+                        }
+                        if let hostName, !hostName.isEmpty {
+                            Text("Host \(hostName)")
+                        }
+                    }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
                 if let lastActivity = item.lastActivity {
                     Text(lastActivity, style: .relative)
                         .font(.caption)
@@ -90,7 +103,8 @@ struct NowPaneRow: View {
         PaneAccessibility.contextLine(
             projectTitle: item.projectTitle,
             agent: item.agent,
-            status: item.status
+            status: item.status,
+            hostName: hostName
         )
     }
 
@@ -123,6 +137,15 @@ struct StaleStateNotice: View {
                 .foregroundStyle(PsycheTheme.amber)
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("Showing last known state")
+        .accessibilityValue(accessibilityValue)
         .accessibilityIdentifier("stale-state-notice")
+    }
+
+    private var accessibilityValue: String {
+        if let lastConfirmedAt {
+            return "Last confirmed \(lastConfirmedAt.formatted(date: .abbreviated, time: .shortened))"
+        }
+        return "Not yet confirmed by a host"
     }
 }

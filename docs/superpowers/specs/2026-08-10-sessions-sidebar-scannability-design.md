@@ -115,7 +115,7 @@ Empty categories remain hidden.
 
 ### Session rows
 
-Every session row uses the same three-column grid:
+Every session row uses the same split metadata grid:
 
 1. Type icon.
 2. Name and concise metadata.
