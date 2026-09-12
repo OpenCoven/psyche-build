@@ -90,7 +90,8 @@
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
     "prepack": "pnpm run build && pnpm run docs:focus:check",
     "smoke:pack": "node scripts/smoke-pack-install.js",
-    "acceptance:validate": "node scripts/validate-operator-acceptance.mjs"
+    "acceptance:validate": "node scripts/validate-operator-acceptance.mjs",
+    "acceptance:preflight": "node scripts/operator-preflight.mjs"
   },
   "bin": {
     "psyche": "psyche"
