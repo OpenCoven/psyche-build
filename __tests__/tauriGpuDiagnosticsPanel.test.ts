@@ -76,6 +76,186 @@ function deferred<T>() {
 }
 
 describe('Tauri GPU diagnostics panel', () => {
+  it.each(['disposal', 'cancelled setup', 'ordinary close'] as const)(
+    'confirms diagnostics shutdown without changing ordinary close semantics: %s', async (scenario) => {
+    const thread = {
+      id: 'diagnostic-terminal', kind: 'shell', projectId: 'project',
+      ptyStarted: true, ptyGeneration: 7, status: 'running',
+      stopRequested: false, closeStarted: false, closing: false,
+      metricsGeneration: 0, terminalController: { dispose: vi.fn() },
+    };
+    const state = { threads: [thread], activeThreadId: null };
+    const resources = new Map();
+    const handles = new Map();
+    const controller = new AbortController();
+    let stopSucceeds = scenario === 'cancelled setup';
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'diagnostics_spawn_fixture' && scenario === 'cancelled setup') {
+        controller.abort(new Error('setup cancelled'));
+      }
+      if (command === 'pty_current_generation') return 7;
+      if (command === 'pty_stop' && !stopSucceeds) throw new Error('native stop rejected');
+    });
+    const restore = vi.fn();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const source = readWebFile('main.js');
+    const deps = {
+      state, invoke, findThread: (id: string) => state.threads.find((t) => t.id === id),
+      isPersistentThread: () => false, setStatus: vi.fn(),
+      forgetThreadInSets: vi.fn(), detachThreadPane: vi.fn(),
+      renderPaneWorkspace: vi.fn(), refreshSidebar: vi.fn(), refreshTabs: vi.fn(),
+      controller,
+      gpuDiagnosticsStressResources: resources,
+      gpuDiagnosticsStressCleanupHandles: handles,
+      restoreGpuDiagnosticsStressWorkspace: restore,
+      beginGpuDiagnosticsStressWorkspace: () => ({ projectId: 'project', worktreePath: '/workspace' }),
+      assertGpuDiagnosticsStressOperationCurrent: () => {},
+      gpuDiagnosticsStressOperationIsCurrent: () => true,
+      findProject: () => ({ id: 'project' }), activeWorkspaceRoot: () => '/workspace',
+      createThread: async () => thread, ensureThreadPtyController: () => thread.terminalController,
+      isLiveThread: () => true, syncThreadPaneMetadata: () => {},
+    };
+    const factory = Function(...Object.keys(deps), `
+      ${['stopThreadPty', 'closeThread', 'closeGpuDiagnosticsStressThread', 'throwIfGpuDiagnosticsStressAborted',
+        'createGpuDiagnosticsStressResource', 'createGpuDiagnosticsStressTerminal']
+        .map((name) => functionSource(source, name)).join('\n')}
+      return {
+        create: () => createGpuDiagnosticsStressTerminal(0, "steady", controller.signal),
+        close: (id) => closeThread(id, { focus: false, persist: false }),
+      };
+    `)(...Object.values(deps)) as {
+      create(): Promise<{ dispose(): Promise<void>; forceDispose(): Promise<void> }>;
+      close(id: string): Promise<boolean>;
+    };
+    try {
+      if (scenario === 'cancelled setup') {
+        await expect(factory.create()).rejects.toThrow('setup cancelled');
+        expect(state.threads).toEqual([]);
+        expect(invoke.mock.calls.filter(([command]) => command === 'pty_stop')).toHaveLength(1);
+        return;
+      }
+      if (scenario === 'ordinary close') {
+        await expect(factory.close(thread.id)).resolves.toBe(true);
+        expect(state.threads).toEqual([]);
+        return;
+      }
+      const resource = await factory.create();
+      await expect(resource.dispose()).rejects.toThrow('diagnostics cleanup and forced cleanup failed');
+      expect(state.threads).toEqual([thread]);
+      expect(thread.terminalController.dispose).not.toHaveBeenCalled();
+      expect(resources.get(thread.id)).toEqual({ kind: 'terminal', thread });
+      expect(handles.get(thread.id)).toBe(resource);
+      expect(restore).not.toHaveBeenCalled();
+      await expect(resource.forceDispose()).rejects.toThrow('cleanup was not confirmed');
+      expect(thread.closeStarted).toBe(false);
+      expect(thread.stopRequested).toBe(false);
+      stopSucceeds = true;
+      await resource.forceDispose();
+      expect(invoke.mock.calls.filter(([command]) => command === 'pty_stop')).toHaveLength(4);
+      expect(invoke).toHaveBeenLastCalledWith('pty_stop', {
+        threadId: thread.id, thread_id: thread.id, generation: 7,
+      });
+      expect(state.threads).toEqual([]);
+      expect(resources.size).toBe(0);
+      expect(handles.size).toBe(0);
+      expect(restore).toHaveBeenCalledOnce();
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('restores the loaded editor document and Files pane after closing a synthetic tab', async () => {
+    const project = { id: 'project', selectedWorktreePath: '/workspace' };
+    const files = ['A', 'B', 'diagnostic'].map((id) => ({
+      id, text: `document ${id}`, projectId: project.id, workspaceRoot: '/workspace',
+    }));
+    const state = {
+      activeProjectId: project.id, activeThreadId: null, activeFileId: 'A',
+      openFiles: [...files], threads: [],
+    };
+    const pane = { activeFileId: 'A' };
+    const workspace = {
+      projectId: project.id, activeProjectId: project.id, worktreePath: '/workspace',
+      selectedWorktreePath: '/workspace', activeThreadId: null, activeFileId: 'A',
+      activeSurface: 'terminal', focusedSurface: 'file', focusedFileId: 'A',
+      sidebarWidth: null, sidebarOpen: true, layoutKey: 'layout', layout: null,
+      threadIds: [], fileIds: ['A', 'B'],
+    };
+    let document = '';
+    const deps = {
+      state, findProject: () => project,
+      findOpenFile: (id: string) => state.openFiles.find((file) => file.id === id),
+      filesPanes: new Map([['files', pane]]), filesPaneKey: () => 'files',
+      filesForPane: () => state.openFiles,
+      ensureFilesPane: () => pane, assignSelectedWorktreePath: () => {},
+      fileFocus: {}, fileViewEl: { hidden: true },
+      focusCanvasSurface: () => {}, syncPaneMetricsVisibility: () => {},
+      syncAllPtyVisibility: () => {}, renderPaneMinimap: () => {}, activePaneLayout: () => null,
+      renderPaneWorkspace: () => {}, markActiveSurface: () => {}, refreshTabs: () => {},
+      renderFileChrome: () => {}, guardDirtyFile: async () => true,
+      fileEditor: { focus: () => {}, setDocument: (value: { text: string }) => { document = value.text; } },
+      gpuDiagnosticsStressResources: new Map(), gpuDiagnosticsStressWorkspace: workspace,
+      activeWorkspaceRoot: () => '/workspace', discardGpuDiagnosticsStressWorkspace: () => {},
+      paneLayouts: new Map(), setSidebarOpen: () => {},
+      refreshSidebar: () => {}, renderBrowserTabs: () => {}, syncUrlInput: () => {},
+    };
+    const source = readWebFile('main.js');
+    const api = Function(...Object.keys(deps), `
+      var loadedEditorFileId = null, activeSurface = "terminal";
+      var fileNavigationInFlight = false, fileDecisionInFlight = false;
+      ${['enterFileFocus', 'isEditableFile', 'renderFileView', 'activateFileTabNow',
+        'activateFileTab', 'closeFileTab', 'gpuDiagnosticsStressWorkspaceIsUnchanged',
+        'restoreGpuDiagnosticsStressWorkspace'].map((name) => functionSource(source, name)).join('\n')}
+      return { activateFileTab, closeFileTab, restoreGpuDiagnosticsStressWorkspace };
+    `)(...Object.values(deps)) as {
+      activateFileTab(id: string): Promise<boolean>;
+      closeFileTab(id: string): Promise<boolean>;
+      restoreGpuDiagnosticsStressWorkspace(): Promise<void>;
+    };
+    await api.activateFileTab('diagnostic');
+    expect(document).toBe('document diagnostic');
+    await api.closeFileTab('diagnostic');
+    expect([state.activeFileId, pane.activeFileId, document]).toEqual(['B', 'B', 'document B']);
+    await api.restoreGpuDiagnosticsStressWorkspace();
+    expect([state.activeFileId, pane.activeFileId, document]).toEqual(['A', 'A', 'document A']);
+  });
+
+  it('does not present live stress resources as cleanup recovery during an active run', () => {
+    const retry = { hidden: false, disabled: false };
+    const progress = { textContent: 'Scenario running' };
+    const render = compileFunction<() => void>(readWebFile('main.js'), 'renderGpuDiagnostics', {
+      gpuDiagnosticsReport: {}, gpuDiagnosticsStressAdaptersAvailable: () => true,
+      gpuDiagnosticsStressResources: new Map([['live', {}]]),
+      gpuDiagnosticsStressWorkspace: {}, gpuDiagnosticsStressController: new AbortController(),
+      gpuDiagnosticsStressRecoveryFlight: null, presentGpuDiagnosticsRows: () => {},
+      gpuDiagnosticsStatusEl: null, gpuDiagnosticsFallbackEl: null,
+      gpuDiagnosticsStressControlsEl: null, gpuDiagnosticsRunStressEl: null,
+      gpuDiagnosticsCancelStressEl: null, gpuDiagnosticsRetryCleanupEl: retry,
+      gpuDiagnosticsProgressEl: progress, gpuDiagnosticsStressAuthorized: true,
+    });
+    render();
+    expect(retry).toEqual({ hidden: true, disabled: true });
+    expect(progress.textContent).toBe('Scenario running');
+  });
+
+  it.each([false, true])('rejects cleanup callbacks until the run settles (aborted: %s)', async (aborted) => {
+    const controller = new AbortController();
+    if (aborted) controller.abort();
+    const forceDispose = vi.fn();
+    const restore = vi.fn();
+    const retry = compileFunction<() => Promise<void>>(readWebFile('main.js'), 'retryGpuDiagnosticsStressCleanup', {
+      gpuDiagnosticsStressController: controller, gpuDiagnosticsStressRecoveryFlight: null,
+      gpuDiagnosticsStressCleanupHandles: new Map([['live', { forceDispose }]]),
+      gpuDiagnosticsStressResources: new Map(),
+      restoreGpuDiagnosticsStressWorkspace: restore, renderGpuDiagnostics: () => {},
+    });
+    await expect(retry()).rejects.toThrow('stress run is still active');
+    expect(forceDispose).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
   it('installs runnable stress adapters only for an exact native debug authorization report', async () => {
     const calls: string[] = [];
     const host: DiagnosticsStressAdapterHost = {
@@ -509,6 +689,7 @@ describe('Tauri GPU diagnostics panel', () => {
       const retryGpuDiagnosticsStressCleanup = compileFunction<
         () => Promise<void>
       >(readWebFile('main.js'), 'retryGpuDiagnosticsStressCleanup', {
+        gpuDiagnosticsStressController: null,
         gpuDiagnosticsStressRecoveryFlight: null,
         gpuDiagnosticsStressCleanupHandles: cleanupHandles,
         gpuDiagnosticsStressResources: resources,
@@ -638,6 +819,7 @@ describe('Tauri GPU diagnostics panel', () => {
       const retryGpuDiagnosticsStressCleanup = compileFunction<
         () => Promise<void>
       >(readWebFile('main.js'), 'retryGpuDiagnosticsStressCleanup', {
+        gpuDiagnosticsStressController: null,
         restoreGpuDiagnosticsStressWorkspace: async () => {
           restorationCalls.push('restored');
         },

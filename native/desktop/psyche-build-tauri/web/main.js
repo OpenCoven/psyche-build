@@ -350,8 +350,8 @@
   function renderGpuDiagnostics() {
     var report = gpuDiagnosticsReport || {};
     var stressAdaptersAvailable = gpuDiagnosticsStressAdaptersAvailable();
-    var cleanupRecoveryRequired = gpuDiagnosticsStressResources.size > 0 ||
-      (!gpuDiagnosticsStressController && gpuDiagnosticsStressWorkspace !== null);
+    var cleanupRecoveryRequired = !gpuDiagnosticsStressController &&
+      (gpuDiagnosticsStressResources.size > 0 || gpuDiagnosticsStressWorkspace !== null);
     presentGpuDiagnosticsRows(report);
     if (gpuDiagnosticsStatusEl) {
       gpuDiagnosticsStatusEl.textContent = report.acceleration
@@ -458,6 +458,9 @@
   }
 
   async function retryGpuDiagnosticsStressCleanup() {
+    if (gpuDiagnosticsStressController) {
+      throw new Error("diagnostics stress run is still active");
+    }
     if (gpuDiagnosticsStressRecoveryFlight) return gpuDiagnosticsStressRecoveryFlight;
     var handles = Array.from(gpuDiagnosticsStressCleanupHandles.values());
     if (handles.length === 0) {
@@ -703,7 +706,7 @@
       }
     } else if (snapshot.focusedSurface === "file" &&
                snapshot.focusedFileId && findOpenFile(snapshot.focusedFileId)) {
-      if (!await activateFileTab(snapshot.focusedFileId)) {
+      if (!activateFileTabNow(snapshot.focusedFileId)) {
         throw new Error("diagnostics editor focus restoration failed");
       }
     } else if (snapshot.focusedSurface === "terminal" &&
@@ -796,12 +799,13 @@
     return resource;
   }
 
-  async function closeGpuDiagnosticsStressThread(thread, signal) {
+  async function closeGpuDiagnosticsStressThread(thread, signal, ptyStopConfirmed) {
     throwIfGpuDiagnosticsStressAborted(signal);
     var closed = await closeThread(thread.id, {
       focus: false,
       persist: false,
       preserveTerminalFocus: false,
+      requireConfirmedPtyStop: ptyStopConfirmed !== true,
     });
     if (!closed && findThread(thread.id)) {
       throw new Error("diagnostics terminal cleanup was not confirmed");
@@ -906,7 +910,7 @@
         );
       }
       try {
-        await closeGpuDiagnosticsStressThread(thread);
+        await closeGpuDiagnosticsStressThread(thread, undefined, fixtureStopped);
       } catch (cleanupError) {
         await restoreGpuDiagnosticsStressWorkspace(workspace);
         throw new AggregateError(
@@ -927,18 +931,7 @@
       },
       function () {
         thread.ptyLifecycleToken = (thread.ptyLifecycleToken || 0) + 1;
-        if (thread.terminalController && thread.terminalController.dispose) {
-          thread.terminalController.dispose();
-        }
-        return closeThread(thread.id, {
-          focus: false,
-          persist: false,
-          preserveTerminalFocus: false,
-        }).then(function (closed) {
-          if (!closed && findThread(thread.id)) {
-            throw new Error("diagnostics terminal force cleanup was not confirmed");
-          }
-        });
+        return closeGpuDiagnosticsStressThread(thread);
       },
       workspace,
     );
@@ -7066,6 +7059,18 @@
         return false;
       }
     }
+    var ptyStopConfirmed = false;
+    if (options && options.requireConfirmedPtyStop &&
+        thread.kind !== "web" && thread.kind !== "git") {
+      if (!thread.startInFlight) ptyStopConfirmed = await stopThreadPty(thread);
+      if (!ptyStopConfirmed) {
+        thread.closeStarted = false;
+        thread.closing = false;
+        if (!thread.startInFlight) thread.stopRequested = false;
+        setStatus("failed to confirm terminal shutdown for " + thread.name, "error");
+        return false;
+      }
+    }
     if (thread.ptyIoQueue) {
       thread.ptyIoQueue.closed = true;
     }
@@ -7086,7 +7091,7 @@
     });
     thread.terminalController = null;
     thread.term = null;
-    if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
+    if (!ptyStopConfirmed && thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
       await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
