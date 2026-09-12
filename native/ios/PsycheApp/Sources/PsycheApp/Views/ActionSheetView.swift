@@ -37,9 +37,9 @@ struct ActionSheetView: View {
             .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("remote-action-sheet")
             .interactiveDismissDisabled(preventsInteractiveDismissal)
-            .onChange(of: store.presentation?.requestID, initial: true) {
-                resetDraft()
-            }
+        }
+        .onChange(of: store.presentation?.requestID, initial: true) {
+            resetDraft()
         }
     }
 
