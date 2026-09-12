@@ -174,7 +174,14 @@ describe('Tauri diagnostics stress harness', () => {
         };
       },
     };
-    const browserWindow: { losePsycheDiagnosticsContext?: () => Promise<boolean> } = {};
+    const titleFailure = Promise.reject(new Error('webview is closing'));
+    const catchTitleFailure = vi.spyOn(titleFailure, 'catch');
+    // Keep the regression itself handled even before the generated script is fixed.
+    void titleFailure.then(undefined, () => undefined);
+    const browserWindow: {
+      losePsycheDiagnosticsContext?: () => Promise<boolean>;
+      __TAURI__: { core: { invoke: () => Promise<never> } };
+    } = { __TAURI__: { core: { invoke: () => titleFailure } } };
     const browserDocument = {
       title: page.title,
       getElementById() {
@@ -204,6 +211,7 @@ describe('Tauri diagnostics stress harness', () => {
     expect(page.html).toContain('browser_report_title');
     await expect(browserWindow.losePsycheDiagnosticsContext?.()).resolves.toBe(true);
     expect(contextLost).toBe(true);
+    expect(catchTitleFailure).toHaveBeenCalled();
     expect(browserDocument.title).toBe(
       'Psyche render diagnostics · 12 panes · context-lost',
     );
@@ -467,8 +475,9 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
-  it('force-invalidates a resource after the late-result quarantine closes', async () => {
+  it.each([false, true])('retains asynchronous late force disposal (reject=%s)', async (rejectCleanup) => {
     vi.useFakeTimers();
+    const logCleanupFailure = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const controller = new AbortController();
       const frames = createFrameDriver();
@@ -514,11 +523,35 @@ describe('Tauri diagnostics stress harness', () => {
       const error = await observed;
       expect(error).toBeInstanceOf(AggregateError);
 
-      late.resolve(createResource('late-after-quarantine', disposed));
-      await vi.runAllTimersAsync();
+      const cleanup = deferred<void>();
+      late.resolve({
+        ...createResource('late-after-quarantine', disposed),
+        forceDispose() {
+          disposed.push('force-late-after-quarantine');
+          return cleanup.promise;
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
       expect(disposed).not.toContain('late-after-quarantine');
       expect(disposed).toContain('force-late-after-quarantine');
+      const createTerminal = vi.fn(async (_index, _fixture, signal: AbortSignal) => {
+        await abortableWait(signal);
+        return createResource('unexpected', disposed);
+      });
+      const nextController = new AbortController();
+      const next = runStressPlan({ ...dependencies, createTerminal }, {
+        signal: nextController.signal,
+      }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createTerminal).not.toHaveBeenCalled();
+      nextController.abort(abortError());
+      if (rejectCleanup) cleanup.reject(new Error('late force cleanup failed'));
+      else cleanup.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await next).toBeInstanceOf(Error);
+      expect(logCleanupFailure).toHaveBeenCalledTimes(rejectCleanup ? 1 : 0);
     } finally {
+      logCleanupFailure.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -1065,11 +1098,38 @@ describe('Tauri diagnostics stress harness', () => {
         await Promise.resolve();
       }
       expect(windowCycles).toBe(1);
+      const waitingController = new AbortController();
+      let waitingCancellation: unknown;
+      const waitingRun = runStressPlan(dependencies, { signal: waitingController.signal })
+        .catch((error: unknown) => { waitingCancellation = error; });
+      await vi.advanceTimersByTimeAsync(0);
+      waitingController.abort(abortError());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waitingCancellation).toBeInstanceOf(Error);
+      await waitingRun;
+      const creationsBeforeTimeout = terminalCreations;
+      const stillWaiting = runStressPlan(dependencies).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_001);
+      await expect(stillWaiting).resolves.toMatchObject({ name: 'TimeoutError' });
+      expect(terminalCreations).toBe(creationsBeforeTimeout);
       await vi.advanceTimersByTimeAsync(11_001);
       await expect(oldRun).resolves.toBeInstanceOf(AggregateError);
 
       activeGeneration = null;
       const oldTerminalCreations = terminalCreations;
+      const queuedController = new AbortController();
+      let cancellation: unknown;
+      const cancelledRun = runStressPlan(dependencies, { signal: queuedController.signal })
+        .catch((error: unknown) => { cancellation = error; });
+      await vi.advanceTimersByTimeAsync(0);
+      queuedController.abort(abortError());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cancellation).toBeInstanceOf(Error);
+      await cancelledRun;
+      const timedOutRun = runStressPlan(dependencies).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_001);
+      await expect(timedOutRun).resolves.toMatchObject({ message: 'stress run admission timed out; prior diagnostics work is still pending' });
+      expect(terminalCreations).toBe(oldTerminalCreations);
       const nextRun = runStressPlan(dependencies);
       for (let attempt = 0; attempt < 40; attempt += 1) {
         await Promise.resolve();

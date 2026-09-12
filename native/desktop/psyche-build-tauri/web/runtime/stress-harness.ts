@@ -234,7 +234,9 @@ function reportContextStatus(status) {
   try {
     const core = window.__TAURI__ && window.__TAURI__.core;
     if (core && typeof core.invoke === 'function') {
-      core.invoke('browser_report_title', { title: status });
+      Promise.resolve(core.invoke('browser_report_title', { title: status })).catch(function () {
+        // Title reporting is best-effort when the webview is closing.
+      });
     }
   } catch (_) {}
 }
@@ -1063,7 +1065,16 @@ async function runStressScenario(
         }
       },
       onLateQuarantine: (resource) => {
-        resource.forceDispose();
+        const cleanup = Promise.resolve(resource.forceDispose()).catch((error: unknown) => {
+          if (lateCleanupClosed) {
+            console.error('[psyche:graphics] diagnostics late force cleanup failed:', error);
+          } else {
+            recordCleanupError(error);
+          }
+        });
+        pendingCleanupSettlements.add(cleanup);
+        retainStressOperationQuarantine(cleanup);
+        void cleanup.finally(() => pendingCleanupSettlements.delete(cleanup));
       },
       onLateTimeout: recordCleanupError,
       lateReapers: DETACHED_STRESS_REAPERS,
@@ -1275,9 +1286,7 @@ async function runStressScenario(
         recordCleanupError(error);
       }
     }
-    if (pendingCleanupSettlements.size > 0) {
-      await Promise.allSettled([...pendingCleanupSettlements]);
-    }
+    await awaitPendingLateSettlements(pendingCleanupSettlements);
     lateCleanupClosed = true;
   }
 
@@ -1299,9 +1308,8 @@ export async function runStressPlan(
     releaseQueue = resolve;
   });
   const previousRun = stressRunQueue;
-  stressRunQueue = queued;
-  await previousRun;
-  await awaitStressOperationQuarantines();
+  // A cancelled waiter must not release the still-running predecessor's slot.
+  stressRunQueue = previousRun.then(() => queued);
 
   const runController = new AbortController();
   const forwardAbort = () => runController.abort(abortReason(options.signal as AbortSignal));
@@ -1314,6 +1322,12 @@ export async function runStressPlan(
   const startedAt = dependencies.now();
   const scenarios: StressScenarioResult[] = [];
   try {
+    await invokeBoundedOperation(async (admissionSignal) => {
+      await invokeAbortable(() => previousRun, admissionSignal);
+      await invokeAbortable(awaitStressOperationQuarantines, admissionSignal);
+    }, runController.signal, {
+      timeoutMessage: 'stress run admission timed out; prior diagnostics work is still pending',
+    });
     throwIfAborted(runController.signal);
     for (let index = 0; index < STRESS_PLAN.length; index += 1) {
       scenarios.push(await runStressScenario(
