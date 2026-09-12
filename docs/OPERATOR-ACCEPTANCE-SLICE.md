@@ -30,6 +30,41 @@ Keep observations from different hosts in separate manifests.
 
 ## Preparation
 
+Run the read-only setup preflight before preparing a disposable session:
+
+```sh
+pnpm acceptance:preflight
+pnpm acceptance:preflight -- --artifact-arch arm64
+```
+
+For JSON-only output, use `node scripts/operator-preflight.mjs` with the same
+optional flag. Accepted architecture aliases are `arm64`/`aarch64` and
+`x64`/`x86_64`. The artifact architecture is **operator-declared**, not binary
+inspection, digest verification, or installed-artifact evidence. No path input
+is accepted. Host architecture is the Node process architecture; a translated
+process does not establish physical hardware architecture.
+
+The versioned report checks PATH availability of Node, pnpm, Git, and tmux using
+four non-login shell lookups, without executing those tools. Availability does
+not prove versions or runtime health. Each subprocess has a 1-second timeout,
+SIGKILL termination, a 1 KiB buffer ceiling, and discarded output; PATH is capped
+at 32 Ki characters. No files are read. No releases are downloaded or mounted,
+no product or GUI is launched, and no permissions or contexts are changed.
+
+UI automation permission remains `unknown`: this command intentionally avoids
+potentially prompting probes. Disposable context remains `unverified`; directory
+names and user assertions cannot prove isolation from an active profile.
+Establish these prerequisites manually before the execution steps below.
+Missing tools, failed lookups, unsupported hosts, and architecture mismatches
+are setup blockers, never product failures. Fix missing dependencies or PATH,
+use a supported Mac, and select a matching artifact as appropriate.
+
+Exit 0 means only that no observed setup blocker was found; exit 1 reports setup
+blockers; exit 64 rejects invalid arguments with a fixed, redacted error.
+Unknown permission and unverified context do not cause exit 1 or authorize
+execution. Every acceptance scenario remains `not_observed`, even with exit 0.
+This report is not an acceptance manifest and cannot close #199 or #239.
+
 1. Copy the
    [v0.0.1 manifest template](https://github.com/OpenCoven/psyche-build/blob/main/docs/templates/operator-acceptance-v0.0.1.json)
    outside the repository into the durable, operator-controlled evidence

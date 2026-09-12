@@ -25,7 +25,7 @@ const ARTIFACTS = new Map([
   ],
 ]);
 
-const REQUIRED_OBSERVATIONS = new Set([
+export const REQUIRED_OBSERVATIONS = new Set([
   'first-run-onboarding',
   'plain-terminal-lifecycle',
   'supported-agent-lane',
@@ -70,6 +70,10 @@ const HOST_ARCHITECTURES = new Map([
   ['x86_64', 'x86_64'],
   ['x64', 'x86_64'],
 ]);
+
+export function normalizeOperatorArchitecture(value) {
+  return HOST_ARCHITECTURES.get(value) ?? 'unknown';
+}
 const ISSUE199_COMMENT =
   /^https:\/\/github\.com\/OpenCoven\/psyche-build\/issues\/199#issuecomment-[1-9]\d*$/;
 
@@ -241,7 +245,7 @@ export function validateOperatorAcceptanceManifest(manifest, { requireComplete =
       }
       if (
         TERMINAL_STATUSES.has(manifest.sourceSmoke?.status) &&
-        HOST_ARCHITECTURES.get(manifest.sourceSmoke?.environment?.architecture) !==
+        normalizeOperatorArchitecture(manifest.sourceSmoke?.environment?.architecture) !==
           manifest.packagedRuntime.architecture
       ) {
         errors.push('packagedRuntime.architecture must match the observed source smoke host');
