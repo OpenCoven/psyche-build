@@ -1489,7 +1489,7 @@ describe('Tauri physical terminal panes', () => {
     ]);
 
     const expectedCallCount =
-      transitionOnly.length + preserveOnly.length + 2 + 1 + 5 + 2 + 1 + 1;
+      transitionOnly.length + preserveOnly.length + 2 + 1 + 5 + 2 + 1 + 1 + 2;
     expect((mainJs.match(/renderPaneWorkspace\(/g) || []).length - 1).toBe(
       expectedCallCount,
     );

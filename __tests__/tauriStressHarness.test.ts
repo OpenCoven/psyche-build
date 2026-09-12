@@ -174,7 +174,14 @@ describe('Tauri diagnostics stress harness', () => {
         };
       },
     };
-    const browserWindow: { losePsycheDiagnosticsContext?: () => Promise<boolean> } = {};
+    const titleFailure = Promise.reject(new Error('webview is closing'));
+    const catchTitleFailure = vi.spyOn(titleFailure, 'catch');
+    // Keep the regression itself handled even before the generated script is fixed.
+    void titleFailure.then(undefined, () => undefined);
+    const browserWindow: {
+      losePsycheDiagnosticsContext?: () => Promise<boolean>;
+      __TAURI__: { core: { invoke: () => Promise<never> } };
+    } = { __TAURI__: { core: { invoke: () => titleFailure } } };
     const browserDocument = {
       title: page.title,
       getElementById() {
@@ -201,9 +208,10 @@ describe('Tauri diagnostics stress harness', () => {
     expect(page.html).toContain('context-unavailable');
     expect(page.html).toContain('context-lost');
     expect(page.html).toContain('webglcontextlost');
-    expect(page.html).not.toContain('browser_report_title');
+    expect(page.html).toContain('browser_report_title');
     await expect(browserWindow.losePsycheDiagnosticsContext?.()).resolves.toBe(true);
     expect(contextLost).toBe(true);
+    expect(catchTitleFailure).toHaveBeenCalled();
     expect(browserDocument.title).toBe(
       'Psyche render diagnostics · 12 panes · context-lost',
     );
@@ -467,8 +475,9 @@ describe('Tauri diagnostics stress harness', () => {
     }
   });
 
-  it('force-invalidates a resource after the late-result quarantine closes', async () => {
+  it.each([false, true])('retains asynchronous late force disposal (reject=%s)', async (rejectCleanup) => {
     vi.useFakeTimers();
+    const logCleanupFailure = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const controller = new AbortController();
       const frames = createFrameDriver();
@@ -514,11 +523,35 @@ describe('Tauri diagnostics stress harness', () => {
       const error = await observed;
       expect(error).toBeInstanceOf(AggregateError);
 
-      late.resolve(createResource('late-after-quarantine', disposed));
-      await vi.runAllTimersAsync();
+      const cleanup = deferred<void>();
+      late.resolve({
+        ...createResource('late-after-quarantine', disposed),
+        forceDispose() {
+          disposed.push('force-late-after-quarantine');
+          return cleanup.promise;
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
       expect(disposed).not.toContain('late-after-quarantine');
       expect(disposed).toContain('force-late-after-quarantine');
+      const createTerminal = vi.fn(async (_index, _fixture, signal: AbortSignal) => {
+        await abortableWait(signal);
+        return createResource('unexpected', disposed);
+      });
+      const nextController = new AbortController();
+      const next = runStressPlan({ ...dependencies, createTerminal }, {
+        signal: nextController.signal,
+      }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createTerminal).not.toHaveBeenCalled();
+      nextController.abort(abortError());
+      if (rejectCleanup) cleanup.reject(new Error('late force cleanup failed'));
+      else cleanup.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await next).toBeInstanceOf(Error);
+      expect(logCleanupFailure).toHaveBeenCalledTimes(rejectCleanup ? 1 : 0);
     } finally {
+      logCleanupFailure.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -668,6 +701,76 @@ describe('Tauri diagnostics stress harness', () => {
         expect.objectContaining({ message: 'stress cleanup operation timed out' }),
       ]));
       expect(disposed).toContain('browser-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not settle the run before asynchronous force disposal completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const disposalStarted = deferred<void>();
+      const forceStarted = deferred<void>();
+      const forceCompleted = deferred<void>();
+      let now = 0;
+      const resource = (id: string): StressResource => ({
+        id,
+        async dispose() {
+          if (id === 'browser') {
+            disposalStarted.resolve();
+            await new Promise<void>(() => {});
+          }
+        },
+        forceDispose() {
+          if (id !== 'browser') return;
+          forceStarted.resolve();
+          return forceCompleted.promise;
+        },
+      });
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          return resource(`terminal-${index}`);
+        },
+        async createEditor() {
+          return resource('editor');
+        },
+        async createBrowser() {
+          return resource('browser');
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {},
+        async loseGraphicsContext() {
+          return false;
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms) {
+          now += ms;
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      let settled = false;
+      const run = runStressPlan(dependencies).catch((error: unknown) => error);
+      void run.finally(() => { settled = true; });
+      await disposalStarted.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await forceStarted.promise;
+
+      expect(settled).toBe(false);
+      forceCompleted.resolve();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(run).resolves.toBeInstanceOf(AggregateError);
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -925,6 +1028,121 @@ describe('Tauri diagnostics stress harness', () => {
       lateFocus.resolve();
       await vi.advanceTimersByTimeAsync(0);
       expect(invalidated).toContain('focus');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an attempted next run behind a delayed old window operation', async () => {
+    vi.useFakeTimers();
+    try {
+      const frames = createFrameDriver();
+      const delayedWindowCycle = deferred<void>();
+      const capturedGenerations: Array<number | null> = [];
+      const invalidatedGenerations: number[] = [];
+      let now = 0;
+      let terminalCreations = 0;
+      let windowCycles = 0;
+      let activeGeneration: number | null = 1;
+      const dependencies: StressHarnessDependencies = {
+        authorized: true,
+        async createTerminal(index) {
+          terminalCreations += 1;
+          if (activeGeneration === null) activeGeneration = 2;
+          return createResource(`terminal-${index}`, []);
+        },
+        async createEditor() {
+          return createResource('editor', []);
+        },
+        async createBrowser() {
+          return createResource('browser', []);
+        },
+        async focus() {},
+        resize() {},
+        async setVisible() {},
+        async cycleWindow() {
+          windowCycles += 1;
+          if (windowCycles === 1) {
+            await delayedWindowCycle.promise;
+          }
+        },
+        async loseGraphicsContext() {
+          return false;
+        },
+        captureLateOperationGeneration() {
+          capturedGenerations.push(activeGeneration);
+          return activeGeneration;
+        },
+        invalidateLateOperation(_operation, generation) {
+          if (generation === activeGeneration && generation !== null) {
+            invalidatedGenerations.push(generation);
+          }
+        },
+        resetMetrics() {},
+        snapshotMetrics() {
+          return {};
+        },
+        async sleep(ms, signal) {
+          if (signal.aborted) throw signal.reason ?? abortError();
+          now += ms;
+          frames.flush(now);
+        },
+        requestFrame: frames.request,
+        cancelFrame: frames.cancel,
+        now: () => now,
+        onProgress() {},
+      };
+
+      const oldRun = runStressPlan(dependencies).catch((error: unknown) => error);
+      for (let attempt = 0; attempt < 4_000 && windowCycles === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(windowCycles).toBe(1);
+      const waitingController = new AbortController();
+      let waitingCancellation: unknown;
+      const waitingRun = runStressPlan(dependencies, { signal: waitingController.signal })
+        .catch((error: unknown) => { waitingCancellation = error; });
+      await vi.advanceTimersByTimeAsync(0);
+      waitingController.abort(abortError());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waitingCancellation).toBeInstanceOf(Error);
+      await waitingRun;
+      const creationsBeforeTimeout = terminalCreations;
+      const stillWaiting = runStressPlan(dependencies).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_001);
+      await expect(stillWaiting).resolves.toMatchObject({ name: 'TimeoutError' });
+      expect(terminalCreations).toBe(creationsBeforeTimeout);
+      await vi.advanceTimersByTimeAsync(11_001);
+      await expect(oldRun).resolves.toBeInstanceOf(AggregateError);
+
+      activeGeneration = null;
+      const oldTerminalCreations = terminalCreations;
+      const queuedController = new AbortController();
+      let cancellation: unknown;
+      const cancelledRun = runStressPlan(dependencies, { signal: queuedController.signal })
+        .catch((error: unknown) => { cancellation = error; });
+      await vi.advanceTimersByTimeAsync(0);
+      queuedController.abort(abortError());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cancellation).toBeInstanceOf(Error);
+      await cancelledRun;
+      const timedOutRun = runStressPlan(dependencies).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_001);
+      await expect(timedOutRun).resolves.toMatchObject({ message: 'stress run admission timed out; prior diagnostics work is still pending' });
+      expect(terminalCreations).toBe(oldTerminalCreations);
+      const nextRun = runStressPlan(dependencies);
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(terminalCreations).toBe(oldTerminalCreations);
+
+      delayedWindowCycle.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nextRun).resolves.toBeDefined();
+
+      expect(capturedGenerations).toContain(1);
+      expect(invalidatedGenerations).toEqual([]);
+      expect(activeGeneration).toBe(2);
     } finally {
       vi.useRealTimers();
     }

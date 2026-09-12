@@ -9,6 +9,14 @@ export {
   STRESS_FOCUS_INTERVAL_MS,
 } from './stress-harness';
 
+export {
+  isGpuDiagnosticsContextLossConfirmed,
+  installDiagnosticsStressAdapters,
+  isGpuDiagnosticsStressRunEnabled,
+  isNativeDiagnosticsStressAuthorized,
+  presentGpuDiagnosticRows,
+} from './diagnostics-stress-adapters';
+
 export type {
   StressBrowserPage,
   StressEditorDocument,

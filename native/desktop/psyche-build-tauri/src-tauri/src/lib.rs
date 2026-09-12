@@ -5364,6 +5364,15 @@ mod browser_app_shortcut_tests {
     }
 
     #[test]
+    fn browser_title_bridge_does_not_observe_document_mutations() {
+        let script = browser_title_initialization_script();
+
+        assert!(!script.contains("MutationObserver"));
+        assert!(!script.contains("childList: true"));
+        assert!(!script.contains("subtree: true"));
+    }
+
+    #[test]
     fn browser_script_worker_runtime_is_embedded_and_bounded() {
         assert!(
             include_str!("../../web/control/browser-script-worker-runtime.js")

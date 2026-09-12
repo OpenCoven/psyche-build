@@ -113,10 +113,19 @@
   var gpuDiagnosticsStressControlsEl = document.getElementById("gpu-diagnostics-stress-controls");
   var gpuDiagnosticsRunStressEl = document.getElementById("gpu-diagnostics-run-stress");
   var gpuDiagnosticsCancelStressEl = document.getElementById("gpu-diagnostics-cancel-stress");
+  var gpuDiagnosticsRetryCleanupEl = document.getElementById("gpu-diagnostics-retry-cleanup");
   var gpuDiagnosticsProgressEl = document.getElementById("gpu-diagnostics-progress");
   var gpuDiagnosticsReport = null;
   var gpuDiagnosticsStressAuthorized = false;
   var gpuDiagnosticsStressController = null;
+  var gpuDiagnosticsProcessMetrics = {};
+  var gpuDiagnosticsProcessMetricsTimer = 0;
+  var gpuDiagnosticsStressResources = new Map();
+  var gpuDiagnosticsStressCleanupHandles = new Map();
+  var gpuDiagnosticsStressRecoveryFlight = null;
+  var gpuDiagnosticsStressWorkspace = null;
+  var gpuDiagnosticsStressOperationGeneration = 0;
+  var gpuDiagnosticsStressLayoutGeneration = null;
 
   function invoke(command, args) {
     var startedAt = performance.now();
@@ -217,49 +226,109 @@
 
   function normalizeNativeDiagnostics(report) {
     var normalized = {};
-    if (!report || typeof report !== "object") return normalized;
-    function copy(name) {
-      var value = report[name];
-      if (value === undefined && name === "engineVersion") value = report.engine_version;
-      if (value === undefined && name === "debugBuild") value = report.debug_build;
-      if (value === undefined && name === "stressAuthorized") value = report.stress_authorized;
-      if (value !== undefined) normalized[name] = value;
+    if (!report || typeof report !== "object" || Array.isArray(report) ||
+        Object.getPrototypeOf(report) !== Object.prototype) {
+      return normalized;
     }
-    ["os", "arch", "engine", "engineVersion", "debugBuild", "stressAuthorized", "process"].forEach(copy);
+    var fields = ["os", "arch", "engine", "engineVersion", "debugBuild", "stressAuthorized", "process"];
+    var processFields = ["cpuPercent", "rssBytes"];
+    var hasOwn = Object.prototype.hasOwnProperty;
+    var process = report.process;
+    if (Object.keys(report).some(function (name) { return fields.indexOf(name) === -1; }) ||
+        !hasOwn.call(report, "os") ||
+        !hasOwn.call(report, "arch") ||
+        !hasOwn.call(report, "engine") ||
+        !hasOwn.call(report, "debugBuild") ||
+        !hasOwn.call(report, "stressAuthorized") ||
+        typeof report.os !== "string" ||
+        typeof report.arch !== "string" ||
+        typeof report.engine !== "string" ||
+        typeof report.debugBuild !== "boolean" ||
+        typeof report.stressAuthorized !== "boolean" ||
+        (report.engineVersion !== undefined && typeof report.engineVersion !== "string") ||
+        (process !== undefined && (
+          !process ||
+          typeof process !== "object" ||
+          Array.isArray(process) ||
+          Object.getPrototypeOf(process) !== Object.prototype ||
+          Object.keys(process).length === 0 ||
+          Object.keys(process).some(function (name) { return processFields.indexOf(name) === -1; }) ||
+          (hasOwn.call(process, "cpuPercent") &&
+            (typeof process.cpuPercent !== "number" ||
+              !Number.isFinite(process.cpuPercent) ||
+              process.cpuPercent < 0)) ||
+          (hasOwn.call(process, "rssBytes") &&
+            (!Number.isSafeInteger(process.rssBytes) || process.rssBytes < 0))
+        ))) {
+      return normalized;
+    }
+    fields.forEach(function (name) {
+      if (report[name] !== undefined) normalized[name] = report[name];
+    });
     return normalized;
   }
 
   function presentGpuDiagnosticsRows(report) {
     if (!gpuDiagnosticsRowsEl) return;
     gpuDiagnosticsRowsEl.innerHTML = "";
-    var labels = [
-      ["acceleration", "Acceleration"],
-      ["engine", "Engine"],
-      ["engineVersion", "Engine version"],
-      ["backend", "Backend"],
-      ["adapter", "Adapter"],
-      ["supportingProbe", "Probe"],
-      ["os", "OS"],
-      ["arch", "Architecture"],
-      ["debugBuild", "Debug build"],
-      ["stressAuthorized", "Stress authorized"],
-      ["frameAverageMs", "Frame average"],
-      ["frameP95Ms", "Frame p95"],
-      ["ipcLatencyMs", "IPC latency"],
-      ["queueHighWater", "Queue high-water"],
-      ["cpuPercent", "CPU percent"],
-      ["rssBytes", "Resident memory"],
-    ];
-    labels.forEach(function (entry) {
-      var key = entry[0];
-      var value = report && report[key];
-      if (value === undefined || value === null || value === "") return;
+    var rows = window.PsycheRuntimeDebug &&
+      typeof window.PsycheRuntimeDebug.presentGpuDiagnosticRows === "function"
+      ? window.PsycheRuntimeDebug.presentGpuDiagnosticRows(report)
+      : [];
+    rows.forEach(function (entry) {
       var term = document.createElement("dt");
       var description = document.createElement("dd");
       term.textContent = entry[1];
-      description.textContent = typeof value === "object" ? JSON.stringify(value) : String(value);
+      description.textContent = typeof entry[2] === "object"
+        ? JSON.stringify(entry[2])
+        : String(entry[2]);
       gpuDiagnosticsRowsEl.appendChild(term);
       gpuDiagnosticsRowsEl.appendChild(description);
+    });
+  }
+
+  function nativeDiagnosticsStressAuthorized(report) {
+    return Boolean(
+      window.PsycheRuntimeDebug &&
+      typeof window.PsycheRuntimeDebug.isNativeDiagnosticsStressAuthorized === "function" &&
+      window.PsycheRuntimeDebug.isNativeDiagnosticsStressAuthorized(report)
+    );
+  }
+
+  function gpuDiagnosticsStressAdaptersAvailable() {
+    return Boolean(
+      window.PsycheDiagnosticsStressAdapters &&
+      window.PsycheDiagnosticsStressAdapters.authorized === true
+    );
+  }
+
+  function normalizeProcessMetrics(metrics) {
+    if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return {};
+    var normalized = {};
+    if (typeof metrics.cpuPercent === "number" && Number.isFinite(metrics.cpuPercent) &&
+        metrics.cpuPercent >= 0) {
+      normalized.cpuPercent = metrics.cpuPercent;
+    }
+    if (typeof metrics.rssBytes === "number" && Number.isSafeInteger(metrics.rssBytes) &&
+        metrics.rssBytes >= 0) {
+      normalized.rssBytes = metrics.rssBytes;
+    }
+    return normalized;
+  }
+
+  function applyGpuDiagnosticsProcessMetrics(metrics) {
+    gpuDiagnosticsProcessMetrics = normalizeProcessMetrics(metrics);
+    if (!gpuDiagnosticsReport) return;
+    delete gpuDiagnosticsReport.cpuPercent;
+    delete gpuDiagnosticsReport.rssBytes;
+    Object.assign(gpuDiagnosticsReport, gpuDiagnosticsProcessMetrics);
+    if (gpuDiagnosticsPanelEl && !gpuDiagnosticsPanelEl.hidden) renderGpuDiagnostics();
+  }
+
+  function refreshGpuDiagnosticsProcessMetrics() {
+    return invoke("runtime_process_metrics", {}).then(function (metrics) {
+      applyGpuDiagnosticsProcessMetrics(metrics);
+      return gpuDiagnosticsProcessMetrics;
     });
   }
 
@@ -280,7 +349,9 @@
 
   function renderGpuDiagnostics() {
     var report = gpuDiagnosticsReport || {};
-    var stressAdaptersAvailable = Boolean(window.PsycheDiagnosticsStressAdapters);
+    var stressAdaptersAvailable = gpuDiagnosticsStressAdaptersAvailable();
+    var cleanupRecoveryRequired = !gpuDiagnosticsStressController &&
+      (gpuDiagnosticsStressResources.size > 0 || gpuDiagnosticsStressWorkspace !== null);
     presentGpuDiagnosticsRows(report);
     if (gpuDiagnosticsStatusEl) {
       gpuDiagnosticsStatusEl.textContent = report.acceleration
@@ -295,10 +366,30 @@
         : "";
     }
     if (gpuDiagnosticsStressControlsEl) gpuDiagnosticsStressControlsEl.hidden = !gpuDiagnosticsStressAuthorized;
-    if (gpuDiagnosticsRunStressEl) gpuDiagnosticsRunStressEl.disabled =
-      !gpuDiagnosticsStressAuthorized || !stressAdaptersAvailable || Boolean(gpuDiagnosticsStressController);
+    if (gpuDiagnosticsRunStressEl) {
+      gpuDiagnosticsRunStressEl.disabled = window.PsycheRuntimeDebug &&
+        typeof window.PsycheRuntimeDebug.isGpuDiagnosticsStressRunEnabled === "function"
+        ? !window.PsycheRuntimeDebug.isGpuDiagnosticsStressRunEnabled(
+          gpuDiagnosticsStressAuthorized,
+          stressAdaptersAvailable,
+          Boolean(gpuDiagnosticsStressController),
+          cleanupRecoveryRequired,
+        )
+        : true;
+    }
     if (gpuDiagnosticsCancelStressEl) gpuDiagnosticsCancelStressEl.disabled = !gpuDiagnosticsStressController;
-    if (gpuDiagnosticsProgressEl && gpuDiagnosticsStressAuthorized && !stressAdaptersAvailable) {
+    if (gpuDiagnosticsRetryCleanupEl) {
+      gpuDiagnosticsRetryCleanupEl.hidden = !cleanupRecoveryRequired;
+      gpuDiagnosticsRetryCleanupEl.disabled = (
+        !cleanupRecoveryRequired ||
+        Boolean(gpuDiagnosticsStressRecoveryFlight)
+      );
+    }
+    if (gpuDiagnosticsProgressEl && cleanupRecoveryRequired) {
+      gpuDiagnosticsProgressEl.textContent = gpuDiagnosticsStressRecoveryFlight
+        ? "Retrying owned diagnostics cleanup."
+        : "Cleanup recovery required. Retry cleanup before running scenarios.";
+    } else if (gpuDiagnosticsProgressEl && gpuDiagnosticsStressAuthorized && !stressAdaptersAvailable) {
       gpuDiagnosticsProgressEl.textContent = "Stress scenarios require the debug UI adapter.";
     }
   }
@@ -335,8 +426,11 @@
     if (!window.PsycheRuntimeDebug || typeof window.PsycheRuntimeDebug.runStressPlan !== "function") {
       throw new Error("render diagnostics stress bundle is unavailable");
     }
-    if (!window.PsycheDiagnosticsStressAdapters) {
+    if (!gpuDiagnosticsStressAdaptersAvailable()) {
       throw new Error("render diagnostics stress UI adapters are unavailable");
+    }
+    if (gpuDiagnosticsStressResources.size > 0) {
+      throw new Error("diagnostics cleanup recovery is required before running scenarios");
     }
     gpuDiagnosticsStressController = new AbortController();
     renderGpuDiagnostics();
@@ -363,6 +457,42 @@
     }
   }
 
+  async function retryGpuDiagnosticsStressCleanup() {
+    if (gpuDiagnosticsStressController) {
+      throw new Error("diagnostics stress run is still active");
+    }
+    if (gpuDiagnosticsStressRecoveryFlight) return gpuDiagnosticsStressRecoveryFlight;
+    var handles = Array.from(gpuDiagnosticsStressCleanupHandles.values());
+    if (handles.length === 0) {
+      await restoreGpuDiagnosticsStressWorkspace();
+      return;
+    }
+    var flight = Promise.resolve().then(async function () {
+      var failures = [];
+      for (var index = 0; index < handles.length; index += 1) {
+        try {
+          await handles[index].forceDispose();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (gpuDiagnosticsStressResources.size > 0) {
+        failures.push(new Error("owned diagnostics resources remain after cleanup retry"));
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "diagnostics cleanup recovery failed");
+      }
+    });
+    gpuDiagnosticsStressRecoveryFlight = flight;
+    renderGpuDiagnostics();
+    return flight.finally(function () {
+      if (gpuDiagnosticsStressRecoveryFlight === flight) {
+        gpuDiagnosticsStressRecoveryFlight = null;
+      }
+      renderGpuDiagnostics();
+    });
+  }
+
   async function initializeGpuDiagnostics() {
     var graphics = probeGraphicsDiagnostics();
     var nativeReport = {};
@@ -371,15 +501,873 @@
     } catch (error) {
       nativeReport = {};
     }
-    gpuDiagnosticsStressAuthorized = Boolean(nativeReport.stressAuthorized);
+    if (window.PsycheDiagnosticsStressAdapters) delete window.PsycheDiagnosticsStressAdapters;
+    gpuDiagnosticsStressAuthorized = nativeDiagnosticsStressAuthorized(nativeReport);
     gpuDiagnosticsReport = Object.assign({}, graphics, nativeReport);
-    if (gpuDiagnosticsReport.process) {
-      if (gpuDiagnosticsReport.process.cpuPercent !== undefined) gpuDiagnosticsReport.cpuPercent = gpuDiagnosticsReport.process.cpuPercent;
-      if (gpuDiagnosticsReport.process.rssBytes !== undefined) gpuDiagnosticsReport.rssBytes = gpuDiagnosticsReport.process.rssBytes;
+    applyGpuDiagnosticsProcessMetrics(gpuDiagnosticsReport.process);
+    delete gpuDiagnosticsReport.process;
+    if (gpuDiagnosticsReport.debugBuild === true) {
+      if (gpuDiagnosticsStressAuthorized &&
+          window.PsycheRuntimeDebug &&
+          typeof window.PsycheRuntimeDebug.installDiagnosticsStressAdapters === "function") {
+        window.PsycheRuntimeDebug.installDiagnosticsStressAdapters(
+          window,
+          nativeReport,
+          createGpuDiagnosticsStressAdapterHost(),
+        );
+      }
+      refreshGpuDiagnosticsProcessMetrics().catch(function (error) {
+        console.warn("[psyche:graphics] process metrics unavailable: " + String(error));
+      });
+      if (gpuDiagnosticsProcessMetricsTimer) clearInterval(gpuDiagnosticsProcessMetricsTimer);
+      gpuDiagnosticsProcessMetricsTimer = setInterval(function () {
+        refreshGpuDiagnosticsProcessMetrics().catch(function (error) {
+          console.warn("[psyche:graphics] process metrics refresh failed: " + String(error));
+        });
+      }, 1000);
     }
     console.info("[psyche:graphics]", deterministicGpuDiagnosticsJson(gpuDiagnosticsReport).trim());
-    if (gpuDiagnosticsToggleEl && gpuDiagnosticsReport.debugBuild) gpuDiagnosticsToggleEl.hidden = false;
+    if (gpuDiagnosticsToggleEl && gpuDiagnosticsReport.debugBuild === true) gpuDiagnosticsToggleEl.hidden = false;
     renderGpuDiagnostics();
+  }
+
+  function throwIfGpuDiagnosticsStressAborted(signal) {
+    if (signal && signal.aborted) {
+      throw signal.reason || new Error("render diagnostics stress was cancelled");
+    }
+  }
+
+  function cloneGpuDiagnosticsLayout(layout) {
+    return layout ? JSON.parse(JSON.stringify(layout)) : null;
+  }
+
+  function cancelGpuDiagnosticsStressLayout() {
+    terminalFrameScheduler.cancelPrefix("layout:gpu-diagnostics-stress");
+    gpuDiagnosticsStressLayoutGeneration = null;
+  }
+
+  function invalidateGpuDiagnosticsStressOperations() {
+    gpuDiagnosticsStressOperationGeneration += 1;
+    cancelGpuDiagnosticsStressLayout();
+    return gpuDiagnosticsStressOperationGeneration;
+  }
+
+  function discardGpuDiagnosticsStressWorkspace(snapshot) {
+    if (!snapshot || gpuDiagnosticsStressWorkspace !== snapshot) return false;
+    gpuDiagnosticsStressWorkspace = null;
+    invalidateGpuDiagnosticsStressOperations();
+    return true;
+  }
+
+  function gpuDiagnosticsStressOperationIsCurrent(workspace, operationGeneration) {
+    return !!workspace &&
+      gpuDiagnosticsStressWorkspace === workspace &&
+      workspace.operationGeneration === operationGeneration &&
+      gpuDiagnosticsStressOperationGeneration === operationGeneration;
+  }
+
+  function assertGpuDiagnosticsStressOperationCurrent(workspace, signal) {
+    throwIfGpuDiagnosticsStressAborted(signal);
+    if (!gpuDiagnosticsStressOperationIsCurrent(workspace, workspace && workspace.operationGeneration)) {
+      throw new Error("diagnostics stress operation was invalidated");
+    }
+    return workspace;
+  }
+
+  function captureGpuDiagnosticsStressOperation(signal) {
+    var workspace = gpuDiagnosticsStressWorkspace;
+    if (!workspace) {
+      throwIfGpuDiagnosticsStressAborted(signal);
+      throw new Error("diagnostics workspace is no longer available");
+    }
+    return assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+  }
+
+  function beginGpuDiagnosticsStressWorkspace() {
+    if (gpuDiagnosticsStressWorkspace) {
+      if (gpuDiagnosticsStressOperationIsCurrent(
+        gpuDiagnosticsStressWorkspace,
+        gpuDiagnosticsStressWorkspace.operationGeneration,
+      )) {
+        return gpuDiagnosticsStressWorkspace;
+      }
+      throw new Error("diagnostics workspace cleanup is still in progress");
+    }
+    var project = activeProject();
+    var worktreePath = project && activeWorkspaceRoot(project);
+    if (!project || !worktreePath) {
+      throw new Error("open a project and select a worktree before running diagnostics stress");
+    }
+    var key = paneLayoutKey(project.id, worktreePath);
+    var sidebarWidth = parseFloat(
+      window.getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w")
+    );
+    var browserPane = findBrowserPane(project.id, worktreePath);
+    var browser = project.browsersByWorktree && project.browsersByWorktree[worktreePath];
+    var focusedSurface = activeSurface === "browser"
+      ? "browser"
+      : (typeof filesPaneHasCanvasFocus === "function" && filesPaneHasCanvasFocus()
+        ? "file"
+        : "terminal");
+    gpuDiagnosticsStressWorkspace = Object.freeze({
+      operationGeneration: invalidateGpuDiagnosticsStressOperations(),
+      projectId: project.id,
+      worktreePath: worktreePath,
+      selectedWorktreePath: project.selectedWorktreePath,
+      activeProjectId: state.activeProjectId,
+      activeThreadId: state.activeThreadId,
+      activeFileId: state.activeFileId,
+      activeSurface: activeSurface,
+      focusedSurface: focusedSurface,
+      focusedThreadId: state.activeThreadId,
+      focusedFileId: state.activeFileId,
+      focusedBrowserTabId: browser ? browser.activeTabId : null,
+      sidebarOpen: sidebarOpen(),
+      sidebarWidth: Number.isFinite(sidebarWidth) ? sidebarWidth : null,
+      layoutKey: key,
+      layout: cloneGpuDiagnosticsLayout(paneLayouts.get(key)),
+      threadIds: Object.freeze(state.threads.map(function (thread) { return thread.id; })),
+      fileIds: Object.freeze(state.openFiles.map(function (file) { return file.id; })),
+      browserPaneId: browserPane ? browserPane.id : null,
+      browserActiveTabId: browser ? browser.activeTabId : null,
+    });
+    return gpuDiagnosticsStressWorkspace;
+  }
+
+  function gpuDiagnosticsStressWorkspaceIsUnchanged(snapshot, project) {
+    if (state.activeProjectId !== snapshot.activeProjectId ||
+        project.selectedWorktreePath !== snapshot.selectedWorktreePath ||
+        activeWorkspaceRoot(project) !== snapshot.worktreePath ||
+        state.threads.length !== snapshot.threadIds.length ||
+        state.openFiles.length !== snapshot.fileIds.length) {
+      return false;
+    }
+    return state.threads.every(function (thread) {
+      return snapshot.threadIds.indexOf(thread.id) !== -1;
+    }) && state.openFiles.every(function (file) {
+      return snapshot.fileIds.indexOf(file.id) !== -1;
+    });
+  }
+
+  async function restoreGpuDiagnosticsStressWorkspace(
+    workspace,
+    completingResourceId,
+    completingResource,
+  ) {
+    var snapshot = workspace || gpuDiagnosticsStressWorkspace;
+    var completingFinalResource =
+      gpuDiagnosticsStressResources.size === 1 &&
+      gpuDiagnosticsStressResources.get(completingResourceId) === completingResource;
+    if (!snapshot || gpuDiagnosticsStressWorkspace !== snapshot ||
+        (gpuDiagnosticsStressResources.size && !completingFinalResource)) {
+      return;
+    }
+    var project = findProject(snapshot.projectId);
+    if (!project || project.closing) {
+      discardGpuDiagnosticsStressWorkspace(snapshot);
+      return;
+    }
+    if (!gpuDiagnosticsStressWorkspaceIsUnchanged(snapshot, project)) {
+      discardGpuDiagnosticsStressWorkspace(snapshot);
+      return;
+    }
+    if (snapshot.layout) paneLayouts.set(snapshot.layoutKey, cloneGpuDiagnosticsLayout(snapshot.layout));
+    else paneLayouts.delete(snapshot.layoutKey);
+    if (snapshot.sidebarWidth !== null) scheduleSidebarWidth(snapshot.sidebarWidth);
+    setSidebarOpen(snapshot.sidebarOpen);
+    project.selectedWorktreePath = snapshot.selectedWorktreePath;
+    if (snapshot.activeProjectId && findProject(snapshot.activeProjectId)) {
+      if (typeof assignActiveProjectId === "function") assignActiveProjectId(snapshot.activeProjectId);
+      else Object.assign(state, { activeProjectId: snapshot.activeProjectId });
+    }
+    var browser = project.browsersByWorktree &&
+      project.browsersByWorktree[snapshot.worktreePath];
+    if (browser && (snapshot.browserActiveTabId === null || browser.tabs.some(function (tab) {
+      return tab.id === snapshot.browserActiveTabId;
+    }))) {
+      browser.activeTabId = snapshot.browserActiveTabId;
+    }
+    state.activeThreadId = snapshot.activeThreadId;
+    state.activeFileId = snapshot.activeFileId;
+    activeSurface = snapshot.activeSurface;
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+    refreshSidebar();
+    refreshTabs();
+    renderBrowserTabs();
+    syncUrlInput();
+
+    if (snapshot.focusedSurface === "browser" &&
+        snapshot.focusedBrowserTabId &&
+        browser && browser.tabs.some(function (tab) {
+          return tab.id === snapshot.focusedBrowserTabId;
+        })) {
+      if (!await activateBrowserTab(project, snapshot.focusedBrowserTabId)) {
+        throw new Error("diagnostics browser focus restoration failed");
+      }
+    } else if (snapshot.focusedSurface === "file" &&
+               snapshot.focusedFileId && findOpenFile(snapshot.focusedFileId)) {
+      if (!activateFileTabNow(snapshot.focusedFileId)) {
+        throw new Error("diagnostics editor focus restoration failed");
+      }
+    } else if (snapshot.focusedSurface === "terminal" &&
+               snapshot.focusedThreadId && findThread(snapshot.focusedThreadId)) {
+      if (!await focusThread(snapshot.focusedThreadId)) {
+        throw new Error("diagnostics terminal focus restoration failed");
+      }
+    }
+    discardGpuDiagnosticsStressWorkspace(snapshot);
+  }
+
+  function createGpuDiagnosticsStressResource(id, record, dispose, forceDispose, workspace) {
+    var cleanupCompleted = false;
+    var cleanupFlight = null;
+    var forceFlight = null;
+    var finishFlight = null;
+    var resource;
+    gpuDiagnosticsStressResources.set(id, record);
+    function finish() {
+      if (finishFlight) return finishFlight;
+      var flight = Promise.resolve().then(async function () {
+        await restoreGpuDiagnosticsStressWorkspace(workspace, id, record);
+        if (gpuDiagnosticsStressResources.get(id) === record) {
+          gpuDiagnosticsStressResources.delete(id);
+        }
+        if (typeof gpuDiagnosticsStressCleanupHandles !== "undefined" &&
+            gpuDiagnosticsStressCleanupHandles.get(id) === resource) {
+          gpuDiagnosticsStressCleanupHandles.delete(id);
+        }
+      });
+      finishFlight = flight;
+      void flight.catch(function (error) {
+        if (finishFlight === flight) finishFlight = null;
+        console.error("[psyche:graphics] diagnostics workspace restoration failed: " + String(error));
+      });
+      return flight;
+    }
+    function forceCleanup() {
+      if (cleanupCompleted) return finish();
+      if (forceFlight) return forceFlight;
+      var flight = Promise.resolve().then(function () {
+        return forceDispose();
+      }).then(function () {
+        cleanupCompleted = true;
+        return finish();
+      });
+      forceFlight = flight;
+      void flight.catch(
+        function (error) {
+          if (forceFlight === flight) forceFlight = null;
+          if (!cleanupCompleted) {
+            console.error("[psyche:graphics] diagnostics force cleanup failed: " + String(error));
+          }
+        },
+      );
+      return flight;
+    }
+    resource = {
+      id: id,
+      dispose: function (signal) {
+        if (cleanupCompleted) return finish();
+        if (cleanupFlight) return cleanupFlight;
+        throwIfGpuDiagnosticsStressAborted(signal);
+        cleanupFlight = Promise.resolve().then(function () {
+          return dispose(signal);
+        }).then(async function () {
+          cleanupCompleted = true;
+          await finish();
+        }, function (error) {
+          cleanupFlight = null;
+          return forceCleanup().then(function () {
+            throw error;
+          }, function (forceError) {
+            throw new AggregateError(
+              [error, forceError],
+              "diagnostics cleanup and forced cleanup failed",
+              { cause: error },
+            );
+          });
+        });
+        return cleanupFlight;
+      },
+      forceDispose: function () {
+        return forceCleanup();
+      },
+    };
+    if (typeof gpuDiagnosticsStressCleanupHandles !== "undefined") {
+      gpuDiagnosticsStressCleanupHandles.set(id, resource);
+    }
+    return resource;
+  }
+
+  async function closeGpuDiagnosticsStressThread(thread, signal, ptyStopConfirmed) {
+    throwIfGpuDiagnosticsStressAborted(signal);
+    var closed = await closeThread(thread.id, {
+      focus: false,
+      persist: false,
+      preserveTerminalFocus: false,
+      requireConfirmedPtyStop: ptyStopConfirmed !== true,
+    });
+    if (!closed && findThread(thread.id)) {
+      throw new Error("diagnostics terminal cleanup was not confirmed");
+    }
+  }
+
+  async function createGpuDiagnosticsStressTerminal(index, fixture, signal) {
+    var workspace = beginGpuDiagnosticsStressWorkspace();
+    assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    var project = findProject(workspace.projectId);
+    if (!project || project.closing || activeWorkspaceRoot(project) !== workspace.worktreePath) {
+      discardGpuDiagnosticsStressWorkspace(workspace);
+      throw new Error("diagnostics workspace is no longer available");
+    }
+    var thread;
+    var resource;
+    var fixtureStarted = false;
+    var fixtureStopped = false;
+    async function cleanupTerminal(cleanupSignal) {
+      throwIfGpuDiagnosticsStressAborted(cleanupSignal);
+      if (fixtureStarted && !fixtureStopped) {
+        thread.ptyStarted = true;
+        fixtureStopped = await stopThreadPty(thread);
+        if (!fixtureStopped) {
+          thread.stopRequested = false;
+          throw new Error("diagnostics terminal cleanup was not confirmed");
+        }
+      }
+      await closeGpuDiagnosticsStressThread(thread, cleanupSignal, fixtureStopped);
+    }
+    function ownThread(candidate) {
+      thread = candidate;
+      if (!resource && thread) {
+        resource = createGpuDiagnosticsStressResource(
+          thread.id,
+          { kind: "terminal", thread: thread },
+          cleanupTerminal,
+          function () {
+            thread.ptyLifecycleToken = (thread.ptyLifecycleToken || 0) + 1;
+            return cleanupTerminal();
+          },
+          workspace,
+        );
+      }
+    }
+    try {
+      var createdThread = await createThread({
+        project: project,
+        name: "render diagnostics " + fixture + " " + (index + 1),
+        kind: "shell",
+        launchKind: "diagnostics-fixture",
+        projectRoot: project.root,
+        cwd: workspace.worktreePath,
+        worktreePath: workspace.worktreePath,
+        deferStart: true,
+        focusTerminal: false,
+        onCreated: ownThread,
+      });
+      if (createdThread) ownThread(createdThread);
+    } catch (error) {
+      if (resource) await resource.forceDispose();
+      else await restoreGpuDiagnosticsStressWorkspace(workspace);
+      throw error;
+    }
+    if (!thread) {
+      await restoreGpuDiagnosticsStressWorkspace(workspace);
+      throw new Error("diagnostics terminal pane could not be created");
+    }
+
+    try {
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      var controller = ensureThreadPtyController(thread);
+      var startAttempt = controller && typeof controller.prepareForPtyStart === "function"
+        ? controller.prepareForPtyStart()
+        : null;
+      thread.startInFlight = true;
+      await invoke("diagnostics_spawn_fixture", { threadId: thread.id, fixture: fixture });
+      fixtureStarted = true;
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      var nativeGeneration = await invoke("pty_current_generation", {
+        threadId: thread.id,
+        thread_id: thread.id,
+      });
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      if (!Number.isSafeInteger(nativeGeneration) || nativeGeneration <= 0) {
+        throw new Error("diagnostics terminal generation was not returned");
+      }
+      thread.ptyGeneration = nativeGeneration;
+      thread.ptyStarted = true;
+      thread.startInFlight = false;
+      if (!isLiveThread(thread)) {
+        throw new Error("diagnostics terminal pane was closed during startup");
+      }
+      if (!gpuDiagnosticsStressOperationIsCurrent(workspace, workspace.operationGeneration) ||
+          signal.aborted) {
+        throwIfGpuDiagnosticsStressAborted(signal);
+        throw new Error("diagnostics terminal creation was invalidated");
+      }
+      thread.status = "running";
+      thread.spawning = false;
+      if (controller && typeof controller.markPtyStarted === "function") {
+        await controller.markPtyStarted(startAttempt, nativeGeneration);
+        assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      }
+      syncThreadPaneMetadata(thread);
+      refreshSidebar();
+      refreshTabs();
+    } catch (error) {
+      thread.startInFlight = false;
+      if (controller && typeof controller.restoreAfterFailedPtyStart === "function") {
+        controller.restoreAfterFailedPtyStart(startAttempt);
+      }
+      try {
+        await resource.forceDispose();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "diagnostics terminal setup and cleanup failed",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+
+    return resource;
+  }
+
+  async function createGpuDiagnosticsStressEditor(documentModel, signal) {
+    var workspace = beginGpuDiagnosticsStressWorkspace();
+    assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    var project = findProject(workspace.projectId);
+    if (!project || project.closing || activeWorkspaceRoot(project) !== workspace.worktreePath) {
+      discardGpuDiagnosticsStressWorkspace(workspace);
+      throw new Error("diagnostics workspace is no longer available");
+    }
+    var key = filesPaneKey(project.id, workspace.worktreePath);
+    var filesPaneExisted = filesPanes.has(key);
+    fileCounter += 1;
+    var file = Object.assign({
+      id: "f" + fileCounter,
+      path: documentModel.name,
+      rel: documentModel.name,
+      name: documentModel.name,
+      projectId: project.id,
+      workspaceRoot: workspace.worktreePath,
+      originalText: documentModel.text,
+      dirty: false,
+      saving: false,
+      savePromise: null,
+      languageId: documentModel.languageId,
+      cursor: { line: 1, column: 1 },
+      selection: { anchor: 0, head: 0 },
+      truncated: false,
+      binary: false,
+      size: documentModel.text.length,
+      error: null,
+      saveError: null,
+      saveState: "clean",
+      loading: false,
+    }, window.PsycheCodeEditor.createFileBuffer(documentModel.text));
+    var filesPane;
+    function cleanupEmptyFilesPane() {
+      var ownedPane = filesPane || filesPanes.get(key);
+      if (!filesPaneExisted && ownedPane && filesForPane(ownedPane).length === 0) {
+        removeFilesPaneNow(ownedPane);
+      }
+    }
+
+    var resource = createGpuDiagnosticsStressResource(
+      file.id,
+      { kind: "editor", file: file, filesPaneExisted: filesPaneExisted },
+      async function (cleanupSignal) {
+        throwIfGpuDiagnosticsStressAborted(cleanupSignal);
+        if (!await closeFileTab(file.id)) {
+          if (findOpenFile(file.id)) {
+            throw new Error("diagnostics editor cleanup was not confirmed");
+          }
+          cleanupEmptyFilesPane();
+        }
+      },
+      function () {
+        state.openFiles = state.openFiles.filter(function (candidate) {
+          return candidate.id !== file.id;
+        });
+        cleanupEmptyFilesPane();
+      },
+      workspace,
+    );
+    try {
+      filesPane = ensureFilesPane(project, workspace.worktreePath);
+      if (!filesPane) throw new Error("diagnostics editor pane could not be created");
+      state.openFiles.push(file);
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      filesPane.activeFileId = file.id;
+      if (!activateFileTabNow(file.id)) {
+        throw new Error("diagnostics editor pane could not be activated");
+      }
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    } catch (error) {
+      try {
+        await resource.dispose();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "diagnostics editor setup and cleanup failed",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    return resource;
+  }
+
+  async function installGpuDiagnosticsBrowserPage(project, tab, page) {
+    await invoke("browser_eval", {
+      label: browserLabelForTab(project, tab),
+      script: "document.open();document.write(" + JSON.stringify(page.html) + ");document.close();",
+    });
+  }
+
+  async function cleanupGpuDiagnosticsStressBrowserResources(project, tab, pane, createdPane) {
+    var errors = [];
+    var browser = ensureBrowserModel(project, pane.worktreePath);
+    if (tab && browser && browser.tabs.indexOf(tab) !== -1) {
+      try {
+        if (!await closeBrowserTab(project, tab.id, pane.worktreePath) &&
+            browser.tabs.indexOf(tab) !== -1) {
+          throw new Error("diagnostics browser tab cleanup was not confirmed");
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (createdPane && findThread(pane.id)) {
+      try {
+        await closeGpuDiagnosticsStressThread(pane);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length) {
+      throw new AggregateError(errors, "diagnostics browser cleanup failed");
+    }
+  }
+
+  async function createGpuDiagnosticsStressBrowser(page, signal) {
+    var workspace = beginGpuDiagnosticsStressWorkspace();
+    assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    var project = findProject(workspace.projectId);
+    if (!project || project.closing || activeWorkspaceRoot(project) !== workspace.worktreePath) {
+      discardGpuDiagnosticsStressWorkspace(workspace);
+      throw new Error("diagnostics workspace is no longer available");
+    }
+    var pane = null;
+    var createdPane = null;
+    var tab = null;
+    var resource = null;
+    var record = null;
+    function ownBrowserResources() {
+      if (resource) {
+        record.tab = tab;
+        return;
+      }
+      record = {
+        kind: "browser",
+        project: project,
+        tab: tab,
+        pane: pane,
+        createdPane: createdPane === pane,
+        page: page,
+        visible: true,
+      };
+      function cleanup() {
+        return cleanupGpuDiagnosticsStressBrowserResources(
+          project, tab, pane, record.createdPane,
+        );
+      }
+      resource = createGpuDiagnosticsStressResource(
+        tab ? tab.id : pane.id, record, cleanup, cleanup, workspace,
+      );
+    }
+    try {
+      var availablePane = await createBrowserPane(project, {
+        worktreePath: workspace.worktreePath,
+        onCreated: function (candidate) {
+          createdPane = candidate;
+          pane = candidate;
+          ownBrowserResources();
+        },
+      });
+      if (availablePane) pane = availablePane;
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      if (!availablePane) throw new Error("diagnostics browser pane could not be created");
+      tab = createBrowserTab(project, "about:blank", true, workspace.worktreePath, function (candidate) {
+        tab = candidate;
+        ownBrowserResources();
+      });
+      if (tab) ownBrowserResources();
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      if (!tab) throw new Error("diagnostics browser tab could not be created");
+      if (!await navigateBrowser("about:blank", {
+        tabId: tab.id,
+        replace: true,
+        preserveHistory: true,
+      })) {
+        throw new Error("diagnostics browser page could not be created");
+      }
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      await installGpuDiagnosticsBrowserPage(project, tab, page);
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+
+      return resource;
+    } catch (error) {
+      var cleanupError = null;
+      if (resource) {
+        try {
+          await resource.forceDispose();
+        } catch (failure) {
+          cleanupError = failure;
+        }
+      }
+      if (!resource) await restoreGpuDiagnosticsStressWorkspace(workspace);
+      if (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "diagnostics browser setup and cleanup failed",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  async function focusGpuDiagnosticsStressResource(id, signal) {
+    var workspace = captureGpuDiagnosticsStressOperation(signal);
+    var operationGeneration = workspace.operationGeneration;
+    var isCurrent = function () {
+      return gpuDiagnosticsStressOperationIsCurrent(workspace, operationGeneration);
+    };
+    var resource = gpuDiagnosticsStressResources.get(id);
+    if (!resource) throw new Error("diagnostics stress resource is unavailable");
+    if (resource.kind === "terminal") {
+      var terminalFocused = await focusThread(resource.thread.id, { isCurrent: isCurrent });
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      if (!terminalFocused) throw new Error("diagnostics terminal focus failed");
+      return;
+    }
+    if (resource.kind === "editor") {
+      if (!await activateFileTab(resource.file.id)) throw new Error("diagnostics editor focus failed");
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      return;
+    }
+    var browserFocused = await activateBrowserTab(
+      resource.project,
+      resource.tab.id,
+      { isCurrent: isCurrent },
+    );
+    assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    if (!browserFocused) throw new Error("diagnostics browser focus failed");
+  }
+
+  async function setGpuDiagnosticsStressResourceVisibility(id, visible, signal) {
+    var workspace = captureGpuDiagnosticsStressOperation(signal);
+    var resource = gpuDiagnosticsStressResources.get(id);
+    if (!resource) throw new Error("diagnostics stress resource is unavailable");
+    if (resource.kind === "terminal") {
+      var changed = visible
+        ? reopenThread(resource.thread.id)
+        : hideThread(resource.thread.id);
+      if (!changed && resource.thread.hidden !== !visible) {
+        throw new Error("diagnostics terminal visibility change failed");
+      }
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      return;
+    }
+    if (resource.kind === "editor") {
+      if (visible && !await activateFileTab(resource.file.id)) {
+        throw new Error("diagnostics editor visibility change failed");
+      }
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      if (!visible && state.activeFileId === resource.file.id) {
+        await returnFromFileFocus();
+        assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      }
+      return;
+    }
+    resource.visible = visible;
+    if (visible) {
+      await focusGpuDiagnosticsStressResource(id, signal);
+    } else {
+      await invoke("browser_hide", { label: browserLabelForTab(resource.project, resource.tab) });
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    }
+  }
+
+  function applyGpuDiagnosticsStressSplitRatios(node, splitRatios, index) {
+    if (!node || node.type === "leaf") return;
+    node.ratio = splitRatios[index.value % splitRatios.length];
+    index.value += 1;
+    applyGpuDiagnosticsStressSplitRatios(node.first, splitRatios, index);
+    applyGpuDiagnosticsStressSplitRatios(node.second, splitRatios, index);
+  }
+
+  function resizeGpuDiagnosticsStressWorkspace(step, geometry) {
+    if (!geometry || !Array.isArray(geometry.splitRatios)) return;
+    var workspace = captureGpuDiagnosticsStressOperation();
+    var operationGeneration = workspace.operationGeneration;
+    var layoutKey = workspace.layoutKey;
+    var splitRatios = geometry.splitRatios.slice();
+    var sidebarWidth = geometry.sidebarWidth;
+    gpuDiagnosticsStressLayoutGeneration = operationGeneration;
+    terminalFrameScheduler.schedule("layout:gpu-diagnostics-stress", function () {
+      if (gpuDiagnosticsStressLayoutGeneration === operationGeneration) {
+        gpuDiagnosticsStressLayoutGeneration = null;
+      }
+      if (!gpuDiagnosticsStressOperationIsCurrent(workspace, operationGeneration)) return;
+      var layout = paneLayouts.get(layoutKey);
+      if (layout && layout.root && splitRatios.length) {
+        applyGpuDiagnosticsStressSplitRatios(layout.root, splitRatios, { value: 0 });
+      }
+      setSidebarOpen(true);
+      scheduleSidebarWidth(sidebarWidth);
+      renderPaneWorkspace({ preserveTerminalFocus: false });
+      scheduleTerminalPaneFits();
+      scheduleBrowserBounds();
+    });
+  }
+
+  async function loseGpuDiagnosticsStressGraphicsContext(signal) {
+    var workspace = captureGpuDiagnosticsStressOperation(signal);
+    var browser = Array.from(gpuDiagnosticsStressResources.values()).find(function (resource) {
+      return resource.kind === "browser";
+    });
+    if (!browser) return false;
+    var nativeLabel = browserTabLifecycle(browser.tab).nativeLabel;
+    if (!nativeLabel) return false;
+    var resolveConfirmed;
+    var confirmed = new Promise(function (resolve) {
+      resolveConfirmed = resolve;
+    });
+    var settled = false;
+    var timeout = null;
+    function finishContextLossConfirmation(value) {
+      if (settled) return;
+      settled = true;
+      if (timeout !== null) clearTimeout(timeout);
+      resolveConfirmed(value);
+    }
+    var unlisten;
+    try {
+      unlisten = await listen("browser:title", function (event) {
+        var payload = event && event.payload || {};
+        if (payload.label !== nativeLabel || typeof payload.title !== "string") return;
+        if (!gpuDiagnosticsStressOperationIsCurrent(workspace, workspace.operationGeneration)) {
+          finishContextLossConfirmation(false);
+          return;
+        }
+        var isConfirmed = window.PsycheRuntimeDebug &&
+          typeof window.PsycheRuntimeDebug.isGpuDiagnosticsContextLossConfirmed === "function" &&
+          window.PsycheRuntimeDebug.isGpuDiagnosticsContextLossConfirmed(
+            payload.title,
+            browser.page.title,
+          );
+        if (isConfirmed || payload.title.indexOf(browser.page.title + " · context-") === 0) {
+          finishContextLossConfirmation(isConfirmed);
+        }
+      });
+    } catch (error) {
+      console.warn("[psyche:graphics] context-loss acknowledgement unavailable: " + String(error));
+      return false;
+    }
+    assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+    timeout = setTimeout(function () {
+      finishContextLossConfirmation(false);
+    }, 1500);
+    try {
+      await invoke("browser_eval", {
+        label: browserLabelForTab(browser.project, browser.tab),
+        script: "(function () { if (typeof window.losePsycheDiagnosticsContext !== 'function') { document.title = " + JSON.stringify(browser.page.title + " · context-unavailable") + "; return; } Promise.resolve(window.losePsycheDiagnosticsContext()).catch(function () { document.title = " + JSON.stringify(browser.page.title + " · context-loss-failed") + "; }); }());",
+      });
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      var contextLost = await confirmed;
+      assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+      return contextLost;
+    } finally {
+      if (typeof unlisten === "function") unlisten();
+      if (timeout !== null) clearTimeout(timeout);
+    }
+  }
+
+  async function restoreGpuDiagnosticsStressGraphicsContext(signal) {
+    var workspace = captureGpuDiagnosticsStressOperation(signal);
+    var browser = Array.from(gpuDiagnosticsStressResources.values()).find(function (resource) {
+      return resource.kind === "browser";
+    });
+    if (!browser) return;
+    await installGpuDiagnosticsBrowserPage(browser.project, browser.tab, browser.page);
+    assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+  }
+
+  function createGpuDiagnosticsStressAdapterHost() {
+    return {
+      createTerminal: createGpuDiagnosticsStressTerminal,
+      createEditor: createGpuDiagnosticsStressEditor,
+      createBrowser: createGpuDiagnosticsStressBrowser,
+      focus: focusGpuDiagnosticsStressResource,
+      resize: resizeGpuDiagnosticsStressWorkspace,
+      setVisible: setGpuDiagnosticsStressResourceVisibility,
+      cycleWindow: function (signal) {
+        var workspace = captureGpuDiagnosticsStressOperation(signal);
+        return invoke("diagnostics_cycle_window", {}).then(function () {
+          assertGpuDiagnosticsStressOperationCurrent(workspace, signal);
+        });
+      },
+      loseGraphicsContext: loseGpuDiagnosticsStressGraphicsContext,
+      restoreGraphicsContext: restoreGpuDiagnosticsStressGraphicsContext,
+      captureLateOperationGeneration: function () {
+        var workspace = gpuDiagnosticsStressWorkspace;
+        return workspace &&
+          gpuDiagnosticsStressOperationIsCurrent(workspace, workspace.operationGeneration)
+          ? workspace.operationGeneration
+          : null;
+      },
+      invalidateLateOperation: function (_operation, operationGeneration) {
+        var workspace = gpuDiagnosticsStressWorkspace;
+        if (!workspace ||
+            workspace.operationGeneration !== operationGeneration ||
+            !gpuDiagnosticsStressOperationIsCurrent(workspace, operationGeneration)) {
+          return;
+        }
+        invalidateGpuDiagnosticsStressOperations();
+      },
+      resetMetrics: function () {
+        applyGpuDiagnosticsProcessMetrics({});
+        refreshGpuDiagnosticsProcessMetrics().catch(function (error) {
+          console.warn("[psyche:graphics] process metrics reset failed: " + String(error));
+        });
+      },
+      snapshotMetrics: function () {
+        return Object.assign({}, gpuDiagnosticsProcessMetrics);
+      },
+      sleep: function (ms, signal) {
+        return new Promise(function (resolve, reject) {
+          throwIfGpuDiagnosticsStressAborted(signal);
+          var timer = setTimeout(resolve, ms);
+          signal.addEventListener("abort", function () {
+            clearTimeout(timer);
+            reject(signal.reason || new Error("render diagnostics stress was cancelled"));
+          }, { once: true });
+        });
+      },
+      requestFrame: function (callback) {
+        return window.requestAnimationFrame(callback);
+      },
+      cancelFrame: function (handle) {
+        window.cancelAnimationFrame(handle);
+      },
+      now: function () {
+        return performance.now();
+      },
+      onProgress: function () {},
+    };
   }
 
   // ============================================================
@@ -2796,6 +3784,7 @@
     }
     commitPanePlacement(placement);
     state.threads.push(thread);
+    if (typeof opts.onCreated === "function") opts.onCreated(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountTerminal(thread);
     focusThread(id, opts.focusTerminal === false ? { focusTerminal: false } : undefined);
@@ -3133,6 +4122,7 @@
     };
     commitPanePlacement(placement);
     state.threads.push(pane);
+    if (typeof options.onCreated === "function") options.onCreated(pane);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountBrowserPane(pane);
     var focusOptions = { focusTerminal: false };
@@ -5523,7 +6513,12 @@
   }
 
   async function focusThread(id, options) {
+    options = options || {};
+    var operationIsCurrent = function () {
+      return typeof options.isCurrent !== "function" || options.isCurrent();
+    };
     function resolveFocusableThread() {
+      if (!operationIsCurrent()) return null;
       var candidate = findThread(id);
       var candidateLayout = paneLayoutForThread(candidate);
       return paneSurfaceFocusEligible(candidateLayout, candidate) ? candidate : null;
@@ -5532,6 +6527,7 @@
     if (!thread) return false;
     var layout = paneLayoutForThread(thread);
     if (!(await showTerminalView())) return false;
+    if (!operationIsCurrent()) return false;
     thread = resolveFocusableThread();
     if (!thread) return false;
     layout = paneLayoutForThread(thread);
@@ -5549,6 +6545,7 @@
     var project = findProject(thread.projectId);
     var scopeChanged = state.activeProjectId !== thread.projectId ||
       !project || activeWorkspaceRoot(project) !== thread.worktreePath;
+    if (!operationIsCurrent()) return false;
     markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
@@ -5578,6 +6575,7 @@
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
+      if (!operationIsCurrent()) return;
       var focusedThread = resolveFocusableThread();
       if (!focusedThread || state.activeThreadId !== id) return;
       if (
@@ -5597,6 +6595,7 @@
       scheduleBrowserBounds();
     });
 
+    if (!operationIsCurrent()) return false;
     setProjectStatus(project, statusLevel(thread.status));
     if ((!options || options.refreshStatus !== false) &&
         typeof refreshStatusController === "function") {
@@ -6081,6 +7080,18 @@
         return false;
       }
     }
+    var ptyStopConfirmed = false;
+    if (options && options.requireConfirmedPtyStop &&
+        thread.kind !== "web" && thread.kind !== "git") {
+      if (!thread.startInFlight) ptyStopConfirmed = await stopThreadPty(thread);
+      if (!ptyStopConfirmed) {
+        thread.closeStarted = false;
+        thread.closing = false;
+        if (!thread.startInFlight) thread.stopRequested = false;
+        setStatus("failed to confirm terminal shutdown for " + thread.name, "error");
+        return false;
+      }
+    }
     if (thread.ptyIoQueue) {
       thread.ptyIoQueue.closed = true;
     }
@@ -6101,7 +7112,7 @@
     });
     thread.terminalController = null;
     thread.term = null;
-    if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
+    if (!ptyStopConfirmed && thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
       await stopThreadPty(thread);
     }
     var closingProjectId = thread.projectId;
@@ -12921,7 +13932,7 @@
     var tab = browser.tabs.find(function (t) { return t.id === browser.activeTabId; });
     return tab || browser.tabs[0] || null;
   }
-  function createBrowserTab(project, url, activate, worktreePath) {
+  function createBrowserTab(project, url, activate, worktreePath, onCreated) {
     project = project || activeProject();
     if (!project || project.closing) return null;
     worktreePath = worktreePath || activeWorkspaceRoot(project);
@@ -12934,12 +13945,13 @@
     var normalised = url && url !== "about:blank" ? normaliseUrl(url) : "about:blank";
     var tab = { id: makeBrowserTabId(), url: normalised || "about:blank", title: tabTitle(normalised), history: normalised && normalised !== "about:blank" ? [normalised] : [], historyIndex: normalised && normalised !== "about:blank" ? 0 : -1, created: false, loading: false };
     browser.tabs.push(tab);
+    if (typeof onCreated === "function") onCreated(tab);
     if (activate || !browser.activeTabId) { browser.activeTabId = tab.id; markActiveSurface("browser"); }
     renderBrowserTabs(); saveWorkspaceSoon(); return tab;
   }
-  async function closeBrowserTab(project, tabId) {
+  async function closeBrowserTab(project, tabId, worktreePath) {
     project = project || activeProject();
-    var browser = ensureBrowserModel(project); if (!browser) return false;
+    var browser = ensureBrowserModel(project, worktreePath); if (!browser) return false;
     var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return false;
     var tab = browser.tabs[idx];
     var lifecycle = browserTabLifecycle(tab);
@@ -13016,7 +14028,12 @@
     return navigated && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane) &&
       tab.created === true;
   }
-  async function activateBrowserTab(project, tabId) {
+  async function activateBrowserTab(project, tabId, options) {
+    options = options || {};
+    var operationIsCurrent = function () {
+      return typeof options.isCurrent !== "function" || options.isCurrent();
+    };
+    if (!operationIsCurrent()) return false;
     project = project || activeProject();
     var browser = ensureBrowserModel(project);
     if (!browser) return false;
@@ -13037,16 +14054,17 @@
         while (lifecycle.pendingOperation || lifecycle.cleanupOperation) {
           var pending = lifecycle.pendingOperation || lifecycle.cleanupOperation;
           await pending.promise;
+          if (!operationIsCurrent()) return false;
         }
         pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
         if (browser.tabs.indexOf(tab) === -1 || browserTabIsClosing(tab) ||
-            browserPaneIsClosing(pane)) return false;
+            browserPaneIsClosing(pane) || !operationIsCurrent()) return false;
         if (browser.activeTabId === tab.id && !tab.created) {
           await restoreDormantBrowserTab(project, tab);
         }
         pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
         return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
-          !browserPaneIsClosing(pane);
+          !browserPaneIsClosing(pane) && operationIsCurrent();
       })();
       lifecycle.activationOperation = activationOperation;
     }
@@ -13741,6 +14759,7 @@
   onRailClick("gpu-diagnostics-close", function () { setGpuDiagnosticsOpen(false); });
   onRailClick("gpu-diagnostics-copy", function () { copyGpuDiagnosticsJson().catch(function (error) { showStatusError(String(error && error.message || error)); }); });
   onRailClick("gpu-diagnostics-run-stress", function () { runGpuDiagnosticsStress().catch(function (error) { showStatusError(String(error && error.message || error)); }); });
+  onRailClick("gpu-diagnostics-retry-cleanup", function () { retryGpuDiagnosticsStressCleanup().catch(function (error) { showStatusError(String(error && error.message || error)); }); });
   onRailClick("gpu-diagnostics-cancel-stress", function () {
     if (gpuDiagnosticsStressController) gpuDiagnosticsStressController.abort(new Error("stress run cancelled"));
   });
