@@ -700,19 +700,31 @@ final class PsycheAppUITests: XCTestCase {
 
         let sheet = element("remote-action-sheet", in: app)
         XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        let titleField = textInput("remote-action-pr-title", in: app)
+        let bodyField = textInput("remote-action-pr-body", in: app)
+        reveal(titleField, in: sheet)
+        XCTAssertTrue(titleField.waitForExistence(timeout: 10))
+        XCTAssertTrue(bodyField.waitForExistence(timeout: 10))
+        let originalTitle = try XCTUnwrap(titleField.value as? String)
+        let originalBody = try XCTUnwrap(bodyField.value as? String)
         let changedFile = element("remote-action-pr-file-Sources/App.swift", in: app)
         reveal(changedFile, in: sheet)
         XCTAssertTrue(changedFile.waitForExistence(timeout: 10))
         changedFile.tap()
 
         XCTAssertTrue(element("action-sheet-related-file", in: app).waitForExistence(timeout: 10))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        // Regular-width layouts also expose the underlying workspace navigation bar.
+        let relatedFileNavigationBar = app.navigationBars["App.swift"]
+        XCTAssertTrue(relatedFileNavigationBar.waitForExistence(timeout: 10))
+        let backToReview = relatedFileNavigationBar.buttons.firstMatch
+        XCTAssertTrue(backToReview.waitForExistence(timeout: 10))
+        backToReview.tap()
 
-        let titleField = textInput("remote-action-pr-title", in: app)
-        let bodyField = textInput("remote-action-pr-body", in: app)
         reveal(titleField, in: sheet)
         XCTAssertTrue(titleField.waitForExistence(timeout: 10))
         XCTAssertTrue(bodyField.waitForExistence(timeout: 10))
+        XCTAssertEqual(titleField.value as? String, originalTitle)
+        XCTAssertEqual(bodyField.value as? String, originalBody)
 
         titleField.tap()
         titleField.typeText(" safely")
@@ -726,6 +738,22 @@ final class PsycheAppUITests: XCTestCase {
             (bodyField.value as? String ?? "").contains("Confirmed from iOS"),
             "Edited PR summary should remain in the review form"
         )
+
+        let editedTitle = try XCTUnwrap(titleField.value as? String)
+        let editedBody = try XCTUnwrap(bodyField.value as? String)
+        reveal(changedFile, in: sheet)
+        XCTAssertTrue(changedFile.isHittable)
+        changedFile.tap()
+        XCTAssertTrue(element("action-sheet-related-file", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(relatedFileNavigationBar.waitForExistence(timeout: 10))
+        XCTAssertTrue(backToReview.waitForExistence(timeout: 10))
+        backToReview.tap()
+
+        reveal(titleField, in: sheet)
+        XCTAssertTrue(titleField.waitForExistence(timeout: 10))
+        XCTAssertTrue(bodyField.waitForExistence(timeout: 10))
+        XCTAssertEqual(titleField.value as? String, editedTitle)
+        XCTAssertEqual(bodyField.value as? String, editedBody)
     }
 
     func testPullRequestCanBeCancelledFromConfirmationAndReview() throws {
