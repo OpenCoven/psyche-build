@@ -5,6 +5,7 @@
 **Active stabilization owner:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)  
 **Executable evidence slice:** [#239](https://github.com/OpenCoven/psyche-build/issues/239)  
 **Bounded operator runbook:** [OPERATOR-ACCEPTANCE-SLICE.md](./OPERATOR-ACCEPTANCE-SLICE.md)  
+**Graphics evidence procedure:** [GPU-VERIFICATION-MATRIX.md](./GPU-VERIFICATION-MATRIX.md) (#232 under #199; no physical acceptance asserted)<br>
 **Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
 **Execution order:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
