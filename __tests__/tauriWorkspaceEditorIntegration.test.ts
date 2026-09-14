@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -219,6 +220,83 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toContain('StreamLanguage.define(toml)');
     expect(editorEntry).toMatch(/default:\s*return \[\];/);
   });
+
+  it('reloads a shortened CRLF file with a stale selection through the production editor', async () => {
+    const editorModule = await import(
+      pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
+    );
+    const root = mkdtempSync(join(tmpdir(), 'psyche-editor-reload-'));
+    try {
+      const path = join(root, 'example.txt');
+      const originalText = 'original longer document\r\nsecond line\r\n';
+      writeFileSync(path, originalText);
+      let editorState = editorModule.createFileEditorState({ text: readFileSync(path, 'utf8') });
+      editorState = editorState.update({
+        selection: { anchor: editorState.doc.length, head: editorState.doc.length },
+      }).state;
+      const file = {
+        id: 'f1', projectId: 'p1', workspaceRoot: root, path,
+        ...editorModule.createFileBuffer(originalText),
+        selection: {
+          anchor: editorState.selection.main.anchor,
+          head: editorState.selection.main.head,
+        },
+        saveError: null,
+      };
+      const state = { activeFileId: file.id };
+      const renderFileView = compileFunction<(options: { reload: boolean }) => void>(
+        extractFunctionSource(mainJs, 'renderFileView'),
+        {
+          state, findOpenFile: () => file, renderFileChrome: () => {},
+          loadedEditorFileId: file.id, isEditableFile: () => true,
+          fileEditor: {
+            setDocument: (options: object) => {
+              editorState = editorModule.createFileEditorState(options);
+            },
+          },
+        },
+      );
+      const reloadFile = compileFunction<(target: typeof file) => Promise<boolean>>(
+        extractFunctionSource(mainJs, 'reloadFile'),
+        {
+          state, findProject: () => ({ id: 'p1', root }),
+          window: { PsycheCodeEditor: editorModule },
+          invoke: async (command: string, args: { root: string; path: string }) => {
+            expect(command).toBe('fs_read_text');
+            expect(args).toEqual({ root, path });
+            const text = readFileSync(args.path, 'utf8');
+            return { text, size: Buffer.byteLength(text), truncated: false, binary: false };
+          },
+          renderFileView, renderFileChrome: () => {}, refreshTabs: () => {},
+          restoreFileEditorFocus: () => {},
+        },
+      );
+      writeFileSync(path, 'a\r\nb\r\n');
+
+      expect(await reloadFile(file), String(file.saveError)).toBe(true);
+      expect(editorState.doc.toString()).toBe('a\nb\n');
+      expect(editorState.selection.main).toMatchObject({ anchor: 4, head: 4 });
+      expect(file.text).toBe(readFileSync(path, 'utf8'));
+      expect(file.dirty).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['a\r\nb\r\n', 'a\nb\n', 'a\rb\r', 'a\r\nb\n'])(
+    'clamps selection to normalized document bounds for %j',
+    async (text) => {
+      const editorModule = await import(
+        pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
+      );
+      const state = editorModule.createFileEditorState({
+        text,
+        selection: { anchor: 100, head: -1 },
+      });
+      expect(state.doc.toString()).toBe('a\nb\n');
+      expect(state.selection.main).toMatchObject({ anchor: 4, head: 0 });
+    },
+  );
 
   it('starts every loaded document with isolated undo history', async () => {
     expect(tauriPackage.dependencies['@codemirror/commands']).toBe('6.10.4');

@@ -1,5 +1,5 @@
 import { basicSetup } from 'codemirror';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Text } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
@@ -144,10 +144,12 @@ export function createFileEditorState({
   const handleChange = typeof onChange === 'function' ? onChange : () => {};
   const handleSelectionChange =
     typeof onSelectionChange === 'function' ? onSelectionChange : () => {};
+  // Selection offsets address CodeMirror's normalized document, not disk bytes.
+  const doc = Text.of(text.split(/\r\n?|\n/));
 
   return EditorState.create({
-    doc: text,
-    selection: normalizeSelection(selection, text.length),
+    doc,
+    selection: normalizeSelection(selection, doc.length),
     extensions: [
       basicSetup,
       syntaxHighlighting(workspaceHighlightStyle),
