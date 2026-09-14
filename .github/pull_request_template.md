@@ -1,8 +1,8 @@
 ## Outcome
 
-<!-- Link one accountable issue/outcome and state the user or maintainer result. Do not use a PR as the durable implementation backlog. -->
+<!-- Name one outcome with its owner, train, and acceptance gate. Link an owning issue when one exists; a bounded maintenance fix need not create a duplicate issue. Keep GitHub closing keywords away from generated Beads mirror references. -->
 
-Closes #
+Related outcome:
 
 ## Scope and boundaries
 
@@ -56,5 +56,12 @@ Result:
 
 - [ ] No support or release claim changes.
 - [ ] The support matrix, roadmap, release acceptance, changelog, and user-facing docs are updated consistently.
+
+## Roadmap control
+
+- [ ] No scope, priority, dependency, or closure decision changes.
+- [ ] A decision changes: roadmap/execution docs agree, remaining safety/acceptance gates stay open, and authorized tracker reconciliation follows merge.
+
+<!-- Follow CONTRIBUTING.md#roadmap-control. Retirements are not implementation completion. Generated Beads mirrors use only the source-first synchronizer. -->
 
 <!-- A checked box records the author's assessment; CODEOWNERS review and protected exact-head checks remain authoritative. -->
