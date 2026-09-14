@@ -424,6 +424,115 @@ mod tests {
     }
 
     #[test]
+    fn environment_replaces_inheritance_with_exact_allowlist() {
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::process::Command;
+
+        const CHILD_ROOT: &str = "PSYCHE_ACCEPTANCE_ENV_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let profile = open_profile(Path::new(&root)).unwrap();
+            set_environment(&profile).unwrap();
+            let mut expected: BTreeMap<OsString, OsString> = [
+                (
+                    "PATH",
+                    "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+                ),
+                ("SHELL", "/bin/bash"),
+                ("LANG", "en_US.UTF-8"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_TERMINAL_PROMPT", "0"),
+                ("GIT_ATTR_NOSYSTEM", "1"),
+                ("PSYCHE_NATIVE_WORKSPACE_V2", "1"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+            for (key, directory) in [
+                ("HOME", "home"),
+                ("CFFIXED_USER_HOME", "home"),
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_DATA_HOME", "data"),
+                ("XDG_CACHE_HOME", "cache"),
+                ("XDG_RUNTIME_DIR", "run"),
+                ("TMPDIR", "scratch"),
+            ] {
+                expected.insert(key.into(), profile.root.join(directory).into_os_string());
+            }
+            assert_eq!(std::env::vars_os().collect::<BTreeMap<_, _>>(), expected);
+            assert_eq!(
+                std::env::current_dir().unwrap(),
+                profile.root.join("projects")
+            );
+            let descendant = Command::new("/usr/bin/env").output().unwrap();
+            assert!(descendant.status.success());
+            let inherited: BTreeMap<OsString, OsString> = std::str::from_utf8(&descendant.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let (key, value) = line.split_once('=').unwrap();
+                    (key.into(), value.into())
+                })
+                .collect();
+            assert_eq!(inherited, expected);
+            return;
+        }
+
+        // Run process-global environment and cwd mutation only in a disposable child.
+        let root = root("environment");
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "acceptance::tests::environment_replaces_inheritance_with_exact_allowlist",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD_ROOT, &root);
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "BASH_ENV",
+            "ENV",
+            "ZDOTDIR",
+            "SHELLOPTS",
+            "GIT_CONFIG_COUNT",
+            "HOME",
+            "CFFIXED_USER_HOME",
+            "PATH",
+            "SHELL",
+            "TMPDIR",
+        ] {
+            child.env(key, "inherited-fixture");
+        }
+        child.env(OsString::from_vec(b"NON_UTF8_\xff".to_vec()), "fixture");
+        let output = child.output().unwrap();
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        assert!(
+            output.status.success(),
+            "environment child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[test]
     fn project_admission_rejects_profile_state_outside_and_parent_traversal() {
         let root = Path::new("/acceptance");
         assert!(is_local_project(
@@ -565,7 +674,8 @@ mod tests {
 fn set_environment(profile: &Profile) -> Result<(), String> {
     // Called before the runtime creates threads. No inherited credential, proxy,
     // provider, shell startup, Git config, or developer injection variable survives.
-    for (key, _) in std::env::vars_os() {
+    let inherited_keys: Vec<_> = std::env::vars_os().map(|(key, _)| key).collect();
+    for key in inherited_keys {
         std::env::remove_var(key);
     }
     for (key, value) in [
