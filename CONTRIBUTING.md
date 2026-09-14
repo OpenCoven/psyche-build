@@ -186,10 +186,11 @@ Do not combine broad visual redesign, architecture extraction, schema migration,
 
 ## Roadmap control
 
-This protected PR process succeeds the completed setup in #195. @BunsDev remains
-accountable for portfolio decisions; the PR author prepares the evidence and
-the reviewer checks the transition. Do not keep an umbrella issue open solely
-to duplicate roadmap maintenance.
+The [standing register](docs/ROADMAP.md#standing-roadmap-control), delivered
+through #195, owns weekly and event-driven reconciliation. This protected PR
+procedure implements that existing policy. @BunsDev remains accountable for
+portfolio decisions; the PR author prepares the evidence and the reviewer checks
+the transition. Do not keep an umbrella issue open solely to duplicate maintenance.
 
 Every product or maintenance PR names one owning outcome, owner, train, and
 acceptance gate. A focused maintenance result may be described in the PR without
@@ -214,10 +215,10 @@ For any change to scope, priority, dependency, support, or closure:
    decision, not proof that the work was implemented. Keep unresolved safety,
    data-preservation, and operator-acceptance gates open.
 
-Recurring source/mirror drift remains covered by the scheduled Beads sync and
-read-only tracker validator. A new concrete regression gets a focused issue;
-neither a periodic all-project audit nor a replacement perpetual control issue
-is required. Rollback of a scope decision uses a reviewed PR and explicit
+The scheduled Beads sync and read-only tracker validator support the register's
+weekly and event-driven reconciliation; they do not replace its owner obligation.
+A new concrete regression gets a focused issue, not a replacement perpetual
+control issue. Rollback of a scope decision uses a reviewed PR and explicit
 reopening/reprioritization, never a support claim inferred from tracker state.
 
 ## When a design record is required

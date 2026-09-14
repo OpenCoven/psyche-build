@@ -1,10 +1,12 @@
 # Psyche Build post-release execution contract
 
 **Status:** Active delivery plan  
-**Last reconciled:** 2026-09-14 (rollout focus and control)
+**Last reconciled:** 2026-09-14
 
 **Portfolio owner:** [@BunsDev](https://github.com/BunsDev)  
-**Roadmap control:** [PR-based maintenance](../CONTRIBUTING.md#roadmap-control)
+**Roadmap control:** [Standing register](./ROADMAP.md#standing-roadmap-control)
+
+**Establishment and closeout evidence:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)
 
 **Delivered documentation foundation:** [#238](https://github.com/OpenCoven/psyche-build/issues/238)
 
@@ -16,6 +18,23 @@ slices that must replace oversized or stale branches.
 Live GitHub issues and pull requests remain authoritative for implementation
 state. This file is the maintained sequencing contract. Beads owns internal task
 dependencies, not product identity or public support status.
+
+The [September 14 reconciliation](./ROADMAP.md#september-14-reconciliation)
+and [portfolio register](./ROADMAP.md#portfolio-outcomes-and-closure-state)
+record current ownership, trains, dependencies, support decisions, and evidence
+indices at source `3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5`.
+The standing register replaces perpetual updates to #195 through merged PR #453.
+@BunsDev owns weekly and event-driven reconciliation; this does not complete any
+independently open product acceptance gate.
+
+Since the previous snapshot, #388/#424/#426 and the #420 tracker incident are
+complete. #367 was retired as not planned, not fixed. PR #451 delivered the
+bounded CRLF reload repair; #452 is the Tracker maintenance PR owned by @BunsDev,
+with a separate owner merge decision and terminal exact-head checks required.
+The [live PR disposition](./ROADMAP.md#pull-request-disposition) records its head
+and evidence. #435 is P1 under #200. The initially observed proposal #450 no
+longer resolves in GitHub at the pre-publication refresh; no replacement, remote
+assignment, integration commitment, or P0/P1 prerequisite is claimed.
 
 ## macOS-first rollout focus
 
@@ -37,11 +56,12 @@ future extraction must serve a named defect or operational requirement in a
 bounded PR, not a broad line-count target.
 
 [#195](https://github.com/OpenCoven/psyche-build/issues/195) delivered the
-control setup. Its successor is the protected PR maintenance process in
-[Contributing](../CONTRIBUTING.md#roadmap-control), with @BunsDev accountable
-for the outcome roster and support/evidence decisions. The
+control setup through PR #453 at `cea1529a1c58898b5f8ccf08148626577c82188c`.
+The standing register retains weekly and event-driven reconciliation; the
+protected PR procedure in [Contributing](../CONTRIBUTING.md#roadmap-control)
+implements it with @BunsDev accountable for portfolio decisions. The
 [roadmap focus snapshot](./ROADMAP.md#macos-first-rollout-focus) records the
-live policy and source/mirror evidence and the current maintenance PR.
+live policy and source/mirror evidence.
 Existing and future dated plans/specs remain reference material under the
 [classification policy](./superpowers/README.md). No standing umbrella issue
 is needed to duplicate those controls.
@@ -144,7 +164,7 @@ macOS acceptance and recovery.
 
 | Order | Outcome | Priority | Current state and exit gate |
 |---:|---|---:|---|
-| 1 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths; the manifest verifies 15 digests and is still `incomplete` |
+| 1 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths; the earlier 15-digest manifest remains `incomplete`, not reverified by later CLI smoke |
 | 2 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) ([#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P1 | Address observed #239 recovery/provider/upgrade gaps; schema only, no production collector wiring or packaged acceptance |
 
 | Separate train | Outcomes | Retained gate on resumption |
@@ -224,15 +244,31 @@ outside the synchronizer.
 [#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the full
 evidence under #195.
 
+The later [#420 recovery](https://github.com/OpenCoven/psyche-build/issues/420#issuecomment-5616402711)
+is complete: protected apply and normal no-op at source
+`73039d5c3827e2f49cf28c7ad7db74cc3b5a5247`, original survivors preserved,
+25 approved operations, no newly created issues, then zero operations and a
+zero-finding authenticated drift report. The
+[roadmap evidence record](./ROADMAP.md#stage-0--delivered-control-state-closure-wave)
+also retains September 13 scheduled runs 34747362154 and 34761084154 at
+`8650344ce560ffcfe190ea99acc2010921409753`: both successful, zero planned/applied
+operations, all 14 active sources mapped, and no warnings or visibility drift.
+Recent sync health is not exact-current-head execution proof. No Beads or
+generated mirror mutation is part of this closeout.
+
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
 **Owners:** #196 and #239.  
 **Current gate:** #196/#239 remain the active P0 critical path.
 
 #196 was reopened on 2026-09-06 after PR #350's quoted closing phrase changed
-its tracker state without acceptance evidence. The latest #239 update still
+its tracker state without acceptance evidence. The earlier #239 manifest
 records 15 retained evidence digests and `terminal_state: incomplete`; a
 documentation-only merge did not complete the outcome.
+
+Later exact-release CLI smoke did not reverify those records or establish
+packaged GUI acceptance. PR #393 delivered validator remediation, not evidence
+authenticity or human verification; #196/#239 remain open.
 
 The acceptance manifest must cover:
 
@@ -266,6 +302,11 @@ discovery/reconnect UI → physical same-LAN acceptance → #242 publication →
 
 #200/#241 retains its P1 dependency gate: atomic readiness precedes every later
 iOS capability slice, and physical evidence precedes a support-state change.
+
+The accepted #241 readiness implementation is the prerequisite, not closure of
+all #241 physical acceptance. #280 composition and discovery then enable the
+shared physical matrix for #241/#200; do not create a circular issue-closure
+dependency.
 
 ### Atomic readiness
 
@@ -309,6 +350,12 @@ project/pane scope, generation, revision, and advertised capability immediately
 before execution. Retries share canonical idempotency and receipts. Mobile
 controls remain absent when the production capability is absent.
 
+PR #434 restored disabled ritual controls on that boundary. #435, a P1 child
+of #200 related to #199, retains unknown effects after reply loss. It needs an
+approved host-owned reconciliation adapter or authorized operator recovery
+procedure before dismiss/retry/reconnect can clear the guard. Existing gateway
+characterization is not production WebSocket/iOS/Git or physical-device proof.
+
 ### Distribution
 
 Only an immutable TestFlight build installed by an authorized tester may move
@@ -350,6 +397,11 @@ published harness/operator marker, with successful clean cleanup as a positive
 control. Interruption during Git mutation and automatic crash reconciliation
 remain open; this bounded scenario does not supply packaged acceptance evidence.
 
+PRs #444/#445 delivered bounded operator-acceptance preflight, and #448 made
+the GPU-verification matrix operational. Read-only preflight supplies no product
+observation; validating GPU exports supplies no physical performance acceptance.
+The later PR #451 editor-reload fix is source remediation, not #196/#199 closure.
+
 #198/#244 is delivered. PR #261 landed the minimum security, ownership,
 support, issue, PR, conduct, and protected-data floor, and PR #321 closed the
 clean-checkout contributor loop with a credential-free acceptance run and live
@@ -376,7 +428,11 @@ Later persistence, pane/process, and Git extractions also remain in current
 source; the list above is historical, not an inventory of unstarted work.
 Any future defect-driven extraction preserves public commands, schemas,
 persisted formats, errors, security boundaries, generated outputs, and rollback.
-Use the
+
+The later [bounded persistence completion](https://github.com/OpenCoven/psyche-build/issues/197#issuecomment-5594299874)
+supersedes the proposed separate atomic-publication slice after PR #373.
+It preserves the open-file and rollback context without adding previously absent
+save scheduling, quarantine, or recovery guarantees. Use the
 [slice 2 design record](./superpowers/specs/2026-09-06-workspace-persistence-decomposition-design.md)
 as design history rather than a parallel backlog. Source changes do not
 complete #239's packaged operator acceptance.
@@ -434,9 +490,11 @@ required checks on its exact final head.
 - #196/#239 is the active P0 gate.
 - #199 recovery scenarios wait for observed #239 acceptance cases; the #243
   schema slice is delivered.
-- iOS work is paused for rollout focus; when resumed, #241 precedes all later
-  iOS capability work and #280 composes into it. #435 remains a safety gate.
+- iOS work is paused for rollout focus. On resumption:
+- The accepted #241 readiness implementation precedes later iOS composition;
+  #280 does not wait for closure of shared physical acceptance.
 - #242 publication precedes execution, and execution precedes mobile controls.
+- #435 reconciliation guards precede consequential mobile-action acceptance.
 - #197 is retired; defect-driven extraction must belong to a bounded outcome.
 - #201/#253/#279 remain deferred; resumption requires explicit owner
   prioritization and cannot block #196, #199, or #200.

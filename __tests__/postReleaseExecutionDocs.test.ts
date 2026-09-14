@@ -31,7 +31,7 @@ describe('post-release execution documentation', () => {
     expect(path).not.toMatch(/^\| \d+ \|[^\n]*(?:#197|#200|#201|#246)/m);
   });
 
-  it('replaces the perpetual portfolio issue with an explicit protected PR maintenance process', async () => {
+  it('wires rollout retirement through the existing standing control process', async () => {
     const [roadmap, execution, contributing, template, history] = await Promise.all([
       readFile('docs/ROADMAP.md', 'utf8'),
       readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8'),
@@ -42,17 +42,75 @@ describe('post-release execution documentation', () => {
     for (const source of [roadmap, execution]) {
       expect(source).toContain('CONTRIBUTING.md#roadmap-control');
       expect(source).toMatch(/#195[\s\S]{0,160}(?:completed|delivered)/i);
-      expect(source).toMatch(/successor[\s\S]{0,180}protected PR/i);
+      expect(source).toContain('standing');
     }
     expect(roadmap).not.toContain('Update #195 in the same controlled state transition');
     expect(contributing).toContain('## Roadmap control');
     expect(contributing).toMatch(/@BunsDev[\s\S]{0,120}accountable/i);
     expect(contributing).toMatch(/one owning outcome[\s\S]{0,80}owner[\s\S]{0,80}train[\s\S]{0,80}gate/i);
     expect(contributing).toMatch(/not planned[\s\S]{0,160}not[\s\S]{0,80}implemented/i);
+    expect(contributing).toContain('docs/ROADMAP.md#standing-roadmap-control');
+    expect(contributing).toMatch(/weekly and event-driven reconciliation/i);
+    expect(contributing).not.toContain('neither a periodic all-project audit');
     expect(template).toContain('Roadmap control');
     expect(template).toMatch(/owner, train, and acceptance gate/i);
     expect(template).not.toMatch(/^Closes #/m);
     expect(history).toMatch(/existing and future[\s\S]{0,220}classified \*\*`reference`\*\*/i);
+  });
+
+  it('hands ongoing control to an owned register without closing product gates', async () => {
+    const roadmap = await readFile('docs/ROADMAP.md', 'utf8');
+    const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
+    const history = await readFile('docs/superpowers/README.md', 'utf8');
+    const register = roadmap.split('## Standing roadmap control\n')[1];
+
+    expect(register).toBeDefined();
+    expect(register).toMatch(/explicit successor to #195/);
+    expect(register).toContain('@BunsDev');
+    expect(register).toMatch(/\*\*weekly\*\*/);
+    expect(register).toMatch(/support, priority, dependency, owner,[\s\S]{0,100}delivery train/);
+    expect(register).toMatch(/one owner, priority, train, explicit dependencies,[\s\S]{0,100}support decision, exit gate, and durable evidence index/);
+    expect(register).toMatch(/each open PR[\s\S]{0,150}exact-head gate/);
+    expect(register).toMatch(/overdue weekly review is control drift/);
+    expect(register).toMatch(/refresh live inventory and required checks/);
+    expect(register).not.toMatch(/Update #195 in the same controlled state transition/);
+    expect(execution).toContain('./ROADMAP.md#standing-roadmap-control');
+    expect(history).toMatch(/Every existing and future Markdown record/);
+    expect(history).toMatch(/nested directories/);
+    expect(history).toMatch(/no creation-date cutoff/);
+    expect(history).toMatch(/no[\s\S]{0,20}per-file overrides/);
+
+    for (const source of [roadmap, execution]) {
+      expect(source).toContain('**Last reconciled:** 2026-09-14');
+      expect(source).toContain('3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5');
+      expect(source).toMatch(/#196\/#239 remain (?:the active P0 critical path|open)/);
+      expect(source).toMatch(/accepted #241 readiness implementation/);
+      expect(source).toMatch(/not (?:a )?circular issue-closure[\s\S]{0,20}dependency|not create a circular issue-closure/);
+      expect(source).toContain(issueUrl(435));
+      expect(source).toMatch(/#435[\s\S]{0,240}P1/);
+      expect(source).not.toMatch(/atomic publication into a separate module remains/);
+    }
+    const intake = roadmap.split('### Intake disposition\n')[1]?.split('\n## ')[0];
+    expect(intake).toContain('@BunsDev');
+    expect(intake).toContain('deferred P2 Optional integrations');
+    expect(intake).toMatch(/not\s+an accepted implementation commitment/);
+    expect(intake).toContain('no longer resolved #450');
+    expect(intake).toMatch(/no\s+replacement is created/);
+    expect(intake).toContain('no remote assignment is claimed');
+  });
+
+  it('retains recent tracker health with immutable provenance rather than current-head claims', async () => {
+    const roadmap = await readFile('docs/ROADMAP.md', 'utf8');
+    expect(roadmap).toContain(issueUrl(420));
+    for (const run of [34459609608, 34460856341, 34747362154, 34761084154]) {
+      expect(roadmap).toContain(runUrl(run));
+    }
+    expect(roadmap).toContain('73039d5c3827e2f49cf28c7ad7db74cc3b5a5247');
+    expect(roadmap).toContain('8650344ce560ffcfe190ea99acc2010921409753');
+    expect(roadmap).toContain('907c2fadb5c1a57d661911af7a5643002bb93758c7868eb9cc01133f99e22720');
+    expect(roadmap).toMatch(/111 sources, 14 active, 97 closed, all 14 active mapped/);
+    expect(roadmap).toMatch(/recent sync health, not execution against/);
+    expect(roadmap).toMatch(/No Beads or generated mirror mutation/);
   });
 
   it('records the Stage 0 proof wave as closed with linked evidence before the active P0 gate', async () => {

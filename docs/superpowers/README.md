@@ -4,13 +4,19 @@
 
 ## Classification
 
-The standing policy, reconciled on 2026-09-14, covers every existing and future
-file under:
+Every existing and future Markdown record under:
 
 - `docs/superpowers/plans/*.md`
 - `docs/superpowers/specs/*.md`
 
 is classified **`reference`** unless a future controlled change adds an explicit per-file override here.
+
+The default covers nested directories as well as the listed top-level globs;
+it has no creation-date cutoff. At the 2026-09-14 reconciliation there are no
+per-file overrides. Thus records added after the original 2026-08-28
+classification are covered without interpreting their checkboxes as live work.
+The [standing roadmap register](../ROADMAP.md#standing-roadmap-control) owns
+weekly and event-driven review of this classification.
 
 `reference` means: retain the document for historical reasoning and implementation context; do not infer current priority, completion, support, authority, or release status from it.
 
