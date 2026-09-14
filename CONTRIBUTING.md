@@ -182,7 +182,43 @@ Use one branch/worktree for one reviewable outcome. A PR should have one primary
 
 As a **split heuristic**, prefer keeping a PR below approximately **800 non-generated changed lines**. This is not a mechanical limit: generated artifacts, fixtures, migrations, or a tightly coupled mechanical move may legitimately exceed it. When substantially exceeding the heuristic, explain in the PR why splitting would make the change less safe, less testable, or break an atomic compatibility boundary.
 
-Do not combine broad visual redesign, architecture extraction, schema migration, and behavior changes merely because they touch the same large entry point. The active decomposition contract is issue #197.
+Do not combine broad visual redesign, architecture extraction, schema migration, and behavior changes merely because they touch the same large entry point. The broad decomposition program in #197 is retired as not planned. Extract only what a named defect fix or operational requirement needs, preserving existing contracts and rollback.
+
+## Roadmap control
+
+This protected PR process succeeds the completed setup in #195. @BunsDev remains
+accountable for portfolio decisions; the PR author prepares the evidence and
+the reviewer checks the transition. Do not keep an umbrella issue open solely
+to duplicate roadmap maintenance.
+
+Every product or maintenance PR names one owning outcome, owner, train, and
+acceptance gate. A focused maintenance result may be described in the PR without
+creating a duplicate issue; an existing unresolved public outcome retains its
+owning issue. The active macOS rollout is #196/#239 acceptance followed by #199
+recovery. iOS and future architecture/input expansion are not prerequisites.
+
+For any change to scope, priority, dependency, support, or closure:
+
+1. Update `docs/ROADMAP.md` and `docs/POST-RELEASE-EXECUTION.md` in the same PR.
+   Update support/release contracts only if their claims actually change.
+2. Record the owning issue's acceptance evidence and remaining gaps. Classify
+   dated records through `docs/superpowers/README.md`; they default to reference,
+   including newly added records, and cannot become an implicit backlog.
+3. Use the source-first Beads procedure for generated mirrors. Never edit
+   generated mirror state directly or remove a configured target while an
+   active Bead still maps to it.
+4. Obtain independent review appropriate to risk and terminal exact-head
+   required checks. Merge through the ordinary protected PR path.
+5. Reconcile authorized unmanaged issue/milestone state after merge, linking
+   the immutable change and evidence. A not planned retirement is a scope
+   decision, not proof that the work was implemented. Keep unresolved safety,
+   data-preservation, and operator-acceptance gates open.
+
+Recurring source/mirror drift remains covered by the scheduled Beads sync and
+read-only tracker validator. A new concrete regression gets a focused issue;
+neither a periodic all-project audit nor a replacement perpetual control issue
+is required. Rollback of a scope decision uses a reviewed PR and explicit
+reopening/reprioritization, never a support claim inferred from tracker state.
 
 ## When a design record is required
 

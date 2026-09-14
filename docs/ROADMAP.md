@@ -2,9 +2,10 @@
 
 **Status:** Active post-release roadmap  
 **Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-09-06
+**Last reconciled:** 2026-09-14 (rollout focus and control; historical delivery evidence retains its original dates)
 
-**Portfolio control:** [#195](https://github.com/OpenCoven/psyche-build/issues/195)  
+**Portfolio control:** [PR-based roadmap maintenance](../CONTRIBUTING.md#roadmap-control)
+
 **Execution contract:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
 
 This is the canonical public roadmap for Psyche Build. It records supported
@@ -24,10 +25,51 @@ continuity while allowing multiple terminal or agent lanes to proceed in
 parallel.
 
 The first credible public macOS release shipped on 2026-08-23. The current
-objective is to stabilize and govern that supported surface, make operational
-recovery repeatable, deliver an independently gated iOS companion, establish a
-credible contributor boundary, and then converge incrementally on
-OpenCoven-native familiar and Threads identity.
+objective is to earn repeatable operator acceptance and recovery for that
+supported surface before expanding the product. The contributor floor is
+delivered. iOS and OpenCoven convergence remain separate, deferred trains.
+
+## macOS-first rollout focus
+
+The active delivery order is #196/#239 operator acceptance, then the observed
+recovery gaps owned by #199. Work that fixes a demonstrated supported-surface
+defect may proceed alongside acceptance; feature breadth and file-size
+reduction are not release gates.
+
+| Disposition | Outcomes | Decision |
+|---|---|---|
+| Active macOS rollout | #196, #239, #199 | Preserve the packaged lifecycle, persistence, Git/cleanup, provider isolation, and recovery evidence gates. |
+| Separate iOS train, paused for rollout focus | #200, #241, #280, #242, [#435](https://github.com/OpenCoven/psyche-build/issues/435) | iOS is not a macOS rollout prerequisite. #435 remains open: a lost consequential-action reply requires authoritative reconciliation, not a fresh retry. |
+| Deferred product expansion | #201, #253, #279, #246 | Preserve ownership and dependency contracts; no implied rollout commitment or protocol/input-parity claim. |
+| Retired broad refactor program | #197 | Retired as not planned. Keep delivered extractions; future extraction must enable a named defect fix rather than a perpetual decomposition target. |
+
+Retiring #197 is not a claim that desktop decomposition or its acceptance is
+complete. Do not remove compatibility, work-preservation, or recovery coverage.
+The iOS and Vim Beads families remain source-owned and retain their current
+mappings; deferring a train does not authorize editing generated mirror state.
+
+[#195](https://github.com/OpenCoven/psyche-build/issues/195) delivered the
+portfolio-control setup. Its successor is the protected PR maintenance process
+in [Contributing](../CONTRIBUTING.md#roadmap-control), not another perpetual
+umbrella issue. @BunsDev remains accountable for every outcome in this snapshot.
+The owning issues retain acceptance evidence and honest incomplete states.
+
+Control evidence observed on 2026-09-14 from source
+`3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5`: the read-only tracker validator
+reported 111 sources, 27 managed mirrors, 14 canonical outcomes, and 0 findings.
+[Scheduled sync 34761084154](https://github.com/OpenCoven/psyche-build/actions/runs/34761084154)
+succeeded at `8650344ce560ffcfe190ea99acc2010921409753`. Live branch protection
+still enforced administrators, strict `TypeScript and Rust`/`iOS` checks,
+linear history, and conversation resolution; ruleset `21729943` had no bypass
+actors and zero required approving reviews. No repository settings changed.
+This proves control state, not packaged operator acceptance.
+
+At this snapshot, [PR #452](https://github.com/OpenCoven/psyche-build/pull/452)
+is @BunsDev's focused tracker/source-gate maintenance change. Its gate is
+unchanged renderer limits, independent review, exact-head required checks, and
+an explicit owner merge decision; it is not a new product train. The live PR
+list supersedes this snapshot. All existing and future dated records remain
+reference material under the [classification policy](./superpowers/README.md).
 
 ## Current support state
 
@@ -179,16 +221,14 @@ Delivered Stage 0 control wave
              │
              ▼
 Active P0 critical path
-  #196/#239 operator acceptance ──► #199 operations (#243 schema delivered)
-             │                              │
-             ├──────────────────────────────┤
-             ▼                              ▼
-Independent iOS train                 Stable extraction seams
-  #241 atomic readiness                    #197 desktop decomposition
-  (core/composition merged;                  │
-   physical proof open)                      ▼
-      │                               #201 OpenCoven identity/Threads
-      ▼                                 (#253 canary, #279 Coven adapter)
+  #196/#239 operator acceptance ──► #199 observed recovery gaps
+
+Paused independent iOS train (not a macOS rollout prerequisite)
+  #241 atomic readiness
+  (core/composition merged;
+   physical proof open)
+      │
+      ▼
   #280 invite auth (slice 1 merged)
       │
       ▼
@@ -205,13 +245,16 @@ Delivered community floor
 
 Deferred P2 trains
   #201/#253 Psyche compatibility ── #279 Coven adapter ── #246 input parity
+
+Retired program
+  #197 broad desktop decomposition (not completed; merged modules retained)
 ```
 
 ## Portfolio outcomes and closure state
 
 | Outcome | Priority | Train | Close condition |
 |---|---:|---|---|
-| [#195 — roadmap and post-release control](https://github.com/OpenCoven/psyche-build/issues/195) | P0 | Portfolio | Every active outcome has one owner, priority, dependency chain, support decision, and evidence location; the scheduled Beads mirror sync is healthy again (#342) |
+| [#195 — roadmap and post-release control](https://github.com/OpenCoven/psyche-build/issues/195) | Delivered | Portfolio | Setup complete; recurring control belongs to the protected PR maintenance process, with policy and source/mirror evidence recorded above |
 | [#238 — critical-path documentation](https://github.com/OpenCoven/psyche-build/issues/238) | P0 | Documentation | **Delivered** by PR #245 / `5f4b7b05`; preserve it as completed Stage 0 foundation |
 | [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Governance | **Delivered** — closed 2026-08-30 with sanitized ruleset/protection evidence, direct-push rejection proof, and protected proof PR #283 |
 | [#237 — Beads/mirror reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) | P0 | Tracker integrity | **Delivered** — closed 2026-08-29 after source-first Beads reconciliation left no open generated `priority:P0` mirror |
@@ -222,11 +265,12 @@ Deferred P2 trains
 | [#241 — atomic iOS readiness](https://github.com/OpenCoven/psyche-build/issues/241) | P1 | iOS | Readiness core (#326), production composition (#329), and ready-selection hardening (#335/#337/#338) are merged; discovery/reconnect UX, lifecycle acceptance, physical-device, and real-Keychain partial-write evidence remain open |
 | [#280 — single-use iOS invite authentication](https://github.com/OpenCoven/psyche-build/issues/280) | P1 | iOS | The protocol/fixture slice merged in PR #323; desktop issuer, iOS credential exchange, QR/deep-link UX, physical acceptance, and distribution evidence remain open |
 | [#242 — production ritual path](https://github.com/OpenCoven/psyche-build/issues/242) | P1 | iOS | Publication merged in PR #322; the registered execution path, canonical receipts, and capability-gated controls remain open |
+| [#435 — unknown mobile action outcomes](https://github.com/OpenCoven/psyche-build/issues/435) | P1 | iOS recovery | Paused train, unresolved safety gate: preserve scoped unknown effects through reply loss, reconnect, restart, and host switch until authoritative reconciliation; production-path evidence and independent R3 review required |
 | [#199 — operations, diagnostics, and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and reusable failure harnesses recover deterministically; the harness is delivered through PRs #354-#359 with CI-retained evidence, and the support-bundle production surface plus provider/upgrade scenarios remain open |
 | [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Reliability | **Delivered** — closed 2026-09-01 by PR #278 (`69769cc5`); schema, bounds, redaction, and fixture only |
 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Community | **Delivered** — closed 2026-08-31 by PR #321 (`3c188481`) with a credential-free clean-checkout run and live community-profile evidence |
 | [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Community | **Delivered** — closed 2026-08-28 by PR #261 (`267b8809`) |
-| [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | P1 | Architecture | Early lifecycle and persistence extractions are merged; publication/recovery decomposition and packaged acceptance remain, with stable #196/#199 contracts still required |
+| [#197 — desktop decomposition](https://github.com/OpenCoven/psyche-build/issues/197) | Retired | Architecture | Not planned as a broad program; retain merged modules and require any further extraction to serve a bounded, owned defect fix |
 | [#201 — OpenCoven identity and Threads](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | OpenCoven | A cross-device reference flow preserves protocol-owned identity through execution, evidence, disconnect, and resume |
 | [#253 — Psyche compatibility canary and adapters](https://github.com/OpenCoven/psyche-build/issues/253) | P2 | OpenCoven | Pin a consumable protocol profile and introduce bounded canaries/adapters without blocking supported-product work; the pin waits on `OpenCoven/psyche#11` and `#12` |
 | [#279 — Coven launch adapter](https://github.com/OpenCoven/psyche-build/issues/279) | P2 | OpenCoven | Capability-negotiated launches keep prompts out of argv and persisted metadata (PRs #324/#328/#336 merged); live restart/reconnect recovery, canonical runtime receipts, and migration/rollback evidence remain open, and receipt semantics wait on #253 |
@@ -407,36 +451,21 @@ credential-free acceptance run and live community-profile evidence. The former
 dependency gate no longer sequences work. Repository documentation links #31's
 retained settings evidence when claiming the policy is enforced.
 
-## Stage 5 — decompose behind proven contracts
+## Retired program — broad desktop decomposition
 
-**Owner:** #197.  
-**Depends on:** stable #196/#199 seams.
+**Historical owner:** #197.
 
-#197 retains its P1 dependency gate: implementation waits for stable #196/#199
-contracts at each extracted boundary, not for a blanket claim that all
-acceptance is complete. Early lifecycle and persistence extractions have
-landed as recorded above; #197 is not merely an inventory exercise anymore.
+#197 is retired as not planned for the macOS-first rollout. Delivered
+lifecycle, persistence, pane/process, and Git extractions remain in the source.
+The remaining broad composition-root target is not a user-facing release gate.
 The [slice 2 design record](./superpowers/specs/2026-09-06-workspace-persistence-decomposition-design.md)
-explains the measured boundaries, not a separate executable backlog.
+explains historical boundaries, not a separate executable backlog.
 
-Extraction order:
-
-1. application lifecycle and Tauri command registration;
-2. workspace persistence and recovery;
-3. pane, PTY, and process lifecycle;
-4. browser and Git control;
-5. desktop-web state, rendering, and event wiring.
-
-Each PR preserves public commands, protocol schemas, persisted formats, errors,
-security boundaries, generated outputs, user-visible behavior, and rollback.
-This is not a framework rewrite or a visual redesign program.
-
-PR #372 splits initial-workspace transaction finishing; PR #373 subsequently
-extracts stage/verify/publish with a named `PublishedWorkspace` result. Moving
-atomic publication into a separate module remains a distinct slice that must
-preserve the open file and rollback context crossing that boundary. Neither
-source decomposition nor the recovery harness substitutes for #239's packaged
-operator observations.
+A future extraction needs a named defect or operational requirement, one
+owning outcome, and preserved public commands, schemas, persisted formats,
+errors, security boundaries, generated outputs, and rollback. Neither source
+decomposition nor the recovery harness substitutes for #239's packaged
+operator observations. No merged code is reverted by this retirement.
 
 ## Stage 6 — converge on OpenCoven-native identity and execution
 
@@ -477,11 +506,12 @@ claimed from it.
 - #196/#239 is the active P0 gate.
 - #199 reusable failure scenarios wait for observed #239 cases; the #243 schema
   slice is already delivered.
-- #241 precedes every later iOS capability slice; #280 composes into it.
+- iOS work is paused for rollout focus; when resumed, #241 precedes every later
+  iOS capability slice and #280 composes into it. #435 remains a safety gate.
 - #242 publication precedes execution; execution precedes mobile controls.
-- #197 implementation waits for stable #196/#199 contracts.
-- #201/#253/#279 design and bounded adapters may proceed; implementation cannot
-  block #196, #199, or #200.
+- #197 is retired; defect-driven extraction must belong to a bounded outcome.
+- #201/#253/#279 remain deferred; resumption requires explicit owner
+  prioritization and cannot block #196, #199, or #200.
 - #246 remains P2 until its prerequisite contracts are stable or a bounded
   slice is explicitly promoted.
 
@@ -506,7 +536,8 @@ or operator-observed recovery.
 - Reconcile this file and [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
   whenever support status, priority, dependency, delivery train, or open-PR
   disposition changes.
-- Update #195 in the same controlled state transition.
+- Follow the successor [roadmap-control process](../CONTRIBUTING.md#roadmap-control)
+  in the same protected PR; #195 is completed setup, not a standing work queue.
 - Never close an outcome without durable evidence tied to immutable source.
 - Never repair generated mirror state by treating generated issue bodies as the
   authoritative source.

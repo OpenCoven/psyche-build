@@ -4,7 +4,8 @@
 
 ## Classification
 
-As of 2026-08-28, every existing file under:
+The standing policy, reconciled on 2026-09-14, covers every existing and future
+file under:
 
 - `docs/superpowers/plans/*.md`
 - `docs/superpowers/specs/*.md`
