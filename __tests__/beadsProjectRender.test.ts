@@ -6,6 +6,7 @@ import { gfm } from 'micromark-extension-gfm';
 import { parseFragment } from 'parse5';
 import { describe, expect, it } from 'vitest';
 import type { DefaultTreeAdapterTypes } from 'parse5';
+import { measureScaling } from './helpers/measureScaling';
 
 import { buildBeadIndex, parseBeadExport } from '../scripts/beads-project-sync/model.mjs';
 import {
@@ -1522,25 +1523,21 @@ describe('Beads project renderers', () => {
 
   it('scans raw HTML text references with near-linear scaling', () => {
     const sizes = [16_384, 32_768, 65_536, 131_000];
-    const durations = sizes.map((size) => {
+    const sources = sizes.map((size) => {
       const unit = 'AT&T &copy &#169 ';
       const body = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-      const source = `<p>${body}</p>`;
-      expect(sanitizePublicText(source)).toBe(source);
-
-      const samples = Array.from({ length: 2 }, () => {
-        const startedAt = performance.now();
-        expect(sanitizePublicText(source)).toBe(source);
-        return performance.now() - startedAt;
-      });
-      return Math.min(...samples);
+      return `<p>${body}</p>`;
     });
+    const durations = measureScaling(sources, (source) => {
+      expect(sanitizePublicText(source)).toBe(source);
+    });
+    const diagnostic = JSON.stringify({ sizes, durations });
 
     for (let index = 1; index < durations.length; index += 1) {
-      expect(durations[index]! / Math.max(durations[index - 1]!, 0.1)).toBeLessThan(4);
+      expect(durations[index]! / Math.max(durations[index - 1]!, 0.1), diagnostic).toBeLessThan(4);
     }
     const perCharacter = durations.map((duration, index) => duration / sizes[index]!);
-    expect(Math.max(...perCharacter) / Math.min(...perCharacter)).toBeLessThan(3.5);
+    expect(Math.max(...perCharacter) / Math.min(...perCharacter), diagnostic).toBeLessThan(3.5);
   });
 
   it.each([
@@ -2196,23 +2193,19 @@ describe('Beads project renderers', () => {
     ['dense incomplete entity-like text', 'AT&T &ampx &#xZZ; '],
   ])('scans %s with near-linear scaling', (_name, unit) => {
     const sizes = [16_384, 32_768, 65_536, 131_072];
-    const durations = sizes.map((size) => {
-      const source = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const sources = sizes.map((size) =>
+      unit.repeat(Math.ceil(size / unit.length)).slice(0, size)
+    );
+    const durations = measureScaling(sources, (source) => {
       expect(sanitizePublicText(source)).toBe(source);
-
-      const samples = Array.from({ length: 2 }, () => {
-        const startedAt = performance.now();
-        expect(sanitizePublicText(source)).toBe(source);
-        return performance.now() - startedAt;
-      });
-      return Math.min(...samples);
     });
+    const diagnostic = JSON.stringify({ sizes, durations });
 
     for (let index = 1; index < durations.length; index += 1) {
-      expect(durations[index]! / Math.max(durations[index - 1]!, 0.1)).toBeLessThan(4);
+      expect(durations[index]! / Math.max(durations[index - 1]!, 0.1), diagnostic).toBeLessThan(4);
     }
     const perCharacter = durations.map((duration, index) => duration / sizes[index]!);
-    expect(Math.max(...perCharacter) / Math.min(...perCharacter)).toBeLessThan(3.5);
+    expect(Math.max(...perCharacter) / Math.min(...perCharacter), diagnostic).toBeLessThan(3.5);
   });
 
   it('enforces the public text cap before scanning malformed candidates', () => {
