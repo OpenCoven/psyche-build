@@ -11,6 +11,62 @@ const runUrl = (run: number): string =>
   `https://github.com/OpenCoven/psyche-build/actions/runs/${run}`;
 
 describe('post-release execution documentation', () => {
+  it('focuses the rollout on macOS acceptance and recovery without retiring safety gates', async () => {
+    for (const filePath of ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md']) {
+      const source = await readFile(filePath, 'utf8');
+      expect(source, filePath).toContain('## macOS-first rollout focus');
+      expect(source, filePath).toMatch(/#196\/#239[\s\S]{0,120}#199/);
+      expect(source, filePath).toMatch(/#197[\s\S]{0,160}retired as not planned/i);
+      expect(source, filePath).toMatch(/not a claim that[\s\S]{0,80}decomposition[\s\S]{0,80}complete/i);
+      expect(source, filePath).toContain(issueUrl(435));
+      expect(source, filePath).toMatch(/#435[\s\S]{0,160}(?:remains open|remain open)/i);
+      expect(source, filePath).toMatch(/iOS[\s\S]{0,160}not a macOS rollout prerequisite/i);
+      expect(source, filePath).not.toMatch(/#197 retains its P1 dependency gate/i);
+    }
+
+    const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
+    const path = execution.split('## Critical path')[1]?.split('## Stage 0')[0] ?? '';
+    expect(path).toMatch(/\| 1 \|[^\n]*#196[^\n]*#239/);
+    expect(path).toMatch(/\| 2 \|[^\n]*#199/);
+    expect(path).not.toMatch(/^\| \d+ \|[^\n]*(?:#197|#200|#201|#246)/m);
+
+    const support = await readFile('docs/SUPPORT-MATRIX.md', 'utf8');
+    const deferrals = support.split('## Current known deferrals')[1]?.split('## Changing this contract')[0] ?? '';
+    expect(deferrals).toMatch(/#197[\s\S]{0,120}retired as not planned/i);
+    expect(deferrals).not.toContain('remaining desktop architecture decomposition');
+  });
+
+  it('wires rollout retirement through the existing standing control process', async () => {
+    const [roadmap, execution, contributing, template, history] = await Promise.all([
+      readFile('docs/ROADMAP.md', 'utf8'),
+      readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8'),
+      readFile('CONTRIBUTING.md', 'utf8'),
+      readFile('.github/pull_request_template.md', 'utf8'),
+      readFile('docs/superpowers/README.md', 'utf8'),
+    ]);
+    for (const source of [roadmap, execution]) {
+      expect(source).toContain('CONTRIBUTING.md#roadmap-control');
+      expect(source).toMatch(/#195[\s\S]{0,160}(?:completed|delivered)/i);
+      expect(source).toContain('standing');
+      expect(source).toMatch(/dated (?:records|plans\/specs) default to/);
+    }
+    expect(roadmap).not.toContain('Update #195 in the same controlled state transition');
+    expect(contributing).toContain('## Roadmap control');
+    expect(contributing).toMatch(/@BunsDev[\s\S]{0,120}accountable/i);
+    expect(contributing).toMatch(/one owning outcome[\s\S]{0,80}owner[\s\S]{0,80}train[\s\S]{0,80}gate/i);
+    expect(contributing).toMatch(/not planned[\s\S]{0,160}not[\s\S]{0,80}implemented/i);
+    expect(contributing).toContain('docs/ROADMAP.md#standing-roadmap-control');
+    expect(contributing).toMatch(/weekly and event-driven reconciliation/i);
+    expect(contributing).not.toContain('neither a periodic all-project audit');
+    expect(template).toContain('Roadmap control');
+    expect(template).toMatch(/owner, train, and acceptance gate/i);
+    for (const field of ['Related outcome:', 'Accountable owner:', 'Delivery train:', 'Acceptance gate:']) {
+      expect(template).toMatch(new RegExp(`^${field}$`, 'm'));
+    }
+    expect(template).not.toMatch(/^Closes #/m);
+    expect(history).toMatch(/existing and future[\s\S]{0,220}classified \*\*`reference`\*\*/i);
+  });
+
   it('hands ongoing control to an owned register without closing product gates', async () => {
     const roadmap = await readFile('docs/ROADMAP.md', 'utf8');
     const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
@@ -243,7 +299,7 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toMatch(/#200\/#241[\s\S]{0,160}P1 dependency gate/i);
       expect(source, filePath).toMatch(/#199\/#243[\s\S]{0,160}P1 dependency gate/i);
       expect(source, filePath).toMatch(/#198\/#244[\s\S]{0,160}(?:delivered|no longer sequences)/i);
-      expect(source, filePath).toMatch(/#197[\s\S]{0,160}P1 dependency gate/i);
+      expect(source, filePath).toMatch(/#197[\s\S]{0,160}retired as not planned/i);
       expect(source, filePath).toMatch(/#201\/#253[\s\S]{0,160}P2 dependency gate/i);
       expect(source, filePath).toMatch(/#246[\s\S]{0,160}P2 dependency gate/i);
       expect(source, filePath).toContain(pullUrl(262));

@@ -195,11 +195,15 @@ unless they expose a shared defect in the supported macOS path:
 - internal, public, or external iOS distribution and mobile feature completion;
 - remote/off-LAN companion transport;
 - graphics diagnostics in #190 unless release acceptance proves them required;
-- remaining desktop architecture decomposition (#197 has early merged slices);
 - cloud terminals or hosted orchestration;
 - team collaboration;
 - marketplace/plugin behavior;
 - complete Threads and AgentFS convergence.
+
+The broad desktop decomposition program in #197 is retired as not planned,
+not retained as a future rollout commitment. Delivered modules stay in place;
+further extraction must serve a named defect or operational requirement and
+preserve compatibility, work preservation, and recovery guarantees.
 
 Community-health readiness (#198/#244) is delivered, as recorded in the
 [roadmap](./ROADMAP.md#delivered-since-2026-08-28), rather than a current deferral.
