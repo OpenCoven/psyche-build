@@ -233,7 +233,10 @@ The implementation was checked in its registered worktree without GUI launch,
 installation, signing credentials, permission changes, provider launch or
 personal project use. The unsigned arm64 `.app` built with the command above;
 its identifier was inspected and its headless invalid-profile command exited
-64. This is not a successful GUI/profile runtime observation.
+64. Parent verification also ran the actual candidate's `--acceptance-prepare`
+against a fresh short private root: exit 0, fixed preparation-success output,
+no stderr, and no GUI launch. The empty prepared profile was retained. This
+proves headless preparation, not a successful GUI/profile runtime observation.
 
 The 234 focused native-frontend tests, all 477 Rust tests, Rust check/format,
 TypeScript checks, documentation focus/build, source smoke, package smoke and
@@ -241,21 +244,25 @@ generated hooks/web-bundle parity passed. Independent review's browser
 provider-disabled navigation/close finding was reproduced, fixed and re-reviewed
 without remaining findings. The separate Beads render suite passed 221 tests.
 
-**The full unit gate is not green:** 5,415 passed, 40 failed and 11 skipped.
+The initial host-constrained unit attempt had 5,415 passed, 40 failed and 11 skipped.
 There were 36 Unix-socket path-limit failures across four unchanged control test
 files, two Beads scratch-prefix expectation failures, and two recovery-harness
-failures. The latter recovery observations remain failed, not waived or claimed
-fixed. A short relative scratch-path retry removed most socket failures, but
+failures. These failed attempt results are retained, not rewritten as passes.
+A short relative scratch-path retry removed most socket failures, but
 fixtures that canonicalize their sockets still exceed macOS's path limit here.
 
-The full wrapper calls `mktemp`; this execution prohibited that command and
-system scratch writes. Its constituent checks were therefore run individually
+The initial execution reported a restriction on `mktemp` and system scratch
+writes. Its constituent checks were therefore run individually
 with a worktree-local `TMPDIR`, and a `GIT_CEILING_DIRECTORIES` at that scratch
 root to prevent non-repository fixtures discovering the enclosing checkout.
-This is a documented host-constrained gate attempt, **not** a passing
-`scripts/agent-check full` receipt. Re-run the normal exact-head gate on an
-authorized host with suitable short disposable fixture paths before any merge
-or acceptance claim. The handoff supplies the exact commit and candidate digest.
+This initial attempt is **not** a passing `scripts/agent-check full` receipt.
+A subsequent independent execution of `bash ./scripts/agent-check full` at
+`4bc02373a033177e98cc0ccfdd99bff221b66b60` used the normal supported environment,
+encountered no tool denial, completed successfully (exit 0), and left the
+worktree clean. This includes the previously failing suites, Rust tests/check,
+source/package smoke and generated parity. No product fix or test waiver was
+needed for those environment-induced failures. iOS was not enabled. This
+source-gate result does not establish GUI or release acceptance.
 
 ### 1. Exact-source tmux smoke
 
