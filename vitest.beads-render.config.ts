@@ -3,6 +3,8 @@ import { configDefaults, defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     // The sanitizer renderer contains deliberate wall-clock complexity guards.
+    // Those guards use warmed, interleaved sample medians with unchanged scaling
+    // thresholds; isolation is still needed to limit shared-runner contention.
     // Run that suite alone so its timing ratios are not distorted by the normal
     // four-worker unit pool. CI retries only this isolated suite: a real
     // complexity regression remains reproducible and fails every attempt, while
