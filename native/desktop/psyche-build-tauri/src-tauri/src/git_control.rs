@@ -44,6 +44,7 @@ pub(crate) fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>,
         .filter(|worktree| !worktree.bare && !worktree.prunable && !worktree.missing)
         .filter_map(|worktree| {
             let canonical = Path::new(&worktree.path).canonicalize().ok()?;
+            acceptance::require_local_project(&canonical).ok()?;
             canonical.is_dir().then_some(canonical)
         })
         .collect())
@@ -54,6 +55,7 @@ pub(crate) fn verified_worktree_root(project_root: &str, cwd: &Path) -> Result<P
     let canonical_cwd = cwd
         .canonicalize()
         .map_err(|e| format!("PTY cwd '{}': {}", cwd.display(), e))?;
+    acceptance::require_local_project(&canonical_cwd)?;
     if canonical_cwd.starts_with(&canonical_root) {
         return Ok(canonical_root);
     }

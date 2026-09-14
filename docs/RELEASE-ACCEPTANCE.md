@@ -493,6 +493,17 @@ not prove.
 
 ## Release-candidate invariants for future releases
 
+For source-only preparation of a **new** macOS candidate, the
+[explicit app-local acceptance profile](./OPERATOR-ACCEPTANCE-SLICE.md#new-candidate-app-local-profile-explicit-opt-in-not-historical-release-proof)
+requests separate persistent WebKit stores through explicit builders and provides
+local workspace/session routing (source tests are not GUI store-isolation proof),
+without changing production defaults. It requires macOS 14+, a separate
+acceptance bundle, private disposable projects and an explicit launch command.
+Its state/API/path matrix names the non-isolated OS surfaces and excluded
+integration rows. Construction and source tests do not constitute GUI,
+distribution, clean-machine, historical-release or full #196/#239 acceptance.
+Independent review and an owner decision are required before launching it.
+
 A future candidate must have:
 
 - one exact commit SHA on `origin/main`;

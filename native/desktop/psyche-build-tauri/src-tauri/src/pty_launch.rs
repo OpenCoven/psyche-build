@@ -243,6 +243,25 @@ fn pty_start_blocking_with_launch(
     options: StartOptions,
     trusted_fixture_launch: Option<platform::LaunchDescriptor>,
 ) -> Result<PtyStartResult, String> {
+    if crate::acceptance::active() {
+        let (shell, args) = platform::default_shell();
+        if options
+            .command
+            .as_ref()
+            .is_some_and(|command| command != &shell)
+            || options
+                .args
+                .as_ref()
+                .is_some_and(|supplied| supplied != &args)
+            || options.env.as_ref().is_some_and(|env| {
+                env.iter()
+                    .any(|(key, value)| key != "TMUX" || !value.is_empty())
+            })
+            || options.launch_kind.is_some()
+        {
+            return Err("acceptance PTY launch requires the clean local shell".into());
+        }
+    }
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
     validate_coven_launch(&options)?;

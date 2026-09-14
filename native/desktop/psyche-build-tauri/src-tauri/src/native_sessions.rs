@@ -64,6 +64,9 @@ pub(crate) fn shell_quote(value: &str) -> String {
 }
 
 pub(crate) fn native_socket_path() -> Result<PathBuf, String> {
+    if let Some(profile) = crate::acceptance::profile() {
+        return Ok(profile.root.join("run/tmux.sock"));
+    }
     let home = crate::platform::home_directory()
         .ok_or_else(|| "home directory is unavailable".to_string())?;
     Ok(PathBuf::from(home)
@@ -174,7 +177,11 @@ fn ensure_trusted_caller(label: &str) -> Result<(), String> {
 fn tmux_output(args: Vec<String>) -> Result<Output, String> {
     let tmux = crate::which_on_path("tmux")
         .ok_or_else(|| "tmux is unavailable; install tmux and restart Psyche".to_string())?;
-    Command::new(tmux)
+    let mut command = Command::new(tmux);
+    if crate::acceptance::active() {
+        command.args(["-f", "/dev/null"]);
+    }
+    command
         .args(args)
         .output()
         .map_err(|error| format!("failed to run tmux: {error}"))

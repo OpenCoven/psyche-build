@@ -477,6 +477,7 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   dependencies: Record<string, unknown>,
 ) {
   const completeDependencies = {
+    state: { env: {} },
     browserCreationFlights: new Map(),
     invalidateBrowserAutomation: async () => true,
     removeBrowserControlResource: async () => true,
@@ -2350,7 +2351,7 @@ function browserFocusFixture() {
 }
 
 function tauriHandlerNames(source: string) {
-  const match = /\.invoke_handler\(tauri::generate_handler!\[(?<body>[\s\S]*?)\]\)/.exec(source);
+  const match = /tauri::generate_handler!\[(?<body>[\s\S]*?)\];/.exec(source);
   if (!match?.groups?.body) throw new Error('missing tauri handler list');
 
   return match.groups.body

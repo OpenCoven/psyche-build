@@ -17,6 +17,12 @@ pub(super) fn runtime_info() -> RuntimePlatformInfo {
 }
 
 pub(super) fn default_shell() -> (String, Vec<String>) {
+    if crate::acceptance::active() {
+        return (
+            "/bin/bash".into(),
+            vec!["--noprofile".into(), "--norc".into()],
+        );
+    }
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|shell| !shell.is_empty())
@@ -30,6 +36,9 @@ pub(super) fn diagnostics_shell() -> Result<String, String> {
 }
 
 pub(super) fn augmented_path() -> OsString {
+    if crate::acceptance::active() {
+        return std::env::var_os("PATH").unwrap_or_default();
+    }
     let existing = std::env::var_os("PATH").unwrap_or_default();
     let mut parts = split_and_deduplicate_paths(&existing);
 

@@ -1453,6 +1453,74 @@ mod tests {
         })
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn acceptance_restart_recovers_real_publication_hardlinks() {
+        use std::os::unix::fs::MetadataExt;
+        for forward in [false, true] {
+            let root = std::env::current_dir().unwrap().join(format!(
+                "psyche-acceptance-{}-publication-{forward}",
+                std::process::id()
+            ));
+            let profile = crate::acceptance::open_profile(&root).unwrap();
+            let path = root.join("home/.psyche/macos-app/workspace-v3.json");
+            let original = workspace_value();
+            save_workspace_to(&path, &original).unwrap();
+            let updated = workspace_with_project("updated");
+            let interrupted = std::panic::catch_unwind(|| {
+                save_workspace_to_inner(
+                    &path,
+                    &updated,
+                    |_| Ok(()),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                    |dir, parent| {
+                        let marker = workspace_forward_rollback_path(parent, "workspace-v3.json");
+                        if marker.exists()
+                            && (!forward
+                                || fs::metadata(&marker).unwrap().ino()
+                                    == fs::metadata(&path).unwrap().ino())
+                        {
+                            panic!("simulated interruption at durable publication boundary");
+                        }
+                        sync_workspace_directory(dir, parent)
+                    },
+                    restore_workspace_backup_in,
+                    create_rollback_backup_in,
+                    create_rollback_backup_in,
+                    rename_workspace_path_in,
+                )
+            });
+            assert!(interrupted.is_err());
+            assert!(fs::metadata(&path).unwrap().nlink() > 1);
+            drop(profile);
+            let mut restart = crate::acceptance::open_profile(&root);
+            // Parallel tests fork; wait only for their inherited CLOEXEC lock
+            // descriptors, never retry an isolation or recovery rejection.
+            for _ in 0..100 {
+                if restart.as_ref().err().map(String::as_str)
+                    != Some("acceptance profile is already in use")
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+                restart = crate::acceptance::open_profile(&root);
+            }
+            let error = restart.as_ref().err().cloned();
+            if restart.is_ok() {
+                assert_eq!(load_workspace_from(&path).unwrap(), Some(original));
+                save_workspace_to(&path, &updated).unwrap();
+                assert_eq!(load_workspace_from(&path).unwrap(), Some(updated));
+            }
+            drop(restart);
+            fs::remove_dir_all(&root).unwrap();
+            assert!(
+                error.is_none(),
+                "legitimate transaction restart rejected: {error:?}"
+            );
+        }
+    }
+
     #[cfg(all(test, not(unix)))]
     mod non_unix_tests {
         use super::*;
