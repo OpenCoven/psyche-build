@@ -495,7 +495,8 @@ not prove.
 
 For source-only preparation of a **new** macOS candidate, the
 [explicit app-local acceptance profile](./OPERATOR-ACCEPTANCE-SLICE.md#new-candidate-app-local-profile-explicit-opt-in-not-historical-release-proof)
-provides separate persistent WebKit stores and local workspace/session routing,
+requests separate persistent WebKit stores through explicit builders and provides
+local workspace/session routing (source tests are not GUI store-isolation proof),
 without changing production defaults. It requires macOS 14+, a separate
 acceptance bundle, private disposable projects and an explicit launch command.
 Its state/API/path matrix names the non-isolated OS surfaces and excluded

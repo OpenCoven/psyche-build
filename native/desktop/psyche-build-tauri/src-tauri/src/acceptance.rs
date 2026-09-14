@@ -103,7 +103,7 @@ pub fn initialize(identifier: &str) -> Result<bool, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_profile(root: &Path) -> Result<Profile, String> {
+pub(crate) fn open_profile(root: &Path) -> Result<Profile, String> {
     use sha2::{Digest, Sha256};
     use std::fs::{self, OpenOptions};
     use std::io::{Read, Write};
@@ -196,9 +196,7 @@ fn open_profile(root: &Path) -> Result<Profile, String> {
     // Storage paths are not project fixtures: never follow a planted link on
     // restart. The ordinary workspace layer retains its stronger fd-relative
     // checks for writes. Same-user concurrent tampering is not sandboxed here.
-    for directory in ["home", "config", "data", "cache", "run", "scratch"] {
-        reject_storage_links(&root.join(directory), metadata.uid(), &mut 100_000)?;
-    }
+    reject_storage_links(&root, metadata.uid())?;
     for directory in [
         "home", "config", "data", "cache", "run", "projects", "scratch",
     ] {
@@ -232,27 +230,183 @@ fn open_profile(root: &Path) -> Result<Profile, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn reject_storage_links(path: &Path, uid: u32, remaining: &mut usize) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    *remaining = remaining
-        .checked_sub(1)
-        .ok_or("acceptance storage exceeds validation bound")?;
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| "acceptance storage unavailable")?;
-    if metadata.file_type().is_symlink()
-        || metadata.uid() != uid
-        || metadata.mode() & 0o022 != 0
-        || (metadata.is_file() && metadata.nlink() != 1)
-    {
-        return Err("acceptance storage contains a link or foreign owner".into());
+fn reject_storage_links(root: &Path, uid: u32) -> Result<(), String> {
+    storage_snapshot(root, uid, 100_000, || Ok(()))
+}
+
+#[cfg(target_os = "macos")]
+fn storage_snapshot(
+    root: &Path,
+    uid: u32,
+    bound: usize,
+    between_scans: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use std::ffi::{CStr, CString};
+    use std::fs::{File, OpenOptions};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    // Include identity, link count and change time, not access time (our scan
+    // changes it). Two bounded fd-relative scans fail closed on observed churn.
+    type Stamp = (i32, u64, u16, u32, u16, i64, i64);
+    type Snapshot = BTreeMap<PathBuf, Stamp>;
+    struct Directory(*mut libc::DIR);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
     }
-    if metadata.is_dir() {
-        for entry in std::fs::read_dir(path).map_err(|_| "acceptance storage unavailable")? {
-            reject_storage_links(
-                &entry.map_err(|_| "acceptance storage unavailable")?.path(),
+    fn scan(
+        parent: &File,
+        name: &CStr,
+        path: &Path,
+        uid: u32,
+        remaining: &mut usize,
+        depth: usize,
+        snapshot: &mut Snapshot,
+    ) -> Result<(), String> {
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or("acceptance storage exceeds validation bound")?;
+        if depth > 64 {
+            return Err("acceptance storage exceeds validation depth".into());
+        }
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err("acceptance storage unavailable".into());
+        }
+        let stat = unsafe { stat.assume_init() };
+        let kind = stat.st_mode & libc::S_IFMT;
+        if stat.st_uid != uid
+            || stat.st_mode & 0o022 != 0
+            || ![libc::S_IFDIR, libc::S_IFREG, libc::S_IFSOCK].contains(&kind)
+        {
+            return Err("acceptance storage contains a link or foreign owner".into());
+        }
+        let stamp = (
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_mode,
+            stat.st_uid,
+            stat.st_nlink,
+            stat.st_ctime,
+            stat.st_ctime_nsec,
+        );
+        if snapshot.insert(path.to_path_buf(), stamp).is_some() {
+            return Err("acceptance storage changed during validation".into());
+        }
+        if kind != libc::S_IFDIR {
+            return Ok(());
+        }
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err("acceptance storage directory unavailable".into());
+        }
+        let directory = unsafe { File::from_raw_fd(fd) };
+        let opened = directory
+            .metadata()
+            .map_err(|_| "acceptance storage unavailable")?;
+        if opened.dev() != stat.st_dev as u64 || opened.ino() != stat.st_ino {
+            return Err("acceptance storage changed during validation".into());
+        }
+        // Open a separate descriptor for readdir; fdopendir owns it.
+        let iterator_fd = unsafe {
+            libc::openat(
+                fd,
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if iterator_fd < 0 {
+            return Err("acceptance storage directory unavailable".into());
+        }
+        let stream = unsafe { libc::fdopendir(iterator_fd) };
+        if stream.is_null() {
+            unsafe { libc::close(iterator_fd) };
+            return Err("acceptance storage directory unavailable".into());
+        }
+        let stream = Directory(stream);
+        loop {
+            unsafe { *libc::__error() = 0 };
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                if unsafe { *libc::__error() } != 0 {
+                    return Err("acceptance storage enumeration failed".into());
+                }
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name == c"." || name == c".." {
+                continue;
+            }
+            scan(
+                &directory,
+                name,
+                &path.join(std::ffi::OsStr::from_bytes(name.to_bytes())),
                 uid,
                 remaining,
+                depth + 1,
+                snapshot,
             )?;
         }
+        Ok(())
+    }
+    let snapshot = || -> Result<Snapshot, String> {
+        let root = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(root)
+            .map_err(|_| "acceptance storage unavailable")?;
+        let mut result = BTreeMap::new();
+        let mut remaining = bound;
+        for directory in ["home", "config", "data", "cache", "run", "scratch"] {
+            scan(
+                &root,
+                &CString::new(directory).unwrap(),
+                Path::new(directory),
+                uid,
+                &mut remaining,
+                0,
+                &mut result,
+            )?;
+        }
+        let mut counts = BTreeMap::new();
+        for stamp in result
+            .values()
+            .filter(|stamp| stamp.2 & libc::S_IFMT == libc::S_IFREG)
+        {
+            *counts.entry((stamp.0, stamp.1)).or_insert(0u64) += 1;
+        }
+        for stamp in result
+            .values()
+            .filter(|stamp| stamp.2 & libc::S_IFMT == libc::S_IFREG)
+        {
+            if counts[&(stamp.0, stamp.1)] != u64::from(stamp.4) {
+                return Err("acceptance storage contains an external hardlink alias".into());
+            }
+        }
+        Ok(result)
+    };
+    let before = snapshot()?;
+    between_scans()?;
+    if before != snapshot()? {
+        return Err("acceptance storage changed during validation".into());
     }
     Ok(())
 }
@@ -310,6 +464,77 @@ mod tests {
         assert_eq!(main, second.main_store);
         assert_eq!(browser, second.browser_store);
         drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_counts_internal_links_across_roots_and_fails_closed_on_churn() {
+        let root = root("internal-links");
+        drop(open_profile(&root).unwrap());
+        let source = root.join("home/state");
+        fs::write(&source, b"sentinel").unwrap();
+        fs::hard_link(&source, root.join("data/state")).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert!(reject_storage_links(&root, uid).is_ok());
+        assert!(storage_snapshot(&root, uid, 2, || Ok(())).is_err());
+        assert!(storage_snapshot(&root, uid, 100_000, || {
+            fs::rename(root.join("data/state"), root.join("data/changed")).unwrap();
+            Ok(())
+        })
+        .is_err());
+        assert!(storage_snapshot(&root, uid, 100_000, || {
+            fs::hard_link(&source, root.join("projects/alias")).unwrap();
+            Ok(())
+        })
+        .is_err());
+        fs::remove_file(root.join("projects/alias")).unwrap();
+        assert!(storage_snapshot(&root, uid, 100_000, || {
+            fs::rename(root.join("data"), root.join("projects/moved")).unwrap();
+            symlink(root.join("projects/moved"), root.join("data")).unwrap();
+            Ok(())
+        })
+        .is_err());
+        fs::remove_file(root.join("data")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_rejects_external_and_excluded_project_hardlink_aliases() {
+        let root = root("external-links");
+        drop(open_profile(&root).unwrap());
+        let source = root.join("home/state");
+        fs::write(&source, b"sentinel").unwrap();
+        for alias in [
+            root.with_extension("external-alias"),
+            root.join("outside-storage"),
+            root.join("projects/alias"),
+        ] {
+            fs::hard_link(&source, &alias).unwrap();
+            assert!(open_profile(&root).is_err());
+            assert_eq!(fs::read(&alias).unwrap(), b"sentinel");
+            fs::remove_file(alias).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_rejects_excessive_depth_but_allows_private_runtime_sockets() {
+        let root = root("depth");
+        drop(open_profile(&root).unwrap());
+        let socket = std::os::unix::net::UnixListener::bind(
+            Path::new(root.file_name().unwrap()).join("run/socket"),
+        )
+        .unwrap();
+        assert!(reject_storage_links(&root, unsafe { libc::geteuid() }).is_ok());
+        let mut path = root.join("cache");
+        for _ in 0..66 {
+            path.push("d");
+            fs::create_dir(&path).unwrap();
+        }
+        assert!(reject_storage_links(&root, unsafe { libc::geteuid() })
+            .unwrap_err()
+            .contains("depth"));
+        drop(socket);
         fs::remove_dir_all(root).unwrap();
     }
 

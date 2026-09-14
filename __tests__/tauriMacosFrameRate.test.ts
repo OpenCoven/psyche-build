@@ -27,7 +27,7 @@ describe('macOS WKWebView frame pacing', () => {
 
   it('registers high-refresh support before the app starts creating webviews', () => {
     const fpsPlugin = tauriLib.indexOf('.plugin(tauri_plugin_macos_fps::init())');
-    const setup = tauriLib.indexOf('.setup(|app|');
+    const setup = tauriLib.indexOf('.setup(move |app|');
     const run = tauriLib.indexOf('.run(context)');
 
     expect(fpsPlugin).toBeGreaterThan(-1);

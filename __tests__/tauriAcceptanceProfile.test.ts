@@ -50,8 +50,11 @@ describe('explicit native acceptance profile', () => {
 
   it('configures persistent isolated stores before any main or child WebView creation', () => {
     expect(app.indexOf('acceptance::initialize')).toBeLessThan(app.indexOf('tauri::Builder::default'));
-    expect(app).toContain('window.data_store_identifier = Some(profile.main_store)');
-    expect(app).toContain('window.incognito = false');
+    expect(app).toContain('window.create = false');
+    expect(app).toContain('.data_store_identifier(profile.main_store)');
+    expect(app).toContain('.incognito(false)');
+    expect(app.indexOf('tauri_plugin_macos_fps::init()'))
+      .toBeLessThan(app.indexOf('tauri::WebviewWindowBuilder::from_config'));
     expect(app).toContain('.run(context)');
     expect(lib.indexOf('builder.data_store_identifier(profile.browser_store)'))
       .toBeLessThan(lib.indexOf('main.add_child('));

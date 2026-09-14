@@ -185,13 +185,13 @@ contents in evidence.
 
 | Surface / actual call chain | Acceptance route | Persistence / boundary |
 |---|---|---|
-| `app::run` → generated window configuration → automatic main WebView | `WindowConfig.data_store_identifier`, set before `Builder` runs | Persistent cockpit-only UUID; never default/incognito fallback |
+| `app::run` → acceptance-only deferred windows → explicit `WebviewWindowBuilder` in setup | Direct `.data_store_identifier(profile.main_store).incognito(false)` before build, after FPS plugin registration | Persistent cockpit-only UUID requested; production automatic window creation unchanged |
 | `ensure_browser` → `WebviewBuilder` → `main.add_child` | `WebviewBuilder::data_store_identifier`, distinct browser UUID before creation | Browser tabs share only their profile's browser store, not cockpit storage |
 | WKWebView localStorage, IndexedDB, cookies, service worker/cache data | OS-managed `WKWebsiteDataStore.dataStoreForIdentifier` | Physical directory is managed by WebKit, **not** `P/data` and not promised to follow HOME; isolate by supported identifier API |
 | Cockpit settings `psyche.tauri.settings.v1`, project appearance keys, legacy workspace fallback | Cockpit UUID's localStorage | Empty for a new profile; stable across restart; legacy fallback cannot import the default cockpit store |
 | `workspace_load/save`, locks, forward/rollback/recovery/candidate artifacts | `P/home/.psyche/macos-app/workspace-v3.json` and existing sibling artifact names | Existing native secure persistence/rollback implementation, not a mock or replacement format |
 | `native_session_*`, durable restore, PTY attach/stop/capture | Explicit `-S P/run/tmux.sock`; tmux server configuration `-f /dev/null` | Persistent session semantics unchanged; never the user's default tmux socket |
-| Profile admission | `P/profile.v1`, `P/profile.lock` | Random domain-separated store IDs; path-bound marker; exclusive lock; unmarked/shared/copied/link/collision rejection |
+| Profile admission | `P/profile.v1`, `P/profile.lock` | Random domain-separated store IDs; path-bound marker; exclusive lock; unmarked/shared/copied/symlink/collision rejection; storage hardlinks require every alias inside validated storage |
 | Config, data, cache, runtime scratch | HOME/CFFIXED → `P/home`; XDG → `P/config`, `P/data`, `P/cache`, `P/run`; TMPDIR → `P/scratch` | Own process and descendants; existing platform config remains `P/home/.config/psyche` where it explicitly derives HOME |
 | `app_environment` executable/CWD repository discovery | Disabled in acceptance; no Psyche entry or Coven executable advertised | Cannot infer a launchable project from the candidate worktree |
 | Project picker → native authority → canonical project/PTY/Git paths | Picker starts at `P/projects`; admission requires a canonical descendant | Picker is still a real NSOpenPanel and may display other locations; selecting outside fails authority admission |
@@ -206,7 +206,29 @@ contents in evidence.
 
 The supported API is documented in
 [Tauri `WebviewBuilder::data_store_identifier`](https://docs.rs/tauri/2.10.3/tauri/webview/struct.WebviewBuilder.html#method.data_store_identifier).
-The lock selects Tauri 2.10.3, tauri-runtime-wry 2.10.1 and Wry 0.54.4.
+The lock selects Tauri 2.10.3, tauri-runtime 2.10.1,
+tauri-runtime-wry 2.10.1 and Wry 0.54.4.
+That runtime's actual `WebviewAttributes::from(&WindowConfig)` conversion omits
+`data_store_identifier`. Assigning the config field does **not** isolate an
+automatically created cockpit. Acceptance therefore defers only windows marked
+for automatic creation, then builds them explicitly with the direct setter in
+setup. The FPS plugin still registers before any WebView is built. A locked-crate
+Rust conversion test records the omission; source contract checks cover the
+explicit builder path. These tests are not an observed WKWebsiteDataStore or GUI
+restart result; independent review and subsequent authorized runtime proof remain
+required.
+
+Startup enumerates `home/config/data/cache/run/scratch` together using no-follow,
+descriptor-relative traversal. Two stable snapshots must account for every
+regular-file inode's link count, with a shared 100,000-entry limit and depth 64.
+This admits internal workspace forward/rollback links without admitting aliases
+outside storage (including `projects`). Symlinks, foreign ownership, writable
+shared storage, external aliases and observed enumeration churn fail closed.
+Marker and profile lock files still require a single link. Real publication
+fault tests cover retained prior/forward hardlinks, profile reopen, recovery and
+the next save; recovery semantics and artifact names are unchanged. This bounded
+startup check is not a sandbox against same-user tampering after validation.
+
 Wry's macOS implementation selects `dataStoreForIdentifier` only on macOS 14+
 and otherwise falls back to `defaultDataStore`; the explicit OS gate prevents
 that fallback. `data_directory` is not a supported substitute on macOS.

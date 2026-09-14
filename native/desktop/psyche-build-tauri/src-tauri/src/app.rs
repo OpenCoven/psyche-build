@@ -15,6 +15,21 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn acceptance_pinned_runtime_conversion_requires_direct_store_setter() {
+        let store = [42; 16];
+        let config = tauri::utils::config::WindowConfig {
+            data_store_identifier: Some(store),
+            ..Default::default()
+        };
+        let attributes = tauri_runtime::webview::WebviewAttributes::from(&config);
+        // This is the actual locked runtime conversion, not a source-text proxy.
+        assert_eq!(attributes.data_store_identifier, None);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut context = tauri::generate_context!();
@@ -29,10 +44,13 @@ pub fn run() {
             std::process::exit(64);
         }
     }
-    if let Some(profile) = acceptance::profile() {
+    let mut acceptance_windows = Vec::new();
+    if acceptance::active() {
         for window in &mut context.config_mut().app.windows {
-            window.data_store_identifier = Some(profile.main_store);
-            window.incognito = false;
+            if window.create {
+                acceptance_windows.push(window.clone());
+                window.create = false;
+            }
         }
     }
     env_logger::init();
@@ -135,7 +153,16 @@ pub fn run() {
             ];
             handler(invoke)
         })
-        .setup(|app| {
+        .setup(move |app| {
+            if let Some(profile) = acceptance::profile() {
+                for window in &acceptance_windows {
+                    // The locked runtime drops WindowConfig's store identifier.
+                    tauri::WebviewWindowBuilder::from_config(app, window)?
+                        .data_store_identifier(profile.main_store)
+                        .incognito(false)
+                        .build()?;
+                }
+            }
             if let Err(error) = platform::configure_window(app) {
                 log::warn!("optional window configuration unavailable: {error}");
             }
