@@ -105,7 +105,7 @@ function browserShortcutInjectionSource() {
 
 function registeredAppCommands() {
   const match = tauriLib.match(
-    /tauri::generate_handler!\[(?<commands>[\s\S]*?)\]\)/,
+    /tauri::generate_handler!\[(?<commands>[\s\S]*?)\];/,
   );
   expect(match?.groups?.commands).toBeTruthy();
   return match!.groups!.commands

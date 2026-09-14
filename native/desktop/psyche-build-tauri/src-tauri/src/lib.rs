@@ -53,6 +53,9 @@ use webview2_com::{
 };
 #[cfg(target_os = "windows")]
 use windows::core::{Interface, PWSTR};
+mod acceptance;
+#[cfg(unix)]
+mod acceptance_paths;
 mod app;
 mod browser_focus;
 mod control_provider;
@@ -466,6 +469,9 @@ async fn native_project_open(
     ensure_trusted_project_caller(webview.label())?;
     let selected = tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = app.dialog().file().set_title("Open project");
+        let default_path = acceptance::profile()
+            .map(|profile| profile.root.join("projects").to_string_lossy().into_owned())
+            .or(default_path);
         if let Some(default_path) = default_path {
             let default_path = PathBuf::from(default_path);
             if default_path.is_dir() {
@@ -2190,6 +2196,11 @@ fn ensure_browser(
             );
         });
 
+    let builder = if let Some(profile) = acceptance::profile() {
+        builder.data_store_identifier(profile.browser_store)
+    } else {
+        builder
+    };
     if let Err(error) = main.add_child(
         builder,
         LogicalPosition::new(x, y),
@@ -3520,6 +3531,7 @@ async fn browser_snapshot(
 
 #[derive(Serialize, Default)]
 pub struct AppEnvironment {
+    pub acceptance_profile: bool,
     pub home: Option<String>,
     pub repo_root: Option<String>,
     pub psyche_entry: Option<String>,
@@ -3554,7 +3566,11 @@ fn app_environment() -> AppEnvironment {
     // launching `node` from there should work even if PATH munging in spawn
     // misses common Homebrew paths.
     let node_path = which_on_path("node");
-    let coven_path = which_on_path("coven");
+    let coven_path = if acceptance::active() {
+        None
+    } else {
+        which_on_path("coven")
+    };
 
     // Heuristic: if the binary is being run from a built .app inside a
     // worktree, the worktree root is a couple of levels up from the .app.
@@ -3569,6 +3585,7 @@ fn app_environment() -> AppEnvironment {
     });
 
     AppEnvironment {
+        acceptance_profile: acceptance::active(),
         home,
         repo_root,
         psyche_entry,
@@ -3581,6 +3598,9 @@ fn app_environment() -> AppEnvironment {
 }
 
 fn native_launch_command(request: &NativeSessionCreate) -> Result<(String, Vec<String>), String> {
+    if acceptance::active() && !matches!(request.launch_kind, NativeLaunchKind::Shell) {
+        return Err("acceptance profile permits only explicit local shell sessions".into());
+    }
     #[cfg(not(unix))]
     {
         let _ = request;
@@ -4007,6 +4027,9 @@ fn which_on_path(binary: &str) -> Option<String> {
 }
 
 fn locate_psyche_repo() -> Option<String> {
+    if acceptance::active() {
+        return None;
+    }
     // Walk up from the current executable looking for a directory that
     // contains both `dist/index.js` and `package.json`.
     let exe = std::env::current_exe().ok()?;
@@ -4057,6 +4080,7 @@ fn canonical_project_root(root: &str) -> Result<PathBuf, String> {
     if !canonical.is_dir() {
         return Err(format!("project root is not a directory: {}", root));
     }
+    acceptance::require_local_project(&canonical)?;
     Ok(canonical)
 }
 

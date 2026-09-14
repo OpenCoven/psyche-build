@@ -95,6 +95,7 @@ fn validate_opened_pty_cwd(
     linked_worktrees: &[PathBuf],
     cwd: &str,
 ) -> Result<(), String> {
+    crate::acceptance::require_local_project(canonical_candidate)?;
     if canonical_candidate.starts_with(canonical_root) {
         return Ok(());
     }

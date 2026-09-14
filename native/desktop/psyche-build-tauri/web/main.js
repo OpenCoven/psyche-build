@@ -2024,6 +2024,7 @@
     }, []);
   }
   async function refreshCovenSessions(options) {
+    if (state.env && state.env.acceptance_profile) return covenDiscovery;
     var force = !!(options && options.force);
     var requiredGeneration = force
       ? Number(options && options.requiredGeneration) || covenSessionMutationGeneration
@@ -2137,6 +2138,7 @@
   }
   function startCovenPolling() {
     stopCovenPolling();
+    if (state.env && state.env.acceptance_profile) return;
     if (document.visibilityState === "hidden" || state.projects.length === 0) return;
     refreshCovenSessions();
     covenPollTimer = setInterval(refreshCovenSessions, COVEN_POLL_MS);
@@ -11946,6 +11948,7 @@
    * the Claude Code harness.
    */
   function loadAgentSkills(verbose) {
+    if (state.env && state.env.acceptance_profile) return;
     var project = activeProject();
     var workspaceRoot = activeWorkspaceRoot(project);
     invoke("agent_skills", {
@@ -12770,6 +12773,7 @@
     };
   }
   function ensureBrowserControlProvider(project) {
+    if (state.env && state.env.acceptance_profile) return Promise.reject(new Error("optional providers are disabled in the acceptance profile"));
     if (!project || !project.root) return Promise.reject(new Error("browser project is unavailable"));
     var current = browserControlProviders.get(project.root);
     if (current && current.status) return Promise.resolve(current.status);
@@ -12881,6 +12885,12 @@
   function removeBrowserControlResource(pair, expectedGeneration) {
     if (!pair) return Promise.resolve(false);
     var lifecycle = browserTabLifecycle(pair.tab);
+    if (state.env && state.env.acceptance_profile) {
+      if (lifecycle.controlGeneration || lifecycle.quarantinedControlGeneration) return Promise.resolve(false);
+      lifecycle.confirmedAbsentControlGeneration =
+        expectedGeneration || lifecycle.liveGeneration || lifecycle.pendingGeneration || 0;
+      return Promise.resolve(true);
+    }
     if (expectedGeneration &&
         lifecycle.confirmedAbsentControlGeneration === expectedGeneration &&
         lifecycle.controlGeneration !== expectedGeneration) {
@@ -17009,7 +17019,7 @@
     }
     if (project) {
       var activeTab = currentBrowserTab(project);
-      if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
+      if (!state.env.acceptance_profile && activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
     }
     renderPaneWorkspace({ preserveTerminalFocus: false });
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills();

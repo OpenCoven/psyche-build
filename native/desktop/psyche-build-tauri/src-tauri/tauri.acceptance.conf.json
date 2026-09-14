@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Psyche Build Acceptance",
+  "identifier": "dev.opencoven.psyche.acceptance",
+  "bundle": {
+    "active": true,
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  }
+}
