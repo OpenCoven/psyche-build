@@ -62,7 +62,7 @@ protected PR procedure in [Contributing](../CONTRIBUTING.md#roadmap-control)
 implements it with @BunsDev accountable for portfolio decisions. The
 [roadmap focus snapshot](./ROADMAP.md#macos-first-rollout-focus) records the
 live policy and source/mirror evidence.
-Existing and future dated plans/specs remain reference material under the
+Existing and future dated plans/specs default to reference material under the
 [classification policy](./superpowers/README.md). No standing umbrella issue
 is needed to duplicate those controls.
 

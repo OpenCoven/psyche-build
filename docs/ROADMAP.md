@@ -68,7 +68,7 @@ linear history, and conversation resolution; ruleset `21729943` had no bypass
 actors and zero required approving reviews. No repository settings changed.
 This proves control state, not packaged operator acceptance.
 
-All existing and future dated records remain reference material under the
+All existing and future dated records default to reference material under the
 [classification policy](./superpowers/README.md). The live PR list supersedes
 the dated inventory below.
 

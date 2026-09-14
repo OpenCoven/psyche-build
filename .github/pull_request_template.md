@@ -4,6 +4,12 @@
 
 Related outcome:
 
+Accountable owner:
+
+Delivery train:
+
+Acceptance gate:
+
 ## Scope and boundaries
 
 <!-- What changed? What deliberately did not change? Name any authority, persistence, security, compatibility, generated-source, or platform boundary touched. -->

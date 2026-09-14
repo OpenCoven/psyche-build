@@ -29,6 +29,11 @@ describe('post-release execution documentation', () => {
     expect(path).toMatch(/\| 1 \|[^\n]*#196[^\n]*#239/);
     expect(path).toMatch(/\| 2 \|[^\n]*#199/);
     expect(path).not.toMatch(/^\| \d+ \|[^\n]*(?:#197|#200|#201|#246)/m);
+
+    const support = await readFile('docs/SUPPORT-MATRIX.md', 'utf8');
+    const deferrals = support.split('## Current known deferrals')[1]?.split('## Changing this contract')[0] ?? '';
+    expect(deferrals).toMatch(/#197[\s\S]{0,120}retired as not planned/i);
+    expect(deferrals).not.toContain('remaining desktop architecture decomposition');
   });
 
   it('wires rollout retirement through the existing standing control process', async () => {
@@ -43,6 +48,7 @@ describe('post-release execution documentation', () => {
       expect(source).toContain('CONTRIBUTING.md#roadmap-control');
       expect(source).toMatch(/#195[\s\S]{0,160}(?:completed|delivered)/i);
       expect(source).toContain('standing');
+      expect(source).toMatch(/dated (?:records|plans\/specs) default to/);
     }
     expect(roadmap).not.toContain('Update #195 in the same controlled state transition');
     expect(contributing).toContain('## Roadmap control');
@@ -54,6 +60,9 @@ describe('post-release execution documentation', () => {
     expect(contributing).not.toContain('neither a periodic all-project audit');
     expect(template).toContain('Roadmap control');
     expect(template).toMatch(/owner, train, and acceptance gate/i);
+    for (const field of ['Related outcome:', 'Accountable owner:', 'Delivery train:', 'Acceptance gate:']) {
+      expect(template).toMatch(new RegExp(`^${field}$`, 'm'));
+    }
     expect(template).not.toMatch(/^Closes #/m);
     expect(history).toMatch(/existing and future[\s\S]{0,220}classified \*\*`reference`\*\*/i);
   });
