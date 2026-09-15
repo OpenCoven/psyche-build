@@ -300,6 +300,30 @@ Record the sanitized versions of Node, pnpm, tmux, Git, macOS, architecture,
 command exit status, and reviewed evidence digest. A source smoke failure does
 not rewrite packaged-runtime observations.
 
+#### Known tagged-source first-run failure
+
+On 2026-09-14, the unchanged accepted source reproduced a failed `pnpm smoke`
+with a fresh HOME, no inherited credentials, and a private tmux server:
+the cockpit exited after declining tmux setup, before writing the project
+configuration. The command exited 1 after the configuration wait timed out.
+The observed host was arm64 macOS 26.6.2 with Node 24.18.1, pnpm 10.34.5,
+tmux 3.6a, and Git 2.55.0. This is a source-only observation, not an
+observation of either published DMG.
+
+The tag predates [PR #275](https://github.com/OpenCoven/psyche-build/pull/275)
+(`fc58e9c88931c3e12e0d78d22044622d520bf87d`), which re-references stdin when
+handing the TTY from Ink to readline and makes the smoke harness decline the
+separate OpenRouter setup prompt. Current source
+`c5d1896d56acff54f097b65074dd02d2d24bdcef` completed `pnpm smoke` in the same
+credential-free environment, but that result does not repair or reverify the
+tagged source.
+
+If this failure is reproduced, retain `sourceSmoke.status: "failed"` and
+`commandExitStatus: 1` with its evidence digest, and keep the manifest
+`incomplete`. Do not inject credentials, patch the tagged checkout, or replace
+the failed observation with a newer-source pass to satisfy the historical gate.
+The source and packaged-runtime acceptance requirements remain unchanged.
+
 ### 2. Packaged first run and ordinary lifecycle
 
 Verify the chosen DMG digest before installation. Then:
