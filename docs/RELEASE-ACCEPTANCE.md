@@ -31,7 +31,7 @@ operate, recover, and remove the application.
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
-| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; eight bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; nine bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
 
 The open #196/#239 row does not make the already-delivered macOS artifact
@@ -364,6 +364,7 @@ Current scenarios:
 | `interrupted-cleanup-recovery-marker` | Cleanup abandoned after publishing its recovery marker | `worktree-retained-after-interruption`, `recovery-marker-discoverable`, `recovery-marker-names-the-worktree`, `recovery-marker-carries-operator-instructions`, `uncommitted-work-untouched` |
 | `interrupted-cleanup-owner` | Real cleanup worker killed after acquiring its project lease, before Git mutation | `cleanup-owner-interrupted`, `cleanup-project-lease-recovered`, `cleanup-retry-blocked-by-marker`, `worktree-retained-after-interruption`, `worktree-branch-unchanged`, `clean-worktree-control-removed`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
 | `unavailable-providers` | An unregistered capability provider and an absent Coven daemon socket | `provider-failure-classified`, `available-provider-still-executes`, `plain-terminal-lane-remains-usable`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
+| `stale-pane-identity` | A replaced tmux server that hands the recorded pane ID to a pane the persisted record never owned | `replaced-server-reused-pane-id`, `stale-pane-identity-reported`, `reused-pane-id-not-adopted`, `live-pane-rebinds-to-current-identity`, `rebind-clears-stale-background-windows`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -420,6 +421,32 @@ blocks cleanup while the worktree bytes, branch OID, and persisted config remain
 unchanged. A separate clean-worktree control must actually remove its worktree
 and branch; a no-op queue cannot pass.
 
+`stale-pane-identity` covers the #196 requirement that a stale or replaced
+tmux identity is reported and never rebound to unrelated state. It is the one
+scenario that ages the pane identity itself rather than a lease. A real tmux
+server is replaced; the replacement restarts pane numbering, so the recorded
+`%0` now names a pane the persisted record never owned. Production
+`paneTmuxIdentityIsCurrent` must refuse that ID because its server generation
+differs — not merely because the ID is absent, which it is not — and
+`rebindPaneByTitle` must leave the stale record alone rather than adopting the
+pane its title now resolves to. A cross-generation rebind must also drop the
+background test/dev window bindings the retired server allocated, since
+carrying those across is the same reuse defect one level down.
+
+`live-pane-rebinds-to-current-identity` is a deliberate positive control:
+refusing every rebind would satisfy both fail-closed invariants while
+stranding every pane that legitimately moved across the restart. The scenario
+reports `injection_ineffective` when the replacement server does not reuse the
+recorded ID, so a run in which the collision never occurred cannot be read as
+the product having rejected anything.
+
+Its tmux server is pinned to a socket inside the disposable workspace and the
+inherited `TMUX`/`TMUX_PANE` variables are cleared for the duration, so a
+harness run started from inside tmux reads and terminates only its own server.
+Scope: this observes the identity and rebinding boundary that persisted records
+pass through on load. It does not observe the application restarting, and it
+does not prove that a pane which dies mid-command reports a terminal outcome.
+
 The child uses a disposable home and tmux socket directory, with global Git
 configuration excluded. The harness rejects ambient `GIT_DIR`, `GIT_WORK_TREE`,
 or `GIT_COMMON_DIR` overrides before parent-side worktree-lease discovery.
@@ -438,9 +465,8 @@ not yet implemented and must not be implied by a passing run. The
 `unavailable-providers` scenario observes the routing and detection boundary
 only: an agent CLI that disappears mid-session is sent into a live shell and
 has no product classification, so it stays unobserved. No scenario launches, terminates, and relaunches the application: the
-restart-adjacent scenarios reopen the control journal or construct a restarted
-owner epoch in process. Stale-identity coverage is likewise partial, exercising
-a stale config lease rather than the stale pane/session identity path.
+restart-adjacent scenarios reopen the control journal, construct a restarted
+owner epoch in process, or replace the tmux server rather than the application.
 Upgrade recovery is additionally blocked by a missing production surface; its
 prerequisites are recorded in
 [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md#upgrade-recovery-prerequisites).

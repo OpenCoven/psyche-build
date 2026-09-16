@@ -34,6 +34,11 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'provider-failure-classified',
   'available-provider-still-executes',
   'plain-terminal-lane-remains-usable',
+  'replaced-server-reused-pane-id',
+  'stale-pane-identity-reported',
+  'reused-pane-id-not-adopted',
+  'live-pane-rebinds-to-current-identity',
+  'rebind-clears-stale-background-windows',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -175,6 +180,29 @@ describe('disposable recovery harness', () => {
     expect(byId.get('plain-terminal-lane-remains-usable')).toBe(true);
     expect(byId.get('persisted-config-unchanged')).toBe(true);
     expect(byId.get('uncommitted-work-untouched')).toBe(true);
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+  });
+
+  it('refuses a pane ID reused by a replacement tmux server', async () => {
+    const report = await runRecoveryHarness(['stale-pane-identity']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('stale_identity_rejected');
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    // `injection_ineffective` would mean the replacement server never reused
+    // the recorded ID, so the collision under observation never happened, and
+    // `tmux_unavailable` would mean no server ran at all.
+    expect(scenario.classification).not.toBe('injection_ineffective');
+    expect(scenario.classification).not.toBe('tmux_unavailable');
+    expect(byId.get('replaced-server-reused-pane-id')).toBe(true);
+    // The ID is present on the live server; only the generation differs, so
+    // presence alone must not be read as the pane still being current.
+    expect(byId.get('stale-pane-identity-reported')).toBe(true);
+    expect(byId.get('reused-pane-id-not-adopted')).toBe(true);
+    // Positive control: refusing every rebind would satisfy the two
+    // invariants above while stranding every pane that legitimately moved.
+    expect(byId.get('live-pane-rebinds-to-current-identity')).toBe(true);
+    expect(byId.get('rebind-clears-stale-background-windows')).toBe(true);
     expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
   });
 

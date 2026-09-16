@@ -387,7 +387,7 @@ records `deferred` with #239 as owner unless the operator actually exercises
 them.
 
 The current recovery harness may remain linked as implementation evidence for
-its eight bounded scenarios. It must not be promoted to packaged GUI evidence.
+its nine bounded scenarios. It must not be promoted to packaged GUI evidence.
 
 ## Handoff
 
