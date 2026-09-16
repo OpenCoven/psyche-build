@@ -392,6 +392,55 @@ lease the harness drives, plus the support-bundle production surface.
 Unavailable providers and upgrade recovery need observed #239 operator cases or
 two real installed builds, so they stay gated rather than inferred.
 
+### Upgrade-recovery prerequisites
+
+Upgrade recovery is gated by a missing production surface, not only by missing
+operator cases. A harness scenario cannot assert on behavior the product does
+not implement, so the prerequisites below must land before `upgrade-recovery`
+can be added to the recovery harness.
+
+Observed on `main` at `ef131ac9`:
+
+- The primary persisted state carries no schema version.
+  `.psyche/psyche.config.json`, the state every existing scenario drives, has
+  no version field; the nested `paneLayout.version` check skips reconciliation
+  on mismatch rather than refusing or migrating. The versioned formats that do
+  exist, listed below, are narrow side files rather than the project
+  configuration, so no versioned read path covers the state a scenario would
+  need to age.
+- Exactly one comparison of persisted state against the running application
+  version exists, in `AutoUpdater`. Its only effect is discarding a cached
+  update banner.
+- There is no pending update, staged update, rollback, or post-upgrade
+  reconciliation. The updater shells out to the package manager and asks the
+  operator to restart.
+- `WorktreeRecoveryMarker` is the one genuinely multi-version on-disk format.
+  Listing throws on any unrecognized version rather than quarantining and
+  continuing, so no recovery behavior is observable.
+
+Required before a meaningful scenario:
+
+1. A schema version written on every mutation of the persisted project config.
+2. A read-side version gate with defined outcomes: equal proceeds, older runs a
+   named migration, newer refuses and preserves rather than silently dropping
+   fields it does not understand.
+3. A named migration registry, so "old state was adapted" is an assertable
+   event rather than a side effect of field defaulting.
+4. A durable pre-migration snapshot or staged write, so "migration failed" has
+   a defined recovery state.
+5. Consistent unknown-version handling in `WorktreeRecoveryMarker` and
+   `PaneSlugRegistry`: quarantine and continue with an operator marker instead
+   of throwing out of a listing.
+
+Items 2 and 4 are the two that yield invariants as load-bearing as the existing
+`corrupt-bytes-preserved`. Until they exist, an `upgrade-recovery` scenario
+would assert invented behavior and must not be added.
+
+One genuine cross-version invariant is already observable and is not upgrade
+recovery: `listQuarantinedPaneSlugs` treats a pre-current recovery marker's
+slug as still owned rather than reusable. It is a bounded claim about marker
+vintage, not about an upgraded application.
+
 The source harness now also exercises a real cleanup-worker interruption after
 project-lease acquisition and before Git mutation. It proves stale-lease
 takeover, work/config/branch preservation, and a retry blocked by an explicitly
