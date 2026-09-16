@@ -120,11 +120,78 @@ scenarios without copying private evidence into this schema or its tests.
 Graphics facts are optional and non-blocking; unsupported or conflicting
 evidence must remain absent or `unknown`.
 
+## `psyche support-bundle`
+
+The first production surface over this contract. It is read-only with respect
+to application state: it runs bounded collectors, serializes one bundle, and
+either writes it into the project or prints it.
+
+```
+psyche support-bundle [--project <path>] [--out <file>] [--stdout]
+```
+
+Without `--out`, the bundle lands in
+`<project>/.psyche/runtime/support-bundles/psyche-support-<UTC stamp>-<digest
+prefix>.json` and the newest ten are retained. `--stdout` writes nothing to
+disk. A write failure exits 1 and says the bundle was collected, so an operator
+can rerun with `--stdout` rather than lose it.
+
+Writing is deliberate about the destination. The file is created exclusively at
+`0600` under a random temporary name and renamed into place: `writeFile`'s
+`mode` applies only when it creates the path, so writing straight to the target
+would inherit a pre-existing file's permissions and would follow a pre-existing
+symlink out of the directory. Exclusive creation refuses both, and `rename`
+replaces a symlink at the destination rather than following it.
+
+Retention deletes files, so it is doubly guarded: a candidate must match the
+exact `psyche-support-<UTC stamp>-<12 hex>.json` pattern **and** parse as a
+bundle carrying this schema. A file a person named that way is left alone and
+counted as a retention failure, which the summary reports rather than
+swallowing. The bundle just written is never a candidate at any retention
+value. Two concurrent runs in one directory can still each prune beyond the
+limit; the newest bundle always survives, so this costs an older snapshot
+rather than the one just collected.
+
+`--out` is a single-file export to a directory the command does not own, so
+retention is disabled there entirely — pruning an arbitrary directory could
+remove another project's or another tool's files.
+
+The command holds no control-plane authority, so its provenance is always
+`verification: 'unverified'` and its bundles cannot reach `complete`. That is
+the honest state for an operator-invoked snapshot; it is not a defect to
+"fix" by manufacturing a capability.
+
+Collectors currently report platform, release, architecture, a project
+identity digest, project-config presence, and outstanding recovery state —
+worktree recovery markers and quarantined recovery files, which raise the
+bundle status to `recovery_required`. Lifecycle, provider, updater, graphics,
+receipt, and terminal facts remain uncollected; those sections are empty rather
+than fabricated.
+
+The project identity digest hashes the canonical project root, resolved the way
+the recovery readers resolve it, so one project reached through a symlink
+digests to one identity rather than one per spelling of its path.
+
+The recovery scan is bounded and cancellable like the rest of collection: at
+most 256 files, none larger than 64 KiB, stopping on the collector's abort
+signal. A file over that size is quarantined unread, and a scan that hits its
+bound reports `state: 'partial'` so partial counts are not read as a whole
+directory. `psyche recover` passes no bounds, because the operator surface must
+report everything.
+
+Collector fields must use the contract's closed key and value vocabulary. A key
+outside `SAFE_STATE_KEYS`, or a string outside `SAFE_DIAGNOSTIC_VALUES`, is
+dropped during normalization and counted in `redaction.omittedFields` — the
+bundle still serializes, so a collector with the wrong vocabulary silently
+reports nothing. Tests assert `omittedFields === 0` for the shipped collectors
+to keep that failure visible.
+
 ## Rollback and recovery
 
 This foundation is additive and has no persistence migration. A caller can
 stop using the module and discard generated snapshots without changing project
-state. If a future persistence adapter is added, it must apply the same
+state; `psyche support-bundle` writes only into its own runtime directory.
+If a future persistence adapter is added, it must apply the same
 normalization before disk I/O, preserve valid prior records after a corrupt
 tail, and surface storage failure as `partial` or `recovery_required` rather
 than blocking application startup. A later CLI/UI integration requires its own

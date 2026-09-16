@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 
 /**
  * A recovery file the running version cannot interpret.
@@ -24,6 +24,19 @@ const SALVAGEABLE_SLUG = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 /** Slugs are generated from short branch-like names; anything longer is not one. */
 const MAX_SALVAGED_SLUG_LENGTH = 64;
 
+/**
+ * Bounds a tolerant recovery listing for a caller that advertises bounded,
+ * cancellable work. Omitted fields mean unbounded, which is what the operator
+ * `psyche recover` surface wants: it must report the whole directory.
+ */
+export interface RecoveryListingBounds {
+  /** Maximum `.json` entries to examine, in sorted order. */
+  readonly limit?: number;
+  /** Files larger than this are quarantined unread. */
+  readonly maxFileBytes?: number;
+  readonly signal?: AbortSignal;
+}
+
 export type RecoveryFileRead =
   | { parsed: unknown; quarantined?: undefined }
   | { parsed?: undefined; quarantined: QuarantinedRecoveryFile };
@@ -32,9 +45,23 @@ export type RecoveryFileRead =
  * Reads one recovery file, separating an I/O failure from a parse failure so
  * the operator is not told a permissions denial was corrupt JSON.
  */
-export async function readRecoveryFile(filePath: string): Promise<RecoveryFileRead> {
+export async function readRecoveryFile(
+  filePath: string,
+  options: { maxBytes?: number } = {},
+): Promise<RecoveryFileRead> {
   let contents: string;
   try {
+    if (options.maxBytes !== undefined) {
+      // A recovery file larger than any this application writes is not parsed
+      // at all: a caller that bounds its work must not be forced to read an
+      // arbitrarily large file before it can classify it.
+      const { size } = await stat(filePath);
+      if (size > options.maxBytes) {
+        return {
+          quarantined: { path: filePath, reason: `exceeds the ${options.maxBytes} byte read bound` },
+        };
+      }
+    }
     contents = await readFile(filePath, 'utf8');
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

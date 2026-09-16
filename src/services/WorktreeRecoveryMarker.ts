@@ -25,6 +25,7 @@ import {
   quarantineEntry,
   readRecoveryFile,
   type QuarantinedRecoveryFile,
+  type RecoveryListingBounds,
 } from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 
@@ -55,6 +56,8 @@ export interface WorktreeRecoveryMarker {
 export interface WorktreeRecoveryMarkerListing {
   markers: WorktreeRecoveryMarker[];
   quarantined: QuarantinedRecoveryFile[];
+  /** Set when `bounds.limit` stopped the scan before the directory ended. */
+  truncated?: boolean;
 }
 
 export interface WorktreeRecoveryMarkerRequest {
@@ -394,6 +397,7 @@ export async function ensurePaneSlugCleanupBlocker(
  */
 export async function readWorktreeRecoveryMarkers(
   projectRoot: string,
+  bounds: RecoveryListingBounds = {},
 ): Promise<WorktreeRecoveryMarkerListing> {
   const directory = worktreeRecoveryMarkerDirectory(projectRoot);
   let entries: string[];
@@ -408,12 +412,20 @@ export async function readWorktreeRecoveryMarkers(
 
   const markers: WorktreeRecoveryMarker[] = [];
   const quarantined: QuarantinedRecoveryFile[] = [];
-  for (const entry of entries) {
+  let scanned = 0;
+  let truncated = false;
+  for (const entry of entries.slice().sort()) {
     if (!entry.endsWith('.json')) {
       continue;
     }
+    bounds.signal?.throwIfAborted();
+    if (bounds.limit !== undefined && scanned >= bounds.limit) {
+      truncated = true;
+      break;
+    }
+    scanned += 1;
     const markerPath = path.join(directory, entry);
-    const read = await readRecoveryFile(markerPath);
+    const read = await readRecoveryFile(markerPath, { maxBytes: bounds.maxFileBytes });
     if (read.quarantined) {
       quarantined.push(read.quarantined);
       continue;
@@ -432,6 +444,7 @@ export async function readWorktreeRecoveryMarkers(
   return {
     markers: markers.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
     quarantined: quarantined.sort((left, right) => left.path.localeCompare(right.path)),
+    ...(truncated ? { truncated: true } : {}),
   };
 }
 

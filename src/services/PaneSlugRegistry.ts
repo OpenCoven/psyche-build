@@ -22,6 +22,7 @@ import {
   quarantineEntry,
   readRecoveryFile,
   type QuarantinedRecoveryFile,
+  type RecoveryListingBounds,
 } from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
@@ -61,6 +62,8 @@ export interface PaneSlugOwnershipRecord {
 export interface PaneSlugOwnershipListing {
   records: PaneSlugOwnershipRecord[];
   quarantined: QuarantinedRecoveryFile[];
+  /** Set when `bounds.limit` stopped the scan before the directory ended. */
+  truncated?: boolean;
 }
 
 export interface PaneSlugAllocationState {
@@ -408,6 +411,7 @@ export function allocateUniquePaneSlug(
  */
 export async function readPaneSlugOwnershipRecords(
   sessionProjectRoot: string,
+  bounds: RecoveryListingBounds = {},
 ): Promise<PaneSlugOwnershipListing> {
   const directory = paneSlugOwnershipDirectory(sessionProjectRoot);
   let entries: string[];
@@ -421,12 +425,20 @@ export async function readPaneSlugOwnershipRecords(
   }
   const records: PaneSlugOwnershipRecord[] = [];
   const quarantined: QuarantinedRecoveryFile[] = [];
-  for (const entry of entries) {
+  let scanned = 0;
+  let truncated = false;
+  for (const entry of entries.slice().sort()) {
     if (!entry.endsWith('.json')) {
       continue;
     }
+    bounds.signal?.throwIfAborted();
+    if (bounds.limit !== undefined && scanned >= bounds.limit) {
+      truncated = true;
+      break;
+    }
+    scanned += 1;
     const recordPath = path.join(directory, entry);
-    const read = await readRecoveryFile(recordPath);
+    const read = await readRecoveryFile(recordPath, { maxBytes: bounds.maxFileBytes });
     if (read.quarantined) {
       quarantined.push(read.quarantined);
       continue;
@@ -445,6 +457,7 @@ export async function readPaneSlugOwnershipRecords(
   return {
     records: records.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
     quarantined: quarantined.sort((left, right) => left.path.localeCompare(right.path)),
+    ...(truncated ? { truncated: true } : {}),
   };
 }
 

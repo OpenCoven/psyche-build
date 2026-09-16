@@ -98,6 +98,10 @@ import {
   collectRecoveryListing,
   formatRecoveryReport,
 } from './diagnostics/recoveryReport.js';
+import {
+  parseSupportBundleArgs,
+  runSupportBundle,
+} from './diagnostics/supportBundleCli.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -130,6 +134,31 @@ function isDoctorMode(): boolean {
 
 function isRecoveryMode(): boolean {
   return process.argv.slice(2)[0] === 'recover';
+}
+
+function isSupportBundleMode(): boolean {
+  return process.argv.slice(2)[0] === 'support-bundle';
+}
+
+async function handleSupportBundleCli(): Promise<number> {
+  const parsed = parseSupportBundleArgs(process.argv.slice(3), {
+    cwd: process.cwd(),
+    releaseVersion: (packageJson as { version?: string }).version ?? 'unknown',
+    platform: process.platform,
+    architecture: process.arch,
+  });
+  if (parsed.error || !parsed.options) {
+    console.error(parsed.error ?? 'psyche support-bundle could not parse its arguments');
+    return 1;
+  }
+
+  const result = await runSupportBundle(parsed.options);
+  if (result.exitCode === 0) {
+    console.log(result.text);
+  } else {
+    console.error(result.text);
+  }
+  return result.exitCode;
 }
 
 async function handleRecoveryCli(): Promise<number> {
@@ -1625,6 +1654,14 @@ class Psyche {
 
   if (isRecoveryMode()) {
     process.exit(await handleRecoveryCli());
+  }
+
+  if (isSupportBundleMode()) {
+    // `--stdout` can emit up to the 64 KiB bundle cap. `process.exit` would
+    // terminate before a piped stdout drains and truncate it, so the exit code
+    // is set and the entrypoint returns instead.
+    process.exitCode = await handleSupportBundleCli();
+    return;
   }
 
   const remotePaneActionArg = getArgValue('--remote-pane-action');
