@@ -17,6 +17,12 @@
  * begun writing to the object store or the worktree administrative files;
  * that needs a fault injected inside Git, not around it.
  *
+ * When the interrupted mutation cannot be confirmed finished, the observation
+ * asks its caller to retain the disposable workspace instead of deleting it:
+ * a live Git process may still be operating inside, and deleting it would both
+ * destroy the evidence and pull the ground out from under that process. This
+ * mirrors `RecoveryCleanupRetentionError` in the pre-Git scenario.
+ *
  * The invariant that matters is that the worktree never ends up half-removed:
  * either it is gone and Git no longer lists it, or it is present and Git still
  * lists it. A directory removed while the registration survives — or the
@@ -67,6 +73,13 @@ export interface MidMutationCleanupObservation {
   readonly branchUnchanged: boolean;
   /** The only copy of uncommitted work in the main project is byte-identical. */
   readonly workPreserved: boolean;
+  /**
+   * The interrupted mutation could not be confirmed finished, so the caller
+   * must retain the workspace rather than delete it. A Git process may still
+   * be operating inside it, and the unsafe state is itself the evidence a
+   * diagnosis would need.
+   */
+  readonly retentionRequired: boolean;
 }
 
 /**
@@ -191,9 +204,16 @@ export async function observeMidMutationCleanup(
   const present = existsSync(worktree);
   const worktreeStateSelfConsistent = registered === present;
 
+  // Queried independently of the worktree. Reading it only when the worktree
+  // survived would let a cleanup that removed the worktree *and* moved the
+  // branch pass the branch-preservation invariant unchallenged.
+  const branchOid = git('for-each-ref', '--format=%(objectname)', 'refs/heads/control');
   const branchUnchanged = present
-    ? git('rev-parse', 'refs/heads/control') === branchBefore
-    : true;
+    // A retained worktree must still have its branch, unmoved.
+    ? branchOid === branchBefore
+    // A completed cleanup is entitled to delete the branch it owns, but never
+    // to point it at a different commit.
+    : branchOid === '' || branchOid === branchBefore;
   const workPreserved = (await readFile(workFile)).equals(workBefore);
 
   return {
@@ -204,6 +224,7 @@ export async function observeMidMutationCleanup(
     projectLeaseRecovered,
     branchUnchanged,
     workPreserved,
+    retentionRequired: !mutationLeftNoOrphan || !projectLeaseRecovered,
   };
 }
 

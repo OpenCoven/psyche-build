@@ -900,6 +900,10 @@ async function runStalePaneIdentity(): Promise<RecoveryScenarioEvidence> {
 async function runInterruptedGitMutation(): Promise<RecoveryScenarioEvidence> {
   const startedAt = Date.now();
   const workspace = await createDisposableWorkspace();
+  // An interrupted mutation that cannot be confirmed finished keeps its
+  // workspace: deleting a repository a live Git process may still be writing
+  // to would destroy the evidence and undercut that process.
+  let retainWorkspace = false;
   try {
     const configPath = projectPaneConfigPath(workspace.projectRoot);
     const configBefore = digest(await readFile(configPath));
@@ -908,10 +912,12 @@ async function runInterruptedGitMutation(): Promise<RecoveryScenarioEvidence> {
     let classification: RecoveryClassification = 'unexpected_error';
     try {
       observed = await observeMidMutationCleanup(workspace.projectRoot);
+      retainWorkspace = observed.retentionRequired;
       classification = observed.mutationObservedInFlight
         ? 'cleanup_recoverable'
         : 'injection_ineffective';
-    } catch {
+    } catch (error) {
+      retainWorkspace = error instanceof RecoveryCleanupRetentionError;
       classification = 'unexpected_error';
     }
 
@@ -948,7 +954,7 @@ async function runInterruptedGitMutation(): Promise<RecoveryScenarioEvidence> {
       startedAt,
     );
   } finally {
-    await workspace.dispose();
+    if (!retainWorkspace) await workspace.dispose();
   }
 }
 

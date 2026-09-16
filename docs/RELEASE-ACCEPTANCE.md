@@ -434,6 +434,16 @@ and uncommitted work must be untouched.
 `injection_ineffective` when the queue never reached its mutation, so a run
 that interrupted nothing cannot report every preservation invariant as held.
 
+When the interrupted mutation cannot be confirmed finished — an orphan
+survives, or the queue never goes idle — the scenario retains its disposable
+workspace instead of deleting it, mirroring `RecoveryCleanupRetentionError` in
+the pre-Git scenario. Deleting a repository a live Git process may still be
+writing to would both destroy the evidence and pull the ground out from under
+that process. The branch is queried independently of the worktree for the same
+reason: reading it only when the worktree survived would let a cleanup that
+removed the worktree *and* moved the branch pass unchallenged. A completed
+cleanup may delete the branch it owns; it may never repoint it.
+
 Scope: the interruption lands between the product handing off to Git and Git
 answering. It does not prove interruption *after* Git has begun writing to the
 object store or the worktree administrative files; that needs a fault injected
