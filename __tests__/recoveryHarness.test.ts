@@ -39,6 +39,10 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'reused-pane-id-not-adopted',
   'live-pane-rebinds-to-current-identity',
   'rebind-clears-stale-background-windows',
+  'mutation-observed-in-flight',
+  'cleanup-owner-killed-during-mutation',
+  'worktree-state-self-consistent',
+  'interrupted-mutation-left-no-orphan',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -203,6 +207,30 @@ describe('disposable recovery harness', () => {
     // invariants above while stranding every pane that legitimately moved.
     expect(byId.get('live-pane-rebinds-to-current-identity')).toBe(true);
     expect(byId.get('rebind-clears-stale-background-windows')).toBe(true);
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+  });
+
+  it('interrupts a supervised Git mutation without half-removing the worktree', async () => {
+    const report = await runRecoveryHarness(['interrupted-git-mutation']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('cleanup_recoverable');
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    // `injection_ineffective` would mean the queue never reached its
+    // destructive mutation, so nothing was interrupted mid-flight and every
+    // preservation invariant below would hold while proving nothing.
+    expect(scenario.classification).not.toBe('injection_ineffective');
+    expect(byId.get('mutation-observed-in-flight')).toBe(true);
+    expect(byId.get('cleanup-owner-killed-during-mutation')).toBe(true);
+    // The state that silently loses work is a directory removed while its
+    // registration survives, or the reverse — not either complete outcome.
+    expect(byId.get('worktree-state-self-consistent')).toBe(true);
+    // A Git process still mutating a repository nobody supervises is the
+    // other way an interrupted mutation becomes unsafe.
+    expect(byId.get('interrupted-mutation-left-no-orphan')).toBe(true);
+    expect(byId.get('cleanup-project-lease-recovered')).toBe(true);
+    expect(byId.get('worktree-branch-unchanged')).toBe(true);
+    expect(byId.get('uncommitted-work-untouched')).toBe(true);
     expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
   });
 

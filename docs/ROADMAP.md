@@ -513,11 +513,12 @@ tmux pane identity — at source, not as packaged observation.
 
 The #243 schema slice is delivered through PR #278, and the reusable
 disposable failure-injection and recovery harness is delivered through
-PRs #354-#359. It covers nine scenarios against the real production paths —
+PRs #354-#359. It covers ten scenarios against the real production paths —
 corrupt pane config, stale config lease, unwritable state storage, duplicate
 command retry, stale owner epoch, interrupted-cleanup recovery evidence, an
 interrupted real cleanup owner, unavailable optional providers, and a replaced
-tmux server that reuses a recorded pane identity — runs from a clean checkout
+tmux server that reuses a recorded pane identity, and a cleanup owner killed
+during its supervised Git mutation — runs from a clean checkout
 as `pnpm recovery:harness`, and runs in the Quality CI job with its report
 retained as a build artifact.
 
@@ -534,8 +535,8 @@ has no production collector wiring, CLI, or UI yet.
 #199 remains open. The harness covers the failure classes reachable without a
 running application, including the unavailable-provider routing and detection
 boundary and the replaced-tmux-identity rebinding boundary; application
-restart, upgrade recovery, and full mid-flight cleanup interruption are
-deliberately uncovered, and the support-bundle production surface is unbuilt. Those follow observed #239
+restart and upgrade recovery are deliberately uncovered, and the
+support-bundle production surface is unbuilt. Those follow observed #239
 operator cases rather than being inferred, and only focused, safe portions of
 former PR #190 should be integrated where they materially improve the bounded
 contract.

@@ -23,6 +23,7 @@ import {
   observeReplacedTmuxIdentity,
   RecoveryTmuxUnavailableError,
 } from './recoveryTmuxIdentity.js';
+import { observeMidMutationCleanup } from './recoveryMidMutationCleanup.js';
 
 import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
@@ -56,7 +57,8 @@ export type RecoveryScenarioId =
   | 'interrupted-cleanup-recovery-marker'
   | 'interrupted-cleanup-owner'
   | 'unavailable-providers'
-  | 'stale-pane-identity';
+  | 'stale-pane-identity'
+  | 'interrupted-git-mutation';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -67,7 +69,8 @@ export type RecoveryInjectionId =
   | 'cleanup-abandoned-after-marker-publication'
   | 'cleanup-owner-killed-before-git-mutation'
   | 'capability-provider-unregistered-and-daemon-socket-absent'
-  | 'tmux-server-replaced-reusing-recorded-pane-id';
+  | 'tmux-server-replaced-reusing-recorded-pane-id'
+  | 'cleanup-owner-killed-during-supervised-git-mutation';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -111,6 +114,10 @@ export type RecoveryInvariantId =
   | 'provider-failure-classified'
   | 'available-provider-still-executes'
   | 'plain-terminal-lane-remains-usable'
+  | 'mutation-observed-in-flight'
+  | 'cleanup-owner-killed-during-mutation'
+  | 'worktree-state-self-consistent'
+  | 'interrupted-mutation-left-no-orphan'
   | 'replaced-server-reused-pane-id'
   | 'stale-pane-identity-reported'
   | 'reused-pane-id-not-adopted'
@@ -863,6 +870,94 @@ async function runStalePaneIdentity(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * The mid-flight half of the cleanup story. `interrupted-cleanup-owner` kills
+ * the real cleanup queue at the safe boundary — after its project lease is
+ * durable, before any Git mutation can begin. This kills it at the dangerous
+ * one: the supervised `git worktree remove` is live, its leases are claimed,
+ * and its process group is tracked, but Git has not reported a result.
+ *
+ * Documented until now as deliberately uncovered. The invariants are about the
+ * state a user is left in, not about which side of the race won:
+ *
+ *   - the worktree is never half-removed — gone and unregistered, or present
+ *     and still registered, never a directory removed while its registration
+ *     survives or the reverse;
+ *   - no Git process from the interrupted mutation outlives the interruption,
+ *     which is what would keep mutating a repository nobody is supervising;
+ *   - the project lifecycle lease is recoverable afterwards rather than
+ *     stranded by an owner that died holding it;
+ *   - the branch and the only copy of uncommitted work are untouched.
+ *
+ * `mutation-observed-in-flight` is the injection's positive control. Without
+ * it a run that never reached the mutation would report every preservation
+ * invariant as held while having proved nothing.
+ *
+ * Scope: the interruption lands between the product handing off to Git and Git
+ * answering. It does not prove interruption *after* Git has begun writing;
+ * that needs a fault inside Git rather than around it.
+ */
+async function runInterruptedGitMutation(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  // An interrupted mutation that cannot be confirmed finished keeps its
+  // workspace: deleting a repository a live Git process may still be writing
+  // to would destroy the evidence and undercut that process.
+  let retainWorkspace = false;
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+
+    let observed: Awaited<ReturnType<typeof observeMidMutationCleanup>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observeMidMutationCleanup(workspace.projectRoot);
+      retainWorkspace = observed.retentionRequired;
+      classification = observed.mutationObservedInFlight
+        ? 'cleanup_recoverable'
+        : 'injection_ineffective';
+    } catch (error) {
+      retainWorkspace = error instanceof RecoveryCleanupRetentionError;
+      classification = 'unexpected_error';
+    }
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    return evidence(
+      'interrupted-git-mutation',
+      'cleanup-owner-killed-during-supervised-git-mutation',
+      classification,
+      [
+        { id: 'mutation-observed-in-flight', held: observed?.mutationObservedInFlight === true },
+        {
+          id: 'cleanup-owner-killed-during-mutation',
+          held: observed?.ownerKilledDuringMutation === true,
+        },
+        {
+          id: 'worktree-state-self-consistent',
+          held: observed?.worktreeStateSelfConsistent === true,
+        },
+        {
+          id: 'interrupted-mutation-left-no-orphan',
+          held: observed?.mutationLeftNoOrphan === true,
+        },
+        {
+          id: 'cleanup-project-lease-recovered',
+          held: observed?.projectLeaseRecovered === true,
+        },
+        { id: 'worktree-branch-unchanged', held: observed?.branchUnchanged === true },
+        { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    if (!retainWorkspace) await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -875,6 +970,7 @@ const SCENARIOS: Readonly<
   'interrupted-cleanup-owner': runInterruptedCleanupOwner,
   'unavailable-providers': runUnavailableProviders,
   'stale-pane-identity': runStalePaneIdentity,
+  'interrupted-git-mutation': runInterruptedGitMutation,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
