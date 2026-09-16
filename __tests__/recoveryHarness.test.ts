@@ -43,6 +43,11 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'cleanup-owner-killed-during-mutation',
   'worktree-state-self-consistent',
   'interrupted-mutation-left-no-orphan',
+  'newer-schema-refused',
+  'newer-schema-config-preserved',
+  'unversioned-config-adopted-by-named-migration',
+  'pre-migration-snapshot-retained',
+  'adopted-config-carries-current-schema',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [

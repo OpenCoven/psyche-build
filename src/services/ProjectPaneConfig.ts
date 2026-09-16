@@ -6,6 +6,7 @@ import {
   realpath,
   rename,
   rm,
+  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
@@ -32,6 +33,52 @@ const LOCK_DIRECTORY_NAME = 'pane-config.lock';
 const SLUG_ALLOCATION_LOCK_DIRECTORY_NAME = 'pane-slug-allocation.lock';
 const RECOVERY_LOCK_DIRECTORY_NAME = 'worktree-recovery.lock';
 const LOCK_RECORD_NAME = 'lease.json';
+
+/**
+ * Schema version stamped on the persisted project config.
+ *
+ * Every write goes through `writeProjectPaneConfig`, so the stamp is
+ * structural rather than something each mutation must remember. Version 1 is
+ * the shape this application has always written; a config with no stamp is an
+ * unversioned file from before the stamp existed, not a different shape.
+ */
+export const PROJECT_CONFIG_SCHEMA_VERSION = 1;
+
+/** A file written before the stamp existed reads as this. */
+export const UNVERSIONED_PROJECT_CONFIG_SCHEMA = 0;
+
+export interface ProjectConfigMigration {
+  readonly name: string;
+  readonly from: number;
+  readonly to: number;
+  readonly migrate: (config: ProjectPaneConfig) => ProjectPaneConfig;
+}
+
+/**
+ * Named migrations, applied in order from the version found on disk.
+ *
+ * A registry exists so that "old state was adapted" is an event a caller can
+ * assert on, rather than an invisible side effect of field defaulting. The
+ * first entry adapts nothing: it records that an unversioned file was adopted
+ * as v1, which is the honest description of a file this application wrote
+ * before it stamped versions.
+ */
+export const PROJECT_CONFIG_MIGRATIONS: readonly ProjectConfigMigration[] = Object.freeze([
+  Object.freeze({
+    name: 'adopt-unversioned-as-v1',
+    from: UNVERSIONED_PROJECT_CONFIG_SCHEMA,
+    to: 1,
+    migrate: (config: ProjectPaneConfig): ProjectPaneConfig => config,
+  }),
+]);
+
+export interface ProjectPaneConfigRead {
+  config: ProjectPaneConfig;
+  /** The version found on disk, before any migration. */
+  schemaVersion: number;
+  /** Names of the migrations applied, in the order they ran. */
+  migrations: string[];
+}
 
 export type ProjectPaneConfigPane = Record<string, unknown> | PsychePane;
 
@@ -95,11 +142,19 @@ export type ProjectPaneConfigIdentityRemovalGuard = (
   exactPanes: readonly ProjectPaneConfigPane[],
 ) => void | Promise<void>;
 
+export type ProjectPaneConfigErrorCode =
+  | 'config_unreadable'
+  | 'config_corrupt'
+  /** Written by a newer Psyche; this version refuses rather than dropping fields. */
+  | 'config_newer_schema'
+  /** The pre-migration snapshot could not be written, so nothing was migrated. */
+  | 'config_snapshot_failed';
+
 export class ProjectPaneConfigError extends Error {
-  readonly code: 'config_unreadable' | 'config_corrupt';
+  readonly code: ProjectPaneConfigErrorCode;
 
   constructor(
-    code: 'config_unreadable' | 'config_corrupt',
+    code: ProjectPaneConfigErrorCode,
     message: string,
   ) {
     super(message);
@@ -811,6 +866,24 @@ export async function compareAndRemoveProjectPaneConfigPaneIdentities(
 export async function readProjectPaneConfig(
   projectRoot: string,
 ): Promise<ProjectPaneConfig> {
+  return (await readProjectPaneConfigWithSchema(projectRoot)).config;
+}
+
+/**
+ * Reads the project config through its schema gate.
+ *
+ * Equal proceeds. Older runs the named migrations from the version found on
+ * disk and reports which ran. Newer refuses: a config this version does not
+ * understand is preserved untouched rather than read through a lossy parse and
+ * written back without the fields it could not represent.
+ *
+ * Migration is in-memory only. The file is stamped on the next write, which is
+ * where the pre-migration snapshot is taken, so reading a project never
+ * rewrites it.
+ */
+export async function readProjectPaneConfigWithSchema(
+  projectRoot: string,
+): Promise<ProjectPaneConfigRead> {
   const canonicalProjectRoot = await canonicalizePath(projectRoot);
   const configPath = projectPaneConfigPath(canonicalProjectRoot);
   let raw: string;
@@ -820,11 +893,16 @@ export async function readProjectPaneConfig(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return {
-        projectName: path.basename(canonicalProjectRoot),
-        projectRoot: canonicalProjectRoot,
-        panes: [],
-        settings: {},
-        lastUpdated: new Date().toISOString(),
+        config: {
+          schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
+          projectName: path.basename(canonicalProjectRoot),
+          projectRoot: canonicalProjectRoot,
+          panes: [],
+          settings: {},
+          lastUpdated: new Date().toISOString(),
+        },
+        schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
+        migrations: [],
       };
     }
     throw new ProjectPaneConfigError(
@@ -850,6 +928,15 @@ export async function readProjectPaneConfig(
   }
 
   const config = parsed as ProjectPaneConfig;
+  const schemaVersion = readSchemaVersion(config, configPath);
+  if (schemaVersion > PROJECT_CONFIG_SCHEMA_VERSION) {
+    throw new ProjectPaneConfigError(
+      'config_newer_schema',
+      `${configPath} is schema version ${schemaVersion}, newer than the ${
+        PROJECT_CONFIG_SCHEMA_VERSION
+      } this Psyche understands. It is left unchanged; upgrade Psyche to open this project.`,
+    );
+  }
   if (config.panes !== undefined && !Array.isArray(config.panes)) {
     throw new ProjectPaneConfigError(
       'config_corrupt',
@@ -869,7 +956,48 @@ export async function readProjectPaneConfig(
     }
   }
 
-  return config;
+  const { config: migrated, migrations } = applyProjectConfigMigrations(config, schemaVersion);
+  return { config: migrated, schemaVersion, migrations };
+}
+
+/**
+ * A missing stamp means a file written before stamping existed. Anything that
+ * is not a positive whole number is not a version this format ever wrote.
+ */
+function readSchemaVersion(config: ProjectPaneConfig, configPath: string): number {
+  const value = config.schemaVersion;
+  if (value === undefined) {
+    return UNVERSIONED_PROJECT_CONFIG_SCHEMA;
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new ProjectPaneConfigError(
+      'config_corrupt',
+      `${configPath} has an unusable schemaVersion field`,
+    );
+  }
+  return value;
+}
+
+function applyProjectConfigMigrations(
+  config: ProjectPaneConfig,
+  fromVersion: number,
+): { config: ProjectPaneConfig; migrations: string[] } {
+  let current = config;
+  let version = fromVersion;
+  const migrations: string[] = [];
+  while (version < PROJECT_CONFIG_SCHEMA_VERSION) {
+    const step = PROJECT_CONFIG_MIGRATIONS.find((candidate) => candidate.from === version);
+    if (!step) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `no migration is registered from project config schema version ${version}`,
+      );
+    }
+    current = step.migrate(current);
+    migrations.push(step.name);
+    version = step.to;
+  }
+  return { config: current, migrations };
 }
 
 export function projectPaneConfigPath(projectRoot: string): string {
@@ -931,13 +1059,101 @@ async function writeLockRecord(
   }
 }
 
+/**
+ * The single write path, so the schema stamp lands on every mutation without
+ * each caller remembering it.
+ *
+ * Before the first write that supersedes a different schema version, the
+ * existing bytes are snapshotted. That gives "the migration was wrong" a
+ * defined recovery state: the pre-migration file is still on disk, whole. If
+ * the snapshot cannot be written the config is not written either, so the
+ * original survives rather than being replaced with nothing to fall back to.
+ */
 async function writeProjectPaneConfig(
   canonicalProjectRoot: string,
   config: ProjectPaneConfig,
 ): Promise<void> {
   const configPath = projectPaneConfigPath(canonicalProjectRoot);
   await mkdir(path.dirname(configPath), { recursive: true });
-  await atomicWriteJson(configPath, config);
+  await snapshotSupersededProjectConfig(canonicalProjectRoot, configPath);
+  await atomicWriteJson(configPath, {
+    ...config,
+    schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
+  });
+}
+
+export function projectConfigSnapshotDirectory(canonicalProjectRoot: string): string {
+  return path.join(canonicalProjectRoot, '.psyche', 'runtime', 'config-schema-snapshots');
+}
+
+async function snapshotSupersededProjectConfig(
+  canonicalProjectRoot: string,
+  configPath: string,
+): Promise<void> {
+  let existing: string;
+  try {
+    existing = await readFile(configPath, 'utf8');
+  } catch {
+    // No existing file, or one that cannot be read. There is nothing this
+    // write supersedes, and an unreadable config already fails the read gate.
+    return;
+  }
+
+  let supersededVersion: number;
+  try {
+    const parsed = JSON.parse(existing) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const value = (parsed as ProjectPaneConfig).schemaVersion;
+    supersededVersion = value === undefined
+      ? UNVERSIONED_PROJECT_CONFIG_SCHEMA
+      : Number(value);
+  } catch {
+    // A corrupt config is preserved by the read gate before any write reaches
+    // here; snapshotting unparseable bytes is not this function's job.
+    return;
+  }
+  if (supersededVersion === PROJECT_CONFIG_SCHEMA_VERSION) {
+    return;
+  }
+
+  const directory = projectConfigSnapshotDirectory(canonicalProjectRoot);
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const base = `psyche.config.v${supersededVersion}-${stamp}`;
+
+  const fail = (error: unknown): never => {
+    throw new ProjectPaneConfigError(
+      'config_snapshot_failed',
+      `could not snapshot ${configPath} before superseding schema version ${
+        supersededVersion
+      }: ${errorMessage(error)}. The config was left unchanged.`,
+    );
+  };
+
+  try {
+    await mkdir(directory, { recursive: true });
+  } catch (error) {
+    fail(error);
+  }
+
+  // Exclusive creation at 0600: the snapshot must not adopt the permissions of
+  // a file already at that path, and must not follow a symlink planted there.
+  // Anything already occupying the name is worked around rather than trusted,
+  // because this version cannot tell its own earlier snapshot from a plant.
+  for (const suffix of ['', `-${randomUUID().slice(0, 8)}`]) {
+    try {
+      await writeFile(
+        path.join(directory, `${base}${suffix}.json`),
+        existing,
+        { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+      );
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        fail(error);
+      }
+    }
+  }
+  fail(new Error(`a file already occupies every candidate snapshot name for ${base}`));
 }
 
 function mutableConfigSection(

@@ -391,9 +391,13 @@ debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 
 #199 remains open for the failure classes the harness deliberately does not
-cover — application restart and upgrade recovery — plus the remaining
-support-bundle collectors and UI above. Upgrade recovery needs observed #239 operator cases or two real
-installed builds, so it stays gated rather than inferred. The
+cover — application restart, and upgrade recovery across two real installed
+builds — plus the remaining support-bundle collectors and UI above. The
+`upgrade-recovery` scenario now covers the versioned-state boundary at source:
+a newer config is refused and preserved, and an unversioned one is adopted
+through a named migration with its superseded bytes retained. Recovery across
+two real installed builds still needs observed #239 operator cases and stays
+gated rather than inferred. The
 `unavailable-providers` scenario covers the routing and detection boundary at
 source; an agent CLI that fails at launch inside a live shell still has no
 product classification and stays unobserved. The `stale-pane-identity`
@@ -430,13 +434,30 @@ Observed on `main` at `ef131ac9`:
 Required before a meaningful scenario:
 
 1. A schema version written on every mutation of the persisted project config.
+   **Delivered.** `writeProjectPaneConfig` is the one write path and stamps
+   `schemaVersion` there, so the stamp is structural rather than something each
+   mutation must remember; a caller handing back a stale version cannot defeat
+   it.
 2. A read-side version gate with defined outcomes: equal proceeds, older runs a
    named migration, newer refuses and preserves rather than silently dropping
-   fields it does not understand.
+   fields it does not understand. **Delivered.**
+   `readProjectPaneConfigWithSchema` reports the version found on disk and the
+   migrations applied; a newer config raises `config_newer_schema` and is left
+   untouched, fields this version cannot represent included. Migration is
+   in-memory, so reading a project never rewrites it.
 3. A named migration registry, so "old state was adapted" is an assertable
-   event rather than a side effect of field defaulting.
+   event rather than a side effect of field defaulting. **Delivered.**
+   `PROJECT_CONFIG_MIGRATIONS` is frozen and ordered, and its first entry,
+   `adopt-unversioned-as-v1`, reshapes nothing: it records that a file written
+   before stamping existed was adopted as v1, which is the honest description.
 4. A durable pre-migration snapshot or staged write, so "migration failed" has
-   a defined recovery state.
+   a defined recovery state. **Delivered.** The first write that supersedes a
+   different schema version copies the existing bytes to
+   `.psyche/runtime/config-schema-snapshots/psyche.config.v<from>-<stamp>.json`
+   at `0600` before writing. If that snapshot cannot be written the config is
+   not written either, so the original survives rather than being replaced with
+   nothing to fall back to. One superseded version produces one snapshot;
+   routine writes afterwards produce none.
 5. Consistent unknown-version handling in `WorktreeRecoveryMarker` and
    `PaneSlugRegistry`: quarantine and continue with an operator marker instead
    of throwing out of a listing. **Delivered.** Both services now expose a
@@ -449,11 +470,16 @@ Required before a meaningful scenario:
    The strict `list*` listings are unchanged, so slug allocation and the
    `findBlocking*` cleanup gates still fail closed on the same file.
 
-Items 2 and 4 are the two that yield invariants as load-bearing as the existing
-`corrupt-bytes-preserved`. Until they exist, an `upgrade-recovery` scenario
-would assert invented behavior and must not be added. Item 5 removes a listing
-defect; it does not supply the versioned project-config read path that items 1-4
-still require.
+Items 2 and 4 were the two that yield invariants as load-bearing as the existing
+`corrupt-bytes-preserved`, and with all five delivered the `upgrade-recovery`
+scenario asserts observed behavior rather than invented behavior. It covers both
+halves: an older Psyche meeting a newer config refuses and preserves every
+field, and a Psyche meeting an unversioned config adopts it through a named
+migration while the superseded bytes stay on disk.
+
+The scenario exercises the source path against a disposable workspace. It is
+not two real installed builds, so it is not evidence that an installed upgrade
+recovers; the observed #239 operator cases are still required for that.
 
 One genuine cross-version invariant is already observable and is not upgrade
 recovery: `listQuarantinedPaneSlugs` treats a pre-current recovery marker's
