@@ -438,6 +438,9 @@ run. No scenario launches, terminates, and relaunches the application: the
 restart-adjacent scenarios reopen the control journal or construct a restarted
 owner epoch in process. Stale-identity coverage is likewise partial, exercising
 a stale config lease rather than the stale pane/session identity path.
+Upgrade recovery is additionally blocked by a missing production surface; its
+prerequisites are recorded in
+[POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md#upgrade-recovery-prerequisites).
 
 ## Failure-oriented acceptance — #239
 
