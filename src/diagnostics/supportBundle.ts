@@ -345,7 +345,8 @@ const SAFE_PROVENANCE_ARCHITECTURE_VALUES = new Set([
 ]);
 const SAFE_DIAGNOSTIC_NUMBER_KEYS = new Set([
   'attempts', 'bytes', 'cols', 'count', 'durationms', 'generation', 'height',
-  'items', 'lines', 'ownerepoch', 'panes', 'pid', 'rows', 'size', 'timers', 'width',
+  'items', 'lines', 'ownerepoch', 'panes', 'pid', 'quarantinedrecoveryfiles',
+  'recoverymarkers', 'rows', 'size', 'timers', 'width',
 ]);
 const SAFE_VERSION_VALUE = /^\d+(?:\.\d+){0,3}(?:[-+][A-Za-z][A-Za-z0-9.-]{0,31})?$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -449,7 +450,8 @@ const SUPPORT_COMPATIBILITY_KEYS = new Set(['policy', 'minimumReaderVersion']);
 const SAFE_STATE_KEYS = new Set([
   ...SAFE_DIAGNOSTIC_VALUES,
   'accelerated', 'backend', 'browser', 'capability', 'connected', 'diagnosticNote',
-  'engine', 'fallback', 'graphics', 'healthy', 'mode', 'panes', 'provider',
+  'engine', 'fallback', 'graphics', 'healthy', 'mode', 'panes', 'projectConfig',
+  'provider', 'quarantinedRecoveryFiles', 'recoveryMarkers',
   'recoveryRequired', 'renderer', 'safeState', 'status', 'state', 'surface',
   'supported', 'support', 'tmux', 'version', 'visible', 'webgl', 'wayland', 'x11',
   ...SAFE_DIAGNOSTIC_NUMBER_KEYS,

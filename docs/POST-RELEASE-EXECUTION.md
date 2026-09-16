@@ -379,15 +379,21 @@ invariant was proved load-bearing by reintroducing the defect it guards.
 The merged bundle contract is versioned, deterministic, bounded by
 time/count/record/total size, cancellable, and automatically redacts
 credentials, raw prompts, unrestricted terminal output, repository contents,
-environment variables, infrastructure details, and full user paths. It has no
-production collector wiring, persistence, CLI, or UI. PR #281 delivered the
+environment variables, infrastructure details, and full user paths. It now has
+a first production surface: `psyche support-bundle` wires bounded collectors,
+writes a `0600` bundle under the project runtime directory with retention, and
+prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md).
+That surface covers provenance, project identity and recovery state only;
+lifecycle, provider, updater, graphics, receipt and terminal collectors, and
+any UI, remain absent, and an operator-invoked bundle is always `unverified`
+because the CLI holds no control-plane authority. PR #281 delivered the
 debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 
 #199 remains open for the failure classes the harness deliberately does not
 cover — application restart, upgrade recovery, and interrupting
-`WorktreeCleanupService` mid-flight — plus the support-bundle production
-surface. Upgrade recovery needs observed #239 operator cases or two real
+`WorktreeCleanupService` mid-flight — plus the remaining support-bundle
+collectors and UI above. Upgrade recovery needs observed #239 operator cases or two real
 installed builds, so it stays gated rather than inferred. The
 `unavailable-providers` scenario covers the routing and detection boundary at
 source; an agent CLI that fails at launch inside a live shell still has no

@@ -120,11 +120,49 @@ scenarios without copying private evidence into this schema or its tests.
 Graphics facts are optional and non-blocking; unsupported or conflicting
 evidence must remain absent or `unknown`.
 
+## `psyche support-bundle`
+
+The first production surface over this contract. It is read-only with respect
+to application state: it runs bounded collectors, serializes one bundle, and
+either writes it into the project or prints it.
+
+```
+psyche support-bundle [--project <path>] [--out <file>] [--stdout]
+```
+
+Without `--out`, the bundle lands in
+`<project>/.psyche/runtime/support-bundles/psyche-support-<UTC stamp>-<digest
+prefix>.json`, written `0600`, and the newest ten are retained. Retention
+matches only that exact filename pattern and never the bundle just written, so
+a file the command did not create is not a pruning candidate. `--stdout`
+writes nothing to disk. A write failure exits 1 and says the bundle was
+collected, so an operator can rerun with `--stdout` rather than lose it.
+
+The command holds no control-plane authority, so its provenance is always
+`verification: 'unverified'` and its bundles cannot reach `complete`. That is
+the honest state for an operator-invoked snapshot; it is not a defect to
+"fix" by manufacturing a capability.
+
+Collectors currently report platform, release, architecture, a project
+identity digest, project-config presence, and outstanding recovery state —
+worktree recovery markers and quarantined recovery files, which raise the
+bundle status to `recovery_required`. Lifecycle, provider, updater, graphics,
+receipt, and terminal facts remain uncollected; those sections are empty rather
+than fabricated.
+
+Collector fields must use the contract's closed key and value vocabulary. A key
+outside `SAFE_STATE_KEYS`, or a string outside `SAFE_DIAGNOSTIC_VALUES`, is
+dropped during normalization and counted in `redaction.omittedFields` — the
+bundle still serializes, so a collector with the wrong vocabulary silently
+reports nothing. Tests assert `omittedFields === 0` for the shipped collectors
+to keep that failure visible.
+
 ## Rollback and recovery
 
 This foundation is additive and has no persistence migration. A caller can
 stop using the module and discard generated snapshots without changing project
-state. If a future persistence adapter is added, it must apply the same
+state; `psyche support-bundle` writes only into its own runtime directory.
+If a future persistence adapter is added, it must apply the same
 normalization before disk I/O, preserve valid prior records after a corrupt
 tail, and surface storage failure as `partial` or `recovery_required` rather
 than blocking application startup. A later CLI/UI integration requires its own
