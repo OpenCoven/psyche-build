@@ -515,11 +515,10 @@ The #243 schema slice is delivered through PR #278, and the reusable
 disposable failure-injection and recovery harness is delivered through
 PRs #354-#359. It covers eight scenarios against the real production paths —
 corrupt pane config, stale config lease, unwritable state storage, duplicate
-command retry, stale owner epoch, interrupted-cleanup recovery evidence, and an
+command retry, stale owner epoch, interrupted-cleanup recovery evidence, an
 interrupted real cleanup owner, and unavailable optional providers — runs from
-a clean checkout as
-`pnpm recovery:harness`, and runs in the Quality CI job with its report
-retained as a build artifact.
+a clean checkout as `pnpm recovery:harness`, and runs in the Quality CI job
+with its report retained as a build artifact.
 
 That seventh scenario interrupts the real cleanup worker before Git mutation,
 recovers its project lease, and proves a fresh retry respects an
