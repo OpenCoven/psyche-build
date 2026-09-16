@@ -93,11 +93,11 @@ import {
 } from './workspace/tuiSnapshot.js';
 import { readProjectRitualPublicationWithUsage } from './workspace/ritualPublication.js';
 import os from 'node:os';
+import { acknowledgeWorktreeRecoveryMarker } from './services/WorktreeRecoveryMarker.js';
 import {
-  acknowledgeWorktreeRecoveryMarker,
-  readWorktreeRecoveryMarkers,
-} from './services/WorktreeRecoveryMarker.js';
-import { formatRecoveryReport } from './diagnostics/recoveryReport.js';
+  collectRecoveryListing,
+  formatRecoveryReport,
+} from './diagnostics/recoveryReport.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -159,7 +159,7 @@ async function handleRecoveryCli(): Promise<number> {
     return removed ? 0 : 1;
   }
 
-  const report = formatRecoveryReport(await readWorktreeRecoveryMarkers(projectRoot));
+  const report = formatRecoveryReport(await collectRecoveryListing(projectRoot));
   console.log(report.text);
   return report.exitCode;
 }

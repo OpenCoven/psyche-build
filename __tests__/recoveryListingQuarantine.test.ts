@@ -15,7 +15,10 @@ import {
   writePaneSlugOwnershipRecord,
 } from '../src/services/PaneSlugRegistry.js';
 import { reconcileStalePaneSlugReservations } from '../src/services/PaneSlugReservation.js';
-import { formatRecoveryReport } from '../src/diagnostics/recoveryReport.js';
+import {
+  collectRecoveryListing,
+  formatRecoveryReport,
+} from '../src/diagnostics/recoveryReport.js';
 
 const directories: string[] = [];
 
@@ -126,8 +129,88 @@ describe('unknown-version recovery listings quarantine instead of throwing', () 
     expect(listing.markers.map((marker) => marker.id)).toEqual([readableId]);
     expect(listing.quarantined).toHaveLength(1);
     expect(listing.quarantined[0]).toMatchObject({ path: truncated });
-    expect(listing.quarantined[0].reason).toContain('could not be parsed');
+    expect(listing.quarantined[0].reason).toBe('could not be parsed as JSON');
     expect(listing.quarantined[0].version).toBeUndefined();
+  });
+
+  it('never echoes the parser message, which quotes the corrupt payload', async () => {
+    const projectRoot = createProjectRoot();
+    const directory = worktreeRecoveryMarkerDirectory(projectRoot);
+    mkdirSync(directory, { recursive: true });
+    const secret = 'ghp_notarealtokenbutlookslikeone';
+    writeFileSync(path.join(directory, `${'d'.repeat(64)}.json`), secret, 'utf8');
+
+    const listing = await readWorktreeRecoveryMarkers(projectRoot);
+
+    expect(listing.quarantined).toHaveLength(1);
+    expect(listing.quarantined[0].reason).toBe('could not be parsed as JSON');
+    expect(JSON.stringify(listing.quarantined[0])).not.toContain(secret);
+  });
+
+  it('labels an unreadable file as unread rather than unparsed', async () => {
+    const projectRoot = createProjectRoot();
+    const directory = worktreeRecoveryMarkerDirectory(projectRoot);
+    mkdirSync(directory, { recursive: true });
+    // A directory named like a marker fails the read, not the parse.
+    mkdirSync(path.join(directory, `${'c'.repeat(64)}.json`));
+
+    const listing = await readWorktreeRecoveryMarkers(projectRoot);
+
+    expect(listing.quarantined).toHaveLength(1);
+    expect(listing.quarantined[0].reason).toMatch(/^could not be read/);
+    expect(listing.quarantined[0].reason).not.toContain('parsed');
+  });
+
+  it('refuses to salvage an unbounded slug from a corrupt file', async () => {
+    const projectRoot = createProjectRoot();
+    const directory = worktreeRecoveryMarkerDirectory(projectRoot);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(directory, `${'b'.repeat(64)}.json`), JSON.stringify({
+      version: 99,
+      pane: { slug: 'a'.repeat(5000) },
+    }), 'utf8');
+
+    const listing = await readWorktreeRecoveryMarkers(projectRoot);
+
+    expect(listing.quarantined).toHaveLength(1);
+    expect(listing.quarantined[0].version).toBe(99);
+    expect(listing.quarantined[0].slug).toBeUndefined();
+  });
+
+  it('reports an unreadable pane ownership record through the recover surface', async () => {
+    const projectRoot = createProjectRoot();
+    const quarantinedPath = writeOwnershipRecordFile(
+      projectRoot,
+      randomUUID(),
+      '{"version": 1, "recoveryId": "',
+    );
+
+    const listing = await collectRecoveryListing(projectRoot);
+    const report = formatRecoveryReport(listing);
+
+    // No worktree marker exists at all: before this surface covered ownership
+    // records, the command reported a clean project while cleanup stayed blocked.
+    expect(listing.markers).toEqual([]);
+    expect(listing.quarantined.map((entry) => entry.path)).toEqual([quarantinedPath]);
+    expect(report.exitCode).toBe(2);
+    expect(report.text).toContain(quarantinedPath);
+  });
+
+  it('merges both recovery directories into one bounded operator report', async () => {
+    const projectRoot = createProjectRoot();
+    await writeReadableMarker(projectRoot);
+    const markerQuarantine = writeUnknownVersionMarker(projectRoot, 'newer');
+    const ownershipQuarantine = writeOwnershipRecordFile(
+      projectRoot,
+      randomUUID(),
+      JSON.stringify({ ...ownershipRecord(projectRoot, 'stale'), version: 99 }),
+    );
+
+    const listing = await collectRecoveryListing(projectRoot);
+
+    expect(listing.markers).toHaveLength(1);
+    expect(listing.quarantined.map((entry) => entry.path).sort())
+      .toEqual([markerQuarantine, ownershipQuarantine].sort());
   });
 
   it('keeps the strict marker listing fail-closed for allocation callers', async () => {
@@ -225,6 +308,21 @@ describe('operator recovery report', () => {
 
     expect(report.exitCode).toBe(0);
     expect(report.text).toBe('No worktree recovery markers found.');
+  });
+
+  it('bounds how many quarantined files it prints', () => {
+    const report = formatRecoveryReport({
+      markers: [],
+      quarantined: Array.from({ length: 25 }, (_, index) => ({
+        path: `/project/.psyche/runtime/worktree-recovery/${index}.json`,
+        reason: 'could not be parsed as JSON',
+      })),
+    });
+
+    expect(report.exitCode).toBe(2);
+    expect(report.text).toContain('25 quarantined recovery files');
+    expect(report.text).toContain('and 5 more not listed');
+    expect(report.text).not.toContain('/worktree-recovery/24.json');
   });
 
   it('blocks on quarantined files even when no marker is readable', () => {

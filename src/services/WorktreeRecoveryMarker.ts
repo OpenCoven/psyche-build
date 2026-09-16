@@ -23,6 +23,7 @@ import {
 } from './PaneSlugRegistry.js';
 import {
   quarantineEntry,
+  readRecoveryFile,
   type QuarantinedRecoveryFile,
 } from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
@@ -412,16 +413,12 @@ export async function readWorktreeRecoveryMarkers(
       continue;
     }
     const markerPath = path.join(directory, entry);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await readFile(markerPath, 'utf8')) as unknown;
-    } catch (error) {
-      quarantined.push({
-        path: markerPath,
-        reason: `could not be parsed: ${errorMessage(error)}`,
-      });
+    const read = await readRecoveryFile(markerPath);
+    if (read.quarantined) {
+      quarantined.push(read.quarantined);
       continue;
     }
+    const parsed = read.parsed;
     if (!isWorktreeRecoveryMarker(parsed)) {
       quarantined.push(quarantineEntry(
         markerPath,

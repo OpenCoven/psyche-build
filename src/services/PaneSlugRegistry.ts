@@ -20,6 +20,7 @@ import {
 } from './ProcessIdentity.js';
 import {
   quarantineEntry,
+  readRecoveryFile,
   type QuarantinedRecoveryFile,
 } from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
@@ -425,18 +426,12 @@ export async function readPaneSlugOwnershipRecords(
       continue;
     }
     const recordPath = path.join(directory, entry);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await readFile(recordPath, 'utf8')) as unknown;
-    } catch (error) {
-      quarantined.push({
-        path: recordPath,
-        reason: `could not be parsed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      });
+    const read = await readRecoveryFile(recordPath);
+    if (read.quarantined) {
+      quarantined.push(read.quarantined);
       continue;
     }
+    const parsed = read.parsed;
     if (!isPaneSlugOwnershipRecord(parsed)) {
       quarantined.push(quarantineEntry(
         recordPath,
