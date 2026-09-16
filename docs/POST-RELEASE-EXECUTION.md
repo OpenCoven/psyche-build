@@ -434,11 +434,21 @@ Required before a meaningful scenario:
    a defined recovery state.
 5. Consistent unknown-version handling in `WorktreeRecoveryMarker` and
    `PaneSlugRegistry`: quarantine and continue with an operator marker instead
-   of throwing out of a listing.
+   of throwing out of a listing. **Delivered.** Both services now expose a
+   tolerant `read*` listing that returns the records this version validates
+   alongside a `QuarantinedRecoveryFile` entry per file it cannot: the declared
+   version and a salvaged pane slug, never the payload. `psyche recover` reports
+   both and keeps its blocked exit status, where it previously exited 1 on an
+   unhandled `SyntaxError` and printed no marker at all. Restart reconciliation
+   reconciles every readable reservation before refusing on the unreadable one.
+   The strict `list*` listings are unchanged, so slug allocation and the
+   `findBlocking*` cleanup gates still fail closed on the same file.
 
 Items 2 and 4 are the two that yield invariants as load-bearing as the existing
 `corrupt-bytes-preserved`. Until they exist, an `upgrade-recovery` scenario
-would assert invented behavior and must not be added.
+would assert invented behavior and must not be added. Item 5 removes a listing
+defect; it does not supply the versioned project-config read path that items 1-4
+still require.
 
 One genuine cross-version invariant is already observable and is not upgrade
 recovery: `listQuarantinedPaneSlugs` treats a pre-current recovery marker's

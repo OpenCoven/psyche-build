@@ -95,8 +95,9 @@ import { readProjectRitualPublicationWithUsage } from './workspace/ritualPublica
 import os from 'node:os';
 import {
   acknowledgeWorktreeRecoveryMarker,
-  listWorktreeRecoveryMarkers,
+  readWorktreeRecoveryMarkers,
 } from './services/WorktreeRecoveryMarker.js';
+import { formatRecoveryReport } from './diagnostics/recoveryReport.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -158,22 +159,9 @@ async function handleRecoveryCli(): Promise<number> {
     return removed ? 0 : 1;
   }
 
-  const markers = await listWorktreeRecoveryMarkers(projectRoot);
-  if (markers.length === 0) {
-    console.log('No worktree recovery markers found.');
-    return 0;
-  }
-
-  for (const marker of markers) {
-    console.log([
-      `${marker.id} ${marker.operation}`,
-      `  worktree: ${marker.worktreePath}`,
-      `  pane: ${marker.pane.id} (${marker.pane.paneId})`,
-      `  reason: ${marker.reason}`,
-      `  ${marker.operatorInstructions}`,
-    ].join('\n'));
-  }
-  return 2;
+  const report = formatRecoveryReport(await readWorktreeRecoveryMarkers(projectRoot));
+  console.log(report.text);
+  return report.exitCode;
 }
 
 async function handleDoctorCli(): Promise<number> {

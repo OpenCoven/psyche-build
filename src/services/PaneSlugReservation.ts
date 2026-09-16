@@ -6,7 +6,7 @@ import {
 } from './ProjectPaneConfig.js';
 import {
   isPaneSlugOwnerStale,
-  listPaneSlugOwnershipRecords,
+  readPaneSlugOwnershipRecords,
   readPaneSlugOwnershipRecord,
   removePaneSlugOwnershipRecord,
   reservePaneSlug,
@@ -99,8 +99,8 @@ export async function reconcileStalePaneSlugReservations(
     lockOptions?: ProjectPaneConfigLockOptions;
   },
 ): Promise<void> {
-  const records = await listPaneSlugOwnershipRecords(options.sessionProjectRoot);
-  for (const snapshot of records) {
+  const listing = await readPaneSlugOwnershipRecords(options.sessionProjectRoot);
+  for (const snapshot of listing.records) {
     await ensurePaneSlugCleanupBlocker(snapshot, {
       lockOptions: options.lockOptions,
     });
@@ -149,6 +149,17 @@ export async function reconcileStalePaneSlugReservations(
         generation: snapshot.updatedAt,
       },
       { lockOptions: options.lockOptions },
+    );
+  }
+
+  // Every readable reservation is reconciled first: an ownership record this
+  // version cannot validate must not strand the ones it can. Reconciliation
+  // still fails closed afterwards, because an unreadable record may hold a slug
+  // whose name we cannot even read.
+  const [unreadable] = listing.quarantined;
+  if (unreadable) {
+    throw new Error(
+      `Invalid pane slug ownership record: ${unreadable.path} (${unreadable.reason})`,
     );
   }
 }
