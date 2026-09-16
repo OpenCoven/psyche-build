@@ -33,6 +33,15 @@ import {
   projectPaneConfigPath,
   readProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
+import { createCovenClient } from '../daemon/bridge.js';
+import {
+  AgenticCapabilityRouter,
+  CapabilityRoutingError,
+  createCovenNativeCapabilityStrategy,
+} from '../orchestration/capabilityRouter.js';
+import { listCovenSessionsFromDaemon } from '../utils/covenSessions.js';
+import { runTmuxDoctor } from '../utils/tmuxDoctor.js';
+import { buildPsycheManagedTmuxConfigBlock } from '../utils/tmuxManagedConfig.js';
 
 export type RecoveryScenarioId =
   | 'corrupt-pane-config'
@@ -41,7 +50,8 @@ export type RecoveryScenarioId =
   | 'duplicate-command-retry'
   | 'stale-owner-epoch'
   | 'interrupted-cleanup-recovery-marker'
-  | 'interrupted-cleanup-owner';
+  | 'interrupted-cleanup-owner'
+  | 'unavailable-providers';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -50,7 +60,8 @@ export type RecoveryInjectionId =
   | 'command-replayed-after-journal-restart'
   | 'lease-asserted-with-pre-restart-owner-epoch'
   | 'cleanup-abandoned-after-marker-publication'
-  | 'cleanup-owner-killed-before-git-mutation';
+  | 'cleanup-owner-killed-before-git-mutation'
+  | 'capability-provider-unregistered-and-daemon-socket-absent';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -61,6 +72,7 @@ export type RecoveryClassification =
   | 'outcome_reconciled'
   | 'owner_restart_fenced'
   | 'cleanup_recoverable'
+  | 'provider_unavailable'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -87,7 +99,10 @@ export type RecoveryInvariantId =
   | 'cleanup-project-lease-recovered'
   | 'cleanup-retry-blocked-by-marker'
   | 'worktree-branch-unchanged'
-  | 'clean-worktree-control-removed';
+  | 'clean-worktree-control-removed'
+  | 'provider-failure-classified'
+  | 'available-provider-still-executes'
+  | 'plain-terminal-lane-remains-usable';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -639,6 +654,127 @@ async function runInterruptedCleanupOwner(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * Listed in #199 as "unavailable providers". An optional provider that is not
+ * registered, or a daemon that is not running, must fail closed as a
+ * classified outcome and must not cost the operator the plain terminal lane,
+ * their pane configuration, or their uncommitted work.
+ *
+ * Three real production paths are driven, none of them mocked:
+ *   1. `AgenticCapabilityRouter.execute` with an unregistered provider, which
+ *      raises `capability_provider_unavailable` before any strategy runs.
+ *   2. `listCovenSessionsFromDaemon` against a socket path that has no
+ *      listener, which classifies rather than throws.
+ *   3. `runTmuxDoctor` with agent detection returning nothing, which must
+ *      still report the host as able to run.
+ *
+ * The registered-provider execution is a deliberate positive control. Without
+ * it, a change that rejected every provider would satisfy the fail-closed
+ * invariant while removing all optional capability.
+ *
+ * Scope: this observes the routing and detection boundary. It does not prove
+ * that an agent CLI which disappears mid-session degrades gracefully. That
+ * command is sent into a live shell and the product has no classification for
+ * its failure, so a passing run here must not be read as covering it.
+ */
+async function runUnavailableProviders(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+
+    // The router is built with only the native provider registered, so a
+    // request naming the other provider reaches a genuinely absent strategy.
+    const router = new AgenticCapabilityRouter({
+      strategies: [createCovenNativeCapabilityStrategy()],
+    });
+    const request = {
+      taskId: 'harness-task',
+      capability: 'planning' as const,
+      input: { prompt: 'harness', harness: 'recovery-harness' },
+      context: { projectRoot: workspace.projectRoot, cwd: workspace.projectRoot },
+    };
+
+    let routingCode: string | undefined;
+    try {
+      await router.execute({ ...request, provider: 'psyche' });
+    } catch (error) {
+      routingCode = error instanceof CapabilityRoutingError ? error.code : 'unexpected_error';
+    }
+
+    let registeredProviderExecuted = false;
+    try {
+      const execution = await router.execute({ ...request, provider: 'coven-native' });
+      registeredProviderExecuted = execution.trace.provider === 'coven-native';
+    } catch {
+      registeredProviderExecuted = false;
+    }
+
+    // No listener is ever created at this path, so the client observes a real
+    // connection failure rather than a simulated one. A regression that threw
+    // instead of classifying must surface as a failed invariant here, not as
+    // an unhandled rejection that costs the run its evidence.
+    let daemonClassified = false;
+    try {
+      const daemonState = await listCovenSessionsFromDaemon({
+        client: createCovenClient({
+          socketPath: path.join(workspace.projectRoot, '.psyche', 'absent-coven.sock'),
+        }),
+      });
+      daemonClassified = daemonState.status === 'unavailable';
+    } catch {
+      daemonClassified = false;
+    }
+
+    await writeFile(
+      path.join(workspace.projectRoot, '.tmux.conf'),
+      buildPsycheManagedTmuxConfigBlock('dark'),
+      'utf8',
+    );
+    const doctor = await runTmuxDoctor({
+      runtime: {
+        homeDir: workspace.projectRoot,
+        env: {},
+        findAgentCommand: () => null,
+        run: (command, args) => {
+          if (command === 'tmux' && args.join(' ') === '-V') {
+            return { status: 0, stdout: 'tmux 3.4\n', stderr: '' };
+          }
+          if (command === 'git' && args.join(' ') === '--version') {
+            return { status: 0, stdout: 'git version 2.45.0\n', stderr: '' };
+          }
+          return { status: 1, stdout: '', stderr: '' };
+        },
+      },
+    });
+    const agentCheck = doctor.checks.find((check) => check.id === 'agent-cli-guidance');
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    const classified = routingCode === 'capability_provider_unavailable' && daemonClassified;
+    const terminalLaneUsable = doctor.canRun && agentCheck?.severity === 'warning';
+
+    return evidence(
+      'unavailable-providers',
+      'capability-provider-unregistered-and-daemon-socket-absent',
+      classified ? 'provider_unavailable' : 'unexpected_success',
+      [
+        { id: 'provider-failure-classified', held: classified },
+        { id: 'available-provider-still-executes', held: registeredProviderExecuted },
+        { id: 'plain-terminal-lane-remains-usable', held: terminalLaneUsable },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'uncommitted-work-untouched', held: workAfter === digest('the only copy of this work\n') },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -649,6 +785,7 @@ const SCENARIOS: Readonly<
   'stale-owner-epoch': runStaleOwnerEpoch,
   'interrupted-cleanup-recovery-marker': runInterruptedCleanupRecoveryMarker,
   'interrupted-cleanup-owner': runInterruptedCleanupOwner,
+  'unavailable-providers': runUnavailableProviders,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {

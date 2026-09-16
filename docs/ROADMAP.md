@@ -506,19 +506,19 @@ identities.
 **Owner:** #199 (#243 delivered).
 
 #199/#243 retains its P1 dependency gate for the scenarios that remain:
-application restart, unavailable providers, and upgrade recovery still follow
-observed #239 operator cases rather than being inferred. Stale-identity
+application restart and upgrade recovery still follow observed #239 operator
+cases rather than being inferred. Stale-identity
 coverage remains partial: the harness drives a stale config lease, not the
 stale pane/session identity path that production recovery distinguishes.
 
 The #243 schema slice is delivered through PR #278, and the reusable
 disposable failure-injection and recovery harness is delivered through
-PRs #354-#359. It covers seven scenarios against the real production paths —
+PRs #354-#359. It covers eight scenarios against the real production paths —
 corrupt pane config, stale config lease, unwritable state storage, duplicate
-command retry, stale owner epoch, interrupted-cleanup recovery evidence, and an
-interrupted real cleanup owner — runs from a clean checkout as
-`pnpm recovery:harness`, and runs in the Quality CI job with its report
-retained as a build artifact.
+command retry, stale owner epoch, interrupted-cleanup recovery evidence, an
+interrupted real cleanup owner, and unavailable optional providers — runs from
+a clean checkout as `pnpm recovery:harness`, and runs in the Quality CI job
+with its report retained as a build artifact.
 
 That seventh scenario interrupts the real cleanup worker before Git mutation,
 recovers its project lease, and proves a fresh retry respects an
@@ -531,9 +531,10 @@ time, count, record, and total size, cancellable, and redacts by default. It
 has no production collector wiring, CLI, or UI yet.
 
 #199 remains open. The harness covers the failure classes reachable without a
-running application; unavailable providers, upgrade recovery, and full
-mid-flight cleanup interruption are deliberately uncovered, and the
-support-bundle production surface is unbuilt. Those follow observed #239
+running application, including the unavailable-provider routing and detection
+boundary; application restart, upgrade recovery, and full mid-flight cleanup
+interruption are deliberately uncovered, and the support-bundle production
+surface is unbuilt. Those follow observed #239
 operator cases rather than being inferred, and only focused, safe portions of
 former PR #190 should be integrated where they materially improve the bounded
 contract.

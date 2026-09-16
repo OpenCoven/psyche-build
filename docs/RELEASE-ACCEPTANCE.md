@@ -31,7 +31,7 @@ operate, recover, and remove the application.
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
-| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; seven bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; eight bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
 
 The open #196/#239 row does not make the already-delivered macOS artifact
@@ -363,6 +363,7 @@ Current scenarios:
 | `stale-owner-epoch` | A valid capability lease asserted with the pre-restart owner epoch | `stale-epoch-assertion-rejected`, `current-epoch-assertion-accepted` |
 | `interrupted-cleanup-recovery-marker` | Cleanup abandoned after publishing its recovery marker | `worktree-retained-after-interruption`, `recovery-marker-discoverable`, `recovery-marker-names-the-worktree`, `recovery-marker-carries-operator-instructions`, `uncommitted-work-untouched` |
 | `interrupted-cleanup-owner` | Real cleanup worker killed after acquiring its project lease, before Git mutation | `cleanup-owner-interrupted`, `cleanup-project-lease-recovered`, `cleanup-retry-blocked-by-marker`, `worktree-retained-after-interruption`, `worktree-branch-unchanged`, `clean-worktree-control-removed`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
+| `unavailable-providers` | An unregistered capability provider and an absent Coven daemon socket | `provider-failure-classified`, `available-provider-still-executes`, `plain-terminal-lane-remains-usable`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -432,9 +433,11 @@ by the cleanup service. This scenario does not prove interruption during a Git
 mutation, automatic crash reconciliation, application restart, or packaged GUI
 acceptance. It does not close #196, #199, or #239.
 
-The remaining #199 scenarios — application restart, unavailable providers, and
-upgrade recovery — are not yet implemented and must not be implied by a passing
-run. No scenario launches, terminates, and relaunches the application: the
+The remaining #199 scenarios — application restart and upgrade recovery — are
+not yet implemented and must not be implied by a passing run. The
+`unavailable-providers` scenario observes the routing and detection boundary
+only: an agent CLI that disappears mid-session is sent into a live shell and
+has no product classification, so it stays unobserved. No scenario launches, terminates, and relaunches the application: the
 restart-adjacent scenarios reopen the control journal or construct a restarted
 owner epoch in process. Stale-identity coverage is likewise partial, exercising
 a stale config lease rather than the stale pane/session identity path.
