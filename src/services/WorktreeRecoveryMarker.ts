@@ -21,6 +21,11 @@ import {
   type PaneSlugOwnershipRecord,
   type PaneSlugOwnershipState,
 } from './PaneSlugRegistry.js';
+import {
+  quarantineEntry,
+  readRecoveryFile,
+  type QuarantinedRecoveryFile,
+} from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
@@ -45,6 +50,11 @@ export interface WorktreeRecoveryMarker {
   reason: string;
   createdAt: string;
   operatorInstructions: string;
+}
+
+export interface WorktreeRecoveryMarkerListing {
+  markers: WorktreeRecoveryMarker[];
+  quarantined: QuarantinedRecoveryFile[];
 }
 
 export interface WorktreeRecoveryMarkerRequest {
@@ -372,33 +382,73 @@ export async function ensurePaneSlugCleanupBlocker(
   }
 }
 
-export async function listWorktreeRecoveryMarkers(
+/**
+ * Reads every marker the current version understands and quarantines the rest.
+ *
+ * A marker written by a newer Psyche, or truncated by a crash mid-write, must
+ * not hide the markers this version can read: an operator inspecting a blocked
+ * project needs the readable ones, and the unreadable file needs to be named so
+ * it can be acknowledged deliberately. Destructive cleanup keeps failing closed
+ * on the same file through `findBlockingWorktreeRecoveryMarker`, which reads
+ * the directory itself and blocks on anything it cannot validate.
+ */
+export async function readWorktreeRecoveryMarkers(
   projectRoot: string,
-): Promise<WorktreeRecoveryMarker[]> {
+): Promise<WorktreeRecoveryMarkerListing> {
   const directory = worktreeRecoveryMarkerDirectory(projectRoot);
   let entries: string[];
   try {
     entries = await readdir(directory);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return [];
+      return { markers: [], quarantined: [] };
     }
     throw error;
   }
 
   const markers: WorktreeRecoveryMarker[] = [];
+  const quarantined: QuarantinedRecoveryFile[] = [];
   for (const entry of entries) {
     if (!entry.endsWith('.json')) {
       continue;
     }
     const markerPath = path.join(directory, entry);
-    const parsed = JSON.parse(await readFile(markerPath, 'utf8')) as unknown;
+    const read = await readRecoveryFile(markerPath);
+    if (read.quarantined) {
+      quarantined.push(read.quarantined);
+      continue;
+    }
+    const parsed = read.parsed;
     if (!isWorktreeRecoveryMarker(parsed)) {
-      throw new Error(`Invalid worktree recovery marker: ${markerPath}`);
+      quarantined.push(quarantineEntry(
+        markerPath,
+        parsed,
+        'worktree recovery marker',
+      ));
+      continue;
     }
     markers.push(parsed);
   }
-  return markers.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return {
+    markers: markers.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    quarantined: quarantined.sort((left, right) => left.path.localeCompare(right.path)),
+  };
+}
+
+/**
+ * Strict listing for callers that must fail closed rather than act on a
+ * partial view. Read paths that report to an operator use
+ * {@link readWorktreeRecoveryMarkers} instead.
+ */
+export async function listWorktreeRecoveryMarkers(
+  projectRoot: string,
+): Promise<WorktreeRecoveryMarker[]> {
+  const listing = await readWorktreeRecoveryMarkers(projectRoot);
+  const [first] = listing.quarantined;
+  if (first) {
+    throw new Error(`Invalid worktree recovery marker: ${first.path}`);
+  }
+  return listing.markers;
 }
 
 export async function listQuarantinedPaneSlugs(

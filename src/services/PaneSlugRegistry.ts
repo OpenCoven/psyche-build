@@ -18,6 +18,11 @@ import {
   isProcessAlive,
   type ProcessStartIdentityResolver,
 } from './ProcessIdentity.js';
+import {
+  quarantineEntry,
+  readRecoveryFile,
+  type QuarantinedRecoveryFile,
+} from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { TmuxPanePresence } from '../utils/paneTeardown.js';
@@ -51,6 +56,11 @@ export interface PaneSlugOwnershipRecord {
   updatedAt: string;
   reason?: string;
   targetMarkerId?: string;
+}
+
+export interface PaneSlugOwnershipListing {
+  records: PaneSlugOwnershipRecord[];
+  quarantined: QuarantinedRecoveryFile[];
 }
 
 export interface PaneSlugAllocationState {
@@ -389,32 +399,68 @@ export function allocateUniquePaneSlug(
   }
 }
 
-export async function listPaneSlugOwnershipRecords(
+/**
+ * Reads every ownership record the current version understands and quarantines
+ * the rest, so one record written by a newer Psyche cannot stop restart
+ * reconciliation from reaching the records this version owns. Slug allocation
+ * keeps using the strict {@link listPaneSlugOwnershipRecords}, and
+ * `findBlockingPaneSlugOwnership` still blocks on anything it cannot validate.
+ */
+export async function readPaneSlugOwnershipRecords(
   sessionProjectRoot: string,
-): Promise<PaneSlugOwnershipRecord[]> {
+): Promise<PaneSlugOwnershipListing> {
   const directory = paneSlugOwnershipDirectory(sessionProjectRoot);
   let entries: string[];
   try {
     entries = await readdir(directory);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return [];
+      return { records: [], quarantined: [] };
     }
     throw error;
   }
   const records: PaneSlugOwnershipRecord[] = [];
+  const quarantined: QuarantinedRecoveryFile[] = [];
   for (const entry of entries) {
     if (!entry.endsWith('.json')) {
       continue;
     }
     const recordPath = path.join(directory, entry);
-    const parsed = JSON.parse(await readFile(recordPath, 'utf8')) as unknown;
+    const read = await readRecoveryFile(recordPath);
+    if (read.quarantined) {
+      quarantined.push(read.quarantined);
+      continue;
+    }
+    const parsed = read.parsed;
     if (!isPaneSlugOwnershipRecord(parsed)) {
-      throw new Error(`Invalid pane slug ownership record: ${recordPath}`);
+      quarantined.push(quarantineEntry(
+        recordPath,
+        parsed,
+        'pane slug ownership record',
+      ));
+      continue;
     }
     records.push(parsed);
   }
-  return records.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return {
+    records: records.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    quarantined: quarantined.sort((left, right) => left.path.localeCompare(right.path)),
+  };
+}
+
+/**
+ * Strict listing for slug allocation, which must fail closed rather than
+ * allocate against a partial view of who owns what.
+ */
+export async function listPaneSlugOwnershipRecords(
+  sessionProjectRoot: string,
+): Promise<PaneSlugOwnershipRecord[]> {
+  const listing = await readPaneSlugOwnershipRecords(sessionProjectRoot);
+  const [first] = listing.quarantined;
+  if (first) {
+    throw new Error(`Invalid pane slug ownership record: ${first.path}`);
+  }
+  return listing.records;
 }
 
 export async function readPaneSlugOwnershipRecord(
