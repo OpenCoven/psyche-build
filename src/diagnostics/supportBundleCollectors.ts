@@ -2,7 +2,17 @@ import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { collectRecoveryListing } from './recoveryReport.js';
+import { normalizeCanonicalProjectIdentity } from '../control/projectIdentity.js';
+import { canonicalizePathWithExistingAncestor } from '../services/WorktreePath.js';
 import type { SupportBundleInput, SupportCollector } from './supportBundle.js';
+
+/**
+ * A support bundle must stay bounded and cancellable, but the recovery
+ * directories are written by the product and can hold anything. The collector
+ * reads at most this many files, none larger than this, and stops on abort.
+ */
+const MAX_SCANNED_RECOVERY_FILES = 256;
+const MAX_RECOVERY_FILE_BYTES = 64 * 1024;
 
 export interface SupportCollectorContext {
   readonly projectRoot: string;
@@ -45,7 +55,13 @@ export function supportBundleArchitecture(architecture: string): string {
  * a stable value that is not the path itself. The digest is one-way and local.
  */
 export function projectIdentityDigest(projectRoot: string): string {
-  return createHash('sha256').update(path.resolve(projectRoot), 'utf8').digest('hex');
+  // Canonicalized the way the recovery readers canonicalize a project root, so
+  // the same project reached through a symlink digests to one identity instead
+  // of one per spelling of its path.
+  const canonical = normalizeCanonicalProjectIdentity(
+    canonicalizePathWithExistingAncestor(projectRoot),
+  );
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
 /**
@@ -78,8 +94,12 @@ export function createSupportCollectors(
     },
     {
       name: 'persistence',
-      collect: async (): Promise<SupportBundleInput> => {
-        const listing = await collectRecoveryListing(context.projectRoot);
+      collect: async (signal): Promise<SupportBundleInput> => {
+        const listing = await collectRecoveryListing(context.projectRoot, {
+          limit: MAX_SCANNED_RECOVERY_FILES,
+          maxFileBytes: MAX_RECOVERY_FILE_BYTES,
+          signal,
+        });
         const blocked = listing.markers.length > 0 || listing.quarantined.length > 0;
         return {
           persistence: {
@@ -87,6 +107,9 @@ export function createSupportCollectors(
             recoveryMarkers: listing.markers.length,
             quarantinedRecoveryFiles: listing.quarantined.length,
             recoveryRequired: blocked,
+            // A scan that hit its bound reports partial counts; saying so keeps
+            // an operator from reading them as the whole directory.
+            ...(listing.truncated ? { state: 'partial' } : {}),
           },
           // Outstanding recovery state is exactly the condition an operator
           // collects a bundle to explain, so it sets the bundle's status.

@@ -108,11 +108,19 @@ export async function runSupportBundle(
     return { text: serialized, exitCode: 0, bundle };
   }
 
+  // `--out` is a single-file export to a directory this command does not own,
+  // so retention is disabled there: pruning an arbitrary directory could remove
+  // another project's or another tool's files.
   const target = options.outPath
-    ? { directory: path.dirname(path.resolve(options.outPath)), filename: path.basename(options.outPath) }
+    ? {
+      directory: path.dirname(path.resolve(options.outPath)),
+      filename: path.basename(path.resolve(options.outPath)),
+      retain: false,
+    }
     : {
       directory: supportBundleDirectory(options.projectRoot),
       filename: supportBundleFilename(bundle.generatedAt, digest),
+      retain: true,
     };
 
   let written: WrittenSupportBundle;
@@ -159,6 +167,12 @@ export function formatSupportBundleSummary(
   }
   if (written.removed.length > 0) {
     lines.push(`  pruned ${written.removed.length} older bundle${written.removed.length === 1 ? '' : 's'}`);
+  }
+  if (written.retentionFailures > 0) {
+    lines.push(
+      `  retention left ${written.retentionFailures} candidate${written.retentionFailures === 1 ? '' : 's'} in place`,
+      '  Older bundles remain beyond the retention limit; remove them manually if that matters.',
+    );
   }
   lines.push(
     '  The bundle is redacted but not public: it identifies your platform, release, and project digest.',

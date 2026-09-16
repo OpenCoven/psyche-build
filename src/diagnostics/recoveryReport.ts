@@ -3,11 +3,16 @@ import {
   type WorktreeRecoveryMarker,
 } from '../services/WorktreeRecoveryMarker.js';
 import { readPaneSlugOwnershipRecords } from '../services/PaneSlugRegistry.js';
-import type { QuarantinedRecoveryFile } from '../services/QuarantinedRecoveryFile.js';
+import type {
+  QuarantinedRecoveryFile,
+  RecoveryListingBounds,
+} from '../services/QuarantinedRecoveryFile.js';
 
 export interface RecoveryReportInput {
   markers: WorktreeRecoveryMarker[];
   quarantined: QuarantinedRecoveryFile[];
+  /** Set when a bounded scan stopped before the directories ended. */
+  truncated?: boolean;
 }
 
 export interface RecoveryReport {
@@ -25,15 +30,17 @@ export interface RecoveryReport {
  */
 export async function collectRecoveryListing(
   projectRoot: string,
+  bounds: RecoveryListingBounds = {},
 ): Promise<RecoveryReportInput> {
   const [markerListing, ownershipListing] = await Promise.all([
-    readWorktreeRecoveryMarkers(projectRoot),
-    readPaneSlugOwnershipRecords(projectRoot),
+    readWorktreeRecoveryMarkers(projectRoot, bounds),
+    readPaneSlugOwnershipRecords(projectRoot, bounds),
   ]);
   return {
     markers: markerListing.markers,
     quarantined: [...markerListing.quarantined, ...ownershipListing.quarantined]
       .sort((left, right) => left.path.localeCompare(right.path)),
+    ...(markerListing.truncated || ownershipListing.truncated ? { truncated: true } : {}),
   };
 }
 

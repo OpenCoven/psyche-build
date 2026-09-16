@@ -132,11 +132,29 @@ psyche support-bundle [--project <path>] [--out <file>] [--stdout]
 
 Without `--out`, the bundle lands in
 `<project>/.psyche/runtime/support-bundles/psyche-support-<UTC stamp>-<digest
-prefix>.json`, written `0600`, and the newest ten are retained. Retention
-matches only that exact filename pattern and never the bundle just written, so
-a file the command did not create is not a pruning candidate. `--stdout`
-writes nothing to disk. A write failure exits 1 and says the bundle was
-collected, so an operator can rerun with `--stdout` rather than lose it.
+prefix>.json` and the newest ten are retained. `--stdout` writes nothing to
+disk. A write failure exits 1 and says the bundle was collected, so an operator
+can rerun with `--stdout` rather than lose it.
+
+Writing is deliberate about the destination. The file is created exclusively at
+`0600` under a random temporary name and renamed into place: `writeFile`'s
+`mode` applies only when it creates the path, so writing straight to the target
+would inherit a pre-existing file's permissions and would follow a pre-existing
+symlink out of the directory. Exclusive creation refuses both, and `rename`
+replaces a symlink at the destination rather than following it.
+
+Retention deletes files, so it is doubly guarded: a candidate must match the
+exact `psyche-support-<UTC stamp>-<12 hex>.json` pattern **and** parse as a
+bundle carrying this schema. A file a person named that way is left alone and
+counted as a retention failure, which the summary reports rather than
+swallowing. The bundle just written is never a candidate at any retention
+value. Two concurrent runs in one directory can still each prune beyond the
+limit; the newest bundle always survives, so this costs an older snapshot
+rather than the one just collected.
+
+`--out` is a single-file export to a directory the command does not own, so
+retention is disabled there entirely — pruning an arbitrary directory could
+remove another project's or another tool's files.
 
 The command holds no control-plane authority, so its provenance is always
 `verification: 'unverified'` and its bundles cannot reach `complete`. That is
@@ -149,6 +167,17 @@ worktree recovery markers and quarantined recovery files, which raise the
 bundle status to `recovery_required`. Lifecycle, provider, updater, graphics,
 receipt, and terminal facts remain uncollected; those sections are empty rather
 than fabricated.
+
+The project identity digest hashes the canonical project root, resolved the way
+the recovery readers resolve it, so one project reached through a symlink
+digests to one identity rather than one per spelling of its path.
+
+The recovery scan is bounded and cancellable like the rest of collection: at
+most 256 files, none larger than 64 KiB, stopping on the collector's abort
+signal. A file over that size is quarantined unread, and a scan that hits its
+bound reports `state: 'partial'` so partial counts are not read as a whole
+directory. `psyche recover` passes no bounds, because the operator surface must
+report everything.
 
 Collector fields must use the contract's closed key and value vocabulary. A key
 outside `SAFE_STATE_KEYS`, or a string outside `SAFE_DIAGNOSTIC_VALUES`, is

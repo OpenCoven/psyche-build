@@ -1657,7 +1657,11 @@ class Psyche {
   }
 
   if (isSupportBundleMode()) {
-    process.exit(await handleSupportBundleCli());
+    // `--stdout` can emit up to the 64 KiB bundle cap. `process.exit` would
+    // terminate before a piped stdout drains and truncate it, so the exit code
+    // is set and the entrypoint returns instead.
+    process.exitCode = await handleSupportBundleCli();
+    return;
   }
 
   const remotePaneActionArg = getArgValue('--remote-pane-action');
