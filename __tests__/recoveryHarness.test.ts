@@ -31,6 +31,9 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'cleanup-retry-blocked-by-marker',
   'worktree-branch-unchanged',
   'clean-worktree-control-removed',
+  'provider-failure-classified',
+  'available-provider-still-executes',
+  'plain-terminal-lane-remains-usable',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -155,6 +158,24 @@ describe('disposable recovery harness', () => {
     for (const id of expected) {
       expect(byId.get(id), id).toBe(true);
     }
+  });
+
+  it('fails an unavailable provider closed without costing the terminal lane', async () => {
+    const report = await runRecoveryHarness(['unavailable-providers']);
+    const [scenario] = report.scenarios;
+
+    expect(scenario.classification).toBe('provider_unavailable');
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    expect(byId.get('provider-failure-classified')).toBe(true);
+    // Positive control: rejecting every provider would satisfy the fail-closed
+    // invariant while removing all optional capability.
+    expect(byId.get('available-provider-still-executes')).toBe(true);
+    // An unavailable optional provider must never cost the operator the lane
+    // that needs no provider at all.
+    expect(byId.get('plain-terminal-lane-remains-usable')).toBe(true);
+    expect(byId.get('persisted-config-unchanged')).toBe(true);
+    expect(byId.get('uncommitted-work-untouched')).toBe(true);
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {
