@@ -31,7 +31,7 @@ operate, recover, and remove the application.
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
-| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; six bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; seven bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
 
 The open #196/#239 row does not make the already-delivered macOS artifact
@@ -432,8 +432,12 @@ by the cleanup service. This scenario does not prove interruption during a Git
 mutation, automatic crash reconciliation, application restart, or packaged GUI
 acceptance. It does not close #196, #199, or #239.
 
-The remaining #199 scenarios — unavailable providers and upgrade recovery —
-are not yet implemented and must not be implied by a passing run.
+The remaining #199 scenarios — application restart, unavailable providers, and
+upgrade recovery — are not yet implemented and must not be implied by a passing
+run. No scenario launches, terminates, and relaunches the application: the
+restart-adjacent scenarios reopen the control journal or construct a restarted
+owner epoch in process. Stale-identity coverage is likewise partial, exercising
+a stale config lease rather than the stale pane/session identity path.
 
 ## Failure-oriented acceptance — #239
 

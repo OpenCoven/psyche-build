@@ -366,12 +366,12 @@ same-LAN beta; it does not block that beta.
 ## Active follow-through — operations and contributor readiness
 
 #199/#243 retains its P1 dependency gate for the scenarios that remain:
-unavailable providers and upgrade recovery still follow observed #239 operator
-cases rather than being inferred.
+application restart, unavailable providers, and upgrade recovery still follow
+observed #239 operator cases rather than being inferred.
 
 Support-bundle schema and redaction landed through PR #278, and #243 closed
 with it. The reusable disposable failure-injection and recovery harness landed
-through PRs #354-#359: six scenarios driving the real production paths, a
+through PRs #354-#359: seven scenarios driving the real production paths, a
 `pnpm recovery:harness` entry point that runs from a clean checkout, and a
 Quality CI step that retains each run's report as a build artifact. Every
 invariant was proved load-bearing by reintroducing the defect it guards.
@@ -385,10 +385,12 @@ debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 
 #199 remains open for the failure classes the harness deliberately does not
-cover — unavailable providers, upgrade recovery, and interrupting
-`WorktreeCleanupService` mid-flight — plus the support-bundle production
-surface. The first two need observed #239 operator cases or two real installed
-builds, so they stay gated rather than inferred.
+cover — application restart, unavailable providers, upgrade recovery, and
+interrupting `WorktreeCleanupService` mid-flight — plus the stale pane/session
+identity path, which production recovery distinguishes from the stale config
+lease the harness drives, plus the support-bundle production surface.
+Unavailable providers and upgrade recovery need observed #239 operator cases or
+two real installed builds, so they stay gated rather than inferred.
 
 The source harness now also exercises a real cleanup-worker interruption after
 project-lease acquisition and before Git mutation. It proves stale-lease
