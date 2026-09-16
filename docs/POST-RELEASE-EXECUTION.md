@@ -401,10 +401,13 @@ can be added to the recovery harness.
 
 Observed on `main` at `ef131ac9`:
 
-- No persisted file carries a schema version. `.psyche/psyche.config.json`, the
-  state every existing scenario drives, has no version field; the nested
-  `paneLayout.version` check skips reconciliation on mismatch rather than
-  refusing or migrating.
+- The primary persisted state carries no schema version.
+  `.psyche/psyche.config.json`, the state every existing scenario drives, has
+  no version field; the nested `paneLayout.version` check skips reconciliation
+  on mismatch rather than refusing or migrating. The versioned formats that do
+  exist, listed below, are narrow side files rather than the project
+  configuration, so no versioned read path covers the state a scenario would
+  need to age.
 - Exactly one comparison of persisted state against the running application
   version exists, in `AutoUpdater`. Its only effect is discarding a cached
   update banner.
