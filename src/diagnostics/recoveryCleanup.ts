@@ -46,7 +46,16 @@ export async function awaitCleanupQuiescence(projectRoot: string, timeoutMs = 5_
   }
 }
 
-function cleanupWorker(projectRoot: string, branch: 'retained' | 'control', env: NodeJS.ProcessEnv) {
+/**
+ * Forks the real `WorktreeCleanupService` queue in a disposable child so a
+ * scenario can terminate it at a chosen boundary. Exported for the
+ * mid-mutation scenario, which interrupts the same queue at a later point.
+ */
+export function cleanupWorker(
+  projectRoot: string,
+  branch: 'retained' | 'control',
+  env: NodeJS.ProcessEnv,
+) {
   const compiled = fileURLToPath(new URL('./recoveryCleanupChild.js', import.meta.url));
   const source = fileURLToPath(new URL('./recoveryCleanupChild.ts', import.meta.url));
   const child = fork(existsSync(compiled) ? compiled : source, [], {

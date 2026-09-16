@@ -31,7 +31,7 @@ operate, recover, and remove the application.
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
-| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; nine bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; ten bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
 
 The open #196/#239 row does not make the already-delivered macOS artifact
@@ -365,6 +365,7 @@ Current scenarios:
 | `interrupted-cleanup-owner` | Real cleanup worker killed after acquiring its project lease, before Git mutation | `cleanup-owner-interrupted`, `cleanup-project-lease-recovered`, `cleanup-retry-blocked-by-marker`, `worktree-retained-after-interruption`, `worktree-branch-unchanged`, `clean-worktree-control-removed`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
 | `unavailable-providers` | An unregistered capability provider and an absent Coven daemon socket | `provider-failure-classified`, `available-provider-still-executes`, `plain-terminal-lane-remains-usable`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 | `stale-pane-identity` | A replaced tmux server that hands the recorded pane ID to a pane the persisted record never owned | `replaced-server-reused-pane-id`, `stale-pane-identity-reported`, `reused-pane-id-not-adopted`, `live-pane-rebinds-to-current-identity`, `rebind-clears-stale-background-windows`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
+| `interrupted-git-mutation` | Cleanup owner killed while its supervised `git worktree remove` is live | `mutation-observed-in-flight`, `cleanup-owner-killed-during-mutation`, `worktree-state-self-consistent`, `interrupted-mutation-left-no-orphan`, `cleanup-project-lease-recovered`, `worktree-branch-unchanged`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
@@ -409,7 +410,34 @@ Its scope is deliberately narrow: it proves the durable-evidence half — the
 worktree and its uncommitted file survive, and the published marker names the
 worktree and carries operator instructions. It does **not** interrupt
 `WorktreeCleanupService` mid-flight, so it must not be read as covering the
-full cleanup path.
+full cleanup path; `interrupted-git-mutation` below covers that boundary.
+
+`interrupted-git-mutation` covers the boundary the two scenarios above
+deliberately avoid. It kills the same real cleanup queue while its supervised
+`git worktree remove` is live: the leases are claimed, the pending mutation is
+recorded, and the Git process group is tracked, but Git has not reported a
+result. A shim on the child's `PATH` holds that one command at its first
+instruction so the window can be hit deterministically, then execs the real Git
+binary — Git is never replaced or simulated, and no product code is mocked.
+
+Its invariants are about the state an operator is left in rather than which
+side of the race won. The worktree must be either fully removed and
+unregistered or fully present and still registered; a directory removed while
+its registration survives, or the reverse, is how the only copy of work
+disappears silently. No Git process from the interrupted mutation may outlive
+the interruption, because one that does keeps mutating a repository nobody
+supervises. The project lifecycle lease must be recoverable rather than
+stranded by an owner that died holding it, and the branch, persisted config,
+and uncommitted work must be untouched.
+
+`mutation-observed-in-flight` is the injection's positive control, reported as
+`injection_ineffective` when the queue never reached its mutation, so a run
+that interrupted nothing cannot report every preservation invariant as held.
+
+Scope: the interruption lands between the product handing off to Git and Git
+answering. It does not prove interruption *after* Git has begun writing to the
+object store or the worktree administrative files; that needs a fault injected
+inside Git rather than around it.
 
 `interrupted-cleanup-owner` extends that coverage through the real
 `WorktreeCleanupService` queue in disposable child processes. The harness holds
@@ -458,7 +486,8 @@ Reports never include child output, process identifiers,
 paths, or branch names. The marker is published by the harness, not automatically
 by the cleanup service. This scenario does not prove interruption during a Git
 mutation, automatic crash reconciliation, application restart, or packaged GUI
-acceptance. It does not close #196, #199, or #239.
+acceptance; `interrupted-git-mutation` covers the Git-mutation boundary
+separately. It does not close #196, #199, or #239.
 
 The remaining #199 scenarios — application restart and upgrade recovery — are
 not yet implemented and must not be implied by a passing run. The
