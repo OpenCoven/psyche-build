@@ -19,6 +19,10 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { observeInterruptedCleanup, RecoveryCleanupRetentionError } from './recoveryCleanup.js';
+import {
+  observeReplacedTmuxIdentity,
+  RecoveryTmuxUnavailableError,
+} from './recoveryTmuxIdentity.js';
 
 import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
@@ -51,7 +55,8 @@ export type RecoveryScenarioId =
   | 'stale-owner-epoch'
   | 'interrupted-cleanup-recovery-marker'
   | 'interrupted-cleanup-owner'
-  | 'unavailable-providers';
+  | 'unavailable-providers'
+  | 'stale-pane-identity';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -61,7 +66,8 @@ export type RecoveryInjectionId =
   | 'lease-asserted-with-pre-restart-owner-epoch'
   | 'cleanup-abandoned-after-marker-publication'
   | 'cleanup-owner-killed-before-git-mutation'
-  | 'capability-provider-unregistered-and-daemon-socket-absent';
+  | 'capability-provider-unregistered-and-daemon-socket-absent'
+  | 'tmux-server-replaced-reusing-recorded-pane-id';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -73,6 +79,8 @@ export type RecoveryClassification =
   | 'owner_restart_fenced'
   | 'cleanup_recoverable'
   | 'provider_unavailable'
+  | 'stale_identity_rejected'
+  | 'tmux_unavailable'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -102,7 +110,12 @@ export type RecoveryInvariantId =
   | 'clean-worktree-control-removed'
   | 'provider-failure-classified'
   | 'available-provider-still-executes'
-  | 'plain-terminal-lane-remains-usable';
+  | 'plain-terminal-lane-remains-usable'
+  | 'replaced-server-reused-pane-id'
+  | 'stale-pane-identity-reported'
+  | 'reused-pane-id-not-adopted'
+  | 'live-pane-rebinds-to-current-identity'
+  | 'rebind-clears-stale-background-windows';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -775,6 +788,81 @@ async function runUnavailableProviders(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * Named in #196 and left partially covered by #199: a stale or replaced tmux
+ * identity must be reported and never rebound to unrelated state. Every other
+ * scenario in this harness ages a *lease*; this one ages the pane identity
+ * itself, which production recovery treats as a separate path.
+ *
+ * The injection replaces a real tmux server. The replacement restarts pane
+ * numbering, so the recorded `%0` is handed to a pane the persisted record
+ * never owned — the collision that makes a restart able to resize, kill, or
+ * type into someone else's pane.
+ *
+ * Two real production paths are driven, neither mocked:
+ *   1. `paneTmuxIdentityIsCurrent`, which must refuse the reused ID because
+ *      its server generation differs, not merely because the ID is absent.
+ *   2. `rebindPaneByTitle`, which must leave the stale record alone rather
+ *      than adopting the reused ID that its title now resolves to.
+ *
+ * `live-pane-rebinds-to-current-identity` is a deliberate positive control:
+ * refusing every rebind would satisfy the fail-closed invariants while
+ * stranding every pane that legitimately moved across the restart.
+ *
+ * Scope: this observes the identity and rebinding boundary that persisted
+ * records pass through on load. It does not prove that a pane which dies
+ * mid-command reports a terminal outcome, and it does not observe the
+ * application itself restarting; both remain #199 gaps.
+ */
+async function runStalePaneIdentity(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+
+    let observed: Awaited<ReturnType<typeof observeReplacedTmuxIdentity>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observeReplacedTmuxIdentity(workspace.projectRoot);
+      classification = observed.reusedRecordedPaneId
+        ? 'stale_identity_rejected'
+        : 'injection_ineffective';
+    } catch (error) {
+      // A host that cannot run tmux observes nothing. The scenario records why
+      // and fails, rather than reporting an unexercised path as passed.
+      classification = error instanceof RecoveryTmuxUnavailableError
+        ? 'tmux_unavailable'
+        : 'unexpected_error';
+    }
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    return evidence(
+      'stale-pane-identity',
+      'tmux-server-replaced-reusing-recorded-pane-id',
+      classification,
+      [
+        { id: 'replaced-server-reused-pane-id', held: observed?.reusedRecordedPaneId === true },
+        { id: 'stale-pane-identity-reported', held: observed?.staleIdentityReported === true },
+        { id: 'reused-pane-id-not-adopted', held: observed?.reusedPaneIdNotAdopted === true },
+        { id: 'live-pane-rebinds-to-current-identity', held: observed?.livePaneRebound === true },
+        {
+          id: 'rebind-clears-stale-background-windows',
+          held: observed?.backgroundBindingsCleared === true,
+        },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'uncommitted-work-untouched', held: workAfter === digest('the only copy of this work\n') },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -786,6 +874,7 @@ const SCENARIOS: Readonly<
   'interrupted-cleanup-recovery-marker': runInterruptedCleanupRecoveryMarker,
   'interrupted-cleanup-owner': runInterruptedCleanupOwner,
   'unavailable-providers': runUnavailableProviders,
+  'stale-pane-identity': runStalePaneIdentity,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
