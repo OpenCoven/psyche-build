@@ -50,6 +50,8 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'adopted-config-carries-current-schema',
   'first-run-reached-workspace',
   'pane-created-before-quit',
+  'restart-kept-its-project-config',
+  'restart-stayed-inside-its-project',
   'restart-did-not-duplicate-live-panes',
   'normal-quit-ended-cockpit',
   'restart-restored-workspace',

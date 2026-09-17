@@ -430,7 +430,18 @@ observed nothing cannot read as a pass.
 A hard guard refuses any project root at or beneath this checkout. The cockpit
 adopts its working directory as its project and rewrites that project's
 `.psyche` state on startup, so a mis-scoped launch would destroy a developer's
-own workspace. That guard has its own test and is not a convention.
+own workspace. The comparison is made on **canonicalized** paths: a lexical one
+is bypassed by a symlink that points into the checkout, which reads as outside
+while resolving inside. The guard has its own tests, including that symlink,
+and is not a convention.
+
+The scenario separates containment from preservation. `uncommitted-work-untouched`
+reads the restarted project's own work file; `restart-stayed-inside-its-project`
+reads the outer fixture's files, which the cockpit must never touch. Asserting
+equality on the restarted project's own config would be wrong — a restart
+rewrites it, which is the point — so `restart-kept-its-project-config` asserts
+it stays readable and `restart-preserved-project-identity` asserts it still
+names the same project.
 
 Scope: it observes quit and relaunch of a workspace whose panes run no agents.
 It does not observe a crash mid-transition, a restart with live agent panes, or

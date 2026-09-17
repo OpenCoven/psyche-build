@@ -1,5 +1,7 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import {
   assertDisposableRoot,
@@ -14,6 +16,11 @@ import {
 const CHECKOUT = '/repo/psyche-build';
 
 describe('application restart scenario', () => {
+  const cleanup: string[] = [];
+  afterAll(() => {
+    for (const dir of cleanup) rmSync(dir, { recursive: true, force: true });
+  });
+
   // The cockpit adopts its working directory as its project root and rewrites
   // that project's .psyche state on startup. A launch pointed at the checkout
   // therefore destroys the developer's own workspace, which is why this is a
@@ -28,6 +35,32 @@ describe('application restart scenario', () => {
       expect(() => assertDisposableRoot(unsafe, CHECKOUT), unsafe)
         .toThrow(RecoveryRestartUnavailableError);
     }
+  });
+
+  // A lexical comparison is bypassed by a symlink pointing into the checkout:
+  // the path reads as outside, the cockpit launches, and it rewrites the
+  // checkout's .psyche state anyway — the failure this guard exists to stop.
+  it('refuses a symlink that resolves into the checkout', () => {
+    const checkout = realpathSync(mkdtempSync(path.join(tmpdir(), 'psyche-guard-checkout-')));
+    const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'psyche-guard-outside-')));
+    cleanup.push(checkout, outside);
+    mkdirSync(path.join(checkout, 'workspace'));
+
+    const link = path.join(outside, 'looks-external');
+    symlinkSync(path.join(checkout, 'workspace'), link);
+
+    // Both the link itself and the project directory derived beneath it, which
+    // is the shape `observeApplicationRestart` actually builds.
+    expect(() => assertDisposableRoot(link, checkout))
+      .toThrow(RecoveryRestartUnavailableError);
+    expect(() => assertDisposableRoot(path.join(link, 'project'), checkout))
+      .toThrow(RecoveryRestartUnavailableError);
+
+    // A real directory outside the checkout still passes, so the guard is
+    // rejecting the resolved target rather than anything under a temp root.
+    mkdirSync(path.join(outside, 'real'));
+    expect(() => assertDisposableRoot(path.join(outside, 'real', 'project'), checkout))
+      .not.toThrow();
   });
 
   it('allows a disposable root outside the checkout', () => {

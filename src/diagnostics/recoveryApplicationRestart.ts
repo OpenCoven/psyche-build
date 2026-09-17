@@ -28,6 +28,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
+import { canonicalizePathWithExistingAncestor } from '../services/WorktreePath.js';
+
 /** Raised when the host cannot run the cockpit, so nothing was observed. */
 export class RecoveryRestartUnavailableError extends Error {
   constructor(reason: string) {
@@ -99,6 +101,13 @@ export interface ApplicationRestartObservation {
   readonly noDuplicateLivePanes: boolean;
   /** The only copy of uncommitted work in the project is byte-identical. */
   readonly workPreserved: boolean;
+  /**
+   * The restarted project's own config is readable and still names this
+   * project. It is expected to be rewritten across a restart, so equality
+   * would be the wrong claim; identity is checked by
+   * {@link ApplicationRestartObservation.projectIdentityStable}.
+   */
+  readonly projectConfigReadable: boolean;
 }
 
 /**
@@ -110,7 +119,14 @@ export interface ApplicationRestartObservation {
  * than a comment: exported for its own test.
  */
 export function assertDisposableRoot(projectRoot: string, checkoutRoot: string): void {
-  const relative = path.relative(path.resolve(checkoutRoot), path.resolve(projectRoot));
+  // Canonicalized, not merely resolved. A lexical comparison is bypassed by a
+  // symlink that points into the checkout: the path looks outside, the cockpit
+  // launches, and it rewrites the checkout's `.psyche` state anyway — the exact
+  // failure this guard exists to make impossible.
+  const relative = path.relative(
+    canonicalizePathWithExistingAncestor(checkoutRoot),
+    canonicalizePathWithExistingAncestor(projectRoot),
+  );
   const insideCheckout = relative === ''
     || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
   if (insideCheckout) {
@@ -274,6 +290,7 @@ export async function observeApplicationRestart(
       // pointing at nothing.
       noDuplicateManagedPanes: restoredPaneLive,
       noDuplicateWorktrees: worktreesAfter === worktreesBefore,
+      projectConfigReadable: after !== undefined,
       // The restart did not leave a second cockpit running alongside its own.
       noDuplicateLivePanes: countCockpitPanes(socketPath, session) === 1,
   workPreserved: await readFileOrUndefined(workPath) === workBefore,
@@ -307,6 +324,7 @@ function unobserved(firstRunReachedWorkspace: boolean): ApplicationRestartObserv
     noDuplicateManagedPanes: false,
     noDuplicateLivePanes: false,
     workPreserved: false,
+    projectConfigReadable: false,
   };
 }
 
