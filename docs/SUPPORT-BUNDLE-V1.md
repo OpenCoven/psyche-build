@@ -167,16 +167,25 @@ worktree recovery markers and quarantined recovery files, which raise the
 bundle status to `recovery_required` — plus pane lifecycle and updater state.
 
 `lifecycle` carries the persisted pane count and whether a pane layout exists.
-`updater` carries whether auto-update is enabled, whether an update was cached
-as available, and whether that cache was computed for the running build:
+`updater` carries whether auto-update is effectively enabled — `AutoUpdater`
+defaults an absent section to enabled and disables only on an explicit `false`,
+so the bundle reports that behaviour rather than the literal config — whether an
+update was cached as available, and whether that cache was computed for the
+running build:
 `state: 'stale'` means `cachedCurrentVersion` no longer matches, which is the
 one place this application compares persisted state against the running
 version. Both read persisted state only. Neither starts a process, probes tmux,
 or needs a running server, because a bundle must be collectable from an
 installation that is not working.
 
-A config that exists but fails the schema gate — corrupt, or written by a newer
-Psyche — reports `lifecycle.state` and `updater.state` as `unavailable` while
+Both sections resolve from one bounded read of the project config, shared
+between them: `readProjectPaneConfig` parses the whole file with no size bound
+and no interruptible parse, and a bundle must not be the thing that hangs on a
+corrupt installation. A config over 1 MiB is not parsed at all.
+
+A config that exists but fails the schema gate, or exceeds that read bound —
+corrupt, or written by a newer Psyche — reports `lifecycle.state` and
+`updater.state` as `unavailable` while
 `persistence.projectConfig` still reports `available`. The pair is what carries
 the meaning: the file is there and this version cannot read it. One unreadable
 config does not fail the whole collection.

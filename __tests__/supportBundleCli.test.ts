@@ -200,7 +200,10 @@ describe('support bundle collectors', () => {
         { autoUpdateEnabled: false, cachedCurrentVersion: '0.0.1', cachedHasUpdate: true },
         { mode: 'disabled', state: 'stale', capability: 'available' },
       ],
-      [{}, { mode: 'unknown', state: 'unknown', capability: 'missing' }],
+      // `AutoUpdater` defaults an absent section to enabled and disables only
+      // on an explicit `false`, so the bundle must report the behaviour.
+      [{}, { mode: 'enabled', state: 'unknown', capability: 'missing' }],
+      [{ cachedCurrentVersion: '0.0.2' }, { mode: 'enabled', state: 'current', capability: 'missing' }],
     ];
 
     for (const [updateSettings, expected] of cases) {
@@ -218,6 +221,70 @@ describe('support bundle collectors', () => {
       expect(bundle.redaction.omittedFields).toBe(0);
       expect(bundle.updater).toEqual(expected);
     }
+  });
+
+  it('reports an absent updater section as effectively enabled', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes: [] }),
+      'utf8',
+    );
+
+    const bundle = await collect(projectRoot);
+
+    // Reporting `unknown` would describe the config; the operator needs the
+    // behaviour, and the behaviour is "updates are on".
+    expect(bundle.updater).toMatchObject({ mode: 'enabled' });
+  });
+
+  it('refuses to parse a project config beyond the read bound', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    // Valid JSON, but larger than any real config: a bundle collected from a
+    // broken installation must not be the thing that hangs on it.
+    const filler = 'x'.repeat(1024);
+    const panes = Array.from({ length: 1200 }, (_, index) => ({ id: `${filler}-${index}` }));
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes }),
+      'utf8',
+    );
+
+    const bundle = await collect(projectRoot);
+
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.lifecycle).toEqual({ state: 'unavailable' });
+    expect(bundle.updater).toEqual({ state: 'unavailable' });
+    expect(bundle.persistence).toMatchObject({ projectConfig: 'available' });
+  });
+
+  it('reads the project config once for every section that needs it', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes: [{ id: 'a' }] }),
+      'utf8',
+    );
+    const collectors = createSupportCollectors({
+      projectRoot,
+      releaseVersion: '0.0.2',
+      platform: 'darwin',
+      architecture: 'arm64',
+    });
+    const signal = new AbortController().signal;
+
+    // Both sections resolve from one shared snapshot, so a second collector
+    // cannot re-parse the same unbounded file.
+    const [lifecycle, updater] = await Promise.all([
+      collectors.find((collector) => collector.name === 'lifecycle')!.collect(signal),
+      collectors.find((collector) => collector.name === 'updater')!.collect(signal),
+    ]);
+
+    expect(lifecycle.lifecycle).toMatchObject({ panes: 1 });
+    expect(updater.updater).toMatchObject({ mode: 'enabled' });
   });
 
   it('gives every bundle field exactly one owning collector', async () => {
