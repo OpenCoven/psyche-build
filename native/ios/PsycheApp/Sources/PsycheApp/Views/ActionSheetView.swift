@@ -119,6 +119,29 @@ struct ActionSheetView: View {
                 message: presentation.message,
                 targetPaneID: targetPaneID
             )
+        case .reconciliationRequired:
+            reconciliationSection(presentation)
+        }
+    }
+
+    /// An unknown outcome shows what was attempted and against which host, so
+    /// the operator can check the host rather than guess. It offers no retry.
+    @ViewBuilder
+    private func reconciliationSection(
+        _ presentation: RemoteActionPresentation
+    ) -> some View {
+        Section("Unresolved") {
+            Text(presentation.message)
+            Text("This request may already have taken effect on the host. Check the host before acting again.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        if !presentation.scope.rows.isEmpty {
+            Section("Reconcile against") {
+                ForEach(presentation.scope.rows) { row in
+                    LabeledContent(row.label, value: row.value)
+                }
+            }
         }
     }
 
@@ -330,6 +353,15 @@ struct ActionSheetView: View {
         case .terminal, .navigation:
             Section("Controls") {
                 dismissButton("Done")
+            }
+        case .reconciliationRequired:
+            Section("Controls") {
+                Button("The host shows it was applied") {
+                    store.resolveUnknownOutcome(forPane: presentation.paneID, as: .observedApplied)
+                }
+                Button("The host shows it was not applied") {
+                    store.resolveUnknownOutcome(forPane: presentation.paneID, as: .observedNotApplied)
+                }
             }
         }
     }

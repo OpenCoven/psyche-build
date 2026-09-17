@@ -516,7 +516,13 @@ final class RemoteActionStoreTests: XCTestCase {
         XCTAssertFalse(store.isBusy(paneID))
     }
 
-    func testTransportFailureAfterInputPreservesRecoveryTextAndClearsBusy() async {
+    /// Previously this asserted an ordinary dismissable failure with the pane
+    /// released, and preserved the operator's draft. `rename` mutates host
+    /// state, so a transport failure after dispatch is now an unknown outcome
+    /// and the pane stays guarded. The draft is deliberately NOT carried into
+    /// that state: an unknown outcome persists until resolved by hand, and raw
+    /// operator input must not sit in published state for an unbounded time.
+    func testTransportFailureAfterInputGuardsPaneWithoutRetainingTheDraft() async {
         let requests = ActionControlRequests(responses: [
             .actionResult(actionResult(
                 requestID: "req-1",
@@ -530,10 +536,13 @@ final class RemoteActionStoreTests: XCTestCase {
 
         await store.respond(.input(value: "new title"), recoveryText: "new title")
 
-        assertVisibleError(store.presentation)
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
         XCTAssertEqual(store.presentation?.message, TestTransportError.disconnected.localizedDescription)
-        XCTAssertEqual(store.presentation?.recoveryText, "new title")
-        XCTAssertFalse(store.isBusy(paneID))
+        XCTAssertNil(store.presentation?.recoveryText)
+        XCTAssertFalse(store.unknownOutcome(forPane: paneID).map {
+            "\($0)".contains("new title")
+        } ?? false)
+        XCTAssertTrue(store.isBusy(paneID))
         XCTAssertFalse(store.isSubmitting)
     }
 
@@ -808,6 +817,229 @@ private extension RemoteActionStoreTests {
             line: line
         )
         XCTAssertFalse(store.isBusy(paneID), file: file, line: line)
+    }
+}
+
+extension RemoteActionStoreTests {
+    private func storeAwaitingConfirm(
+        action: PaneAction = .merge,
+        failingWith error: any Error
+    ) async -> (RemoteActionStore, ActionControlRequests) {
+        let requests = ActionControlRequests(responses: [
+            .actionResult(actionResult(
+                requestID: "req-1",
+                sessionID: "session-1",
+                type: "confirm"
+            )),
+        ])
+        let store = RemoteActionStore(controlRequests: requests)
+        await store.start(action: action, onPane: paneID, in: workspace)
+        await requests.failNext(error)
+        return (store, requests)
+    }
+
+    // A control-request timeout does not cancel host execution, so a merge that
+    // updated a branch and then waited on a hook cannot be reported as failed.
+    func testTimeoutAfterConfirmLeavesTheOutcomeUnknown() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+        XCTAssertEqual(store.presentation?.title, "This may have taken effect")
+        XCTAssertFalse(store.presentation?.dismissable == true)
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    func testDisconnectAfterConfirmLeavesTheOutcomeUnknown() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.disconnected
+        )
+
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    func testUnknownOutcomePreservesReconciliationContext() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+
+        await store.respond(.confirm)
+
+        let outcome = store.unknownOutcome(forPane: paneID)
+        XCTAssertEqual(outcome?.paneID, paneID)
+        XCTAssertEqual(outcome?.action, .merge)
+        XCTAssertEqual(outcome?.sessionID, "session-1")
+        XCTAssertEqual(outcome?.requestID, store.presentation?.requestID)
+        // The scope carried from the confirm is retained for reconciliation.
+        XCTAssertEqual(outcome?.scope, store.presentation?.scope)
+    }
+
+    func testDismissCannotClearAnUnknownOutcome() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+        await store.respond(.confirm)
+
+        store.dismiss()
+
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+        XCTAssertTrue(store.isBusy(paneID))
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    func testUnknownOutcomeBlocksAFreshActionOnThatPane() async {
+        let (store, requests) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+        await store.respond(.confirm)
+        let sentBefore = await requests.sentCount
+
+        XCTAssertFalse(store.canStartAction(onPane: paneID))
+        await store.start(action: .merge, onPane: paneID, in: workspace)
+
+        let sentAfter = await requests.sentCount
+        XCTAssertEqual(sentAfter, sentBefore, "a retry must not be dispatched")
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+    }
+
+    func testOnlyAnExplicitResolutionReleasesThePane() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+        await store.respond(.confirm)
+
+        store.resolveUnknownOutcome(forPane: paneID, as: .observedApplied)
+
+        XCTAssertNil(store.unknownOutcome(forPane: paneID))
+        XCTAssertFalse(store.isBusy(paneID))
+        XCTAssertTrue(store.presentation?.message.contains("was applied") == true)
+        // An action the host applied is not a failure, and must not be dressed
+        // as one: "That did not work" invites the duplicate retry this guards.
+        XCTAssertEqual(store.presentation?.content, .terminal(.success))
+        XCTAssertEqual(store.presentation?.title, "Reconciled")
+    }
+
+    func testResolvingAsNotAppliedReportsItAsReconciledNotAsAnError() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+        await store.respond(.confirm)
+
+        store.resolveUnknownOutcome(forPane: paneID, as: .observedNotApplied)
+
+        XCTAssertEqual(store.presentation?.title, "Reconciled")
+        XCTAssertEqual(store.presentation?.content, .terminal(.info))
+        XCTAssertTrue(store.presentation?.message.contains("was not applied") == true)
+        XCTAssertFalse(store.isBusy(paneID))
+    }
+
+    func testResolvingOnePaneDoesNotReleaseAnother() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+        await store.respond(.confirm)
+
+        store.resolveUnknownOutcome(forPane: "some-other-pane", as: .observedApplied)
+
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+        XCTAssertTrue(store.isBusy(paneID))
+    }
+
+    // A request the transport refused before handing it to the host is a known
+    // outcome, and must stay an ordinary failure rather than becoming noise.
+    func testPreDispatchRejectionStaysAnOrdinaryFailure() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.duplicateRequestID("req-2")
+        )
+
+        await store.respond(.confirm)
+
+        assertVisibleError(store.presentation)
+        XCTAssertFalse(store.isBusy(paneID))
+        XCTAssertNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    // A host error raised before the action callback runs proves no effect.
+    func testPreEffectHostErrorStaysAnOrdinaryFailure() async {
+        for code in ["action_session_not_found", "invalid_action_response", "project_scope_violation"] {
+            let (store, _) = await storeAwaitingConfirm(
+                failingWith: MobileProtocolErrorResponse(
+                    requestID: "req-2",
+                    code: code,
+                    message: "Refused before the action ran."
+                )
+            )
+
+            await store.respond(.confirm)
+
+            assertVisibleError(store.presentation)
+            XCTAssertNil(store.unknownOutcome(forPane: paneID), code)
+        }
+    }
+
+    // The daemon converts a throw from inside a running action into a generic
+    // `internal_error`, so a host error is not by itself proof of no effect.
+    func testGenericHostErrorLeavesTheOutcomeUnknown() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: MobileProtocolErrorResponse(
+                requestID: "req-2",
+                code: "internal_error",
+                message: "The host failed while running the action."
+            )
+        )
+
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    func testUnrecognisedHostErrorCodeLeavesTheOutcomeUnknown() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: MobileProtocolErrorResponse(
+                requestID: "req-2",
+                code: "some_code_this_client_has_never_seen",
+                message: "Unknown to this client."
+            )
+        )
+
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    // A read-only action carries no effect to reconcile, so it must not strand
+    // a pane behind an acknowledgement the operator never needed.
+    func testReadOnlyActionFailureStaysAnOrdinaryFailure() async {
+        let (store, _) = await storeAwaitingConfirm(
+            action: .openFileBrowser,
+            failingWith: ControlRequestError.timedOut("req-2")
+        )
+
+        await store.respond(.confirm)
+
+        assertVisibleError(store.presentation)
+        XCTAssertFalse(store.isBusy(paneID))
+        XCTAssertNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    func testEveryMutatingActionIsTreatedAsConsequential() {
+        for action in PaneAction.allCases {
+            switch action {
+            case .view, .copyPath, .openOutput, .openInEditor, .openFileBrowser:
+                XCTAssertFalse(action.mayHaveConsequentialEffect, "\(action)")
+            default:
+                XCTAssertTrue(action.mayHaveConsequentialEffect, "\(action)")
+            }
+        }
     }
 }
 
