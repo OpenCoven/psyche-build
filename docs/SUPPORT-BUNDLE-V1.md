@@ -162,11 +162,27 @@ the honest state for an operator-invoked snapshot; it is not a defect to
 "fix" by manufacturing a capability.
 
 Collectors currently report platform, release, architecture, a project
-identity digest, project-config presence, and outstanding recovery state —
+identity digest, project-config presence, outstanding recovery state —
 worktree recovery markers and quarantined recovery files, which raise the
-bundle status to `recovery_required`. Lifecycle, provider, updater, graphics,
-receipt, and terminal facts remain uncollected; those sections are empty rather
-than fabricated.
+bundle status to `recovery_required` — plus pane lifecycle and updater state.
+
+`lifecycle` carries the persisted pane count and whether a pane layout exists.
+`updater` carries whether auto-update is enabled, whether an update was cached
+as available, and whether that cache was computed for the running build:
+`state: 'stale'` means `cachedCurrentVersion` no longer matches, which is the
+one place this application compares persisted state against the running
+version. Both read persisted state only. Neither starts a process, probes tmux,
+or needs a running server, because a bundle must be collectable from an
+installation that is not working.
+
+A config that exists but fails the schema gate — corrupt, or written by a newer
+Psyche — reports `lifecycle.state` and `updater.state` as `unavailable` while
+`persistence.projectConfig` still reports `available`. The pair is what carries
+the meaning: the file is there and this version cannot read it. One unreadable
+config does not fail the whole collection.
+
+Provider, graphics, receipt, and terminal facts remain uncollected; those
+sections are empty rather than fabricated.
 
 The project identity digest hashes the canonical project root, resolved the way
 the recovery readers resolve it, so one project reached through a symlink

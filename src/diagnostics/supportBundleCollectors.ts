@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { collectRecoveryListing } from './recoveryReport.js';
+import { readProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 import { normalizeCanonicalProjectIdentity } from '../control/projectIdentity.js';
 import { canonicalizePathWithExistingAncestor } from '../services/WorktreePath.js';
 import type { SupportBundleInput, SupportCollector } from './supportBundle.js';
@@ -117,7 +118,60 @@ export function createSupportCollectors(
         };
       },
     },
+    {
+      name: 'lifecycle',
+      collect: async (): Promise<SupportBundleInput> => {
+        // Pane facts come from persisted state, not from a live tmux probe: a
+        // support bundle must not start processes or need a running server to
+        // describe the installation it is documenting.
+        try {
+          const config = await readProjectPaneConfig(context.projectRoot);
+          return {
+            lifecycle: {
+              panes: Array.isArray(config.panes) ? config.panes.length : 0,
+              state: config.paneLayout === undefined ? 'missing' : 'available',
+            },
+          };
+        } catch {
+          // A config that exists but cannot be read through the schema gate:
+          // corrupt, or written by a newer Psyche. `persistence` reports the
+          // file as present, so the pair reads "there, unreadable" without
+          // failing the whole collection.
+          return { lifecycle: { state: 'unavailable' } };
+        }
+      },
+    },
+    {
+      name: 'updater',
+      collect: async (): Promise<SupportBundleInput> => {
+        try {
+          const config = await readProjectPaneConfig(context.projectRoot);
+          const settings = isRecord(config.updateSettings) ? config.updateSettings : {};
+          const cachedVersion = settings.cachedCurrentVersion;
+          return {
+            updater: {
+              mode: settings.autoUpdateEnabled === undefined
+                ? 'unknown'
+                : (settings.autoUpdateEnabled ? 'enabled' : 'disabled'),
+              // The one place this application compares persisted state against
+              // the running version. `stale` means the cached update answer was
+              // computed for a different build and no longer describes this one.
+              state: typeof cachedVersion !== 'string'
+                ? 'unknown'
+                : (cachedVersion === context.releaseVersion ? 'current' : 'stale'),
+              capability: settings.cachedHasUpdate === true ? 'available' : 'missing',
+            },
+          };
+        } catch {
+          return { updater: { state: 'unavailable' } };
+        }
+      },
+    },
   ];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
