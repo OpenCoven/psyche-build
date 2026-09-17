@@ -111,6 +111,9 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
         case progress(Double?)
         case terminal(RemoteActionTerminalKind)
         case navigation(targetPaneID: String?)
+        /// The request may already have taken effect and its outcome is not
+        /// known. Distinct from `.terminal(.error)`, which asserts failure.
+        case reconciliationRequired
     }
 
     public let requestID: String
@@ -132,9 +135,16 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
         switch content {
         case .confirm, .choice, .input, .pullRequestReview:
             true
-        case .progress, .terminal, .navigation:
+        case .progress, .terminal, .navigation, .reconciliationRequired:
             false
         }
+    }
+
+    /// An unknown consequential effect keeps its pane guarded until the outcome
+    /// is observed or an operator explicitly resolves it.
+    public var requiresReconciliation: Bool {
+        if case .reconciliationRequired = content { return true }
+        return false
     }
 
     public static func make(
@@ -200,7 +210,7 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
 
         let dismissable: Bool
         switch content {
-        case .confirm, .choice, .input, .pullRequestReview:
+        case .confirm, .choice, .input, .pullRequestReview, .reconciliationRequired:
             dismissable = false
         case .progress, .terminal, .navigation:
             dismissable = true
@@ -242,6 +252,68 @@ public struct RemoteActionPresentation: Sendable, Equatable, Identifiable {
             dismissable: true,
             content: .terminal(.error),
             recoveryText: recoveryText
+        )
+    }
+
+    /// The presentation for an effect that may have happened.
+    ///
+    /// It is deliberately not dismissable: dismissing is how the failure
+    /// presentation releases a pane for a fresh attempt, and a fresh attempt is
+    /// exactly what must not follow an unknown consequential effect. The
+    /// request, session, pane and host scope are retained so the outcome can be
+    /// reconciled against the host rather than guessed.
+    public static func reconciliationRequired(
+        requestID: String,
+        paneID: String,
+        action: PaneAction,
+        sessionID: String?,
+        scope: RemoteActionScope,
+        relatedFiles: [String] = [],
+        message: String,
+        recoveryText: String? = nil
+    ) -> Self {
+        Self(
+            requestID: requestID,
+            paneID: paneID,
+            action: action,
+            actionLabel: action.presentationLabel,
+            title: "This may have taken effect",
+            message: message,
+            sessionID: sessionID,
+            scope: scope,
+            relatedFiles: relatedFiles,
+            dismissable: false,
+            content: .reconciliationRequired,
+            recoveryText: recoveryText
+        )
+    }
+
+    /// The outcome after an operator reconciled an unknown effect against the
+    /// host. Applied is a success, not the failure presentation: the action
+    /// happened, and showing it as an error invites a retry of exactly the
+    /// effect this whole path exists to prevent duplicating.
+    public static func reconciled(
+        requestID: String,
+        paneID: String,
+        action: PaneAction,
+        resolution: UnknownActionResolution
+    ) -> Self {
+        let label = action.presentationLabel.lowercased()
+        return Self(
+            requestID: requestID,
+            paneID: paneID,
+            action: action,
+            actionLabel: action.presentationLabel,
+            title: "Reconciled",
+            message: resolution == .observedApplied
+                ? "The host shows this \(label) was applied. Nothing further is needed."
+                : "The host shows this \(label) was not applied. You can run it again.",
+            sessionID: nil,
+            scope: RemoteActionScope(rows: [], consequence: nil),
+            relatedFiles: [],
+            dismissable: true,
+            content: .terminal(resolution == .observedApplied ? .success : .info),
+            recoveryText: nil
         )
     }
 
@@ -291,6 +363,30 @@ extension RemoteActionPresentation {
 }
 
 public extension PaneAction {
+    /// Whether losing this action's reply could leave a host-side effect behind.
+    ///
+    /// A client-side safety policy, not a claim of canonical identity: the host
+    /// stays authoritative for what an action does. It exists so a lost reply
+    /// for a merge is treated differently from a lost reply for opening a file
+    /// browser. Anything that can change repository, worktree, pane or agent
+    /// state is consequential.
+    ///
+    /// The switch is deliberately exhaustive rather than defaulted: a
+    /// `PaneAction` case added later stops the build here until it is
+    /// classified. A `default: true` would ship the safe answer while hiding
+    /// the decision, and a new action that is genuinely read-only would then be
+    /// stranding panes behind reconciliation prompts nobody chose.
+    var mayHaveConsequentialEffect: Bool {
+        switch self {
+        case .view, .copyPath, .openOutput, .openInEditor, .openFileBrowser:
+            false
+        case .setSource, .close, .merge, .createPR, .rename, .duplicate,
+             .runTest, .runDev, .toggleAutopilot, .attachAgent,
+             .createChildWorktree, .openTerminalInWorktree:
+            true
+        }
+    }
+
     var presentationLabel: String {
         switch self {
         case .view:

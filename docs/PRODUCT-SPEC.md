@@ -154,12 +154,45 @@ cached state. Corrupt or unreadable cache files surface explicit recovery errors
 and preserve the original data where possible; they are not silently replaced
 with an empty workspace.
 
+`RemoteActionStore` consumes an action session before it dispatches the
+response, so once a response is dispatched the host may already have acted. A
+failure after that point is only reported as an ordinary failure when the
+outcome is known: the transport refused the request before handing it over, or
+the host answered with one of a closed set of error codes raised before the
+action callback ran. The host answering is not by itself proof that it did
+nothing — `RemoteActionSessions.respond` consumes the session and then awaits
+the action, so a throw from inside a partially applied effect arrives here as
+the daemon's generic `internal_error`. A timeout, a dropped connection, a
+cancellation, an unrecognised host error code, or a reply that cannot be
+interpreted establish nothing, and a control-request timeout does not cancel
+host execution. For an action that can change repository,
+worktree, pane, or agent state, those become an explicit unknown outcome: the
+pane stays guarded, the presentation is not dismissable, and no fresh action is
+permitted on that pane. The request, session, pane, and host scope are retained
+so the outcome can be reconciled against the host; the operator's draft text is
+deliberately not among them, because an unknown outcome persists until it is
+resolved by hand and raw input must not sit in published state that long. A
+resolution is reported as a reconciled outcome, not as a failure: an action the
+host applied must never be dressed as one, because that is how an operator is
+invited to retry it. Only an explicit operator
+resolution stating what the host was observed to show releases the guard;
+dismissing, reconnecting, and switching hosts do not.
+
+Which actions count as consequential is a client-side safety policy, not a
+claim of canonical identity — the host stays authoritative for what an action
+does. Read-only actions (`view`, `copyPath`, `openOutput`, `openInEditor`,
+`openFileBrowser`) are exempt so a lost reply for opening a file browser does
+not strand a pane; every other action, including any added later, defaults to
+consequential.
+
 Bonjour parsing is currently a discovery adapter only. It validates TXT
 metadata, certificate fingerprint shape, supported protocol versions, and
 deduplicates on server ID, but no production caller has shipped the complete
 discovery/connect flow yet (Bead i7c.11 remains open).
 
-Known open gaps: #435 tracks the lost-reply unknown-outcome guard; #241 still
+Known open gaps: #435's lost-reply unknown-outcome guard is implemented on the
+respond path described above; its physical-device reproduction and the
+equivalent guard for a non-interactive `start` dispatch remain open. #241 still
 requires physical-device acceptance and real-Keychain partial-write evidence;
 #280 has only the invite protocol/fixture slice merged; #242 still owns ritual
 execution; Bead i7c.11 owns discovery/connect; Beads i7c.10.3 and i7c.10.4
