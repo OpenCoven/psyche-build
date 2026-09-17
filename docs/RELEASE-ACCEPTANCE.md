@@ -385,11 +385,23 @@ worktrees". The cockpit is launched in a disposable project with a disposable
 is quit the way a person quits it — it confirms on the first Ctrl+C and exits on
 the second — and then relaunched into the session that survived.
 
-That surviving session is the point rather than a leak: the cockpit's managed
-panes outlive it so a restart can restore them. The scenario therefore checks
-that the process ended, that the session and its panes did not, and that the
-restart restored the same project without duplicating projects, panes, sessions,
-worktrees, or the managed panes it found.
+Whether the tmux session outlives the quit is **recorded but not asserted**. It
+depends on whether managed panes exist: a cockpit whose own pane is the last one
+takes the session with it, which is what `pnpm smoke` documents and relies on,
+while one with live panes leaves them running. This fixture creates no panes, so
+both shapes occur and the restart handles each. The scenario therefore checks
+that the cockpit process ended, that it is running again afterwards, and that
+the restart restored the same project without duplicating projects, panes,
+sessions, worktrees, or the live panes it found.
+
+`restart-restored-workspace` requires the cockpit process to be live again, not
+merely that the persisted config is readable: the config outlives the quit, so
+readability alone would pass even if the relaunch never happened.
+
+The fixture's workspace has no managed panes and no managed worktrees, so the
+persisted pane-count and worktree comparisons are structural guards rather than
+load-bearing ones — they compare zero to zero. A variant that creates a pane and
+a worktree before quitting would make them load-bearing, and is follow-on work.
 
 `first-run-reached-workspace` is the setup control, and `restart_unavailable`
 records a host where the cockpit could not be launched at all, so a run that

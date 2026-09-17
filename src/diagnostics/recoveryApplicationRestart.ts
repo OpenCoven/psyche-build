@@ -48,12 +48,18 @@ export interface ApplicationRestartObservation {
   /** A normal quit ended the cockpit process. */
   readonly quitEndedCockpitProcess: boolean;
   /**
-   * The managed tmux session survived the quit. This is the documented
-   * contract, not a leak: pane processes outlive the cockpit so a restart can
-   * restore them, which is the whole reason restart has to be observed.
+   * Whether the managed tmux session outlived the quit. Recorded, deliberately
+   * not asserted: it depends on whether managed panes exist. A cockpit whose
+   * own pane is the last one takes the session with it — which is exactly what
+   * `pnpm smoke` documents and relies on — while one with live panes leaves
+   * them running. This fixture creates no panes, so either is correct and the
+   * restart must handle both.
    */
   readonly sessionSurvivedQuit: boolean;
-  /** The relaunch came back up on the same persisted workspace. */
+  /**
+   * The cockpit is running again against a readable workspace. The persisted
+   * config outlives the quit, so its readability alone proves nothing.
+   */
   readonly restartRestoredWorkspace: boolean;
   /** The restored project identity is the one that was persisted. */
   readonly projectIdentityStable: boolean;
@@ -168,13 +174,29 @@ export async function observeApplicationRestart(
     // The managed session and its pane processes must outlive the cockpit;
     // that is what a restart is expected to find and restore.
     const sessionSurvivedQuit = sessionExists(socketPath, session);
-    const panesAfterQuit = countPanes(socketPath, session);
+    const panesAfterQuit = sessionSurvivedQuit ? countPanes(socketPath, session) : 0;
 
     // Restart into the surviving session, which is what relaunching the
     // cockpit against the same project does.
-    relaunchCockpit({ socketPath, session, projectRoot, entry, env });
-    const restartRestoredWorkspace = await waitFor(
-      async () => (await readPersistedWorkspace(configPath)) !== undefined,
+    // A relaunch that cannot start is a failed restart, not a lost run: the
+    // observations already made must survive it as evidence. Which form the
+    // relaunch takes follows from whether the session outlived the quit.
+    let relaunched = true;
+    try {
+      if (sessionSurvivedQuit) {
+        relaunchCockpit({ socketPath, session, projectRoot, entry, env });
+      } else {
+        launchCockpit({ socketPath, session, projectRoot, entry, env });
+      }
+    } catch {
+      relaunched = false;
+    }
+    // The persisted config survives the quit, so its mere readability proves
+    // nothing about the relaunch. Restoration requires the cockpit process to
+    // be running again against a readable workspace.
+    const restartRestoredWorkspace = relaunched && await waitFor(
+      async () => cockpitPane(socketPath, session) !== undefined
+        && (await readPersistedWorkspace(configPath)) !== undefined,
       STARTUP_TIMEOUT_MS,
     );
     // The cockpit rewrites its config as it restores, so the comparison waits
