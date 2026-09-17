@@ -3,6 +3,62 @@ import XCTest
 @testable import PsycheCore
 
 final class ControlRequestClientTests: XCTestCase {
+    // Each of the three pre-registration refusals must classify as notConnected.
+    // A regression in any one of them turns a request that never registered into
+    // `disconnected`, which `RemoteActionStore` deliberately reads as a possible
+    // host effect and will guard a pane for.
+    func testSupersededGenerationIsRefusedBeforeTransmission() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        let superseded = ConnectionGeneration(id: 1)
+        let current = ConnectionGeneration(id: 2)
+        await client.beginGeneration(superseded)
+        await client.beginGeneration(current)
+        let sentBefore = await transport.sentMessages.count
+
+        do {
+            _ = try await client.send(
+                .workspaceSnapshot(ControlRequestIDOnly(requestID: "superseded")),
+                for: superseded
+            )
+            XCTFail("A superseded generation must not send")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
+        }
+
+        let sentAfter = await transport.sentMessages.count
+        XCTAssertEqual(sentAfter, sentBefore, "nothing may be transmitted")
+        let pending = await client.pendingRequestCount
+        XCTAssertEqual(pending, 0, "a refused request must not register")
+    }
+
+    func testInvalidatedGenerationIsRefusedBeforeTransmission() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        let generation = ConnectionGeneration(id: 1)
+        await client.beginGeneration(generation)
+        // Invalidated after becoming active: `withValidity` now yields nil.
+        generation.invalidate()
+        let sentBefore = await transport.sentMessages.count
+
+        do {
+            _ = try await client.send(
+                .workspaceSnapshot(ControlRequestIDOnly(requestID: "invalidated")),
+                for: generation
+            )
+            XCTFail("An invalidated generation must not send")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
+        }
+
+        let sentAfter = await transport.sentMessages.count
+        XCTAssertEqual(sentAfter, sentBefore, "nothing may be transmitted")
+        let pending = await client.pendingRequestCount
+        XCTAssertEqual(pending, 0, "a refused request must not register")
+    }
+
     // `notConnected` and `disconnected` must stay distinguishable at the source,
     // because callers decide whether an effect may have happened from them.
     func testUndispatchedAndInFlightFailuresUseDistinctErrors() async throws {
