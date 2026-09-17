@@ -162,10 +162,18 @@ the host answered with one of a closed set of error codes raised before the
 action callback ran. The host answering is not by itself proof that it did
 nothing — `RemoteActionSessions.respond` consumes the session and then awaits
 the action, so a throw from inside a partially applied effect arrives here as
-the daemon's generic `internal_error`. A timeout, a dropped connection, a
-cancellation, an unrecognised host error code, or a reply that cannot be
-interpreted establish nothing, and a control-request timeout does not cancel
-host execution. For an action that can change repository,
+the daemon's generic `internal_error`. A timeout, a connection that ended while
+a request was in flight, a cancellation, an unrecognised host error code, or a
+reply that cannot be interpreted establish nothing, and a control-request
+timeout does not cancel host execution.
+
+`ControlRequestError` separates the two connection failures, because a caller
+cannot classify an effect without them. `notConnected` means the request was
+refused before registration and no bytes left the device; `disconnected` means
+an already-registered request lost its connection, which cannot prove the host
+saw nothing. Previously both were `disconnected`, so a response attempted with
+no connection at all produced an unknown outcome an operator had to acknowledge
+for an effect that never happened. For an action that can change repository,
 worktree, pane, or agent state, those become an explicit unknown outcome: the
 pane stays guarded, the presentation is not dismissable, and no fresh action is
 permitted on that pane. The request, session, pane, and host scope are retained

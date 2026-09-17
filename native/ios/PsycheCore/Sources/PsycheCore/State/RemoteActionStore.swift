@@ -329,15 +329,13 @@ private extension RemoteActionStore {
         }
         if let requestError = error as? ControlRequestError {
             switch requestError {
-            case .missingRequestID, .duplicateRequestID:
-                // Refused before the request was handed to the transport.
+            case .missingRequestID, .duplicateRequestID, .notConnected:
+                // Refused before registration, so nothing was transmitted.
                 return false
             case .timedOut, .disconnected:
-                // `.disconnected` is raised both for a send with no connection
-                // and for an in-flight request whose connection died. The store
-                // cannot tell those apart from the error alone, so it takes the
-                // unsafe-to-assume side: a possible duplicate merge costs more
-                // than an acknowledgement the operator did not need.
+                // Both mean this client stopped waiting, not that the host
+                // stopped working. `.disconnected` now names only the in-flight
+                // case, where bytes may already have reached the host.
                 return true
             }
         }

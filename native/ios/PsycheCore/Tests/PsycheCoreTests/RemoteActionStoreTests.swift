@@ -952,6 +952,35 @@ extension RemoteActionStoreTests {
         XCTAssertTrue(store.isBusy(paneID))
     }
 
+    // The whole point of splitting `notConnected` out of `disconnected`: a
+    // respond attempted with no connection at all was previously indistinguishable
+    // from one whose connection died mid-flight, so it became a sticky unknown
+    // outcome the operator had to acknowledge for an effect that never happened.
+    func testRespondWithNoConnectionIsAnOrdinaryFailureNotAnUnknownOutcome() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.notConnected
+        )
+
+        await store.respond(.confirm)
+
+        assertVisibleError(store.presentation)
+        XCTAssertFalse(store.isBusy(paneID))
+        XCTAssertNil(store.unknownOutcome(forPane: paneID))
+    }
+
+    // Its sibling must keep the opposite treatment: an in-flight connection loss
+    // cannot prove the host saw nothing.
+    func testInFlightDisconnectRemainsAnUnknownOutcome() async {
+        let (store, _) = await storeAwaitingConfirm(
+            failingWith: ControlRequestError.disconnected
+        )
+
+        await store.respond(.confirm)
+
+        XCTAssertEqual(store.presentation?.content, .reconciliationRequired)
+        XCTAssertNotNil(store.unknownOutcome(forPane: paneID))
+    }
+
     // A request the transport refused before handing it to the host is a known
     // outcome, and must stay an ordinary failure rather than becoming noise.
     func testPreDispatchRejectionStaysAnOrdinaryFailure() async {

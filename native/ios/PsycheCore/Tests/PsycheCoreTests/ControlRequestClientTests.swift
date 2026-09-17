@@ -3,6 +3,25 @@ import XCTest
 @testable import PsycheCore
 
 final class ControlRequestClientTests: XCTestCase {
+    // `notConnected` and `disconnected` must stay distinguishable at the source,
+    // because callers decide whether an effect may have happened from them.
+    func testUndispatchedAndInFlightFailuresUseDistinctErrors() async throws {
+        let transport = AmbiguousFailingTransport()
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+
+        // No active generation: the request is refused before registration.
+        do {
+            _ = try await client.send(.workspaceSnapshot(
+                ControlRequestIDOnly(requestID: "undispatched")
+            ))
+            XCTFail("Expected a send with no connection to fail")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
+        }
+
+        XCTAssertNotEqual(ControlRequestError.notConnected, .disconnected)
+    }
+
     func testRequestBeforeGenerationActivationFailsWithoutSending() async {
         let transport = AmbiguousFailingTransport()
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
@@ -13,7 +32,8 @@ final class ControlRequestClientTests: XCTestCase {
             ))
             XCTFail("Expected a request before v3 activation to fail")
         } catch {
-            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+            // Refused before registration: no bytes left this device.
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
         }
 
         let sent = await transport.sentMessages
