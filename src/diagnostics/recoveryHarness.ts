@@ -15,7 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { observeInterruptedCleanup, RecoveryCleanupRetentionError } from './recoveryCleanup.js';
@@ -32,11 +32,15 @@ import {
   writeWorktreeRecoveryMarker,
 } from '../services/WorktreeRecoveryMarker.js';
 import {
+  PROJECT_CONFIG_SCHEMA_VERSION,
   ProjectPaneConfigError,
+  UNVERSIONED_PROJECT_CONFIG_SCHEMA,
   acquireProjectPaneConfigLock,
   mutateProjectPaneConfig,
+  projectConfigSnapshotDirectory,
   projectPaneConfigPath,
   readProjectPaneConfig,
+  readProjectPaneConfigWithSchema,
 } from '../services/ProjectPaneConfig.js';
 import { createCovenClient } from '../daemon/bridge.js';
 import {
@@ -58,7 +62,8 @@ export type RecoveryScenarioId =
   | 'interrupted-cleanup-owner'
   | 'unavailable-providers'
   | 'stale-pane-identity'
-  | 'interrupted-git-mutation';
+  | 'interrupted-git-mutation'
+  | 'upgrade-recovery';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -70,10 +75,13 @@ export type RecoveryInjectionId =
   | 'cleanup-owner-killed-before-git-mutation'
   | 'capability-provider-unregistered-and-daemon-socket-absent'
   | 'tmux-server-replaced-reusing-recorded-pane-id'
-  | 'cleanup-owner-killed-during-supervised-git-mutation';
+  | 'cleanup-owner-killed-during-supervised-git-mutation'
+  | 'pane-config-aged-across-schema-versions';
 
 export type RecoveryClassification =
   | 'config_corrupt'
+  | 'config_newer_schema'
+  | 'config_snapshot_failed'
   | 'config_unreadable'
   | 'lock_taken_over'
   | 'persistence_failed'
@@ -122,7 +130,12 @@ export type RecoveryInvariantId =
   | 'stale-pane-identity-reported'
   | 'reused-pane-id-not-adopted'
   | 'live-pane-rebinds-to-current-identity'
-  | 'rebind-clears-stale-background-windows';
+  | 'rebind-clears-stale-background-windows'
+  | 'newer-schema-refused'
+  | 'newer-schema-config-preserved'
+  | 'unversioned-config-adopted-by-named-migration'
+  | 'pre-migration-snapshot-retained'
+  | 'adopted-config-carries-current-schema';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -958,6 +971,101 @@ async function runInterruptedGitMutation(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * The upgrade-recovery scenario #199 held open.
+ *
+ * It was deliberately absent while the persisted project config carried no
+ * schema version: a scenario cannot assert on behavior the product does not
+ * implement, and asserting an invented one is worse than having no coverage.
+ * With a stamped version, a read-side gate, a named migration registry and a
+ * durable pre-migration snapshot in place, both halves of an upgrade are now
+ * observable.
+ *
+ * Downgrade half: an older Psyche opening a project a newer one wrote must
+ * refuse and preserve every field, including the ones it cannot represent.
+ * Upgrade half: a Psyche meeting a config written before versions existed must
+ * adopt it through a named migration and leave the superseded bytes on disk.
+ *
+ * This exercises the source path, not two real installed builds. It is not
+ * evidence that an installed upgrade recovers.
+ */
+async function runUpgradeRecovery(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const workBefore = digest(await readFile(workspace.workPath));
+
+    // Downgrade half: a config from a newer Psyche, carrying a field this
+    // version has no representation for.
+    const newerConfig = `${JSON.stringify({
+      ...VALID_CONFIG,
+      schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION + 1,
+      fieldThisVersionCannotRepresent: { retained: true },
+    }, null, 2)}\n`;
+    await writeFile(configPath, newerConfig, 'utf8');
+
+    let classification: RecoveryClassification = 'unexpected_success';
+    try {
+      await readProjectPaneConfig(workspace.projectRoot);
+    } catch (error) {
+      classification = error instanceof ProjectPaneConfigError
+        ? error.code
+        : 'unexpected_error';
+    }
+    const afterRefusal = await readFile(configPath, 'utf8');
+
+    // Upgrade half: a config written before the stamp existed.
+    const unversioned = `${JSON.stringify(VALID_CONFIG, null, 2)}\n`;
+    await writeFile(configPath, unversioned, 'utf8');
+    const read = await readProjectPaneConfigWithSchema(workspace.projectRoot);
+    await mutateProjectPaneConfig(workspace.projectRoot, (config) => ({
+      config,
+      result: undefined,
+    }));
+
+    const adopted = await readFile(configPath, 'utf8');
+    const adoptedVersion = (JSON.parse(adopted) as { schemaVersion?: unknown }).schemaVersion;
+    let retainedSnapshot = '';
+    try {
+      const directory = projectConfigSnapshotDirectory(workspace.projectRoot);
+      const [snapshot] = (await readdir(directory)).sort();
+      if (snapshot) retainedSnapshot = await readFile(path.join(directory, snapshot), 'utf8');
+    } catch {
+      // No snapshot directory: the invariant below reports it as not held.
+    }
+
+    return evidence(
+      'upgrade-recovery',
+      'pane-config-aged-across-schema-versions',
+      classification,
+      [
+        { id: 'newer-schema-refused', held: classification === 'config_newer_schema' },
+        { id: 'newer-schema-config-preserved', held: afterRefusal === newerConfig },
+        {
+          id: 'unversioned-config-adopted-by-named-migration',
+          held: read.schemaVersion === UNVERSIONED_PROJECT_CONFIG_SCHEMA
+            && read.migrations.length > 0,
+        },
+        {
+          id: 'adopted-config-carries-current-schema',
+          held: adoptedVersion === PROJECT_CONFIG_SCHEMA_VERSION,
+        },
+        { id: 'pre-migration-snapshot-retained', held: retainedSnapshot === unversioned },
+        { id: 'uncommitted-work-untouched', held: digest(await readFile(workspace.workPath)) === workBefore },
+      ],
+      {
+        configInjected: digest(newerConfig),
+        configAfter: digest(adopted),
+        workAfter: digest(await readFile(workspace.workPath)),
+      },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -971,6 +1079,7 @@ const SCENARIOS: Readonly<
   'unavailable-providers': runUnavailableProviders,
   'stale-pane-identity': runStalePaneIdentity,
   'interrupted-git-mutation': runInterruptedGitMutation,
+  'upgrade-recovery': runUpgradeRecovery,
 };
 
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
