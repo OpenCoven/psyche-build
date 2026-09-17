@@ -398,10 +398,30 @@ sessions, worktrees, or the live panes it found.
 merely that the persisted config is readable: the config outlives the quit, so
 readability alone would pass even if the relaunch never happened.
 
-The fixture's workspace has no managed panes and no managed worktrees, so the
-persisted pane-count and worktree comparisons are structural guards rather than
-load-bearing ones — they compare zero to zero. A variant that creates a pane and
-a worktree before quitting would make them load-bearing, and is follow-on work.
+The fixture seeds a managed worktree and, after the quit, one worktree-pane
+record pointing at it — with a tmux pane id that no longer exists, which is the
+state a restart actually finds once its panes died with the old server. The
+restart must recreate that pane and rebind the record, leaving exactly one pane
+record and both worktrees. Those comparisons are load-bearing rather than
+zero-against-zero.
+
+The record is **written rather than created through the interface**,
+deliberately. The product has no non-interactive path that creates a worktree
+pane, and driving the cockpit's own shortcuts is unreliable for a fixture: it
+gates shortcuts on pane focus — its own status line says so — and ignores them
+while loading, so a keystroke is silently dropped depending on timing. What is
+seeded is the persisted format a restart reads, which is what #196 asks about.
+
+Quitting retries within a bound rather than assuming a fixed number of Ctrl+C
+presses. The cockpit confirms on one press and exits on the next, but the
+interface can consume a press. Assuming two leaves the cockpit running, and the
+relaunch then puts a second cockpit beside it — which
+`restart-did-not-duplicate-live-panes` catches by counting cockpit processes.
+
+Restoration is asynchronous, so the restored pane is waited for rather than
+sampled once, and teardown waits for the cockpit to exit before the workspace is
+removed: a cockpit still writing into a directory being deleted fails the
+removal and costs the run its evidence.
 
 `first-run-reached-workspace` is the setup control, and `restart_unavailable`
 records a host where the cockpit could not be launched at all, so a run that

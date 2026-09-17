@@ -131,6 +131,8 @@ export type RecoveryInvariantId =
   | 'available-provider-still-executes'
   | 'plain-terminal-lane-remains-usable'
   | 'first-run-reached-workspace'
+  | 'pane-created-before-quit'
+  | 'restart-did-not-duplicate-live-panes'
   | 'normal-quit-ended-cockpit'
   | 'restart-restored-workspace'
   | 'restart-preserved-project-identity'
@@ -1141,6 +1143,7 @@ async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
       classification,
       [
         { id: 'first-run-reached-workspace', held: observed?.firstRunReachedWorkspace === true },
+        { id: 'pane-created-before-quit', held: observed?.paneCreatedBeforeQuit === true },
         { id: 'normal-quit-ended-cockpit', held: observed?.quitEndedCockpitProcess === true },
         { id: 'restart-restored-workspace', held: observed?.restartRestoredWorkspace === true },
         {
@@ -1163,6 +1166,10 @@ async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
         {
           id: 'restart-did-not-duplicate-managed-panes',
           held: observed?.noDuplicateManagedPanes === true,
+        },
+        {
+          id: 'restart-did-not-duplicate-live-panes',
+          held: observed?.noDuplicateLivePanes === true,
         },
         { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
         { id: 'persisted-config-unchanged', held: configAfter === configBefore },

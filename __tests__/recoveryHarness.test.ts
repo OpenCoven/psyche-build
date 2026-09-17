@@ -49,6 +49,8 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'pre-migration-snapshot-retained',
   'adopted-config-carries-current-schema',
   'first-run-reached-workspace',
+  'pane-created-before-quit',
+  'restart-did-not-duplicate-live-panes',
   'normal-quit-ended-cockpit',
   'restart-restored-workspace',
   'restart-preserved-project-identity',
