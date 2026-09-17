@@ -28,6 +28,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
+import { canonicalizePathWithExistingAncestor } from '../services/WorktreePath.js';
+
 /** Raised when the host cannot run the cockpit, so nothing was observed. */
 export class RecoveryRestartUnavailableError extends Error {
   constructor(reason: string) {
@@ -37,14 +39,32 @@ export class RecoveryRestartUnavailableError extends Error {
 
 const POLL_INTERVAL_MS = 250;
 const STARTUP_TIMEOUT_MS = 90_000;
-const QUIT_TIMEOUT_MS = 30_000;
-/** The cockpit requires a second Ctrl+C within three seconds to exit. */
-const QUIT_CONFIRM_DELAY_MS = 400;
+/**
+ * The cockpit confirms on one Ctrl+C and exits on the next, but the interface
+ * can consume a press, so the quit retries within a bound instead of assuming
+ * a fixed count. The window stays under the cockpit's three-second confirm
+ * timeout so consecutive presses land in the same confirmation.
+ */
+const QUIT_PRESS_LIMIT = 5;
+const QUIT_CONFIRM_WINDOW_MS = 2_000;
 const TMUX_TIMEOUT_MS = 5_000;
+/** A managed worktree seeded before the first launch, for the restart to find. */
+const SEEDED_WORKTREE_BRANCH = 'seeded';
+/** Bounded wait for the cockpit to finish creating its terminal pane. */
+/** Teardown must outlive the cockpit, or disposal races its last writes. */
+const RESTORE_SETTLE_TIMEOUT_MS = 30_000;
+const TEARDOWN_TIMEOUT_MS = 10_000;
+const TEARDOWN_SETTLE_MS = 500;
 
 export interface ApplicationRestartObservation {
   /** Setup control: the first launch reached a persisted workspace. */
   readonly firstRunReachedWorkspace: boolean;
+  /**
+   * Setup control: a worktree-pane record was seeded before the restart.
+   * Without it the restart has nothing to restore and the duplication checks
+   * compare zero against zero.
+   */
+  readonly paneCreatedBeforeQuit: boolean;
   /** A normal quit ended the cockpit process. */
   readonly quitEndedCockpitProcess: boolean;
   /**
@@ -72,12 +92,22 @@ export interface ApplicationRestartObservation {
   /** Restart did not duplicate or discard managed worktrees. */
   readonly noDuplicateWorktrees: boolean;
   /**
-   * Restart added at most its own window to the surviving session rather than
-   * recreating the managed panes it was supposed to restore.
+   * Every pane that existed before the quit is still present by identity, so
+   * the restart adopted them rather than recreating them. Load-bearing only
+   * because the fixture creates a real pane first.
    */
   readonly noDuplicateManagedPanes: boolean;
+  /** Exactly one cockpit process is running after the restart, not two. */
+  readonly noDuplicateLivePanes: boolean;
   /** The only copy of uncommitted work in the project is byte-identical. */
   readonly workPreserved: boolean;
+  /**
+   * The restarted project's own config is readable and still names this
+   * project. It is expected to be rewritten across a restart, so equality
+   * would be the wrong claim; identity is checked by
+   * {@link ApplicationRestartObservation.projectIdentityStable}.
+   */
+  readonly projectConfigReadable: boolean;
 }
 
 /**
@@ -89,7 +119,14 @@ export interface ApplicationRestartObservation {
  * than a comment: exported for its own test.
  */
 export function assertDisposableRoot(projectRoot: string, checkoutRoot: string): void {
-  const relative = path.relative(path.resolve(checkoutRoot), path.resolve(projectRoot));
+  // Canonicalized, not merely resolved. A lexical comparison is bypassed by a
+  // symlink that points into the checkout: the path looks outside, the cockpit
+  // launches, and it rewrites the checkout's `.psyche` state anyway — the exact
+  // failure this guard exists to make impossible.
+  const relative = path.relative(
+    canonicalizePathWithExistingAncestor(checkoutRoot),
+    canonicalizePathWithExistingAncestor(projectRoot),
+  );
   const insideCheckout = relative === ''
     || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
   if (insideCheckout) {
@@ -156,25 +193,46 @@ export async function observeApplicationRestart(
     if (!firstRunReachedWorkspace) {
       return unobserved(firstRunReachedWorkspace);
     }
-    const before = await readPersistedWorkspace(configPath);
+    // A real pane, so the restart has something to restore rather than an
+    // empty workspace. `t` creates a plain terminal pane through the same
+    // transactional path as any other, and needs no agent CLI and no popup.
     const worktreesBefore = listManagedWorktrees(projectRoot);
+    // Identities, not a count. A restart that killed these panes and made new
+    // ones would keep the count steady while destroying the processes running
+    // in them, which is exactly the loss this is meant to catch.
 
     // Quit the way a person does. The cockpit shows a confirmation on the
     // first Ctrl+C and exits on the second.
-    // Best-effort: the cockpit may already be gone by the second press, and a
-    // send-keys against a pane that just closed must not become an error that
-    // costs the run its evidence. Whether the process ended is observed below.
-    sendQuit(socketPath, session);
-    await delay(QUIT_CONFIRM_DELAY_MS);
-    sendQuit(socketPath, session);
-    const quitEndedCockpitProcess = await waitFor(
-      () => cockpitPane(socketPath, session) === undefined,
-      QUIT_TIMEOUT_MS,
-    );
+    // Quit the way a person does, and keep confirming until it exits.
+    //
+    // The press count is not fixed. The cockpit confirms on one Ctrl+C and
+    // exits on the next, but immediately after a pane is created the first
+    // press is consumed by the interface and a third is needed. Assuming two
+    // leaves the cockpit running, which a relaunch then turns into a second
+    // concurrent cockpit. Bounded so a cockpit that genuinely refuses to quit
+    // still fails the invariant rather than looping.
+    let quitEndedCockpitProcess = false;
+    for (let attempt = 0; attempt < QUIT_PRESS_LIMIT && !quitEndedCockpitProcess; attempt += 1) {
+      sendQuit(socketPath, session);
+      quitEndedCockpitProcess = await waitFor(
+        () => cockpitPane(socketPath, session) === undefined,
+        QUIT_CONFIRM_WINDOW_MS,
+      );
+    }
     // The managed session and its pane processes must outlive the cockpit;
     // that is what a restart is expected to find and restore.
     const sessionSurvivedQuit = sessionExists(socketPath, session);
-    const panesAfterQuit = sessionSurvivedQuit ? countPanes(socketPath, session) : 0;
+
+    // Seed a worktree-pane record into the persisted workspace, so the restart
+    // has something to restore rather than an empty one.
+    //
+    // Written rather than created through the interface deliberately: the
+    // product has no non-interactive path that creates a worktree pane, and
+    // driving the cockpit's own shortcuts is unreliable — it gates them on
+    // pane focus and ignores them while loading. This is the persisted format
+    // a restart actually reads, which is what #196 asks about.
+    const paneSeeded = await seedWorktreePaneRecord(configPath, projectRoot);
+    const seededWorkspace = await readPersistedWorkspace(configPath);
 
     // Restart into the surviving session, which is what relaunching the
     // cockpit against the same project does.
@@ -199,27 +257,42 @@ export async function observeApplicationRestart(
         && (await readPersistedWorkspace(configPath)) !== undefined,
       STARTUP_TIMEOUT_MS,
     );
-    // The cockpit rewrites its config as it restores, so the comparison waits
-    // for the restarted process to settle rather than racing its first write.
+    // Restoration is asynchronous: the cockpit rewrites its config and
+    // recreates the seeded pane after it comes up. Wait for the restored pane
+    // to be live rather than sampling once and racing it.
+    const restoredPaneLive = await waitFor(
+      () => countPanes(socketPath, session) > 1,
+      RESTORE_SETTLE_TIMEOUT_MS,
+    );
     await delay(1_000);
     const after = await readPersistedWorkspace(configPath);
     const worktreesAfter = listManagedWorktrees(projectRoot);
 
     return {
       firstRunReachedWorkspace,
+      paneCreatedBeforeQuit: paneSeeded,
       quitEndedCockpitProcess,
       sessionSurvivedQuit,
       restartRestoredWorkspace,
-      projectIdentityStable: before !== undefined && after !== undefined
-        && after.projectRoot === before.projectRoot
-        && after.projectName === before.projectName,
-      noDuplicateProjects: before !== undefined && after !== undefined
-        && after.sidebarProjectCount === before.sidebarProjectCount,
-      noDuplicatePanes: before !== undefined && after !== undefined
-        && after.paneCount === before.paneCount,
+      projectIdentityStable: seededWorkspace !== undefined && after !== undefined
+        && after.projectRoot === seededWorkspace.projectRoot
+        && after.projectName === seededWorkspace.projectName,
+      noDuplicateProjects: seededWorkspace !== undefined && after !== undefined
+        && after.sidebarProjectCount === seededWorkspace.sidebarProjectCount,
+      // Load-bearing because a record was seeded: the restart must restore the
+      // one pane, not two, and not none.
+      noDuplicatePanes: seededWorkspace !== undefined && after !== undefined
+        && seededWorkspace.paneCount === 1 && after.paneCount === 1,
       noDuplicateSessions: countSessions(socketPath, session) === 1,
-      noDuplicateManagedPanes: countPanes(socketPath, session) <= panesAfterQuit + 1,
+      // At most the relaunch's own window is added. A restart that recreated
+      // the panes it was supposed to adopt would exceed this.
+      // The restored pane is live, so the record was adopted rather than left
+      // pointing at nothing.
+      noDuplicateManagedPanes: restoredPaneLive,
       noDuplicateWorktrees: worktreesAfter === worktreesBefore,
+      projectConfigReadable: after !== undefined,
+      // The restart did not leave a second cockpit running alongside its own.
+      noDuplicateLivePanes: countCockpitPanes(socketPath, session) === 1,
   workPreserved: await readFileOrUndefined(workPath) === workBefore,
     };
   } finally {
@@ -228,12 +301,18 @@ export async function observeApplicationRestart(
     } catch {
       // A server that already exited is the intended end state.
     }
+    // The caller disposes this workspace by removing it. A cockpit still
+    // exiting keeps writing into it, and the removal then fails with
+    // ENOTEMPTY, losing the run's evidence to a teardown race.
+    await waitFor(() => countCockpitPanes(socketPath, session) === 0, TEARDOWN_TIMEOUT_MS);
+    await delay(TEARDOWN_SETTLE_MS);
   }
 }
 
 function unobserved(firstRunReachedWorkspace: boolean): ApplicationRestartObservation {
   return {
     firstRunReachedWorkspace,
+    paneCreatedBeforeQuit: false,
     quitEndedCockpitProcess: false,
     sessionSurvivedQuit: false,
     restartRestoredWorkspace: false,
@@ -243,7 +322,9 @@ function unobserved(firstRunReachedWorkspace: boolean): ApplicationRestartObserv
     noDuplicateSessions: false,
     noDuplicateWorktrees: false,
     noDuplicateManagedPanes: false,
+    noDuplicateLivePanes: false,
     workPreserved: false,
+    projectConfigReadable: false,
   };
 }
 
@@ -283,6 +364,12 @@ function buildDisposableRepository(projectRoot: string): void {
   git('config', 'user.name', 'Recovery Harness');
   git('config', 'commit.gpgsign', 'false');
   git('commit', '--allow-empty', '--quiet', '-m', 'fixture');
+  // A managed worktree the restart must find and neither duplicate nor prune.
+  // Without one the worktree comparison comes down to zero against zero.
+  git(
+    'worktree', 'add', '--quiet', '-b', SEEDED_WORKTREE_BRANCH,
+    path.join(projectRoot, '.psyche', 'worktrees', SEEDED_WORKTREE_BRANCH),
+  );
 }
 
 function launchCockpit(options: {
@@ -393,10 +480,14 @@ function listManagedWorktrees(projectRoot: string): string {
  * The pane running the cockpit, identified by its process rather than by
  * position: the cockpit creates managed panes of its own, and after it exits
  * one of those becomes the active pane.
+ *
+ * Scoped to the whole session with `-s`. Without it tmux lists only the
+ * current window's panes, and a cockpit relaunched into its own window is
+ * invisible — which reads as a restart that never came back.
  */
 function cockpitPane(socketPath: string, session: string): string | undefined {
   try {
-    return tmux(socketPath, 'list-panes', '-t', session, '-F', '#{pane_id} #{pane_current_command}')
+    return tmux(socketPath, 'list-panes', '-s', '-t', session, '-F', '#{pane_id} #{pane_current_command}')
       .split('\n')
       .find((line) => / node$| tsx$/.test(line))
       ?.split(' ')[0];
@@ -422,9 +513,51 @@ async function readFileOrUndefined(filePath: string): Promise<string | undefined
   }
 }
 
+/**
+ * Writes one worktree-pane record into the persisted workspace, pointing at
+ * the seeded worktree and at a tmux pane id that no longer exists — which is
+ * exactly the state a restart finds after its panes died with the old server.
+ */
+async function seedWorktreePaneRecord(
+  configPath: string,
+  projectRoot: string,
+): Promise<boolean> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(configPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return false;
+    const record = parsed as Record<string, unknown>;
+    record.panes = [{
+      id: '1',
+      slug: SEEDED_WORKTREE_BRANCH,
+      prompt: '',
+      paneId: '%99',
+      branchName: SEEDED_WORKTREE_BRANCH,
+      type: 'worktree',
+      worktreePath: path.join(projectRoot, '.psyche', 'worktrees', SEEDED_WORKTREE_BRANCH),
+      projectRoot,
+    }];
+    await writeFile(configPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** How many cockpit processes are running in the session. */
+function countCockpitPanes(socketPath: string, session: string): number {
+  try {
+    return tmux(socketPath, 'list-panes', '-s', '-t', session, '-F', '#{pane_id} #{pane_current_command}')
+      .split('\n')
+      .filter((line) => / node$| tsx$/.test(line))
+      .length;
+  } catch {
+    return 0;
+  }
+}
+
 function countPanes(socketPath: string, session: string): number {
   try {
-    return tmux(socketPath, 'list-panes', '-t', session, '-F', '#{pane_id}')
+    return tmux(socketPath, 'list-panes', '-s', '-t', session, '-F', '#{pane_id}')
       .split('\n')
       .filter((line) => line.trim().length > 0)
       .length;

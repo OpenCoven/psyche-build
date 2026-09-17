@@ -131,6 +131,10 @@ export type RecoveryInvariantId =
   | 'available-provider-still-executes'
   | 'plain-terminal-lane-remains-usable'
   | 'first-run-reached-workspace'
+  | 'pane-created-before-quit'
+  | 'restart-kept-its-project-config'
+  | 'restart-stayed-inside-its-project'
+  | 'restart-did-not-duplicate-live-panes'
   | 'normal-quit-ended-cockpit'
   | 'restart-restored-workspace'
   | 'restart-preserved-project-identity'
@@ -1129,9 +1133,10 @@ async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
         : 'unexpected_error';
     }
 
-    // The cockpit runs against its own project directory inside this
-    // workspace, so the workspace's own config and work file must be
-    // untouched: a restart that wandered outside its project would show here.
+    // The cockpit runs against its own project directory *inside* this
+    // workspace, so these outer files are ones it must never touch. They
+    // prove containment, not preservation: preservation of the restarted
+    // project's own state is reported by the observation itself.
     const configAfter = digest(await readFile(configPath));
     const workAfter = digest(await readFile(workspace.workPath));
 
@@ -1141,6 +1146,7 @@ async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
       classification,
       [
         { id: 'first-run-reached-workspace', held: observed?.firstRunReachedWorkspace === true },
+        { id: 'pane-created-before-quit', held: observed?.paneCreatedBeforeQuit === true },
         { id: 'normal-quit-ended-cockpit', held: observed?.quitEndedCockpitProcess === true },
         { id: 'restart-restored-workspace', held: observed?.restartRestoredWorkspace === true },
         {
@@ -1164,8 +1170,21 @@ async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
           id: 'restart-did-not-duplicate-managed-panes',
           held: observed?.noDuplicateManagedPanes === true,
         },
+        {
+          id: 'restart-did-not-duplicate-live-panes',
+          held: observed?.noDuplicateLivePanes === true,
+        },
+        // The restarted project's own uncommitted work, not the outer fixture's.
         { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
-        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'restart-kept-its-project-config', held: observed?.projectConfigReadable === true },
+        // Containment: the cockpit never reached outside the project it owns.
+        // Asserting equality on the restarted project's own config would be
+        // wrong — a restart rewrites it, which is the point.
+        {
+          id: 'restart-stayed-inside-its-project',
+          held: configAfter === configBefore
+            && workAfter === digest('the only copy of this work\n'),
+        },
       ],
       { configBefore, configAfter, workAfter },
       startedAt,

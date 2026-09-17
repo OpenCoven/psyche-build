@@ -398,10 +398,30 @@ sessions, worktrees, or the live panes it found.
 merely that the persisted config is readable: the config outlives the quit, so
 readability alone would pass even if the relaunch never happened.
 
-The fixture's workspace has no managed panes and no managed worktrees, so the
-persisted pane-count and worktree comparisons are structural guards rather than
-load-bearing ones — they compare zero to zero. A variant that creates a pane and
-a worktree before quitting would make them load-bearing, and is follow-on work.
+The fixture seeds a managed worktree and, after the quit, one worktree-pane
+record pointing at it — with a tmux pane id that no longer exists, which is the
+state a restart actually finds once its panes died with the old server. The
+restart must recreate that pane and rebind the record, leaving exactly one pane
+record and both worktrees. Those comparisons are load-bearing rather than
+zero-against-zero.
+
+The record is **written rather than created through the interface**,
+deliberately. The product has no non-interactive path that creates a worktree
+pane, and driving the cockpit's own shortcuts is unreliable for a fixture: it
+gates shortcuts on pane focus — its own status line says so — and ignores them
+while loading, so a keystroke is silently dropped depending on timing. What is
+seeded is the persisted format a restart reads, which is what #196 asks about.
+
+Quitting retries within a bound rather than assuming a fixed number of Ctrl+C
+presses. The cockpit confirms on one press and exits on the next, but the
+interface can consume a press. Assuming two leaves the cockpit running, and the
+relaunch then puts a second cockpit beside it — which
+`restart-did-not-duplicate-live-panes` catches by counting cockpit processes.
+
+Restoration is asynchronous, so the restored pane is waited for rather than
+sampled once, and teardown waits for the cockpit to exit before the workspace is
+removed: a cockpit still writing into a directory being deleted fails the
+removal and costs the run its evidence.
 
 `first-run-reached-workspace` is the setup control, and `restart_unavailable`
 records a host where the cockpit could not be launched at all, so a run that
@@ -410,7 +430,18 @@ observed nothing cannot read as a pass.
 A hard guard refuses any project root at or beneath this checkout. The cockpit
 adopts its working directory as its project and rewrites that project's
 `.psyche` state on startup, so a mis-scoped launch would destroy a developer's
-own workspace. That guard has its own test and is not a convention.
+own workspace. The comparison is made on **canonicalized** paths: a lexical one
+is bypassed by a symlink that points into the checkout, which reads as outside
+while resolving inside. The guard has its own tests, including that symlink,
+and is not a convention.
+
+The scenario separates containment from preservation. `uncommitted-work-untouched`
+reads the restarted project's own work file; `restart-stayed-inside-its-project`
+reads the outer fixture's files, which the cockpit must never touch. Asserting
+equality on the restarted project's own config would be wrong — a restart
+rewrites it, which is the point — so `restart-kept-its-project-config` asserts
+it stays readable and `restart-preserved-project-identity` asserts it still
+names the same project.
 
 Scope: it observes quit and relaunch of a workspace whose panes run no agents.
 It does not observe a crash mid-transition, a restart with live agent panes, or
