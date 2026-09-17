@@ -535,8 +535,10 @@ has no production collector wiring, CLI, or UI yet.
 #199 remains open. The harness covers the failure classes reachable without a
 running application, including the unavailable-provider routing and detection
 boundary and the replaced-tmux-identity rebinding boundary; application
-restart and upgrade recovery are deliberately uncovered, and the
-support-bundle production surface is unbuilt. Those follow observed #239
+upgrade recovery is deliberately uncovered and the support-bundle production
+surface is incomplete. Application restart is covered by the opt-in
+`pnpm recovery:restart` scenario rather than by the default harness, so it is
+observed on request and does not gate a required check. Those follow observed #239
 operator cases rather than being inferred, and only focused, safe portions of
 former PR #190 should be integrated where they materially improve the bounded
 contract.

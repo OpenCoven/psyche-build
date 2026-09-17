@@ -24,6 +24,10 @@ import {
   RecoveryTmuxUnavailableError,
 } from './recoveryTmuxIdentity.js';
 import { observeMidMutationCleanup } from './recoveryMidMutationCleanup.js';
+import {
+  observeApplicationRestart,
+  RecoveryRestartUnavailableError,
+} from './recoveryApplicationRestart.js';
 
 import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
@@ -63,7 +67,8 @@ export type RecoveryScenarioId =
   | 'unavailable-providers'
   | 'stale-pane-identity'
   | 'interrupted-git-mutation'
-  | 'upgrade-recovery';
+  | 'upgrade-recovery'
+  | 'application-restart';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -76,7 +81,8 @@ export type RecoveryInjectionId =
   | 'capability-provider-unregistered-and-daemon-socket-absent'
   | 'tmux-server-replaced-reusing-recorded-pane-id'
   | 'cleanup-owner-killed-during-supervised-git-mutation'
-  | 'pane-config-aged-across-schema-versions';
+  | 'pane-config-aged-across-schema-versions'
+  | 'application-quit-and-relaunched';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -92,6 +98,8 @@ export type RecoveryClassification =
   | 'provider_unavailable'
   | 'stale_identity_rejected'
   | 'tmux_unavailable'
+  | 'workspace_restored'
+  | 'restart_unavailable'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -122,6 +130,15 @@ export type RecoveryInvariantId =
   | 'provider-failure-classified'
   | 'available-provider-still-executes'
   | 'plain-terminal-lane-remains-usable'
+  | 'first-run-reached-workspace'
+  | 'normal-quit-ended-cockpit'
+  | 'restart-restored-workspace'
+  | 'restart-preserved-project-identity'
+  | 'restart-did-not-duplicate-projects'
+  | 'restart-did-not-duplicate-panes'
+  | 'restart-did-not-duplicate-sessions'
+  | 'restart-did-not-duplicate-worktrees'
+  | 'restart-did-not-duplicate-managed-panes'
   | 'mutation-observed-in-flight'
   | 'cleanup-owner-killed-during-mutation'
   | 'worktree-state-self-consistent'
@@ -1066,6 +1083,98 @@ async function runUpgradeRecovery(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * Listed first in #199 and uncovered until now: no scenario launched,
+ * terminated and relaunched the application. The restart-adjacent scenarios
+ * reopen the control journal or construct a restarted owner epoch in process,
+ * which is not the same claim.
+ *
+ * This launches the real cockpit in a disposable project, completes first-run
+ * onboarding, quits it the way a person does — the cockpit confirms on the
+ * first Ctrl+C and exits on the second — relaunches it, and checks the
+ * workspace comes back without duplicating what it restored. #196 asks exactly
+ * this: restore "without duplicate projects, panes, sessions, or worktrees".
+ *
+ * `first-run-reached-workspace` is the setup control. Without it a run where
+ * the cockpit never started would report every restart invariant as failed for
+ * the wrong reason, and `restart_unavailable` says so explicitly.
+ *
+ * This scenario is **not** in the default harness run. Two real launches cost
+ * tens of seconds and depend on onboarding prompt text, which is a flake
+ * surface no required check should carry. Run it with `pnpm recovery:restart`.
+ *
+ * Scope: it observes quit and relaunch of a workspace with no panes running
+ * agents. It does not observe a crash mid-transition, a restart with live
+ * agent panes, or the packaged application bundle.
+ */
+async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+
+    let observed: Awaited<ReturnType<typeof observeApplicationRestart>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observeApplicationRestart(workspace.projectRoot);
+      classification = observed.firstRunReachedWorkspace
+        ? 'workspace_restored'
+        : 'restart_unavailable';
+    } catch (error) {
+      // A host that cannot launch the cockpit observes nothing, and says which
+      // rather than reporting an unexercised path as passed.
+      classification = error instanceof RecoveryRestartUnavailableError
+        ? 'restart_unavailable'
+        : 'unexpected_error';
+    }
+
+    // The cockpit runs against its own project directory inside this
+    // workspace, so the workspace's own config and work file must be
+    // untouched: a restart that wandered outside its project would show here.
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    return evidence(
+      'application-restart',
+      'application-quit-and-relaunched',
+      classification,
+      [
+        { id: 'first-run-reached-workspace', held: observed?.firstRunReachedWorkspace === true },
+        { id: 'normal-quit-ended-cockpit', held: observed?.quitEndedCockpitProcess === true },
+        { id: 'restart-restored-workspace', held: observed?.restartRestoredWorkspace === true },
+        {
+          id: 'restart-preserved-project-identity',
+          held: observed?.projectIdentityStable === true,
+        },
+        {
+          id: 'restart-did-not-duplicate-projects',
+          held: observed?.noDuplicateProjects === true,
+        },
+        { id: 'restart-did-not-duplicate-panes', held: observed?.noDuplicatePanes === true },
+        {
+          id: 'restart-did-not-duplicate-sessions',
+          held: observed?.noDuplicateSessions === true,
+        },
+        {
+          id: 'restart-did-not-duplicate-worktrees',
+          held: observed?.noDuplicateWorktrees === true,
+        },
+        {
+          id: 'restart-did-not-duplicate-managed-panes',
+          held: observed?.noDuplicateManagedPanes === true,
+        },
+        { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -1080,10 +1189,24 @@ const SCENARIOS: Readonly<
   'stale-pane-identity': runStalePaneIdentity,
   'interrupted-git-mutation': runInterruptedGitMutation,
   'upgrade-recovery': runUpgradeRecovery,
+  'application-restart': runApplicationRestart,
 };
 
+/**
+ * Scenarios excluded from the default run. They launch real applications, so
+ * they cost seconds and depend on interface text. They are run deliberately —
+ * `pnpm recovery:restart` — never as part of a required check.
+ */
+const OPT_IN_SCENARIOS: ReadonlySet<RecoveryScenarioId> = new Set(['application-restart']);
+
+/** The opt-in scenarios, for a runner that wants them by name. */
+export function optInRecoveryScenarioIds(): readonly RecoveryScenarioId[] {
+  return [...OPT_IN_SCENARIOS];
+}
+
 export function recoveryScenarioIds(): readonly RecoveryScenarioId[] {
-  return Object.keys(SCENARIOS) as RecoveryScenarioId[];
+  return (Object.keys(SCENARIOS) as RecoveryScenarioId[])
+    .filter((id) => !OPT_IN_SCENARIOS.has(id));
 }
 
 /**

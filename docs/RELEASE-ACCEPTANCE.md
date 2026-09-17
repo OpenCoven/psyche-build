@@ -367,6 +367,56 @@ Current scenarios:
 | `stale-pane-identity` | A replaced tmux server that hands the recorded pane ID to a pane the persisted record never owned | `replaced-server-reused-pane-id`, `stale-pane-identity-reported`, `reused-pane-id-not-adopted`, `live-pane-rebinds-to-current-identity`, `rebind-clears-stale-background-windows`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 | `interrupted-git-mutation` | Cleanup owner killed while its supervised `git worktree remove` is live | `mutation-observed-in-flight`, `cleanup-owner-killed-during-mutation`, `worktree-state-self-consistent`, `interrupted-mutation-left-no-orphan`, `cleanup-project-lease-recovered`, `worktree-branch-unchanged`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
 
+### Opt-in: application restart
+
+`pnpm recovery:restart` runs one further scenario, `application-restart`, which
+is deliberately **not** part of `pnpm recovery:harness` and therefore not part
+of the required Quality check. It launches the real cockpit twice, so it costs
+seconds rather than milliseconds and depends on first-run prompt text — a flake
+surface a required check should not carry. This is the same shape as
+`PSYCHE_AGENT_CHECK_IOS` for the iOS simulator gate: an expensive observation an
+operator asks for deliberately. Its evidence is retained the same way and its
+exit code still gates.
+
+It covers the #199 case listed first and previously uncovered, and the #196
+requirement to "restore without duplicate projects, panes, sessions, or
+worktrees". The cockpit is launched in a disposable project with a disposable
+`HOME` on a private tmux socket, first-run onboarding is declined, the cockpit
+is quit the way a person quits it — it confirms on the first Ctrl+C and exits on
+the second — and then relaunched into the session that survived.
+
+Whether the tmux session outlives the quit is **recorded but not asserted**. It
+depends on whether managed panes exist: a cockpit whose own pane is the last one
+takes the session with it, which is what `pnpm smoke` documents and relies on,
+while one with live panes leaves them running. This fixture creates no panes, so
+both shapes occur and the restart handles each. The scenario therefore checks
+that the cockpit process ended, that it is running again afterwards, and that
+the restart restored the same project without duplicating projects, panes,
+sessions, worktrees, or the live panes it found.
+
+`restart-restored-workspace` requires the cockpit process to be live again, not
+merely that the persisted config is readable: the config outlives the quit, so
+readability alone would pass even if the relaunch never happened.
+
+The fixture's workspace has no managed panes and no managed worktrees, so the
+persisted pane-count and worktree comparisons are structural guards rather than
+load-bearing ones — they compare zero to zero. A variant that creates a pane and
+a worktree before quitting would make them load-bearing, and is follow-on work.
+
+`first-run-reached-workspace` is the setup control, and `restart_unavailable`
+records a host where the cockpit could not be launched at all, so a run that
+observed nothing cannot read as a pass.
+
+A hard guard refuses any project root at or beneath this checkout. The cockpit
+adopts its working directory as its project and rewrites that project's
+`.psyche` state on startup, so a mis-scoped launch would destroy a developer's
+own workspace. That guard has its own test and is not a convention.
+
+Scope: it observes quit and relaunch of a workspace whose panes run no agents.
+It does not observe a crash mid-transition, a restart with live agent panes, or
+the packaged application bundle, and it is source evidence rather than packaged
+operator acceptance.
+
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness
 process is not stale, so a second acquisition blocks and times out instead of

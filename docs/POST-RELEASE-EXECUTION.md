@@ -391,8 +391,10 @@ debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 
 #199 remains open for the failure classes the harness deliberately does not
-cover — application restart, and upgrade recovery across two real installed
-builds — plus the remaining support-bundle collectors and UI above. The
+cover — upgrade recovery across two real installed builds — plus the remaining
+support-bundle collectors and UI above. Application restart is now covered by
+the opt-in `pnpm recovery:restart` scenario, which launches the real cockpit
+twice and is deliberately kept out of the required Quality check. The
 `upgrade-recovery` scenario now covers the versioned-state boundary at source:
 a newer config is refused and preserved, and an unversioned one is adopted
 through a named migration with its superseded bytes retained. Recovery across

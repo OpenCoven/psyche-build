@@ -48,6 +48,15 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'unversioned-config-adopted-by-named-migration',
   'pre-migration-snapshot-retained',
   'adopted-config-carries-current-schema',
+  'first-run-reached-workspace',
+  'normal-quit-ended-cockpit',
+  'restart-restored-workspace',
+  'restart-preserved-project-identity',
+  'restart-did-not-duplicate-projects',
+  'restart-did-not-duplicate-panes',
+  'restart-did-not-duplicate-sessions',
+  'restart-did-not-duplicate-worktrees',
+  'restart-did-not-duplicate-managed-panes',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
