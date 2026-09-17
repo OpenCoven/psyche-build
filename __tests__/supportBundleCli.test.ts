@@ -141,6 +141,163 @@ describe('support bundle collectors', () => {
     }
   });
 
+  it('reports pane lifecycle facts from persisted state', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(path.join(projectRoot, '.psyche', 'psyche.config.json'), JSON.stringify({
+      schemaVersion: 1,
+      panes: [{ id: 'a' }, { id: 'b' }],
+      paneLayout: { version: 1, root: {} },
+    }), 'utf8');
+
+    const bundle = await collect(projectRoot);
+
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.redaction.omittedFields).toBe(0);
+    expect(bundle.lifecycle).toEqual({ panes: 2, state: 'available' });
+  });
+
+  it('reports a project with no persisted layout as missing, not absent', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes: [] }),
+      'utf8',
+    );
+
+    const bundle = await collect(projectRoot);
+
+    expect(bundle.lifecycle).toEqual({ panes: 0, state: 'missing' });
+  });
+
+  it('says "there, unreadable" when the config fails the schema gate', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    // Written by a newer Psyche: present on disk, refused by the read gate.
+    writeFileSync(path.join(projectRoot, '.psyche', 'psyche.config.json'), JSON.stringify({
+      schemaVersion: 99,
+      panes: [{ id: 'a' }],
+    }), 'utf8');
+
+    const bundle = await collect(projectRoot);
+
+    // One unreadable config must not take out the whole collection.
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.lifecycle).toEqual({ state: 'unavailable' });
+    expect(bundle.updater).toEqual({ state: 'unavailable' });
+    // The pair is what carries the meaning: present, and unreadable.
+    expect(bundle.persistence).toMatchObject({ projectConfig: 'available' });
+  });
+
+  it('reports updater mode and whether its cache matches the running build', async () => {
+    const cases: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      [
+        { autoUpdateEnabled: true, cachedCurrentVersion: '0.0.2', cachedHasUpdate: false },
+        { mode: 'enabled', state: 'current', capability: 'missing' },
+      ],
+      [
+        { autoUpdateEnabled: false, cachedCurrentVersion: '0.0.1', cachedHasUpdate: true },
+        { mode: 'disabled', state: 'stale', capability: 'available' },
+      ],
+      // `AutoUpdater` defaults an absent section to enabled and disables only
+      // on an explicit `false`, so the bundle must report the behaviour.
+      [{}, { mode: 'enabled', state: 'unknown', capability: 'missing' }],
+      [{ cachedCurrentVersion: '0.0.2' }, { mode: 'enabled', state: 'current', capability: 'missing' }],
+    ];
+
+    for (const [updateSettings, expected] of cases) {
+      const projectRoot = createProjectRoot();
+      mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+      writeFileSync(
+        path.join(projectRoot, '.psyche', 'psyche.config.json'),
+        JSON.stringify({ schemaVersion: 1, panes: [], updateSettings }),
+        'utf8',
+      );
+
+      const bundle = await collect(projectRoot);
+
+      expect(bundle.errors).toEqual([]);
+      expect(bundle.redaction.omittedFields).toBe(0);
+      expect(bundle.updater).toEqual(expected);
+    }
+  });
+
+  it('reports an absent updater section as effectively enabled', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes: [] }),
+      'utf8',
+    );
+
+    const bundle = await collect(projectRoot);
+
+    // Reporting `unknown` would describe the config; the operator needs the
+    // behaviour, and the behaviour is "updates are on".
+    expect(bundle.updater).toMatchObject({ mode: 'enabled' });
+  });
+
+  it('refuses to parse a project config beyond the read bound', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    // Valid JSON, but larger than any real config: a bundle collected from a
+    // broken installation must not be the thing that hangs on it.
+    const filler = 'x'.repeat(1024);
+    const panes = Array.from({ length: 1200 }, (_, index) => ({ id: `${filler}-${index}` }));
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes }),
+      'utf8',
+    );
+
+    const bundle = await collect(projectRoot);
+
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.lifecycle).toEqual({ state: 'unavailable' });
+    expect(bundle.updater).toEqual({ state: 'unavailable' });
+    expect(bundle.persistence).toMatchObject({ projectConfig: 'available' });
+  });
+
+  it('reads the project config once for every section that needs it', async () => {
+    const projectRoot = createProjectRoot();
+    mkdirSync(path.join(projectRoot, '.psyche'), { recursive: true });
+    writeFileSync(
+      path.join(projectRoot, '.psyche', 'psyche.config.json'),
+      JSON.stringify({ schemaVersion: 1, panes: [{ id: 'a' }] }),
+      'utf8',
+    );
+    const collectors = createSupportCollectors({
+      projectRoot,
+      releaseVersion: '0.0.2',
+      platform: 'darwin',
+      architecture: 'arm64',
+    });
+    const signal = new AbortController().signal;
+
+    // Both sections resolve from one shared snapshot, so a second collector
+    // cannot re-parse the same unbounded file.
+    const [lifecycle, updater] = await Promise.all([
+      collectors.find((collector) => collector.name === 'lifecycle')!.collect(signal),
+      collectors.find((collector) => collector.name === 'updater')!.collect(signal),
+    ]);
+
+    expect(lifecycle.lifecycle).toMatchObject({ panes: 1 });
+    expect(updater.updater).toMatchObject({ mode: 'enabled' });
+  });
+
+  it('gives every bundle field exactly one owning collector', async () => {
+    const projectRoot = createProjectRoot();
+
+    const bundle = await collect(projectRoot);
+
+    // Two collectors writing one field is a collection_conflict that drops
+    // both, and the dropped section is silently empty in the output.
+    expect(bundle.errors.map((error) => error.code)).not.toContain('collection_conflict');
+    expect(bundle.errors).toEqual([]);
+  });
+
   it('maps host platform and architecture into the bundle vocabulary', () => {
     expect(supportBundlePlatform('win32')).toBe('windows');
     expect(supportBundlePlatform('darwin')).toBe('darwin');

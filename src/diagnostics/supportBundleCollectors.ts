@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { collectRecoveryListing } from './recoveryReport.js';
+import {
+  projectPaneConfigPath,
+  readProjectPaneConfig,
+  type ProjectPaneConfig,
+} from '../services/ProjectPaneConfig.js';
 import { normalizeCanonicalProjectIdentity } from '../control/projectIdentity.js';
 import { canonicalizePathWithExistingAncestor } from '../services/WorktreePath.js';
 import type { SupportBundleInput, SupportCollector } from './supportBundle.js';
@@ -13,6 +18,17 @@ import type { SupportBundleInput, SupportCollector } from './supportBundle.js';
  */
 const MAX_SCANNED_RECOVERY_FILES = 256;
 const MAX_RECOVERY_FILE_BYTES = 64 * 1024;
+
+/**
+ * A project config larger than this is not parsed at all.
+ *
+ * `readProjectPaneConfig` reads and parses the whole file with no size bound
+ * and no way to interrupt the parse. A bundle is collected precisely when an
+ * installation is broken, so it must not be the thing that hangs on a corrupt
+ * or absurdly large config. Generous next to a real config — a hundred panes is
+ * far under this — and still bounded.
+ */
+const MAX_PROJECT_CONFIG_BYTES = 1024 * 1024;
 
 export interface SupportCollectorContext {
   readonly projectRoot: string;
@@ -77,6 +93,33 @@ export function projectIdentityDigest(projectRoot: string): string {
 export function createSupportCollectors(
   context: SupportCollectorContext,
 ): SupportCollector[] {
+  // One bounded read shared by every section that needs the config. Reading it
+  // per collector would parse the same unbounded file more than once, which is
+  // the opposite of bounded collection.
+  let snapshot: Promise<ProjectPaneConfig | undefined> | undefined;
+  const projectConfigOnce = (
+    signal: AbortSignal,
+  ): Promise<ProjectPaneConfig | undefined> => {
+    snapshot ??= (async () => {
+      signal.throwIfAborted();
+      try {
+        const { size } = await stat(projectPaneConfigPath(context.projectRoot));
+        if (size > MAX_PROJECT_CONFIG_BYTES) return undefined;
+      } catch {
+        return undefined;
+      }
+      signal.throwIfAborted();
+      try {
+        return await readProjectPaneConfig(context.projectRoot);
+      } catch {
+        // Corrupt, or written by a newer Psyche. Reported as unavailable by
+        // each section rather than failing the whole collection.
+        return undefined;
+      }
+    })();
+    return snapshot;
+  };
+
   return [
     {
       name: 'provenance',
@@ -117,7 +160,59 @@ export function createSupportCollectors(
         };
       },
     },
+    {
+      name: 'lifecycle',
+      collect: async (signal): Promise<SupportBundleInput> => {
+        // Pane facts come from persisted state, not from a live tmux probe: a
+        // support bundle must not start processes or need a running server to
+        // describe the installation it is documenting.
+        const config = await projectConfigOnce(signal);
+        if (!config) {
+          // Unreadable or over the read bound. `persistence` still reports the
+          // file as present, so the pair reads "there, unreadable" without
+          // failing the whole collection.
+          return { lifecycle: { state: 'unavailable' } };
+        }
+        return {
+          lifecycle: {
+            panes: Array.isArray(config.panes) ? config.panes.length : 0,
+            state: config.paneLayout === undefined ? 'missing' : 'available',
+          },
+        };
+      },
+    },
+    {
+      name: 'updater',
+      collect: async (signal): Promise<SupportBundleInput> => {
+        const config = await projectConfigOnce(signal);
+        if (!config) {
+          return { updater: { state: 'unavailable' } };
+        }
+        const settings = isRecord(config.updateSettings) ? config.updateSettings : {};
+        const cachedVersion = settings.cachedCurrentVersion;
+        return {
+          updater: {
+            // `AutoUpdater` defaults an absent section to enabled and gates on
+            // an explicit `false`, so anything else is effectively enabled.
+            // Reporting `unknown` here would describe the config rather than
+            // the behaviour, and the operator needs the behaviour.
+            mode: settings.autoUpdateEnabled === false ? 'disabled' : 'enabled',
+            // The one place this application compares persisted state against
+            // the running version. `stale` means the cached update answer was
+            // computed for a different build and no longer describes this one.
+            state: typeof cachedVersion !== 'string'
+              ? 'unknown'
+              : (cachedVersion === context.releaseVersion ? 'current' : 'stale'),
+            capability: settings.cachedHasUpdate === true ? 'available' : 'missing',
+          },
+        };
+      },
+    },
   ];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
