@@ -4,6 +4,10 @@ public enum ControlRequestError: Error, Sendable, Equatable, LocalizedError {
     case missingRequestID
     case duplicateRequestID(String)
     case timedOut(String)
+    /// The request was refused before registration, so no bytes were sent.
+    /// Distinct from `disconnected`, which a request already in flight gets
+    /// when its connection ends: that one cannot prove the host saw nothing.
+    case notConnected
     case disconnected
 
     public var errorDescription: String? {
@@ -14,6 +18,8 @@ public enum ControlRequestError: Error, Sendable, Equatable, LocalizedError {
             "A control request with ID \(id) is already in flight."
         case .timedOut:
             "The host did not answer in time."
+        case .notConnected:
+            "There was no connection to the host, so the request was not sent."
         case .disconnected:
             "The connection to the host ended before the host answered."
         }
@@ -86,7 +92,7 @@ public actor ControlRequestClient: ControlRequesting {
 
     public func send(_ request: MobileControlRequest) async throws -> MobileControlResponse {
         guard let generation = activeGeneration else {
-            throw ControlRequestError.disconnected
+            throw ControlRequestError.notConnected
         }
         return try await send(request, generation: generation)
     }
@@ -114,7 +120,7 @@ public actor ControlRequestClient: ControlRequesting {
             try await withCheckedThrowingContinuation { continuation in
                 let registration: RegistrationResult = generation.withValidity {
                     guard activeGeneration === generation else {
-                        return .rejected(.disconnected)
+                        return .rejected(.notConnected)
                     }
                     return register(
                         request,
@@ -123,7 +129,7 @@ public actor ControlRequestClient: ControlRequesting {
                         generation: generation,
                         continuation: continuation
                     )
-                } ?? .rejected(.disconnected)
+                } ?? .rejected(.notConnected)
 
                 if case .rejected(let error) = registration {
                     continuation.resume(throwing: error)

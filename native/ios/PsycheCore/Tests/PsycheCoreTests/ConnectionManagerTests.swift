@@ -275,7 +275,7 @@ final class ConnectionManagerTests: XCTestCase {
             )))
             XCTFail("The shared client must stay unavailable before v3 negotiation")
         } catch {
-            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
         }
 
         await fake.emit(.legacy(.welcome(WelcomePayload(
@@ -2002,7 +2002,7 @@ final class ConnectionManagerTests: XCTestCase {
             )))
             XCTFail("A request during transport connect must fail before transmission")
         } catch {
-            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
         }
 
         await manager.disconnect()
@@ -2217,7 +2217,7 @@ final class ConnectionManagerTests: XCTestCase {
             )))
             XCTFail("A request during transport connect must fail before transmission")
         } catch {
-            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+            XCTAssertEqual(error as? ControlRequestError, .notConnected)
         }
 
         firstConnect.cancel()
