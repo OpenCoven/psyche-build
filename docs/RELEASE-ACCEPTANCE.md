@@ -30,8 +30,8 @@ operate, recover, and remove the application.
 | Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #196 executed through #239 |
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
-| Versioned bounded support bundle schema | **Complete as schema only** | #243 via PR #278 (`69769cc5`); no production collector wiring, CLI, or UI |
-| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; ten bounded scenarios and CI-retained reports, not a `v0.0.1` feature |
+| Versioned bounded support bundle | **Schema complete; production surface partial** | Schema #243 via PR #278 (`69769cc5`); CLI and bounded persistence via PR #462; provenance, persistence, lifecycle and updater collectors via PRs #462 and #467. Provider, graphics, receipt and terminal collectors, and any UI, remain absent. All of it postdates `v0.0.1`, which contains none of it |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; eleven bounded scenarios in the default run plus the opt-in `pnpm recovery:restart` observation, with CI-retained reports. Source coverage, not a `v0.0.1` feature and not the observed operator case |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
 
 The open #196/#239 row does not make the already-delivered macOS artifact
@@ -296,10 +296,12 @@ user context, not merely a development checkout.
 
 ## Current error and diagnostic surfaces
 
-The first release does not claim a support bundle. The v1 schema merged later
-under #243 (PR #278) without production collector wiring, and the reusable
-harness remains owned by #199. Do not invent a nonexistent command to satisfy
-acceptance.
+The first release does not claim a support bundle, and nothing since changes
+that. The v1 schema merged later under #243 (PR #278), and its CLI, bounded
+persistence and first collectors later still under PRs #462 and #467 — all
+after `v0.0.1`, so the released build has no `psyche support-bundle` command.
+The reusable harness remains owned by #199. Do not satisfy acceptance for this
+release with a command it does not contain.
 
 - [ ] Verify visible application errors identify the failed operation and a
   safe next action without dumping credentials, prompts, unrestricted terminal
@@ -580,8 +582,11 @@ mutation, automatic crash reconciliation, application restart, or packaged GUI
 acceptance; `interrupted-git-mutation` covers the Git-mutation boundary
 separately. It does not close #196, #199, or #239.
 
-The remaining #199 scenarios — application restart and upgrade recovery — are
-not yet implemented and must not be implied by a passing run. The
+Application restart and upgrade recovery now have source coverage — the opt-in
+`pnpm recovery:restart` scenario and the `upgrade-recovery` scenario's
+versioned-state boundary — and source coverage is not the observed operator
+case. Neither is established by a passing default run, and PR #465 records that
+its restart scenario supplies no packaged GUI evidence. The
 `unavailable-providers` scenario observes the routing and detection boundary
 only: an agent CLI that disappears mid-session is sent into a live shell and
 has no product classification, so it stays unobserved. No scenario launches, terminates, and relaunches the application: the
