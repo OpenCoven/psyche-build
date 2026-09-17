@@ -507,20 +507,28 @@ identities.
 
 #199/#243 retains its P1 dependency gate for the scenarios that remain:
 application restart and upgrade recovery still follow observed #239 operator
-cases rather than being inferred. Stale-identity coverage now spans both paths
+cases rather than being inferred. Both now have source coverage in the harness;
+source coverage is not the observed case, and PR #465 states that its restart
+scenario supplies no packaged GUI evidence and closes neither #196, #199 nor
+#239. Stale-identity coverage now spans both paths
 production recovery distinguishes — the stale config lease and the replaced
 tmux pane identity — at source, not as packaged observation.
 
 The #243 schema slice is delivered through PR #278, and the reusable
 disposable failure-injection and recovery harness is delivered through
-PRs #354-#359. It covers ten scenarios against the real production paths —
+PRs #354-#359. It covers twelve scenarios against the real production paths —
 corrupt pane config, stale config lease, unwritable state storage, duplicate
 command retry, stale owner epoch, interrupted-cleanup recovery evidence, an
-interrupted real cleanup owner, unavailable optional providers, and a replaced
-tmux server that reuses a recorded pane identity, and a cleanup owner killed
-during its supervised Git mutation — runs from a clean checkout
-as `pnpm recovery:harness`, and runs in the Quality CI job with its report
-retained as a build artifact.
+interrupted real cleanup owner, unavailable optional providers, a replaced
+tmux server that reuses a recorded pane identity, a cleanup owner killed
+during its supervised Git mutation, a config aged across schema versions, and
+an application restart — runs from a clean checkout as `pnpm recovery:harness`,
+and runs in the Quality CI job with its report retained as a build artifact.
+The restart scenario is opt-in through `pnpm recovery:restart` and is
+deliberately excluded from the required Quality check. It is source evidence,
+not packaged operator acceptance: it does not observe a crash mid-transition, a
+restart with live agent panes, or the packaged application bundle, so the #239
+restart acceptance debt stays open.
 
 That seventh scenario interrupts the real cleanup worker before Git mutation,
 recovers its project lease, and proves a fresh retry respects an
@@ -529,8 +537,11 @@ cleanup control and does not claim mid-Git interruption, automatic crash
 reconciliation, or packaged acceptance.
 
 The merged support-bundle v1 contract is versioned, deterministic, bounded by
-time, count, record, and total size, cancellable, and redacts by default. It
-has no production collector wiring, CLI, or UI yet.
+time, count, record, and total size, cancellable, and redacts by default. PR
+#462 gave it a production CLI and bounded persistence, and PR #467 added
+lifecycle and updater collectors. Provider, graphics, receipt and terminal
+collectors and any UI remain absent, and a CLI-collected bundle is always
+`unverified` because it holds no control-plane authority.
 
 #199 remains open. The harness covers the failure classes reachable without a
 running application, including the unavailable-provider routing and detection

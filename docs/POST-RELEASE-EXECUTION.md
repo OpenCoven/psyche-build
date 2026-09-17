@@ -165,7 +165,7 @@ macOS acceptance and recovery.
 | Order | Outcome | Priority | Current state and exit gate |
 |---:|---|---:|---|
 | 1 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths; the earlier 15-digest manifest remains `incomplete`, not reverified by later CLI smoke |
-| 2 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) ([#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P1 | Address observed #239 recovery/provider/upgrade gaps; schema only, no production collector wiring or packaged acceptance |
+| 2 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) ([#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P1 | Address observed #239 recovery/provider/upgrade gaps; #243 delivered the schema only, with no production collector wiring; PRs #462 and #467 later added the CLI, bounded persistence, and lifecycle/updater collectors; no packaged acceptance |
 
 | Separate train | Outcomes | Retained gate on resumption |
 |---|---|---|
@@ -367,11 +367,14 @@ same-LAN beta; it does not block that beta.
 
 #199/#243 retains its P1 dependency gate for the scenarios that remain:
 application restart and upgrade recovery still follow observed #239 operator
-cases rather than being inferred.
+cases rather than being inferred. Both now have source coverage in the harness,
+and source coverage is not the observed case: PR #465 states that its restart
+scenario supplies no packaged GUI evidence and closes neither #196, #199 nor
+#239.
 
 Support-bundle schema and redaction landed through PR #278, and #243 closed
 with it. The reusable disposable failure-injection and recovery harness landed
-through PRs #354-#359: ten scenarios driving the real production paths, a
+through PRs #354-#359: twelve scenarios driving the real production paths, a
 `pnpm recovery:harness` entry point that runs from a clean checkout, and a
 Quality CI step that retains each run's report as a build artifact. Every
 invariant was proved load-bearing by reintroducing the defect it guards.
@@ -383,18 +386,23 @@ environment variables, infrastructure details, and full user paths. It now has
 a first production surface: `psyche support-bundle` wires bounded collectors,
 writes a `0600` bundle under the project runtime directory with retention, and
 prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md).
-That surface covers provenance, project identity and recovery state only;
-lifecycle, provider, updater, graphics, receipt and terminal collectors, and
-any UI, remain absent, and an operator-invoked bundle is always `unverified`
-because the CLI holds no control-plane authority. PR #281 delivered the
+That surface covers provenance, project identity, recovery state, pane
+lifecycle and updater state; PR #467 added the last two, both read from
+persisted state without starting a process or needing a running server.
+Provider, graphics, receipt and terminal collectors, and any UI, remain absent,
+and an operator-invoked bundle is always `unverified` because the CLI holds no
+control-plane authority. PR #281 delivered the
 debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 
-#199 remains open for the failure classes the harness deliberately does not
-cover — upgrade recovery across two real installed builds — plus the remaining
-support-bundle collectors and UI above. Application restart is now covered by
-the opt-in `pnpm recovery:restart` scenario, which launches the real cockpit
-twice and is deliberately kept out of the required Quality check. The
+#199 remains open for the observed operator cases the harness cannot supply —
+application restart and upgrade recovery across two real installed builds —
+plus the remaining support-bundle collectors and UI above. Application restart
+has source coverage in the opt-in `pnpm recovery:restart` scenario, which
+launches the real cockpit twice and is deliberately kept out of the required
+Quality check; it does not observe a crash mid-transition, a restart with live
+agent panes, or the packaged application bundle, so the #239 acceptance debt
+stays open. The
 `upgrade-recovery` scenario now covers the versioned-state boundary at source:
 a newer config is refused and preserved, and an unversioned one is adopted
 through a named migration with its superseded bytes retained. Recovery across
