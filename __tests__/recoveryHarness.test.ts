@@ -34,6 +34,11 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'provider-failure-classified',
   'available-provider-still-executes',
   'plain-terminal-lane-remains-usable',
+  'failing-agent-classified-as-launch-failure',
+  'missing-agent-classified-as-not-found',
+  'running-agent-not-classified-as-failed',
+  'agent-pane-shell-preserved',
+  'launch-report-carries-no-terminal-content',
   'replaced-server-reused-pane-id',
   'stale-pane-identity-reported',
   'reused-pane-id-not-adopted',
@@ -250,6 +255,29 @@ describe('disposable recovery harness', () => {
     expect(byId.get('worktree-branch-unchanged')).toBe(true);
     expect(byId.get('uncommitted-work-untouched')).toBe(true);
     expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+  });
+
+  it('classifies an agent CLI that fails at launch without closing its shell', async () => {
+    expect(recoveryScenarioIds()).toContain('agent-launch-failure');
+    const report = await runRecoveryHarness(['agent-launch-failure']);
+    const [scenario] = report.scenarios;
+
+    // `tmux_unavailable` would mean no shell ran, so nothing was launched.
+    expect(scenario.classification).not.toBe('tmux_unavailable');
+    expect(scenario.classification).toBe('agent_launch_failed');
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    expect(byId.get('failing-agent-classified-as-launch-failure')).toBe(true);
+    expect(byId.get('missing-agent-classified-as-not-found')).toBe(true);
+    // Positive control: classifying every launch as failed would satisfy the
+    // two invariants above while crying wolf on every healthy agent.
+    expect(byId.get('running-agent-not-classified-as-failed')).toBe(true);
+    // The classification is a report, never a remedy: the operator's shell
+    // must still be there and still run what they type.
+    expect(byId.get('agent-pane-shell-preserved')).toBe(true);
+    expect(byId.get('launch-report-carries-no-terminal-content')).toBe(true);
+    expect(byId.get('uncommitted-work-untouched')).toBe(true);
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+    expect(JSON.stringify(report)).not.toContain('SENTINEL');
   });
 
   it('emits bounded evidence carrying no paths, content, or free text', async () => {

@@ -9,6 +9,10 @@ import {
 } from './codexHooks.js';
 import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
+import {
+  buildAgentExitRecorderSuffix,
+  type AgentExitRecorder,
+} from './agentLaunchOutcome.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
@@ -582,6 +586,11 @@ export interface LaunchAgentInPaneOptions {
   permissionMode?: PermissionMode;
   psychePaneId?: string;
   codexHookEventFile?: string;
+  /**
+   * Records the agent's exit status on the pane after it returns, so a launch
+   * that fails inside the live shell can be classified (#475).
+   */
+  exitRecorder?: AgentExitRecorder;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
@@ -613,6 +622,7 @@ export async function launchAgentInPane(
     permissionMode,
     psychePaneId,
     codexHookEventFile,
+    exitRecorder,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -677,6 +687,10 @@ export async function launchAgentInPane(
       tmuxPaneId: paneId,
       eventFile: codexHookEventFile,
     });
+  }
+
+  if (exitRecorder) {
+    launchCommand += buildAgentExitRecorderSuffix(exitRecorder);
   }
 
   await tmuxService.sendShellCommand(paneId, launchCommand);

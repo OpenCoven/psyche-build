@@ -200,4 +200,42 @@ describe('launchAgentInPane', () => {
       expect(tmux.shellCommands[0]).not.toContain('PSYCHE_PROMPT_CONTENT');
     });
   });
+  describe('exit recording', () => {
+    it('appends the exit recorder after the agent command when asked', async () => {
+      const tmux = await launch('coven-code', '', {
+        exitRecorder: { nonce: '0a1b2c3d', shellPath: '/bin/zsh' },
+      });
+
+      expect(tmux.shellCommands[0]).toBe(
+        'coven; tmux set-option -p -t "$TMUX_PANE" @psyche_agent_exit "0a1b2c3d:$?" 2>/dev/null',
+      );
+    });
+
+    it('records the status of the agent, not of the prompt bootstrap', async () => {
+      const tmux = await launch('opencode', 'Fix it', {
+        exitRecorder: { nonce: '0a1b2c3d', shellPath: '/bin/zsh' },
+      });
+
+      const command = tmux.shellCommands[0];
+      // The recorder must follow the agent invocation directly, so `$?` is
+      // the agent's own exit status.
+      expect(command).toMatch(
+        /--prompt "\$PSYCHE_PROMPT_CONTENT"; tmux set-option -p -t "\$TMUX_PANE" @psyche_agent_exit "0a1b2c3d:\$\?" 2>\/dev\/null$/u,
+      );
+      expect(command).not.toContain('Fix it');
+    });
+
+    it('wraps the hooked codex command too', async () => {
+      const tmux = await launch('codex', '', {
+        exitRecorder: { nonce: '0a1b2c3d', shellPath: '/bin/zsh' },
+      });
+
+      expect(tmux.shellCommands[0]).toMatch(/codex.*; tmux set-option -p .*"0a1b2c3d:\$\?" 2>\/dev\/null$/u);
+    });
+
+    it('sends no recorder when none is requested', async () => {
+      const tmux = await launch('coven-code', '');
+      expect(tmux.shellCommands[0]).not.toContain('@psyche_agent_exit');
+    });
+  });
 });

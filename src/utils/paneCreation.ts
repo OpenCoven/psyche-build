@@ -51,9 +51,15 @@ import {
 } from '../services/PaneSlugReservation.js';
 import {
   appendSlugSuffix,
+  getAgentLabel,
   launchAgentInPane,
   type AgentName,
 } from './agentLaunch.js';
+import {
+  createAgentExitRecorder,
+  readAgentExitPaneOption,
+  watchAgentLaunch,
+} from './agentLaunchOutcome.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import { isValidBranchName } from './git.js';
 import { ensurePsycheRuntimeIgnored } from './gitignore.js';
@@ -1463,6 +1469,7 @@ async function createPaneWithReuseReservation(
       }
     }
 
+    const exitRecorder = createAgentExitRecorder();
     await launchAgentInPane({
       paneId: paneInfo,
       agent,
@@ -1473,7 +1480,26 @@ async function createPaneWithReuseReservation(
       permissionMode: settings.permissionMode,
       psychePaneId: newPane.id,
       codexHookEventFile,
+      exitRecorder,
       tmuxService,
+    });
+    // Background: pane creation has already succeeded, and the pane and its
+    // shell are left exactly as they are whatever the agent did (#475).
+    void watchAgentLaunch({
+      nonce: exitRecorder.nonce,
+      agentLabel: getAgentLabel(agent),
+      readExitOption: () => readAgentExitPaneOption(paneInfo),
+      onFailure: async (failure, message) => {
+        LogService.getInstance().warn(
+          `Agent launch classified ${failure.state}:${failure.exit}:${failure.nextAction}`,
+          'paneCreation',
+          newPane.id,
+        );
+        // The toast also lands in the log panel, so the operator sees the
+        // cause and the next action without reading terminal output.
+        const { StateManager } = await import('../shared/StateManager.js');
+        StateManager.getInstance().showToast(message, 'error');
+      },
     });
 
     if (agent === 'claude') {
