@@ -586,18 +586,26 @@ describe('security and supply-chain baseline contract', () => {
   it('schedules grouped weekly Dependabot updates for every lockfile-owning ecosystem', () => {
     const config = readFileSync(dependabotConfigPath, 'utf8');
     const entries = config.split(/^  - package-ecosystem: /m).slice(1);
-    const byEcosystem = new Map(
-      entries.map((entry) => [entry.slice(0, entry.indexOf('\n')).trim(), entry]),
+    const byTarget = new Map(
+      entries.map((entry) => {
+        const ecosystem = entry.slice(0, entry.indexOf('\n')).trim();
+        const directory = /^\s+directory: (\S+)$/m.exec(entry)?.[1];
+        return [`${ecosystem} ${directory}`, entry];
+      }),
     );
 
     expect(config).toMatch(/^version: 2$/m);
-    expect([...byEcosystem.keys()].sort()).toEqual(['cargo', 'github-actions', 'npm']);
-    expect(byEcosystem.get('npm')).toContain('directory: /\n');
-    expect(byEcosystem.get('cargo')).toContain(
-      'directory: /native/desktop/psyche-build-tauri/src-tauri\n',
-    );
-    expect(byEcosystem.get('github-actions')).toContain('directory: /\n');
-    for (const entry of byEcosystem.values()) {
+    // The nested docs lockfile serves the standalone Vercel deployment, so it
+    // is a second npm target rather than part of the root workspace entry.
+    expect([...byTarget.keys()].sort()).toEqual([
+      'cargo /native/desktop/psyche-build-tauri/src-tauri',
+      'github-actions /',
+      'npm /',
+      'npm /docs',
+    ]);
+    const groups = [...config.matchAll(/^      ([a-z0-9-]+):\n\s+update-types:/gm)].map(([, name]) => name);
+    expect(new Set(groups).size).toBe(groups.length);
+    for (const entry of byTarget.values()) {
       expect(entry).toContain('interval: weekly');
       expect(entry).toMatch(/open-pull-requests-limit: [1-9]\b/);
       expect(entry).toContain('update-types: [minor, patch]');

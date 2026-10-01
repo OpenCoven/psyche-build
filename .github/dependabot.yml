@@ -10,9 +10,9 @@
 # label, and this file must not imply one exists.
 version: 2
 updates:
-  # Root pnpm workspace. The single pnpm-lock.yaml at the root covers every
-  # member listed in pnpm-workspace.yaml (frontend, docs, packages/vim-core,
-  # native/desktop/psyche-build-tauri).
+  # Root pnpm workspace. The root pnpm-lock.yaml covers every member listed in
+  # pnpm-workspace.yaml (frontend, docs, packages/vim-core,
+  # native/desktop/psyche-build-tauri) for workspace installs.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -23,6 +23,21 @@ updates:
       default-days: 2
     groups:
       npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Standalone docs deployment. docs/pnpm-lock.yaml is consumed by the Vercel
+  # build configured in docs/vercel.json, separately from the root workspace
+  # importer, so it needs its own entry to stay current.
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 2
+    groups:
+      docs-npm-minor-and-patch:
         update-types: [minor, patch]
 
   # Tauri desktop shell. vendor/portable-pty is a vendored path dependency
