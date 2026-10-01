@@ -216,11 +216,22 @@ Two limits follow, and the section is not evidence beyond them:
   direction. `capability: 'missing'` means nothing was found where the bundle
   looked, not that the app cannot launch an agent.
 
-The survey checks at most 512 candidate locations and stops on the collector's
-abort signal. A survey that hits that bound reports `state: 'partial'`, so its
-`count` is a lower bound rather than a checked absence. Cancellation rejects the
-collector instead of reporting a zero count, which the collection turns into
-`recovery_required`.
+`PATH` entries are normalized, including a trailing separator, before
+duplicates are removed, so `/usr/bin` and `/usr/bin/` cost one search.
+
+The survey checks at most 512 candidate locations. A survey that hits that
+bound reports `state: 'partial'`, so its `count` is a lower bound rather than a
+checked absence. The budget is spent in registry order, and each provider costs
+its common paths plus one candidate per `PATH` entry until it is found. A long
+`PATH` therefore makes `partial` common, and the providers late in the registry
+are the ones left unchecked.
+
+Cancellation is checked between candidates. A single filesystem check already
+in flight, such as one stalled on an unresponsive network mount, cannot be
+interrupted; the collection deadline still bounds the bundle, and the overrun
+is reported as `recovery_required`. On cancellation the collector rejects
+instead of reporting a zero count, and the collection turns that into
+`collection_timeout_or_cancelled` and `recovery_required`.
 
 Graphics, receipt, and terminal facts remain uncollected; those sections are
 empty rather than fabricated.

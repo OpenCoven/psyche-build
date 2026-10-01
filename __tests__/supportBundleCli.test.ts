@@ -564,6 +564,21 @@ describe('installed provider survey', () => {
     expect(survey).toEqual({ found: 0, truncated: false });
   });
 
+  it('spends budget once on search path entries that differ only in spelling', async () => {
+    const root = createProjectRoot();
+    const bin = path.join(root, 'norm-bin');
+    mkdirSync(bin, { recursive: true });
+
+    // Three spellings of one directory, one candidate of budget: if each
+    // spelling were probed separately the survey would run out and say partial.
+    const survey = await surveyInstalledProviders(
+      [{ id: 'amp', installTestCommand: 'command -v amp', commonPaths: [] }],
+      { pathEntries: [bin, `${bin}/`, `${bin}/./`], budget: 1 },
+    );
+
+    expect(survey).toEqual({ found: 0, truncated: false });
+  });
+
   it('ignores relative search path entries instead of resolving them against the cwd', async () => {
     const root = createProjectRoot();
     executable(path.join(root, 'rel-bin'), 'amp');

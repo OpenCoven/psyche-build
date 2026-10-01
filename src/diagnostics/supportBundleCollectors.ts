@@ -290,8 +290,11 @@ export async function surveyInstalledProviders(
   // Only absolute entries: an empty or relative `PATH` entry means "the
   // current directory", which would make the answer depend on where the
   // command was run rather than on the installation.
-  const searchPath = [...new Set(options.pathEntries)]
-    .filter((entry) => entry.length > 0 && path.isAbsolute(entry));
+  // Normalized before de-duplication, so `/usr/bin` and `/usr/bin/` do not
+  // each spend budget on the same directory.
+  const searchPath = [...new Set(options.pathEntries
+    .filter((entry) => entry.length > 0 && path.isAbsolute(entry))
+    .map((entry) => path.normalize(entry).replace(/(.)[\\/]+$/, '$1')))];
 
   for (const definition of definitions) {
     options.signal?.throwIfAborted();
