@@ -29,6 +29,16 @@ function findPackageJson(): any {
 
 const packageJson = findPackageJson();
 
+/**
+ * Whether the CLI may consult a package registry for updates or install from it.
+ *
+ * Psyche Build is not published to any package registry (SUPPORT-MATRIX marks
+ * the npm package Unavailable), so a registry answer for this package name is
+ * not ours and cannot be trusted. Until a signed update channel exists (#477),
+ * the CLI neither asks a registry for a version nor runs a global update.
+ */
+export const REGISTRY_UPDATES_ENABLED = false;
+
 interface UpdateInfo {
   currentVersion: string;
   latestVersion: string;
@@ -110,6 +120,11 @@ export class AutoUpdater {
   }
 
   async getCachedUpdateInfo(): Promise<UpdateInfo | null> {
+    // A cached registry answer is no more trustworthy than a fresh one.
+    if (!REGISTRY_UPDATES_ENABLED) {
+      return null;
+    }
+
     const settings = await this.loadSettings();
 
     // Ignore stale cache after the running psyche version changes.
@@ -134,6 +149,10 @@ export class AutoUpdater {
   }
 
   async getLatestVersion(): Promise<string | null> {
+    if (!REGISTRY_UPDATES_ENABLED) {
+      return null;
+    }
+
     try {
       // First try using npm view which is usually faster
       const result = execSync(`npm view ${packageJson.name} version`, {
@@ -289,6 +308,10 @@ export class AutoUpdater {
   }
 
   async performUpdate(updateInfo: UpdateInfo): Promise<boolean> {
+    if (!REGISTRY_UPDATES_ENABLED) {
+      return false;
+    }
+
     if (!updateInfo.hasUpdate || !updateInfo.packageManager || updateInfo.installMethod !== 'global') {
       return false;
     }
