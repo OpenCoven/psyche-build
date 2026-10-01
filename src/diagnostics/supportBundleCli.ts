@@ -11,6 +11,7 @@ import {
   supportBundleArchitecture,
   supportBundlePlatform,
 } from './supportBundleCollectors.js';
+import { getAgentDefinitions } from '../utils/agentLaunch.js';
 import {
   supportBundleDirectory,
   supportBundleFilename,
@@ -100,6 +101,11 @@ export async function runSupportBundle(
     releaseVersion: options.releaseVersion,
     platform: options.platform,
     architecture: options.architecture,
+    providerDefinitions: getAgentDefinitions(),
+    // The command's own search path. The desktop app resolves agents through
+    // an interactive login shell, whose `PATH` can differ; the bundle reports
+    // what it found here and says nothing about that shell.
+    providerSearchPath: (process.env.PATH ?? '').split(path.delimiter),
   }));
   const serialized = serializeSupportBundle(bundle);
   const digest = supportBundleDigest(bundle);

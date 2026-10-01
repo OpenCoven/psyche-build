@@ -16,6 +16,7 @@ import {
 } from '../src/diagnostics/supportBundleCli.js';
 import {
   createSupportCollectors,
+  surveyInstalledProviders,
   projectIdentityDigest,
   supportBundleArchitecture,
   supportBundlePlatform,
@@ -29,6 +30,7 @@ import {
   collectSupportBundle,
   isSupportBundleV1,
   parseSupportBundle,
+  serializeSupportBundle,
 } from '../src/diagnostics/supportBundle.js';
 import { worktreeRecoveryMarkerDirectory } from '../src/services/WorktreeRecoveryMarker.js';
 import { collectRecoveryListing } from '../src/diagnostics/recoveryReport.js';
@@ -50,12 +52,18 @@ function defaults(cwd: string) {
   };
 }
 
+// The real registry bakes absolute install paths in at module load, and the
+// real search path is whatever the host has. Collector tests pin both so a
+// bundle's provider facts do not depend on the machine running the suite.
+const NO_PROVIDERS = { providerDefinitions: [], providerSearchPath: [] } as const;
+
 async function collect(projectRoot: string) {
   return collectSupportBundle(createSupportCollectors({
     projectRoot,
     releaseVersion: '0.0.2',
     platform: 'darwin',
     architecture: 'arm64',
+    ...NO_PROVIDERS,
   }));
 }
 
@@ -122,11 +130,20 @@ describe('support bundle collectors', () => {
 
   it('keeps the project path out of what collectors hand to normalization', async () => {
     const projectRoot = createProjectRoot();
+    const bin = path.join(projectRoot, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n', { encoding: 'utf8', mode: 0o755 });
     const collectors = createSupportCollectors({
       projectRoot,
       releaseVersion: '0.0.2',
       platform: 'darwin',
       architecture: 'arm64',
+      // Provider paths live under the project root too, so a provider
+      // contribution that echoed a candidate path would fail this test.
+      providerDefinitions: [
+        { id: 'claude', installTestCommand: 'command -v claude', commonPaths: [path.join(bin, 'claude')] },
+      ],
+      providerSearchPath: [bin],
     });
 
     const contributions = await Promise.all(
@@ -273,6 +290,7 @@ describe('support bundle collectors', () => {
       releaseVersion: '0.0.2',
       platform: 'darwin',
       architecture: 'arm64',
+      ...NO_PROVIDERS,
     });
     const signal = new AbortController().signal;
 
@@ -285,6 +303,121 @@ describe('support bundle collectors', () => {
 
     expect(lifecycle.lifecycle).toMatchObject({ panes: 1 });
     expect(updater.updater).toMatchObject({ mode: 'enabled' });
+  });
+
+  it('reports provider availability from the filesystem alone', async () => {
+    const projectRoot = createProjectRoot();
+    const bin = path.join(projectRoot, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { encoding: 'utf8', mode: 0o755 });
+
+    const bundle = await collectSupportBundle(createSupportCollectors({
+      projectRoot,
+      releaseVersion: '0.0.2',
+      platform: 'darwin',
+      architecture: 'arm64',
+      providerDefinitions: [
+        { id: 'claude', installTestCommand: 'command -v claude', commonPaths: [] },
+        { id: 'codex', installTestCommand: 'command -v codex', commonPaths: [] },
+      ],
+      providerSearchPath: [bin],
+    }));
+
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.redaction.omittedFields).toBe(0);
+    expect(bundle.providers).toEqual({ count: 1, items: 2, capability: 'available' });
+  });
+
+  it('reports no installed provider as missing rather than unknown', async () => {
+    const bundle = await collect(createProjectRoot());
+
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.redaction.omittedFields).toBe(0);
+    expect(bundle.providers).toEqual({ count: 0, items: 0, capability: 'missing' });
+  });
+
+  it('marks a provider survey that ran out of budget as partial', async () => {
+    const projectRoot = createProjectRoot();
+    const definitions = Array.from({ length: 600 }, (_, index) => ({
+      id: `p${index}`,
+      installTestCommand: `command -v p${index}`,
+      commonPaths: [],
+    }));
+
+    const bundle = await collectSupportBundle(createSupportCollectors({
+      projectRoot,
+      releaseVersion: '0.0.2',
+      platform: 'darwin',
+      architecture: 'arm64',
+      providerDefinitions: definitions,
+      providerSearchPath: [path.join(projectRoot, 'empty')],
+    }));
+
+    expect(bundle.errors).toEqual([]);
+    expect(bundle.providers).toMatchObject({ count: 0, items: 600, state: 'partial' });
+  });
+
+  it('never carries provider paths, ids, commands, or secret-shaped names', async () => {
+    const projectRoot = createProjectRoot();
+    // Every name here is something the bundle must not repeat: an absolute
+    // path, a token-shaped directory, a provider id, and its install command.
+    const tokenDirectory = path.join(projectRoot, 'ghp_abcdefghijklmnopqrstuvwxyz0123');
+    const commonPath = path.join(projectRoot, 'opt', 'sk-secretsecretsecret', 'claude');
+    mkdirSync(tokenDirectory, { recursive: true });
+    mkdirSync(path.dirname(commonPath), { recursive: true });
+    writeFileSync(path.join(tokenDirectory, 'codex'), '#!/bin/sh\n', { encoding: 'utf8', mode: 0o755 });
+    writeFileSync(commonPath, '#!/bin/sh\n', { encoding: 'utf8', mode: 0o755 });
+
+    const bundle = await collectSupportBundle(createSupportCollectors({
+      projectRoot,
+      releaseVersion: '0.0.2',
+      platform: 'darwin',
+      architecture: 'arm64',
+      providerDefinitions: [
+        { id: 'claude', installTestCommand: 'command -v claude', commonPaths: [commonPath] },
+        { id: 'codex', installTestCommand: 'command -v codex', commonPaths: [] },
+      ],
+      providerSearchPath: [tokenDirectory],
+    }));
+    const serialized = serializeSupportBundle(bundle);
+
+    expect(bundle.providers).toEqual({ count: 2, items: 2, capability: 'available' });
+    for (const forbidden of [
+      projectRoot,
+      tokenDirectory,
+      commonPath,
+      'ghp_',
+      'sk-secret',
+      'command -v',
+      'claude',
+      'codex',
+      process.env.HOME ?? projectRoot,
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+    expect(bundle.redaction.omittedFields).toBe(0);
+    // Provider presence is not authority: the bundle stays unverified and can
+    // never reach `complete` from the CLI.
+    expect(bundle.provenance.verification).toBe('unverified');
+    expect(bundle.status).not.toBe('complete');
+  });
+
+  it('stops the provider survey on cancellation instead of reporting a count', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const providers = createSupportCollectors({
+      projectRoot: createProjectRoot(),
+      releaseVersion: '0.0.2',
+      platform: 'darwin',
+      architecture: 'arm64',
+      providerDefinitions: [{ id: 'claude', installTestCommand: 'command -v claude', commonPaths: [] }],
+      providerSearchPath: [],
+    }).find((collector) => collector.name === 'providers')!;
+
+    // A rejected collector is what the collection turns into
+    // `recovery_required`; resolving with a zero count would read as "nothing
+    // installed" when nothing was checked.
+    await expect(providers.collect(controller.signal)).rejects.toThrow();
   });
 
   it('gives every bundle field exactly one owning collector', async () => {
@@ -311,6 +444,146 @@ describe('support bundle collectors', () => {
     const bundle = await collect(createProjectRoot());
 
     expect(bundle.provenance.verification).toBe('unverified');
+  });
+});
+
+describe('installed provider survey', () => {
+  function executable(directory: string, name: string): string {
+    mkdirSync(directory, { recursive: true });
+    const filePath = path.join(directory, name);
+    writeFileSync(filePath, '#!/bin/sh\nexit 0\n', { encoding: 'utf8', mode: 0o755 });
+    return filePath;
+  }
+
+  it('counts an executable found on PATH', async () => {
+    const root = createProjectRoot();
+    const bin = path.join(root, 'bin');
+    executable(bin, 'claude');
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'claude', installTestCommand: 'command -v claude', commonPaths: [] }],
+      { pathEntries: [bin] },
+    );
+
+    expect(survey).toEqual({ found: 1, truncated: false });
+  });
+
+  it('counts an executable found at a registry common path', async () => {
+    const root = createProjectRoot();
+    const installed = executable(path.join(root, 'opt'), 'codex');
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'codex', installTestCommand: 'command -v codex', commonPaths: [installed] }],
+      { pathEntries: [] },
+    );
+
+    expect(survey.found).toBe(1);
+  });
+
+  it('reports nothing installed as the actionable missing signal', async () => {
+    const root = createProjectRoot();
+    mkdirSync(path.join(root, 'empty'), { recursive: true });
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'gemini', installTestCommand: 'command -v gemini', commonPaths: [] }],
+      { pathEntries: [path.join(root, 'empty')] },
+    );
+
+    expect(survey).toEqual({ found: 0, truncated: false });
+  });
+
+  it('does not count a directory that merely shares the name', async () => {
+    const root = createProjectRoot();
+    const bin = path.join(root, 'dir-bin');
+    // A directory is executable, so an access(X_OK) check alone would count it.
+    mkdirSync(path.join(bin, 'gemini'), { recursive: true });
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'gemini', installTestCommand: 'command -v gemini', commonPaths: [] }],
+      { pathEntries: [bin] },
+    );
+
+    expect(survey.found).toBe(0);
+  });
+
+  it('looks for the binary an agent installs, not its registry id', async () => {
+    const root = createProjectRoot();
+    const bin = path.join(root, 'alias-bin');
+    // `coven-code` installs `coven`; `cursor` installs `cursor-agent`.
+    executable(bin, 'coven');
+    executable(bin, 'cursor-agent');
+
+    const survey = await surveyInstalledProviders(
+      [
+        { id: 'coven-code', installTestCommand: 'command -v coven 2>/dev/null', commonPaths: [] },
+        { id: 'cursor', installTestCommand: 'command -v cursor-agent 2>/dev/null', commonPaths: [] },
+      ],
+      { pathEntries: [bin] },
+    );
+
+    expect(survey.found).toBe(2);
+  });
+
+  it('counts each provider once however many candidates match', async () => {
+    const root = createProjectRoot();
+    const first = path.join(root, 'a');
+    const second = path.join(root, 'b');
+    executable(first, 'amp');
+    executable(second, 'amp');
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'amp', installTestCommand: 'command -v amp', commonPaths: [] }],
+      { pathEntries: [first, second] },
+    );
+
+    expect(survey.found).toBe(1);
+  });
+
+  it('stops at the candidate budget and says the survey is partial', async () => {
+    const root = createProjectRoot();
+    const bin = path.join(root, 'budget-bin');
+    executable(bin, 'qwen');
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'qwen', installTestCommand: 'command -v qwen', commonPaths: ['/nope/1', '/nope/2'] }],
+      { pathEntries: [bin], budget: 1 },
+    );
+
+    expect(survey).toEqual({ found: 0, truncated: true });
+  });
+
+  it('does not call a survey partial when the budget covered every candidate', async () => {
+    const root = createProjectRoot();
+    mkdirSync(path.join(root, 'exact'), { recursive: true });
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'qwen', installTestCommand: 'command -v qwen', commonPaths: [] }],
+      { pathEntries: [path.join(root, 'exact')], budget: 1 },
+    );
+
+    expect(survey).toEqual({ found: 0, truncated: false });
+  });
+
+  it('ignores relative search path entries instead of resolving them against the cwd', async () => {
+    const root = createProjectRoot();
+    executable(path.join(root, 'rel-bin'), 'amp');
+
+    const survey = await surveyInstalledProviders(
+      [{ id: 'amp', installTestCommand: 'command -v amp', commonPaths: [] }],
+      { pathEntries: [path.relative(process.cwd(), path.join(root, 'rel-bin')), ''] },
+    );
+
+    expect(survey.found).toBe(0);
+  });
+
+  it('honours cancellation rather than probing every provider', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(surveyInstalledProviders(
+      [{ id: 'claude', installTestCommand: 'command -v claude', commonPaths: [] }],
+      { pathEntries: [], signal: controller.signal },
+    )).rejects.toThrow();
   });
 });
 

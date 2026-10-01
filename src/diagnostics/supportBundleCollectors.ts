@@ -1,5 +1,6 @@
+import { constants as fsConstants } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { stat } from 'node:fs/promises';
+import { access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { collectRecoveryListing } from './recoveryReport.js';
 import {
@@ -30,11 +31,35 @@ const MAX_RECOVERY_FILE_BYTES = 64 * 1024;
  */
 const MAX_PROJECT_CONFIG_BYTES = 1024 * 1024;
 
+/**
+ * Executable candidates the provider probe will check before giving up.
+ *
+ * The product's own `findAgentCommand` resolves an agent by running
+ * `$SHELL -i -c "command -v ..."` through `execSync`. That starts an
+ * interactive shell per agent, sources the user's rc files, blocks the event
+ * loop and cannot be cancelled — exactly what a bundle collected from a broken
+ * installation must not do. This probe reads the filesystem instead, so it is
+ * bounded, interruptible, and starts nothing.
+ */
+const MAX_PROVIDER_CANDIDATES = 512;
+
 export interface SupportCollectorContext {
   readonly projectRoot: string;
   readonly releaseVersion: string;
   readonly platform: string;
   readonly architecture: string;
+  /**
+   * The providers the survey looks for — the agent registry in production.
+   * Supplied rather than imported so a test does not report whatever happens
+   * to be installed on the machine running it.
+   */
+  readonly providerDefinitions: readonly ProviderDefinition[];
+  /**
+   * Directories searched for provider executables, already split. The caller
+   * reads the environment; the collector never does, so no environment value
+   * can reach the bundle through it.
+   */
+  readonly providerSearchPath: readonly string[];
 }
 
 /**
@@ -161,6 +186,30 @@ export function createSupportCollectors(
       },
     },
     {
+      name: 'providers',
+      collect: async (signal): Promise<SupportBundleInput> => {
+        const survey = await surveyInstalledProviders(context.providerDefinitions, {
+          pathEntries: context.providerSearchPath,
+          signal,
+        });
+        return {
+          providers: {
+            // An executable on disk is not a working provider — it may fail at
+            // launch, and #199 records that an agent CLI failing inside a live
+            // shell still has no product classification. `count: 0` is the
+            // actionable signal: nothing this application knows how to launch
+            // is installed where the bundle looked.
+            count: survey.found,
+            items: context.providerDefinitions.length,
+            capability: survey.found > 0 ? 'available' : 'missing',
+            // A survey that ran out of budget reports a lower bound; saying so
+            // keeps an operator from reading `missing` as a checked absence.
+            ...(survey.truncated ? { state: 'partial' } : {}),
+          },
+        };
+      },
+    },
+    {
       name: 'lifecycle',
       collect: async (signal): Promise<SupportBundleInput> => {
         // Pane facts come from persisted state, not from a live tmux probe: a
@@ -209,6 +258,82 @@ export function createSupportCollectors(
       },
     },
   ];
+}
+
+export interface ProviderDefinition {
+  readonly id: string;
+  readonly installTestCommand: string;
+  readonly commonPaths: readonly string[];
+}
+
+export interface ProviderSurvey {
+  found: number;
+  /** Set when the candidate budget ran out before every provider was checked. */
+  truncated: boolean;
+}
+
+/**
+ * Counts providers whose executable is present, reading the filesystem only.
+ *
+ * Exported so the counting rules can be tested against synthetic definitions:
+ * the real registry bakes absolute paths like `/opt/homebrew/bin/opencode` in
+ * at module load, so a test that drove the collector directly would report
+ * whatever happens to be installed on the machine running it.
+ */
+export async function surveyInstalledProviders(
+  definitions: readonly ProviderDefinition[],
+  options: { pathEntries: readonly string[]; signal?: AbortSignal; budget?: number },
+): Promise<ProviderSurvey> {
+  let budget = options.budget ?? MAX_PROVIDER_CANDIDATES;
+  let found = 0;
+  let truncated = false;
+  // Only absolute entries: an empty or relative `PATH` entry means "the
+  // current directory", which would make the answer depend on where the
+  // command was run rather than on the installation.
+  const searchPath = [...new Set(options.pathEntries)]
+    .filter((entry) => entry.length > 0 && path.isAbsolute(entry));
+
+  for (const definition of definitions) {
+    options.signal?.throwIfAborted();
+    const binary = providerBinaryName(definition);
+    const candidates = [
+      ...definition.commonPaths.filter((candidate) => path.isAbsolute(candidate)),
+      ...searchPath.map((entry) => path.join(entry, binary)),
+    ];
+    for (const candidate of candidates) {
+      if (budget <= 0) {
+        truncated = true;
+        break;
+      }
+      budget -= 1;
+      options.signal?.throwIfAborted();
+      try {
+        await access(candidate, fsConstants.X_OK);
+        // A directory is executable too, so `access` alone would count
+        // `/usr/local/bin/gemini/` as an installed provider.
+        if (!(await stat(candidate)).isFile()) continue;
+        found += 1;
+        break;
+      } catch {
+        // Not at this location; try the next candidate.
+      }
+    }
+  }
+
+  return { found, truncated };
+}
+
+/**
+ * The executable name to look for on `PATH`.
+ *
+ * A registry id is not always its binary: `coven-code` installs `coven` and
+ * `cursor` installs `cursor-agent`. The product records the real name inside
+ * `installTestCommand`, so it is read from there and the id is only a fallback.
+ */
+function providerBinaryName(definition: ProviderDefinition): string {
+  const named = /command -v ([A-Za-z0-9._-]+)/.exec(definition.installTestCommand)?.[1];
+  // `.` and `..` match the character class but name directories, not binaries.
+  return named && named !== '.' && named !== '..' ? named : definition.id;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
