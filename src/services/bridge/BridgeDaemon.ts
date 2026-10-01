@@ -79,6 +79,11 @@ export interface BridgeDaemonOptions {
   bonjourFactory?: () => Pick<BridgeBonjour, "publish" | "stop">;
 }
 
+/** The v3 `unknown_pane` refusal, reused verbatim so v2 leaks no more than v3. */
+function sendUnpublishedPaneError(s: Session): void {
+  s.send({ type: "error", payload: { code: "unknown_pane", message: "pane is not published by this host" } });
+}
+
 export class BridgeDaemon {
   private listener?: WSSListener;
   private tls?: TLSMaterial;
@@ -340,6 +345,10 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "invalid_pane", message: "paneId must be a tmux pane id such as %3" } });
           return;
         }
+        if (!await this.isLegacyPaneInScope(m.payload.paneId)) {
+          sendUnpublishedPaneError(s);
+          return;
+        }
         this.subscribePane(s, m.payload.paneId, m.payload.sinceSeq ?? null);
         return;
       }
@@ -361,6 +370,13 @@ export class BridgeDaemon {
         const bytes = decodeBase64Payload(m.payload.data);
         if (!bytes) {
           s.send({ type: "error", payload: { code: "invalid_input", message: "data must be a base64 string" } });
+          return;
+        }
+        // tmux pane ids are server-global: a well-formed id outside the
+        // published workspace still names a real shell, so scope is checked
+        // per frame rather than trusted from an earlier subscription.
+        if (!await this.isLegacyPaneInScope(m.payload.paneId)) {
+          sendUnpublishedPaneError(s);
           return;
         }
         await this.hub!.sendInput(m.payload.paneId, bytes);
@@ -827,6 +843,28 @@ export class BridgeDaemon {
   private async isPublishedPane(paneId: string): Promise<boolean> {
     const { workspace } = await this.readWorkspaceSnapshot();
     return hasPublishedTmuxBackedPane(workspace, paneId);
+  }
+
+  /**
+   * The v2 `subscribePane` / `sendInput` scope. It applies the same
+   * published-pane predicate as v3 terminal streams, falling back to the
+   * legacy pane list (what v2 `listPanes` publishes) only when no workspace
+   * snapshot is wired. Any failure to read scope fails closed; the cause is
+   * logged on the host and never sent to the client.
+   */
+  private async isLegacyPaneInScope(paneId: string): Promise<boolean> {
+    try {
+      if (this.opts.workspaceProvider) return await this.isPublishedPane(paneId);
+      return this.opts.paneProvider().some((pane) => pane.id === paneId);
+    } catch (error) {
+      LogService.getInstance().error(
+        "bridge v2 pane scope check failed; refusing the request",
+        "BridgeDaemon",
+        undefined,
+        error instanceof Error ? error : undefined,
+      );
+      return false;
+    }
   }
 
   private async isPublishedRitual(projectId: string, ritualId: string): Promise<boolean> {
