@@ -1,0 +1,71 @@
+name: Outcome proposal
+description: Propose one public outcome with an owner, an exit gate, and an evidence index
+title: "[Outcome]: "
+labels: [needs-triage]
+type: Feature
+projects: ["OpenCoven/11"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A maintainer applies the `outcome` label after approving this proposal; until then it stays in triage. An outcome owns an exit gate and closes only by hand, with an evidence comment tied to immutable source. Work items become its sub-issues. See [Tracking work](../../docs/TRACKER.md). This is a public issue.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: The observable result, in one or two sentences.
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Accountable owner
+      placeholder: "@handle"
+    validations:
+      required: true
+  - type: dropdown
+    id: train
+    attributes:
+      label: Train
+      options: [macOS rollout, Reliability, Release, Governance, iOS, OpenCoven, Docs]
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: [P0, P1, P2]
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: The tier from AGENTS.md § Risk and review.
+      options: [R1, R2, R3, R4]
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: Exit gate
+      description: A checklist of the conditions that must be observed before closure.
+      value: |
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence required
+      description: What retained evidence closes this outcome (manifest, run, artifact record). Never paste credentials, raw prompts, or unrestricted terminal output.
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback

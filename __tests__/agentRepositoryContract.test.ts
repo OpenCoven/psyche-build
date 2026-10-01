@@ -28,7 +28,7 @@ describe('agent repository contract', () => {
       'docs/BRIDGE-SECURITY.md',
       'docs/RELEASE-ACCEPTANCE.md',
       'CONTRIBUTING.md',
-      '.beads/README.md',
+      'docs/TRACKER.md',
     ];
 
     for (const path of requiredDocuments) {

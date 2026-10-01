@@ -16,7 +16,7 @@ describe('contributor repository map', () => {
       'AGENT-SURFACE-CONTROL.md',
       'BRIDGE-SECURITY.md',
       'PSYCHE-COMPATIBILITY-MAP.md',
-      'TRACKER-INTEGRITY.md',
+      'TRACKER.md',
       'SUPPORT-MATRIX.md',
       'RELEASE-ACCEPTANCE.md',
     ]) {
@@ -46,7 +46,8 @@ describe('contributor repository map', () => {
 
   it('keeps product and tracker references out of durable protocol identity', () => {
     expect(map).toMatch(/references, not durable OpenCoven protocol identity/i);
-    expect(map).toMatch(/Beads and GitHub own planning\/public outcome state only/i);
+    expect(map).toMatch(/GitHub Issues and the Psyche Build Project own planning\/public outcome state only/i);
+    expect(map).not.toMatch(/source change in Beads/i);
     expect(map).toMatch(/never runtime task, lane, action, receipt, or familiar identity/i);
     expect(map).toMatch(/no guessed wire contract/i);
   });
@@ -61,7 +62,6 @@ describe('contributor repository map', () => {
       'pnpm generate:hooks-docs',
       'pnpm ios:project:check',
       'pnpm build',
-      'source change in Beads followed by the supported synchronizer',
     ]) {
       expect(map).toContain(phrase);
     }

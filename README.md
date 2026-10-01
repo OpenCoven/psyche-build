@@ -15,8 +15,9 @@
   <a href="https://github.com/OpenCoven/psyche-build/issues"><strong>Issues</strong></a>
 </p>
 
-GitHub is the public planning mirror; [Beads](./.beads/README.md) remains the
-authoritative source for issue and roadmap state.
+Planning lives in [GitHub Issues](https://github.com/OpenCoven/psyche-build/issues)
+and the [Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11);
+see [Tracking work](./docs/TRACKER.md).
 
 ---
 
@@ -41,7 +42,7 @@ Node CLI.
 The [v0.0.2 DMGs](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2)
 were published on 2026-08-31 through
 [release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717).
-The Homebrew Cask still selects `v0.0.1` as of 2026-09-06. Publication does not
+Since homebrew-tap commit `2247c1d5` (2026-09-26) the Homebrew Cask selects `0.0.2`, and its checksums match the release `SHA256SUMS`. Publication does not
 complete operator acceptance or prove an upgrade path; keep the two artifacts'
 evidence separate as described in [release acceptance](./docs/RELEASE-ACCEPTANCE.md).
 

@@ -8,7 +8,7 @@ This is the status record for the community, security, and contributor intake su
 | --- | --- | --- |
 | Security policy | [`SECURITY.md`](../SECURITY.md) | Present: supported versions/platforms, private reporting route, response targets, disclosure, scope priorities, support-vs-security boundary. |
 | Private vulnerability reporting | GitHub private advisories | Documented in `SECURITY.md` and linked from `SUPPORT.md`, the issue chooser, and the PR template. If the private form is unavailable, `SECURITY.md` names the verified-private-channel fallback. |
-| Ownership | [`.github/CODEOWNERS`](../.github/CODEOWNERS) | Present: default owner plus release/security, control/protocol, bridge, desktop, iOS, generated outputs, Beads, and documentation surfaces. |
+| Ownership | [`.github/CODEOWNERS`](../.github/CODEOWNERS) | Present: default owner plus release/security, control/protocol, bridge, desktop, iOS, generated outputs, and documentation surfaces. |
 | Pull-request template | [`.github/pull_request_template.md`](../.github/pull_request_template.md) | Present: scope, R1–R4 risk class, focused/full validation, generated-output, security/privacy, review-focus, and release-impact checklists. |
 | Issue forms | [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) | Present: `bug.yml`, `feature.yml`, `documentation.yml`; blank issues disabled in `config.yml`; security redirect implemented as a private-advisory contact link, not a public form. |
 | Support | [`SUPPORT.md`](../SUPPORT.md) | Present: route table, expected evidence, redaction rules, support boundaries, GitHub-vs-private-routing. |

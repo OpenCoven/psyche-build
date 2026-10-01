@@ -1,6 +1,9 @@
 name: Feature request
 description: Propose one user or maintainer outcome for Psyche Build
 title: "[Feature]: "
+labels: [needs-triage]
+type: Feature
+projects: ["OpenCoven/11"]
 body:
   - type: markdown
     attributes:

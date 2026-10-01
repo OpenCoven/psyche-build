@@ -6,12 +6,12 @@ Start with [`../AGENTS.md`](../AGENTS.md) for repository-wide agent rules and [`
 
 ## Authority boundary
 
-Psyche Build is the coding cockpit and product client. Its local project, pane, terminal, tmux, worktree, branch, provider-session, UI, Beads, and GitHub identifiers are references, not durable OpenCoven protocol identity.
+Psyche Build is the coding cockpit and product client. Its local project, pane, terminal, tmux, worktree, branch, provider-session, UI, and GitHub identifiers are references, not durable OpenCoven protocol identity.
 
 - [`src/control/`](../src/control/) is the current in-repository control authority for guarded product actions. See [Control-plane architecture](CONTROL-PLANE.md) and [Agent surface control](AGENT-SURFACE-CONTROL.md).
 - [`src/daemon/`](../src/daemon/) adapts product requests to daemon/runtime effects. The daemon effect boundary must not be bypassed from UI or transport code. See [Control-plane architecture](CONTROL-PLANE.md) and [Bridge security](BRIDGE-SECURITY.md).
 - `OpenCoven/psyche` is the target canonical protocol owner for durable task/lane/execution/lease/approval/receipt/recovery semantics. Psyche Build does not claim that conformance until a released profile is pinned and canaried. See [Psyche compatibility map](PSYCHE-COMPATIBILITY-MAP.md).
-- Beads and GitHub own planning/public outcome state only. They are never runtime task, lane, action, receipt, or familiar identity. See [Tracker integrity](TRACKER-INTEGRITY.md) and [`.beads/README.md`](../.beads/README.md).
+- GitHub Issues and the Psyche Build Project own planning/public outcome state only. They are never runtime task, lane, action, receipt, or familiar identity. See [Tracking work](TRACKER.md).
 
 ## Top-level map
 
@@ -26,8 +26,8 @@ Psyche Build is the coding cockpit and product client. Its local project, pane, 
 | `native/macos/` | macOS-native support code outside the desktop Tauri tree | owning source/tests and support contract | owning native checks; do not infer release acceptance from compile success |
 | `protocol-fixtures/` | checked-in protocol fixtures used by product compatibility tests | `PSYCHE-COMPATIBILITY-MAP.md`, generator source | `pnpm fixtures:generate` and no generated drift; R3/R4 when compatibility changes |
 | `scripts/` | repository automation, builds, release tooling, tracker synchronization and validators | script-specific docs, `AGENTS.md` | focused script tests plus the owning end-to-end/dry-run contract |
-| `.github/` | CI, release workflows, issue/PR intake, CODEOWNERS, Beads Project configuration | `SECURITY.md`, `CONTRIBUTOR-SAFETY.md`, `RELEASE.md` | syntax/contract tests and live settings evidence where applicable; R4 |
-| `.beads/` | authoritative implementation-planning state and migration guidance for generated mirrors | `.beads/README.md`, `TRACKER-INTEGRITY.md` | supported Beads export/sync/validator; source-first repair only; R4 |
+| `.github/` | CI, release workflows, issue/PR intake and issue forms, CODEOWNERS | `SECURITY.md`, `CONTRIBUTOR-SAFETY.md`, `RELEASE.md` | syntax/contract tests and live settings evidence where applicable; R4 |
+| `.beads/` | retired Beads planning store, read-only until its removal under #473 | `TRACKER.md`, `working-records/beads-retirement-2026-10.md` | do not run `bd`; R4 |
 | `docs/` | current product, architecture, support, release and contributor contracts plus the public docs application | `docs/README.md` authority order | `pnpm docs:focus:check`, `pnpm --dir docs build` |
 | `__tests__/` | repository behavior, contract, security, workflow and regression evidence | `__tests__/README.md` | run the narrowest owning test first, then the repository gate |
 | `agent/` | machine-readable repository/agent contract | `AGENTS.md` | `__tests__/agentRepositoryContract.test.ts` plus agent fast/full checks |
@@ -61,7 +61,7 @@ Use the smallest row that owns the consequence:
 | capability scope, approval, receipt, idempotency, revocation, recovery | `src/control/` | preserve exact actor/task/target/revision/digest binding and fail-closed behavior |
 | bridge/session connectivity | `src/services/bridge/` and daemon adapters | preserve authentication, project scope, transport and reconnect failure boundaries |
 | Psyche protocol adoption | adapter seam identified by `PSYCHE-COMPATIBILITY-MAP.md` | no guessed wire contract, floating dependency, or local identity substitution |
-| Beads/GitHub tracker state | `.beads/` and `scripts/beads-project-sync/` | change Beads first; generated GitHub mirrors are not writable source state |
+| GitHub tracker state | GitHub Issues and the Psyche Build Project, per `TRACKER.md` | outcomes close by hand with evidence; tracker identity is never runtime identity |
 | macOS release/signing/notarization | release workflows/scripts + desktop native surface | exact source/artifact evidence and protected credential path; R4 |
 | iOS project/application behavior | `native/ios/` | generated project provenance plus platform-specific acceptance; R4 |
 | public support/status claims | `docs/SUPPORT-MATRIX.md`, owning issue | distinguish source/build evidence from distributed/accepted support |
@@ -86,7 +86,6 @@ Do not hand-edit outputs that have canonical generators:
 - `native/desktop/psyche-build-tauri/web/*.bundle.js` → `pnpm --dir native/desktop/psyche-build-tauri build:web`
 - `native/ios/Psyche.xcodeproj/**` and generated iOS `Info.plist` → `pnpm ios:project:generate` / `pnpm ios:project:check`
 - `dist/**` → `pnpm build`
-- generated Beads mirror issue bodies → source change in Beads followed by the supported synchronizer
 
 A generated diff is evidence only when its source change and regeneration command are reviewable together.
 

@@ -644,11 +644,20 @@ describe('release documentation contract', () => {
     for (const filePath of activeFiles) {
       const contents = await readFile(filePath, 'utf8');
       if (
-        /v0\.1\.0|build\.psyche|--generate-notes|npm (?:i|install).*psyche-build|npmjs\.com\/package\/psyche-build|public\s+(?:`psyche-build`\s+)?npm package|public package that can stand alone|published (?:on|to) npm|available (?:on|from) npm/i.test(
+        /build\.psyche|--generate-notes|npm (?:i|install).*psyche-build|npmjs\.com\/package\/psyche-build|public\s+(?:`psyche-build`\s+)?npm package|public package that can stand alone|published (?:on|to) npm|available (?:on|from) npm/i.test(
           contents,
         )
       ) {
         staleClaims.push(filePath);
+      }
+      // `v0.1.0` is the planned production target; it may be named as a goal
+      // but never presented as an existing release or install path.
+      if (
+        /v0\.1\.0`?[^\n]{0,40}(?:is (?:released|published|available|live)|Cask becomes available)|Psyche-Build-v0\.1\.0-|git tag -s v0\.1\.0|releases\/tag\/v0\.1\.0/i.test(
+          contents,
+        )
+      ) {
+        staleClaims.push(`${filePath} (v0.1.0 presented as released)`);
       }
     }
 

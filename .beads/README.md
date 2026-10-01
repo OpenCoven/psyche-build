@@ -1,5 +1,11 @@
 # Beads in Psyche Build
 
+> **Retired 2026-10-01.** Beads is no longer this repository's planning store.
+> GitHub Issues and the Psyche Build Project are; see
+> [Tracking work](../docs/TRACKER.md) and [#473](https://github.com/OpenCoven/psyche-build/issues/473).
+> Do not run `bd` against this repository. This directory is removed by the
+> follow-up code-removal change; the text below is retained only until then.
+
 Beads is the authoritative issue and planning store for this repository. The
 public GitHub Project is a one-way, sanitized mirror for readers who do not use
 the Beads CLI.

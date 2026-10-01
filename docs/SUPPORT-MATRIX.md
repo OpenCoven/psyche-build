@@ -63,10 +63,10 @@ was published on 2026-08-31 from signed tag source
 checksums. [Release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717)
 completed desktop publication and skipped iOS upload.
 
-The Homebrew Cask still selects `v0.0.1` as of 2026-09-06. The distribution
-table above records that accepted baseline, not a claim that `v0.0.2` is
-unpublished. The newer DMGs require their own operator and upgrade/rollback
-evidence; publication does not complete #196/#239 or change iOS availability.
+Since homebrew-tap commit `2247c1d5` (2026-09-26) the Homebrew Cask selects `0.0.2`, and its checksums match the release `SHA256SUMS`. The distribution
+table above records the `v0.0.1` accepted baseline. The `v0.0.2` DMGs require
+their own operator and upgrade/rollback evidence; publication does not supply
+operator acceptance (now owned by #474) or change iOS availability.
 See [release acceptance](./RELEASE-ACCEPTANCE.md#v002-publication-is-separate-from-acceptance)
 for the source, workflow, and pinned Cask distinction.
 
@@ -160,7 +160,7 @@ The complete iOS delivery and continuity gate is
 Current implementation identifiers may be used as adapters, but durable user
 work must not be defined solely by:
 
-- a Bead ID;
+- a tracker issue or Project item ID;
 - a tmux pane or session ID;
 - a process ID;
 - a filesystem path;

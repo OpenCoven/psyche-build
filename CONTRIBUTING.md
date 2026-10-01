@@ -35,11 +35,11 @@ Before editing, identify the canonical owner in `docs/REPOSITORY-MAP.md` and the
 
 - product/UI/process state is not durable Psyche identity;
 - guarded actions must preserve capability, approval, receipt, revocation, idempotency, persistence, and recovery boundaries;
-- Beads owns generated mirror source state; generated GitHub mirror bodies are not durable edit targets;
+- GitHub Issues and the Psyche Build Project are the only planning store (see [Tracking work](docs/TRACKER.md));
 - generated source must be changed through its named generator;
 - support and release claims require the evidence named by `docs/SUPPORT-MATRIX.md` and `docs/RELEASE-ACCEPTANCE.md`.
 
-For Beads-specific operation, migration, synchronization, and credential boundaries, use [`.beads/README.md`](.beads/README.md). Maintainer-only tracker credentials are not part of the public contributor loop.
+Tracker work needs no credentials beyond your own GitHub account.
 
 ### 4. Run focused proof while iterating
 
@@ -80,101 +80,18 @@ bash ./scripts/agent-check full
 
 The full gate covers the unit/contract suite, docs checks/build, typecheck, source smoke, packaged-artifact smoke, deterministic desktop web generation, Rust formatting/tests/checks, and exact worktree cleanliness. iOS remains an explicit opt-in platform gate; physical-device, signing, TestFlight, and distribution evidence are governed separately by release acceptance.
 
-## Beads planning and public Project
+## Tracking work
 
-Beads is the authoritative planning store. The public GitHub Project is a
-one-way sanitized mirror, so update work with `bd` rather than editing mirrored
-GitHub issues or Project fields. Unmanaged GitHub issues are not touched.
+All planning lives in GitHub Issues and the
+[Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11).
+[Tracking work](docs/TRACKER.md) defines the hierarchy (outcome issues with
+sub-issues), the Project fields (Status, Priority, Train, Risk, Evidence), the
+issue forms, and the closure rules. Contributors file work through the issue
+forms; maintainers triage the Project's **Triage** view weekly.
 
-Common local mirror commands are:
-
-```bash
-pnpm beads:project:check
-export BEADS_PROJECT_TOKEN="<load from your password manager>"
-pnpm beads:project:e2e
-pnpm beads:project:sync
-```
-
-The check and GraphQL E2E verifier are read-only. The E2E command runs the real
-dry-run path against GitHub, rejects mutations and duplicate payloads, and
-enforces bounded per-operation pagination and retry ceilings. Applying requires
-the maintainer-only `BEADS_PROJECT_TOKEN`; load it from a password manager rather
-than storing it in the repository. Create two protected environments restricted
-to the main branch (`main`): the `beads-project-sync-automation` environment
-must have no required reviewers so scheduled runs remain unattended, while the
-`beads-project-sync` environment must have required reviewers so manual runs
-remain reviewer-gated. Install the fine-grained token as the environment secret
-`BEADS_PROJECT_TOKEN` in both environments, or use a secure equivalent that
-preserves those properties. Its complete fine-grained permission contract is
-repository **Contents: read and write** (for the atomic commit/branch-ref apply
-lock), **Issues: read and write**, and **Metadata: read**, plus organization
-**Projects: read and write**.
-
-Local dry-run is read-only and never bootstraps or mutates Beads; a missing
-database produces explicit `bd bootstrap --yes` guidance. Actions dry-run
-bootstraps an ephemeral runner database from the authoritative Beads remote
-without a GitHub token before invoking the same read-only CLI mode.
-
-The synchronizer is bound to the immutable GitHub Project node ID
-`PVT_kwDOECXnmc4BhMIA` for
-[OpenCoven Project 11](https://github.com/orgs/OpenCoven/projects/11). Existing
-Project adoption and repair require that exact identity plus the
-repository-bound managed marker or canonical repository link; a duplicate
-marker elsewhere is ignored and never authorizes publication. The pinned
-public Project's title, README, repository link, fields, and views remain
-repairable.
-
-An absent pinned Project fails closed instead of provisioning a replacement.
-If the pinned Project is private, dry-run and apply also fail before mutations.
-Automatic visibility changes are disabled: a maintainer must manually review
-the Project identity and contents, change visibility to public in GitHub, and
-rerun a dry-run. Never repoint `projectNodeId` merely because another Project
-has the managed marker.
-
-`.github/beads-project-sync.json` also pins the non-empty `trustedIssueAuthors`
-allowlist. Managed issue markers are owned only when GitHub's issue `user.login`
-matches a configured login case-insensitively; `author_association` does not
-grant ownership. Keep `BunsDev` pinned unless a reviewed ownership migration
-changes the issue-creation actor. Created issues are re-read and fail closed on
-an actor mismatch.
-
-After that gate is satisfied, `.github/workflows/beads-project-sync.yml`
-applies automatically at 03:17 UTC with a redundant 09:43 UTC run because
-GitHub may delay or drop scheduled events. The sync is idempotent and
-lease-serialized, so the backup normally applies zero operations. Use workflow
-dispatch with `dry_run` to inspect a plan. `allow_mass_close` is an exception
-guard override and should be enabled only after reviewing a dry-run artifact,
-including its operation-kind counts and body-free closure candidates.
-
-The synchronizer minimizes GitHub GraphQL pressure within each run. Project
-discovery and Project item inventory are read once and reused, while all field
-changes for one Project item are sent as one aliased mutation instead of one
-request per field. Ambiguous writes deliberately bypass the snapshot and
-re-read GitHub before deciding whether a retry is safe.
-
-Every local or Actions apply also acquires the same GitHub-backed apply lock.
-The lock is an atomic, expiring repository branch-ref lease, so a local
-`pnpm beads:project:sync` fails closed while an Actions apply owns the lease (and
-vice versa); dry-runs never acquire it. The persistent
-`psyche-beads-project-sync-lock` coordination branch remains on the remote as a
-linear audit trail. Release appends a `released` tombstone, and the next apply
-acquires immediately by appending a child active lease. Do not delete or
-rewrite this coordination ref manually. Unlike the former moving tag, it does
-not interfere with `git fetch origin main --tags`. Renewal, release,
-reacquisition, and stale takeover commits are children of the exact current
-lock commit and update the branch with a non-forced fast-forward. The 30-minute
-lease is renewed by a bounded heartbeat. After acquisition, apply discards all
-cached Project discovery, item, and field state and revalidates the pinned
-Project's identity, ownership, repository link, visibility, title, and README
-before repair. Lease ownership is then awaited immediately before every
-individual REST, GraphQL, or `gh project` mutation, including each sub-request
-in compound repairs. Renewal or ownership proof failure stops the next write.
-Only the current lease owner may release it.
-
-During a Beads version or schema migration, designate one sole migrator and
-stop other bootstrap/migration-capable processes until the migrated Dolt state
-has been pushed. See [`.beads/README.md`](.beads/README.md) for export commands,
-token setup, guard thresholds, workflow operation, and Project view notes.
+Beads was retired as the planning store on 2026-10-01 under #473. Do not run
+`bd` against this repository; its archive is described in
+[the retirement record](docs/working-records/beads-retirement-2026-10.md).
 
 ## Pull-request scope
 
@@ -195,8 +112,9 @@ the transition. Do not keep an umbrella issue open solely to duplicate maintenan
 Every product or maintenance PR names one owning outcome, owner, train, and
 acceptance gate. A focused maintenance result may be described in the PR without
 creating a duplicate issue; an existing unresolved public outcome retains its
-owning issue. The active macOS rollout is #196/#239 acceptance followed by #199
-recovery. iOS and future architecture/input expansion are not prerequisites.
+owning issue. The active macOS rollout is release-candidate acceptance (#474)
+and the observed recovery gaps (#475) toward `v0.1.0`. iOS and future
+architecture/input expansion are not prerequisites.
 
 For any change to scope, priority, dependency, support, or closure:
 
@@ -205,9 +123,9 @@ For any change to scope, priority, dependency, support, or closure:
 2. Record the owning issue's acceptance evidence and remaining gaps. Classify
    dated records through `docs/superpowers/README.md`; they default to reference,
    including newly added records, and cannot become an implicit backlog.
-3. Use the source-first Beads procedure for generated mirrors. Never edit
-   generated mirror state directly or remove a configured target while an
-   active Bead still maps to it.
+3. Set the affected Project fields and sub-issue links in the same
+   transition. An outcome closes only by hand with an evidence comment, and a
+   PR references it with `Refs #N`, never a closing keyword.
 4. Obtain independent review appropriate to risk and terminal exact-head
    required checks. Merge through the ordinary protected PR path.
 5. Reconcile authorized unmanaged issue/milestone state after merge, linking
@@ -215,7 +133,7 @@ For any change to scope, priority, dependency, support, or closure:
    decision, not proof that the work was implemented. Keep unresolved safety,
    data-preservation, and operator-acceptance gates open.
 
-The scheduled Beads sync and read-only tracker validator support the register's
+The Project's Triage, Blocked, and Needs-evidence views support the register's
 weekly and event-driven reconciliation; they do not replace its owner obligation.
 A new concrete regression gets a focused issue, not a replacement perpetual
 control issue. Rollback of a scope decision uses a reviewed PR and explicit
@@ -272,7 +190,7 @@ Use:
 
 - `docs/SUPPORT-MATRIX.md` for what may be claimed as supported;
 - `docs/RELEASE-ACCEPTANCE.md` for immutable publication/user-path proof;
-- `docs/TRACKER-INTEGRITY.md` for generated mirror reconciliation;
+- `docs/TRACKER.md` for issues, sub-issues, Project fields, and closure rules;
 - `docs/PSYCHE-COMPATIBILITY-MAP.md` for the current Build/Psyche boundary;
 - `docs/CONTRIBUTOR-SAFETY.md` for public-data and generated-source rules.
 

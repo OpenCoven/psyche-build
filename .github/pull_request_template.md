@@ -1,6 +1,6 @@
 ## Outcome
 
-<!-- Name one outcome with its owner, train, and acceptance gate. Link an owning issue when one exists; a bounded maintenance fix need not create a duplicate issue. Keep GitHub closing keywords away from generated Beads mirror references. -->
+<!-- Name one outcome with its owner, train, and acceptance gate. Link an owning issue when one exists; a bounded maintenance fix need not create a duplicate issue. Reference an outcome issue with `Refs #N`; never use a closing keyword for an outcome. -->
 
 Related outcome:
 
@@ -43,7 +43,7 @@ Result:
 - [ ] No generated output changed.
 - [ ] Generated output changed from its canonical source/generator and is reproducible without residual drift.
 
-<!-- Name each generator and generated path. Do not hand-edit checked-in bundles, generated iOS projects, generated docs, or managed Beads mirror bodies. -->
+<!-- Name each generator and generated path. Do not hand-edit checked-in bundles, generated iOS projects or generated docs. -->
 
 ## Security and privacy
 
@@ -68,6 +68,6 @@ Result:
 - [ ] No scope, priority, dependency, or closure decision changes.
 - [ ] A decision changes: roadmap/execution docs agree, remaining safety/acceptance gates stay open, and authorized tracker reconciliation follows merge.
 
-<!-- Follow CONTRIBUTING.md#roadmap-control. Retirements are not implementation completion. Generated Beads mirrors use only the source-first synchronizer. -->
+<!-- Follow CONTRIBUTING.md#roadmap-control. Retirements are not implementation completion. Outcomes close by hand with an evidence comment (docs/TRACKER.md). -->
 
 <!-- A checked box records the author's assessment; CODEOWNERS review and protected exact-head checks remain authoritative. -->

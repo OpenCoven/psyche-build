@@ -15,7 +15,8 @@ describe('post-release execution documentation', () => {
     for (const filePath of ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md']) {
       const source = await readFile(filePath, 'utf8');
       expect(source, filePath).toContain('## macOS-first rollout focus');
-      expect(source, filePath).toMatch(/#196\/#239[\s\S]{0,120}#199/);
+      expect(source, filePath).toMatch(/#474[\s\S]{0,400}#475[\s\S]{0,400}#480/);
+      expect(source, filePath).toMatch(/#196\/#239 acceptance and #199 recovery outcomes are closed/);
       expect(source, filePath).toMatch(/#197[\s\S]{0,160}retired as not planned/i);
       expect(source, filePath).toMatch(/not a claim that[\s\S]{0,80}decomposition[\s\S]{0,80}complete/i);
       expect(source, filePath).toContain(issueUrl(435));
@@ -26,8 +27,8 @@ describe('post-release execution documentation', () => {
 
     const execution = await readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8');
     const path = execution.split('## Critical path')[1]?.split('## Stage 0')[0] ?? '';
-    expect(path).toMatch(/\| 1 \|[^\n]*#196[^\n]*#239/);
-    expect(path).toMatch(/\| 2 \|[^\n]*#199/);
+    expect(path).toMatch(/\| 1 \|[^\n]*#474[^\n]*successor to[^\n]*#196[^\n]*#239/);
+    expect(path).toMatch(/\| 2 \|[^\n]*#475[^\n]*successor to[^\n]*#199/);
     expect(path).not.toMatch(/^\| \d+ \|[^\n]*(?:#197|#200|#201|#246)/m);
 
     const support = await readFile('docs/SUPPORT-MATRIX.md', 'utf8');
@@ -90,9 +91,11 @@ describe('post-release execution documentation', () => {
     expect(history).toMatch(/no[\s\S]{0,20}per-file overrides/);
 
     for (const source of [roadmap, execution]) {
-      expect(source).toContain('**Last reconciled:** 2026-09-14');
+      expect(source).toContain('**Last reconciled:** 2026-10-01');
+      expect(source).toContain('c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1');
       expect(source).toContain('3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5');
-      expect(source).toMatch(/#196\/#239 remain (?:the active P0 critical path|open)/);
+      expect(source).toMatch(/#474 is the active P0 acceptance gate/);
+      expect(source).toMatch(/#239 is superseded by #474/);
       expect(source).toMatch(/accepted #241 readiness implementation/);
       expect(source).toMatch(/not (?:a )?circular issue-closure[\s\S]{0,20}dependency|not create a circular issue-closure/);
       expect(source).toContain(issueUrl(435));
@@ -122,7 +125,7 @@ describe('post-release execution documentation', () => {
     expect(roadmap).toMatch(/No Beads or generated mirror mutation/);
   });
 
-  it('records the Stage 0 proof wave as closed with linked evidence before the active P0 gate', async () => {
+  it('records the Stage 0 proof wave as closed with linked evidence before the current P0 gate', async () => {
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
@@ -142,7 +145,7 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toContain(pullUrl(330));
       expect(source, filePath).toContain('63667f30');
       expect(source, filePath).toMatch(/GH013/);
-      expect(source, filePath).toContain('#196/#239 remain the active P0 critical path');
+      expect(source, filePath).toMatch(/\*\*Superseded 2026-10-01:\*\* #196 is closed and #239 is superseded by #474/);
       expect(source, filePath).toMatch(/policy evidence/i);
       expect(source, filePath).not.toMatch(/when this proof PR merges/i);
       expect(source, filePath).not.toMatch(/delivered by this wave/i);
@@ -215,7 +218,7 @@ describe('post-release execution documentation', () => {
     }
   });
 
-  it('separates published DMGs, the older Cask, and operator acceptance across public docs', async () => {
+  it('separates published DMGs, the current Cask, and operator acceptance across public docs', async () => {
     for (const filePath of [
       'README.md',
       'docs/README.md',
@@ -226,7 +229,8 @@ describe('post-release execution documentation', () => {
     ]) {
       const source = await readFile(filePath, 'utf8');
       expect(source, filePath).toContain('https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2');
-      expect(source, filePath).toMatch(/Homebrew Cask[\s\S]{0,100}(?:still|remains)[\s\S]{0,50}`v0\.0\.1`/i);
+      expect(source, filePath).toMatch(/2247c1d5`? \(2026-09-26\) the Homebrew Cask selects `0\.0\.2`/);
+      expect(source, filePath).not.toMatch(/Homebrew Cask still selects `v0\.0\.1`/);
       expect(source, filePath).toContain('33311851717');
     }
   });
@@ -302,11 +306,37 @@ describe('post-release execution documentation', () => {
       expect(source, filePath).toMatch(/#197[\s\S]{0,160}retired as not planned/i);
       expect(source, filePath).toMatch(/#201\/#253[\s\S]{0,160}P2 dependency gate/i);
       expect(source, filePath).toMatch(/#246[\s\S]{0,160}P2 dependency gate/i);
+      expect(source, filePath).toMatch(/#246 (?:closed|is closed) as not planned/i);
       expect(source, filePath).toContain(pullUrl(262));
       expect(source, filePath).toMatch(
         /PR #262 is the\s+focused replacement for #254(?:'s)? mapping\s+scope/i,
       );
     }
+  });
+
+  it('makes GitHub Issues and the Psyche Build Project the only planning store', async () => {
+    const [tracker, agents, contributing, roadmap, record] = await Promise.all([
+      readFile('docs/TRACKER.md', 'utf8'),
+      readFile('AGENTS.md', 'utf8'),
+      readFile('CONTRIBUTING.md', 'utf8'),
+      readFile('docs/ROADMAP.md', 'utf8'),
+      readFile('docs/working-records/beads-retirement-2026-10.md', 'utf8'),
+    ]);
+
+    expect(tracker).toMatch(/no second planning store, no generated mirror and no synchronizer/i);
+    expect(tracker).toMatch(/Outcomes close by hand/);
+    expect(tracker).toMatch(/`Refs #N` and never with a\s+closing keyword/);
+    expect(tracker).toMatch(/Not planned is a scope decision/);
+    expect(tracker).toMatch(/never a familiar, task, lane, run,\s+action or receipt identity/i);
+    expect(agents).toMatch(/do not run `bd` against this repository/);
+    expect(agents).not.toMatch(/Beads is source-of-truth/);
+    expect(contributing).toContain('## Tracking work');
+    expect(contributing).not.toContain('## Beads planning and public Project');
+    expect(roadmap).toContain('### October 1 reconciliation');
+    expect(roadmap).toContain(runUrl(36915661182));
+    expect(record).toMatch(/111 \(97 closed, 11 open, 3 in progress\)/);
+    expect(record).toContain('ogijj1qeoj4tbmht3lc2jkcs48fsuhlv');
+    expect(record).toMatch(/named here by role only/);
   });
 
   it('documents canonical Beads mapping and review before Dolt publication', async () => {

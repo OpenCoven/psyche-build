@@ -27,7 +27,6 @@ Generated files are review evidence, not authoring surfaces. Change the generato
 | `native/desktop/psyche-build-tauri/web/*.bundle.js` | `pnpm --dir native/desktop/psyche-build-tauri build:web` | Review source and deterministic bundle changes together. |
 | `native/ios/Psyche.xcodeproj/**` and generated iOS `Info.plist` | `pnpm ios:project:generate`; verify with `pnpm ios:project:check` | Change `project.yml` or canonical inputs, not generated Xcode files. |
 | `dist/**` and built frontend output | `pnpm build` | Do not treat build output as the source of behavior. |
-| Generated Beads mirror issue bodies | supported Beads source-first synchronizer | Repair Beads first; do not hand-edit managed mirror prose. |
 
 Check the owning package scripts and workflow before adding a second command for the same outcome. Package-manager and toolchain pins come from `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, and `rust-toolchain.toml`.
 
@@ -47,7 +46,7 @@ For authority, security, protocol, persistence, or recovery changes, include neg
 
 ## Preserve consequential-action boundaries
 
-A UI gesture, process, tmux pane, provider session, worktree, branch, Bead, or GitHub issue is not canonical authorization or identity. Changes must preserve project scope, actor/subject identity, approval, idempotency, receipt, revocation, cleanup, persistence, and recovery contracts.
+A UI gesture, process, tmux pane, provider session, worktree, branch, or GitHub issue is not canonical authorization or identity. Changes must preserve project scope, actor/subject identity, approval, idempotency, receipt, revocation, cleanup, persistence, and recovery contracts.
 
 Psyche Build is the product client/coding cockpit. It must not direct-read Psyche's database or duplicate canonical Psyche familiar, task, lane, run, lease, action, receipt, or recovery state. The Coven daemon remains authoritative for process/PTY execution, project-boundary enforcement, and runtime events.
 
