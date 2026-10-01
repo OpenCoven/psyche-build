@@ -1470,7 +1470,7 @@ async function createPaneWithReuseReservation(
     }
 
     const exitRecorder = createAgentExitRecorder();
-    await launchAgentInPane({
+    const launch = await launchAgentInPane({
       paneId: paneInfo,
       agent,
       prompt,
@@ -1483,24 +1483,17 @@ async function createPaneWithReuseReservation(
       exitRecorder,
       tmuxService,
     });
-    // Background: pane creation has already succeeded, and the pane and its
-    // shell are left exactly as they are whatever the agent did (#475).
-    void watchAgentLaunch({
-      nonce: exitRecorder.nonce,
-      agentLabel: getAgentLabel(agent),
-      readExitOption: () => readAgentExitPaneOption(paneInfo),
-      onFailure: async (failure, message) => {
-        LogService.getInstance().warn(
-          `Agent launch classified ${failure.state}:${failure.exit}:${failure.nextAction}`,
-          'paneCreation',
-          newPane.id,
-        );
-        // The toast also lands in the log panel, so the operator sees the
-        // cause and the next action without reading terminal output.
-        const { StateManager } = await import('../shared/StateManager.js');
-        StateManager.getInstance().showToast(message, 'error');
-      },
-    });
+    // An unarmed recorder (a shell that could not take the suffix) has
+    // nothing to watch. Background: pane creation has already succeeded, and
+    // the pane and its shell are left exactly as they are (#475).
+    if (launch?.exitRecorderArmed) {
+      void watchCreatedPaneAgentLaunch({
+        tmuxPaneId: paneInfo,
+        psychePaneId: newPane.id,
+        agent,
+        nonce: exitRecorder.nonce,
+      });
+    }
 
     if (agent === 'claude') {
       // Auto-approve trust prompts for Claude (workspace trust, not edit
@@ -1541,6 +1534,58 @@ async function createPaneWithReuseReservation(
     needsAgentChoice: false,
     persistedDuringLifecycle: true,
   };
+}
+
+export interface CreatedPaneAgentLaunch {
+  readonly tmuxPaneId: string;
+  readonly psychePaneId: string;
+  readonly agent: AgentName;
+  readonly nonce: string;
+}
+
+/** Seams for tests; production uses tmux, the log service, and the toast queue. */
+export interface CreatedPaneAgentLaunchDeps {
+  readonly readExitOption?: (tmuxPaneId: string) => Promise<string | undefined>;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
+  readonly logWarn?: (message: string, source: string, paneId: string) => void;
+  readonly showToast?: (message: string) => void;
+}
+
+/**
+ * Watches a just-launched agent for a failure inside its launch window and
+ * reports it once: one log line carrying the closed classification and one
+ * error toast carrying the bounded message and next action.
+ */
+export function watchCreatedPaneAgentLaunch(
+  launch: CreatedPaneAgentLaunch,
+  deps: CreatedPaneAgentLaunchDeps = {},
+): Promise<void> {
+  const readExitOption = deps.readExitOption ?? readAgentExitPaneOption;
+  return watchAgentLaunch({
+    nonce: launch.nonce,
+    agentLabel: getAgentLabel(launch.agent),
+    readExitOption: () => readExitOption(launch.tmuxPaneId),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    ...(deps.now ? { now: deps.now } : {}),
+    onFailure: async (failure, message) => {
+      const logWarn = deps.logWarn
+        ?? ((text: string, source: string, paneId: string) => {
+          LogService.getInstance().warn(text, source, paneId);
+        });
+      logWarn(
+        `${message} [${failure.state}:${failure.exit}:${failure.nextAction}]`,
+        'paneCreation',
+        launch.psychePaneId,
+      );
+      // ToastService directly: StateManager.showToast would log a second line.
+      const showToast = deps.showToast ?? (async (text: string) => {
+        const { ToastService } = await import('../services/ToastService.js');
+        ToastService.getInstance().showToast(text, 'error');
+      });
+      await showToast(message);
+    },
+  });
 }
 
 /**

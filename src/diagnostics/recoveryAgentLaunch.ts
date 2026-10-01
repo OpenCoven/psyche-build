@@ -39,11 +39,19 @@ const FAILURE_WINDOW_MS = 5_000;
 const RUNNING_CONTROL_WINDOW_MS = 1_500;
 const SHELL_PROBE_TIMEOUT_MS = 3_000;
 const SHELL_PROBE_OPTION = '@psyche_harness_probe';
+const SHELL_PATH_OPTION = '@psyche_harness_path';
 
 /** Written by the failing CLI; must never reach a classification or message. */
 export const AGENT_STDERR_SENTINEL = 'HARNESS-AGENT-STDERR-SENTINEL';
 /** Prompt for the failing launch; must never reach a classification or message. */
 export const AGENT_PROMPT_SENTINEL = 'HARNESS-AGENT-PROMPT-SENTINEL';
+
+/** Raised when the panes' PATH could not be confined, so nothing was launched. */
+export class RecoveryAgentLaunchConfinementError extends Error {
+  constructor() {
+    super('Agent launch failure was not observed: pane PATH could not be confined');
+  }
+}
 
 /** Raised when the host cannot run tmux, so the scenario observes nothing. */
 export class RecoveryAgentLaunchTmuxUnavailableError extends Error {
@@ -90,11 +98,23 @@ export async function observeAgentLaunchFailure(
   process.env.TMUX_TMPDIR = tmuxTmpdir;
 
   try {
+    // `env` execs `sh`, so the pane's current command is the shell itself,
+    // as in a real pane. tmux's own `-e PATH=` is not used: tmux replaces it
+    // with the client's PATH, which would launch the host's real agents.
     const shellCommand = `/usr/bin/env PATH=${fakeBin} ENV= /bin/sh`;
     tmux(socketPath, '-f', '/dev/null', 'new-session', '-d', '-s', 'harness', '-x', '120', '-y', '30', shellCommand);
     const failingPane = tmux(socketPath, 'display-message', '-p', '-t', 'harness', '#{pane_id}');
     const missingPane = tmux(socketPath, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', 'harness', shellCommand);
     const runningPane = tmux(socketPath, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', 'harness', shellCommand);
+
+    // Fail closed before typing any agent command: every pane's shell must be
+    // up and its PATH must be exactly the fake directory. Anything else could
+    // start a real agent CLI installed on the host.
+    for (const pane of [failingPane, missingPane, runningPane]) {
+      if (await shellProbe(socketPath, pane, SHELL_PATH_OPTION, '"$PATH"') !== fakeBin) {
+        throw new RecoveryAgentLaunchConfinementError();
+      }
+    }
 
     const [failing, missing, running] = await Promise.all([
       launchAndObserve(projectRoot, failingPane, 'opencode', AGENT_PROMPT_SENTINEL, FAILURE_WINDOW_MS),
@@ -150,8 +170,8 @@ async function launchAndObserve(
   prompt: string,
   windowMs: number,
 ): Promise<{ failure: AgentLaunchFailure | null; message: string }> {
-  const recorder = createAgentExitRecorder('/bin/sh');
-  await launchAgentInPane({
+  const recorder = createAgentExitRecorder();
+  const launch = await launchAgentInPane({
     paneId: tmuxPaneId,
     agent,
     prompt,
@@ -160,6 +180,11 @@ async function launchAndObserve(
     exitRecorder: recorder,
     tmuxService: TmuxService.getInstance(),
   });
+  if (!launch.exitRecorderArmed) {
+    // The launch path did not recognise the pane's shell, so nothing could be
+    // recorded. Reported as no classification, which fails the invariants.
+    return { failure: null, message: '' };
+  }
   const failure = await observeAgentLaunch({
     nonce: recorder.nonce,
     readExitOption: () => readAgentExitPaneOption(tmuxPaneId),
@@ -183,20 +208,34 @@ async function launchAndObserve(
 async function shellStillExecutes(socketPath: string, tmuxPaneId: string): Promise<boolean> {
   const dead = tmux(socketPath, 'display-message', '-p', '-t', tmuxPaneId, '#{pane_dead}');
   if (dead !== '0') return false;
+  return await shellProbe(socketPath, tmuxPaneId, SHELL_PROBE_OPTION, 'alive') === 'alive';
+}
+
+/**
+ * Types a command that makes the pane's shell write `value` (shell-expanded)
+ * into a pane option, and returns what arrived, or undefined on timeout.
+ */
+async function shellProbe(
+  socketPath: string,
+  tmuxPaneId: string,
+  option: string,
+  value: string,
+): Promise<string | undefined> {
   tmux(
     socketPath,
     'send-keys',
     '-t',
     tmuxPaneId,
-    `tmux set-option -p -t "$TMUX_PANE" ${SHELL_PROBE_OPTION} alive`,
+    `tmux set-option -p -t "$TMUX_PANE" ${option} ${value}`,
     'Enter',
   );
   const deadline = Date.now() + SHELL_PROBE_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (paneOption(socketPath, tmuxPaneId, SHELL_PROBE_OPTION) === 'alive') return true;
+    const observed = paneOption(socketPath, tmuxPaneId, option);
+    if (observed) return observed;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return false;
+  return undefined;
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   classifyAgentLaunchExit,
   createAgentExitRecorder,
   describeAgentLaunchFailure,
+  exitRecorderSyntaxForPaneCommand,
   observeAgentLaunch,
   parseRecordedAgentExit,
   watchAgentLaunch,
@@ -15,7 +16,7 @@ const NONCE = '0a1b2c3d';
 
 describe('agent exit recorder', () => {
   it('records the agent exit status on the pane after a POSIX shell runs it', () => {
-    const suffix = buildAgentExitRecorderSuffix({ nonce: NONCE, shellPath: '/bin/zsh' });
+    const suffix = buildAgentExitRecorderSuffix({ nonce: NONCE }, 'posix');
 
     expect(suffix).toBe(
       `; tmux set-option -p -t "$TMUX_PANE" ${AGENT_EXIT_PANE_OPTION} "${NONCE}:$?" 2>/dev/null`,
@@ -23,23 +24,46 @@ describe('agent exit recorder', () => {
   });
 
   it('uses $status under fish, which has no $?', () => {
-    const suffix = buildAgentExitRecorderSuffix({ nonce: NONCE, shellPath: '/opt/homebrew/bin/fish' });
+    const suffix = buildAgentExitRecorderSuffix({ nonce: NONCE }, 'fish');
 
     expect(suffix).toContain(`"${NONCE}:$status"`);
     expect(suffix).not.toContain('$?');
   });
 
   it('refuses a nonce that could escape the typed command', () => {
-    expect(() => buildAgentExitRecorderSuffix({ nonce: '"; rm -rf ~; "' })).toThrow();
+    expect(() => buildAgentExitRecorderSuffix({ nonce: '"; rm -rf ~; "' }, 'posix')).toThrow();
   });
 
   it('creates an eight-hex-digit nonce per launch', () => {
-    const first = createAgentExitRecorder('/bin/sh');
-    const second = createAgentExitRecorder('/bin/sh');
+    const first = createAgentExitRecorder();
+    const second = createAgentExitRecorder();
 
     expect(first.nonce).toMatch(/^[a-f0-9]{8}$/u);
     expect(first.nonce).not.toBe(second.nonce);
   });
+});
+
+describe('exitRecorderSyntaxForPaneCommand', () => {
+  it.each(['sh', 'bash', 'zsh', 'dash', 'ksh', '-zsh', '/bin/bash', 'ZSH'])(
+    'uses $? for the POSIX-status shell %j',
+    (paneCommand) => {
+      expect(exitRecorderSyntaxForPaneCommand(paneCommand)).toBe('posix');
+    },
+  );
+
+  it('uses $status for fish', () => {
+    expect(exitRecorderSyntaxForPaneCommand('fish')).toBe('fish');
+    expect(exitRecorderSyntaxForPaneCommand('-fish')).toBe('fish');
+  });
+
+  // A shell that would reject the suffix must get none, or the whole typed
+  // line fails and the agent never starts.
+  it.each(['nu', 'tcsh', 'csh', 'xonsh', 'elvish', 'pwsh', 'node', 'claude', '', undefined])(
+    'refuses to arm the recorder for %j',
+    (paneCommand) => {
+      expect(exitRecorderSyntaxForPaneCommand(paneCommand)).toBeNull();
+    },
+  );
 });
 
 describe('parseRecordedAgentExit', () => {
@@ -62,6 +86,12 @@ describe('parseRecordedAgentExit', () => {
 describe('classifyAgentLaunchExit', () => {
   it('does not classify a clean exit as a launch failure', () => {
     expect(classifyAgentLaunchExit(0)).toBeNull();
+  });
+
+  // Raw-mode TUIs receive Ctrl-C as a keystroke and exit 130 themselves, so
+  // the recorder does run; an operator cancelling is not a failed launch.
+  it('does not classify an operator cancel (exit 130) as a launch failure', () => {
+    expect(classifyAgentLaunchExit(130)).toBeNull();
   });
 
   it.each([
@@ -150,6 +180,23 @@ describe('observeAgentLaunch', () => {
     });
 
     expect(result).toBeNull();
+    expect(time.sleep).not.toHaveBeenCalled();
+  });
+
+  it('stops early once the pane no longer exists', async () => {
+    const time = clock();
+    const readExitOption = vi.fn(async () => {
+      throw new Error("Command failed: tmux show-options\ncan't find pane: %9");
+    });
+    const result = await observeAgentLaunch({
+      nonce: NONCE,
+      readExitOption,
+      windowMs: 20_000,
+      ...time,
+    });
+
+    expect(result).toBeNull();
+    expect(readExitOption).toHaveBeenCalledTimes(1);
     expect(time.sleep).not.toHaveBeenCalled();
   });
 

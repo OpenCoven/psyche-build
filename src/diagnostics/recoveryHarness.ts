@@ -26,6 +26,7 @@ import {
 import { observeMidMutationCleanup } from './recoveryMidMutationCleanup.js';
 import {
   observeAgentLaunchFailure,
+  RecoveryAgentLaunchConfinementError,
   RecoveryAgentLaunchTmuxUnavailableError,
 } from './recoveryAgentLaunch.js';
 import {
@@ -875,9 +876,13 @@ async function runAgentLaunchFailure(): Promise<RecoveryScenarioEvidence> {
         ? 'agent_launch_failed'
         : 'unexpected_success';
     } catch (error) {
+      // A PATH that could not be confined means nothing was launched: the
+      // injection never happened, which is not the product passing.
       classification = error instanceof RecoveryAgentLaunchTmuxUnavailableError
         ? 'tmux_unavailable'
-        : 'unexpected_error';
+        : error instanceof RecoveryAgentLaunchConfinementError
+          ? 'injection_ineffective'
+          : 'unexpected_error';
     }
 
     const configAfter = digest(await readFile(configPath));

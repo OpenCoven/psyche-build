@@ -58,27 +58,49 @@ export interface AgentLaunchFailure {
 export interface AgentExitRecorder {
   /** Eight lowercase hex digits; ties a recorded status to one launch. */
   readonly nonce: string;
-  /** Shell that will run the typed command; selects `$?` or fish's `$status`. */
-  readonly shellPath?: string;
 }
 
-export function createAgentExitRecorder(
-  shellPath: string | undefined = process.env.SHELL,
-): AgentExitRecorder {
-  return { nonce: randomBytes(4).toString('hex'), shellPath };
+export function createAgentExitRecorder(): AgentExitRecorder {
+  return { nonce: randomBytes(4).toString('hex') };
+}
+
+/** How the pane's shell spells the last exit status, when it is known. */
+export type AgentExitRecorderSyntax = 'posix' | 'fish';
+
+const POSIX_STATUS_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+
+/**
+ * Chooses the recorder syntax from the shell actually running in the pane
+ * (`#{pane_current_command}`), never from Psyche's own `$SHELL`: tmux's
+ * `default-shell` can differ from the login shell. Any shell not known to
+ * accept the suffix gets none, so its launch is unclassified rather than
+ * broken — a nushell or tcsh pane would otherwise reject the whole line and
+ * the agent would never start.
+ */
+export function exitRecorderSyntaxForPaneCommand(
+  paneCommand: string | undefined,
+): AgentExitRecorderSyntax | null {
+  // Login shells can report as `-zsh`; a path can appear on some platforms.
+  const name = path.basename((paneCommand ?? '').trim()).replace(/^-/u, '').toLowerCase();
+  if (POSIX_STATUS_SHELLS.has(name)) return 'posix';
+  if (name === 'fish') return 'fish';
+  return null;
 }
 
 /**
- * Suffix appended directly after the agent invocation, so `$?` is the agent's
- * own status. stderr is discarded so a host without `tmux` on the pane's PATH
+ * Suffix appended directly after the agent invocation, so the status is the
+ * agent's own. stderr is discarded so a host without `tmux` on the pane's PATH
  * prints nothing into the operator's shell; the launch then simply goes
  * unclassified rather than misclassified.
  */
-export function buildAgentExitRecorderSuffix(recorder: AgentExitRecorder): string {
+export function buildAgentExitRecorderSuffix(
+  recorder: AgentExitRecorder,
+  syntax: AgentExitRecorderSyntax,
+): string {
   if (!NONCE_PATTERN.test(recorder.nonce)) {
     throw new Error('Agent exit recorder nonce must be eight lowercase hex digits');
   }
-  const status = isFishShell(recorder.shellPath) ? '$status' : '$?';
+  const status = syntax === 'fish' ? '$status' : '$?';
   return `; tmux set-option -p -t "$TMUX_PANE" ${AGENT_EXIT_PANE_OPTION} "${recorder.nonce}:${status}" 2>/dev/null`;
 }
 
@@ -93,9 +115,16 @@ export function parseRecordedAgentExit(
   return code <= 255 ? code : null;
 }
 
-/** A clean exit is not a launch failure; every non-zero exit is. */
+/**
+ * Exit status of a process ended by SIGINT, which is also what raw-mode TUIs
+ * return when the operator presses Ctrl-C to leave them. That is the operator
+ * cancelling, not the agent failing to start.
+ */
+const USER_CANCEL_EXIT_CODE = 130;
+
+/** A clean exit or an operator cancel is not a launch failure; any other non-zero exit is. */
 export function classifyAgentLaunchExit(exitCode: number): AgentLaunchFailure | null {
-  if (exitCode === 0) return null;
+  if (exitCode === 0 || exitCode === USER_CANCEL_EXIT_CODE) return null;
   const exit: AgentLaunchExitBucket = exitCode === 127
     ? 'command_not_found'
     : exitCode === 126
@@ -163,8 +192,10 @@ export async function observeAgentLaunch(
     let raw: string | undefined;
     try {
       raw = await readExitOption();
-    } catch {
-      // A failed read is no evidence either way; keep watching.
+    } catch (error) {
+      // The pane is gone, so nothing can ever be recorded there.
+      if (isMissingPaneError(error)) return null;
+      // Any other failed read is no evidence either way; keep watching.
       raw = undefined;
     }
     const exitCode = parseRecordedAgentExit(raw, nonce);
@@ -219,6 +250,7 @@ function unrefSleep(ms: number): Promise<void> {
   });
 }
 
-function isFishShell(shellPath?: string): boolean {
-  return path.basename(shellPath || '').toLowerCase() === 'fish';
+function isMissingPaneError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /can't find pane|no such pane/iu.test(message);
 }

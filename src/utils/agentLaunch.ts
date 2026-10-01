@@ -11,6 +11,7 @@ import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import {
   buildAgentExitRecorderSuffix,
+  exitRecorderSyntaxForPaneCommand,
   type AgentExitRecorder,
 } from './agentLaunchOutcome.js';
 
@@ -588,7 +589,8 @@ export interface LaunchAgentInPaneOptions {
   codexHookEventFile?: string;
   /**
    * Records the agent's exit status on the pane after it returns, so a launch
-   * that fails inside the live shell can be classified (#475).
+   * that fails inside the live shell can be classified (#475). Applied only
+   * when the pane's own shell is one known to accept the suffix.
    */
   exitRecorder?: AgentExitRecorder;
   /** Injectable for tests. */
@@ -609,9 +611,14 @@ export interface LaunchAgentInPaneOptions {
  * Claude's workspace-trust monitoring is deliberately NOT handled here: it
  * lives in paneCreation, which would be a circular import.
  */
+export interface LaunchAgentInPaneResult {
+  /** True only when the exit recorder was appended to the typed command. */
+  readonly exitRecorderArmed: boolean;
+}
+
 export async function launchAgentInPane(
   options: LaunchAgentInPaneOptions
-): Promise<void> {
+): Promise<LaunchAgentInPaneResult> {
   const {
     paneId,
     agent,
@@ -639,14 +646,18 @@ export async function launchAgentInPane(
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
-  let baselineCommand: string | undefined;
-  if (shouldSendPromptViaTmux) {
+  // The pane's current command is its shell before the agent is typed. It is
+  // both the send-keys baseline and the only trustworthy answer to which
+  // shell will parse the exit recorder.
+  let paneCommand: string | undefined;
+  if (shouldSendPromptViaTmux || exitRecorder) {
     try {
-      baselineCommand = await tmuxService.getPaneCurrentCommand(paneId);
+      paneCommand = await tmuxService.getPaneCurrentCommand(paneId);
     } catch {
-      baselineCommand = undefined;
+      paneCommand = undefined;
     }
   }
+  const baselineCommand = shouldSendPromptViaTmux ? paneCommand : undefined;
 
   let launchCommand: string;
   if (hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery) {
@@ -689,8 +700,9 @@ export async function launchAgentInPane(
     });
   }
 
-  if (exitRecorder) {
-    launchCommand += buildAgentExitRecorderSuffix(exitRecorder);
+  const recorderSyntax = exitRecorder ? exitRecorderSyntaxForPaneCommand(paneCommand) : null;
+  if (exitRecorder && recorderSyntax) {
+    launchCommand += buildAgentExitRecorderSuffix(exitRecorder, recorderSyntax);
   }
 
   await tmuxService.sendShellCommand(paneId, launchCommand);
@@ -709,4 +721,6 @@ export async function launchAgentInPane(
       readyDelayMs: getSendKeysReadyDelayMs(agent),
     });
   }
+
+  return { exitRecorderArmed: Boolean(exitRecorder && recorderSyntax) };
 }
