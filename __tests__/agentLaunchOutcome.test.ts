@@ -183,6 +183,60 @@ describe('observeAgentLaunch', () => {
     expect(time.sleep).not.toHaveBeenCalled();
   });
 
+  it('ignores an exit that a slow read only returns after the window', async () => {
+    const time = clock();
+    const readExitOption = vi.fn(async () => {
+      // The read itself takes longer than the whole window.
+      await time.sleep(6_000);
+      return `${NONCE}:127`;
+    });
+    const result = await observeAgentLaunch({
+      nonce: NONCE,
+      readExitOption,
+      windowMs: 5_000,
+      intervalMs: 500,
+      now: time.now,
+      sleep: async () => {},
+    });
+
+    expect(result).toBeNull();
+    expect(readExitOption).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no read once the clock has passed the deadline', async () => {
+    const time = clock();
+    const readExitOption = vi.fn(async () => undefined);
+    const result = await observeAgentLaunch({
+      nonce: NONCE,
+      readExitOption,
+      windowMs: 1_000,
+      intervalMs: 400,
+      now: time.now,
+      // A late wake-up jumps the clock past the deadline.
+      sleep: async () => {
+        await time.sleep(5_000);
+      },
+    });
+
+    expect(result).toBeNull();
+    expect(readExitOption).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts an exit read at the deadline itself', async () => {
+    const time = clock();
+    const reads = [undefined, undefined, `${NONCE}:1`];
+    const result = await observeAgentLaunch({
+      nonce: NONCE,
+      readExitOption: async () => reads.shift(),
+      windowMs: 1_000,
+      intervalMs: 500,
+      ...time,
+    });
+
+    expect(result?.exit).toBe('failed');
+    expect(time.now()).toBe(1_000);
+  });
+
   it('stops early once the pane no longer exists', async () => {
     const time = clock();
     const readExitOption = vi.fn(async () => {

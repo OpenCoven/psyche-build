@@ -429,8 +429,12 @@ through a named migration with its superseded bytes retained. Recovery across
 two real installed builds still needs observed #474 operator cases and stays
 gated rather than inferred. The
 `unavailable-providers` scenario covers the routing and detection boundary at
-source; an agent CLI that fails at launch inside a live shell still has no
-product classification and stays unobserved. The `stale-pane-identity`
+source. An agent CLI that fails at launch inside a live shell is now classified
+(`agent_launch_failed`, with an exit bucket and a next action) and reported
+without closing the shell; the `agent-launch-failure` scenario covers it at
+source only, for new agent panes in the terminal cockpit. The desktop bridge
+does not carry the classification, and no packaged operator case has observed
+it. The `stale-pane-identity`
 scenario closes the second stale-identity path by replacing a real tmux server
 and proving the reused pane ID is refused rather than rebound; it replaces the
 tmux server, not the application, so it is not restart coverage.

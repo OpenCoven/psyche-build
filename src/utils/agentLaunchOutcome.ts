@@ -189,6 +189,10 @@ export async function observeAgentLaunch(
   } = options;
   const deadline = now() + windowMs;
   for (;;) {
+    // The window is enforced around every read, so neither a late wake-up nor
+    // a slow read can stretch it: no read starts after the deadline, and a
+    // value that only arrives after it is not a launch outcome.
+    if (now() > deadline) return null;
     let raw: string | undefined;
     try {
       raw = await readExitOption();
@@ -198,9 +202,9 @@ export async function observeAgentLaunch(
       // Any other failed read is no evidence either way; keep watching.
       raw = undefined;
     }
+    if (now() > deadline) return null;
     const exitCode = parseRecordedAgentExit(raw, nonce);
     if (exitCode !== null) return classifyAgentLaunchExit(exitCode);
-    if (now() >= deadline) return null;
     await sleep(intervalMs);
   }
 }

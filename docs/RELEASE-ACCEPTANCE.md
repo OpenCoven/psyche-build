@@ -31,7 +31,7 @@ operate, recover, and remove the application.
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle | **Schema complete; production surface partial** | Schema #243 via PR #278 (`69769cc5`); CLI and bounded persistence via PR #462; provenance, persistence, lifecycle and updater collectors via PRs #462 and #467; installed-provider collector via PR #483. Graphics, receipt and terminal collectors, and any UI, remain absent. All of it postdates `v0.0.1`, which contains none of it |
-| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; eleven bounded scenarios in the default run plus the opt-in `pnpm recovery:restart` observation, with CI-retained reports. Source coverage, not a `v0.0.1` feature and not the observed operator case |
+| Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359, extended by #475; twelve bounded scenarios in the default run plus the opt-in `pnpm recovery:restart` observation, with CI-retained reports. Source coverage, not a `v0.0.1` feature and not the observed operator case |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #474 (succeeding #196/#239); source harness results do not establish packaged GUI or provider acceptance |
 
 The open acceptance row does not make the already-delivered macOS artifact
@@ -370,6 +370,7 @@ Current scenarios:
 | `unavailable-providers` | An unregistered capability provider and an absent Coven daemon socket | `provider-failure-classified`, `available-provider-still-executes`, `plain-terminal-lane-remains-usable`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 | `stale-pane-identity` | A replaced tmux server that hands the recorded pane ID to a pane the persisted record never owned | `replaced-server-reused-pane-id`, `stale-pane-identity-reported`, `reused-pane-id-not-adopted`, `live-pane-rebinds-to-current-identity`, `rebind-clears-stale-background-windows`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 | `interrupted-git-mutation` | Cleanup owner killed while its supervised `git worktree remove` is live | `mutation-observed-in-flight`, `cleanup-owner-killed-during-mutation`, `worktree-state-self-consistent`, `interrupted-mutation-left-no-orphan`, `cleanup-project-lease-recovered`, `worktree-branch-unchanged`, `uncommitted-work-untouched`, `persisted-config-unchanged` |
+| `agent-launch-failure` | Agent CLIs typed into a real `sh` whose PATH holds only fakes: one exits 1 with a stderr sentinel and a sentinel prompt, one is absent (127), and one keeps running as a control | `failing-agent-classified-as-launch-failure`, `missing-agent-classified-as-not-found`, `running-agent-not-classified-as-failed`, `agent-pane-shell-preserved`, `launch-report-carries-no-terminal-content`, `persisted-config-unchanged`, `uncommitted-work-untouched` |
 
 ### Opt-in: application restart
 
