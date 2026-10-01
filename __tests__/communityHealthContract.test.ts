@@ -85,12 +85,35 @@ describe('community health contract', () => {
     }
   });
 
+  it('routes every issue form into triage on the Psyche Build Project', () => {
+    for (const [path, type] of [
+      ['.github/ISSUE_TEMPLATE/bug.yml', 'Bug'],
+      ['.github/ISSUE_TEMPLATE/feature.yml', 'Feature'],
+      ['.github/ISSUE_TEMPLATE/documentation.yml', 'Task'],
+    ] as const) {
+      const form = read(path);
+      expect(form, path).toMatch(/^labels: \[needs-triage/m);
+      expect(form, path).toMatch(new RegExp(`^type: ${type}$`, 'm'));
+      expect(form, path).toMatch(/^projects: \["OpenCoven\/11"\]$/m);
+    }
+
+    const outcome = read('.github/ISSUE_TEMPLATE/outcome.yml');
+    expect(outcome).toMatch(/^labels: \[needs-triage\]$/m);
+    expect(outcome).toMatch(/maintainer applies the `outcome` label after approving/);
+    expect(outcome).toMatch(/closes only by hand, with an evidence comment/);
+    for (const field of ['Accountable owner', 'Train', 'Priority', 'Risk', 'Exit gate', 'Evidence required']) {
+      expect(outcome).toContain(`label: ${field}`);
+    }
+    expect(outcome).toMatch(/Do not paste credentials, raw prompts, or unrestricted terminal output/);
+  });
+
   it('does not solicit dangerous material in public templates', () => {
     const publicTemplates = [
       '.github/pull_request_template.md',
       '.github/ISSUE_TEMPLATE/bug.yml',
       '.github/ISSUE_TEMPLATE/feature.yml',
       '.github/ISSUE_TEMPLATE/documentation.yml',
+      '.github/ISSUE_TEMPLATE/outcome.yml',
     ].map(read);
 
     const unsafeSolicitations = [
@@ -117,8 +140,8 @@ describe('community health contract', () => {
       '/protocol-fixtures/ @BunsDev',
       '/native/desktop/psyche-build-tauri/src-tauri/ @BunsDev',
       '/native/ios/ @BunsDev',
-      '/.beads/ @BunsDev',
-      '/scripts/beads-project-sync/ @BunsDev',
+      '/docs/TRACKER.md @BunsDev',
+      '/.github/ISSUE_TEMPLATE/ @BunsDev',
     ]) {
       expect(codeowners).toContain(pattern);
     }

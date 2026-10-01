@@ -10,20 +10,20 @@ Psyche Build does **not** own the durable OpenCoven identity or orchestration pr
 
 - [`OpenCoven/psyche`](https://github.com/OpenCoven/psyche) owns canonical familiar, task, lane, run, lease, approval, action, receipt, recovery, and compatibility semantics.
 - The Coven daemon owns process and PTY execution, project-boundary enforcement, and authoritative runtime events.
-- Psyche Build consumes those contracts through versioned adapters. It must not direct-read Psyche's database, duplicate canonical protocol state, or infer authority/completion from a UI selection, tmux pane, process, path, worktree, branch, provider session, Bead, or GitHub issue.
+- Psyche Build consumes those contracts through versioned adapters. It must not direct-read Psyche's database, duplicate canonical protocol state, or infer authority/completion from a UI selection, tmux pane, process, path, worktree, branch, provider session, or GitHub issue.
 - Issue [#253](https://github.com/OpenCoven/psyche-build/issues/253) owns the future immutable Psyche profile pin and compatibility canary. Until that lands, do not claim Psyche protocol conformance.
 
 ## Planning and evidence contract
 
 | Surface | Owns | Must not become |
 |---|---|---|
-| GitHub issues and milestones | Public outcomes, owners, acceptance gates, and externally legible status | A duplicate implementation dependency graph or runtime identity model |
-| Beads | Internal implementation tasks and dependency ordering | Familiar, task, run, lane, action, or receipt identity |
+| GitHub outcome issues, milestones, and Project #11 | Public outcomes, owners, priority, train, risk, acceptance gates, and externally legible status | A runtime identity model or proof that a user path works |
+| GitHub sub-issues and issue dependencies | Implementation tasks under an outcome and their real ordering | Familiar, task, run, lane, action, or receipt identity |
 | Pull requests | Reviewable implementation slices and exact-head proof | Evidence that an entire user path works merely because unit tests pass |
 | Specs and plans | Design intent, decisions, and historical reasoning | Executable backlog or proof that behavior shipped |
 | Acceptance records | Runtime observations tied to immutable source and artifacts | Unbounded logs, screenshots without provenance, or maintainer memory |
 
-Beads is source-of-truth for generated mirror issues. Repair Beads first and run the supported synchronizer; never hand-edit a generated mirror body as the durable fix. Follow [`.beads/README.md`](.beads/README.md), including the sole-migrator rule.
+GitHub Issues and the Psyche Build Project (#11) are the only planning store; there is no generated mirror. Follow [Tracking work](docs/TRACKER.md): outcomes close by hand with an evidence comment, and a PR references an outcome with `Refs #N`, never a closing keyword. Beads was retired under [#473](https://github.com/OpenCoven/psyche-build/issues/473); do not run `bd` against this repository.
 
 ## Canonical routing
 
@@ -37,7 +37,7 @@ Read only the documents needed for the change, but start here rather than recons
 - [Bridge security](docs/BRIDGE-SECURITY.md) — authentication, scope, transport, and failure boundaries.
 - [Release acceptance](docs/RELEASE-ACCEPTANCE.md) — evidence required for release and support claims.
 - [Contributing](CONTRIBUTING.md) — contributor workflow and platform prerequisites.
-- [Beads](.beads/README.md) — planning-store and mirror operation.
+- [Tracking work](docs/TRACKER.md) — issues, sub-issues, Project fields, and closure rules.
 
 Dated files under `docs/superpowers/` are design history unless the current roadmap explicitly marks one active.
 
@@ -70,7 +70,7 @@ Treat these as R3/R4 unless a narrower current contract proves otherwise:
 - `src/control/**`, `src/services/bridge/**`, and `protocol-fixtures/**`;
 - `native/desktop/psyche-build-tauri/src-tauri/**` and `native/ios/**`;
 - `.github/workflows/**`, `.github/actions/**`, release scripts, signing/notarization/TestFlight paths, and package/toolchain pins;
-- `.beads/**`, Beads synchronization, managed GitHub mutations, and generated mirror ownership;
+- Project #11 configuration, tracker automation, and bulk GitHub issue mutations;
 - authentication, capability leases, approvals, receipts, revocation, idempotency, persistence, cleanup, recovery, and migrations.
 
 Never weaken project scope, authority, confirmation, receipt, revocation, idempotency, work preservation, or recovery behavior to make a test pass.
@@ -86,7 +86,7 @@ Edit generators and source inputs, not generated artifacts:
 | `native/ios/Psyche.xcodeproj/**` and generated iOS `Info.plist` | `pnpm ios:project:generate` (verify with `pnpm ios:project:check`) |
 | `dist/**` and built frontend output | `pnpm build` |
 
-Generated changes must be reproducible, reviewed with their source change, and left clean after the documented check. Do not edit Beads mirror issue bodies or checked-in bundles by hand.
+Generated changes must be reproducible, reviewed with their source change, and left clean after the documented check. Do not edit checked-in bundles by hand.
 
 ## Change discipline
 
@@ -98,7 +98,7 @@ Generated changes must be reproducible, reviewed with their source change, and l
 6. Record exact commands, exact head SHA, observed results, proof gaps, and rollback. Test counts do not substitute for production-path evidence.
 7. Resolve every current review finding and wait for terminal required checks before merge.
 
-Pushing branches, opening or merging PRs, applying Beads/GitHub mutations, publishing packages/releases, changing repository settings, and using signing/distribution credentials are external side effects. Perform only the side effects explicitly authorized for the task.
+Pushing branches, opening or merging PRs, applying GitHub issue or Project mutations, publishing packages/releases, changing repository settings, and using signing/distribution credentials are external side effects. Perform only the side effects explicitly authorized for the task.
 
 ## Protected data
 

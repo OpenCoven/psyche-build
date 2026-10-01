@@ -20,7 +20,7 @@ Psyche Build remains the coding cockpit. It owns product-local composition aroun
 
 Psyche is the target canonical orchestration protocol for task, lane, execution, capability/lease, approval, action, receipt, cancellation, recovery, and compatibility semantics.
 
-The Coven daemon remains authoritative for actual process/PTY execution, project-boundary enforcement, and runtime events. A pane, process, tmux id, worktree, branch, path, provider session, Bead, GitHub issue, or UI selection is therefore never sufficient evidence of canonical identity, authority, completion, or recovery.
+The Coven daemon remains authoritative for actual process/PTY execution, project-boundary enforcement, and runtime events. A pane, process, tmux id, worktree, branch, path, provider session, GitHub issue, Project item, or UI selection is therefore never sufficient evidence of canonical identity, authority, completion, or recovery.
 
 ## Current-state inventory
 
@@ -43,7 +43,7 @@ The Coven daemon remains authoritative for actual process/PTY execution, project
 | Persistence | control journal, durable snapshots/sidecars, credential state, product session/worktree state | Build local stores + daemon | protocol-defined durable identity/evidence projections | Adapter seam | Keep existing persisted formats readable during migration; protocol ids are additive first. No big-bang rewrite. |
 | Recovery | nonterminal command recovery, pane/worktree recovery markers, owner fencing, reconnect behavior | Build control/runtime/product recovery | canonical Psyche recovery semantics | Psyche-owned target semantic after profile release | Restart must preserve identity and exact known/unknown state; never silently mint a new task/lane/action to escape ambiguity. |
 | UI selection | active project, selected pane/thread, focused tab, visible session | Build UI | none | Intentional product-local state | UI state may choose what to display or request; it must never grant authority or prove completion. |
-| Beads / GitHub issue | planning and public-mirror identifiers | Beads/GitHub planning plane | none | Intentional product-local state | Never use tracker identity as runtime task/action/receipt identity. |
+| GitHub issue / Project item | planning identifiers | GitHub planning plane | none | Intentional product-local state | Never use tracker identity as runtime task/action/receipt identity. |
 
 ## Current invariants that adapters must preserve
 
@@ -87,7 +87,7 @@ Rules:
 
 - absent protocol ids preserve existing behavior while the adapter is disabled;
 - once an operation is bound to a Psyche id, conflicting caller/local ids are rejected;
-- protocol ids never derive from pane ids, paths, branch names, provider ids, Beads, or GitHub issues;
+- protocol ids never derive from pane ids, paths, branch names, provider ids, or GitHub issues and Project items;
 - persistence writes old and new correlation fields transactionally or rolls back the migration.
 
 ### Seam B — capability and approval translation

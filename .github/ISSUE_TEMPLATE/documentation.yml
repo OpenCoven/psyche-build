@@ -1,6 +1,9 @@
 name: Documentation report
 description: Report incorrect, missing, ambiguous, or stale Psyche Build documentation
 title: "[Docs]: "
+labels: [needs-triage, area:docs]
+type: Task
+projects: ["OpenCoven/11"]
 body:
   - type: markdown
     attributes:

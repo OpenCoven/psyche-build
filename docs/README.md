@@ -85,7 +85,7 @@ the public Cask is maintained in
 The [v0.0.2 DMGs](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.2)
 were published on 2026-08-31 through
 [release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717).
-The Homebrew Cask still selects `v0.0.1` as of 2026-09-06. Publication does not
+Since homebrew-tap commit `2247c1d5` (2026-09-26) the Homebrew Cask selects `0.0.2`, and its checksums match the release `SHA256SUMS`. Publication does not
 complete operator acceptance or prove an upgrade path; the
 [release acceptance record](RELEASE-ACCEPTANCE.md) separates the artifact evidence.
 
@@ -133,7 +133,7 @@ TestFlight, and public App Store distribution are unavailable. See the
 - [Agent surface control](AGENT-SURFACE-CONTROL.md)
 - [Bridge and daemon security model](BRIDGE-SECURITY.md)
 - [Psyche compatibility map](PSYCHE-COMPATIBILITY-MAP.md)
-- [Tracker integrity](TRACKER-INTEGRITY.md)
+- [Tracking work](TRACKER.md)
 - [Psyche Build integrations](INTEGRATIONS.md)
 - [Breaking changes](BREAKING-CHANGES.md)
 

@@ -1,7 +1,7 @@
 # Psyche Build post-release execution contract
 
 **Status:** Active delivery plan  
-**Last reconciled:** 2026-09-14
+**Last reconciled:** 2026-10-01
 
 **Portfolio owner:** [@BunsDev](https://github.com/BunsDev)  
 **Roadmap control:** [Standing register](./ROADMAP.md#standing-roadmap-control)
@@ -16,10 +16,19 @@ proceed in parallel, the proof required to close each gate, and the pull-request
 slices that must replace oversized or stale branches.
 
 Live GitHub issues and pull requests remain authoritative for implementation
-state. This file is the maintained sequencing contract. Beads owns internal task
-dependencies, not product identity or public support status.
+state. This file is the maintained sequencing contract. Sub-issues and issue
+dependencies on the [Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11)
+own internal task ordering, not product identity or public support status; see
+[Tracking work](./TRACKER.md).
 
-The [September 14 reconciliation](./ROADMAP.md#september-14-reconciliation)
+The [October 1 reconciliation](./ROADMAP.md#october-1-reconciliation) is the
+current snapshot at source `c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1`: #196 and
+#199 closed on 2026-09-16 with their open scope moved to #474, #475, and #476;
+#239 is superseded by #474; #246 is not planned; and Beads was retired under
+[#473](https://github.com/OpenCoven/psyche-build/issues/473). The production
+target is milestone `v0.1.0 — macOS production`.
+
+The earlier [September 14 reconciliation](./ROADMAP.md#september-14-reconciliation)
 and [portfolio register](./ROADMAP.md#portfolio-outcomes-and-closure-state)
 record current ownership, trains, dependencies, support decisions, and evidence
 indices at source `3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5`.
@@ -38,9 +47,15 @@ assignment, integration commitment, or P0/P1 prerequisite is claimed.
 
 ## macOS-first rollout focus
 
-The active delivery order is #196/#239 operator acceptance, then #199's
-observed recovery gaps. An independently reviewable fix for a demonstrated
-supported-surface defect may proceed in parallel. Expansion of diagnostics,
+The active delivery order is release-candidate operator acceptance
+([#474](https://github.com/OpenCoven/psyche-build/issues/474)), with the
+observed recovery gaps ([#475](https://github.com/OpenCoven/psyche-build/issues/475)),
+the signed update channel ([#477](https://github.com/OpenCoven/psyche-build/issues/477)),
+and the security baseline ([#478](https://github.com/OpenCoven/psyche-build/issues/478))
+in parallel, toward `v0.1.0` ([#480](https://github.com/OpenCoven/psyche-build/issues/480)).
+The earlier #196/#239 acceptance and #199 recovery outcomes are closed, and
+their open scope moved to those successors. An independently reviewable fix for
+a demonstrated supported-surface defect may proceed in parallel. Expansion of diagnostics,
 platforms, integrations, or architecture is not an implicit release gate.
 
 The iOS train is paused for rollout focus and is not a macOS rollout prerequisite.
@@ -48,7 +63,8 @@ Its readiness, authentication, physical-device, and distribution gates remain
 unchanged. [#435](https://github.com/OpenCoven/psyche-build/issues/435) remains open
 for authoritative reconciliation of unknown mobile action outcomes; pausing
 delivery does not turn that defect into a safe retry or a completed outcome.
-#201/#253/#279 and #246 remain deferred pending explicit owner prioritization.
+#201/#253/#279 remain deferred pending explicit owner prioritization; #246 is
+closed as not planned.
 
 #197 is retired as not planned. This is not a claim that desktop decomposition
 is complete. Retain merged modules and all compatibility/recovery safeguards;
@@ -85,9 +101,9 @@ was published on 2026-08-31 from signed tag source
 `a4546f45bb0ee05cfbb388a0fc5f9e951596be51`. Its two macOS DMGs and
 `SHA256SUMS` were published by
 [run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717),
-which skipped TestFlight. The Homebrew Cask still selects `v0.0.1`.
-Publication is not operator acceptance or proof that the tap updated; preserve
-separate release evidence and the open #239 gate.
+which skipped TestFlight. Since homebrew-tap commit `2247c1d5` (2026-09-26) the Homebrew Cask selects `0.0.2`, and its checksums match the release `SHA256SUMS`.
+Publication is not operator acceptance; preserve separate release evidence and
+the open #474 gate.
 
 [Issue #238](https://github.com/OpenCoven/psyche-build/issues/238) remains
 delivered through [PR #245](https://github.com/OpenCoven/psyche-build/pull/245)
@@ -146,7 +162,7 @@ its owning outcome.
 | System | Owns | Does not prove |
 |---|---|---|
 | GitHub outcomes | Public ownership, priority, dependencies, acceptance gates, and status | That an implementation or user path works |
-| Beads | Internal implementation tasks and dependency ordering | Runtime identity, support status, or completion of a public outcome |
+| GitHub sub-issues and issue dependencies | Internal implementation tasks and their ordering | Runtime identity, support status, or completion of a public outcome |
 | Pull requests | Reviewable implementation slices and focused verification | End-to-end acceptance merely because unit tests pass |
 | Retained evidence | Runtime, physical-device, clean-artifact, policy, and recovery observations tied to immutable source | Anything not actually observed |
 | Specs and plans | Design intent and historical decisions | Current backlog or shipped behavior |
@@ -164,14 +180,16 @@ macOS acceptance and recovery.
 
 | Order | Outcome | Priority | Current state and exit gate |
 |---:|---|---:|---|
-| 1 | [#196 — stabilization](https://github.com/OpenCoven/psyche-build/issues/196) and [#239 — operator manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | One sanitized manifest proves ordinary lifecycle and representative recovery, Git, cleanup, and optional-provider paths; the earlier 15-digest manifest remains `incomplete`, not reverified by later CLI smoke |
-| 2 | [#199 — operational hardening](https://github.com/OpenCoven/psyche-build/issues/199) ([#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P1 | Address observed #239 recovery/provider/upgrade gaps; #243 delivered the schema only, with no production collector wiring; PRs #462 and #467 later added the CLI, bounded persistence, and lifecycle/updater collectors; no packaged acceptance |
+| 1 | [#474 — release-candidate acceptance](https://github.com/OpenCoven/psyche-build/issues/474) (successor to [#196](https://github.com/OpenCoven/psyche-build/issues/196) and [#239](https://github.com/OpenCoven/psyche-build/issues/239)) | P0 | One sanitized manifest proves install, ordinary lifecycle, representative recovery, Git, cleanup, optional-provider, and `v0.0.2` upgrade/rollback paths on the packaged release candidate |
+| 2 | [#475 — observed recovery gaps](https://github.com/OpenCoven/psyche-build/issues/475) (successor to [#199](https://github.com/OpenCoven/psyche-build/issues/199); [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P0 | Agent launch failure, Git-mutation interruption, crash and live-pane restart, and full storage reach defined states; #243 delivered the schema only, with no production collector wiring, and PRs #462 and #467 later added the CLI, persistence, and lifecycle/updater collectors |
+| 3 | [#477 — signed update channel](https://github.com/OpenCoven/psyche-build/issues/477) and [#478 — security baseline](https://github.com/OpenCoven/psyche-build/issues/478) | P0 | Signed update path and verified Cask automation; Dependabot, CodeQL, dependency review, and no open critical or high alerts |
+| 4 | [#480 — `v0.1.0` release](https://github.com/OpenCoven/psyche-build/issues/480) | P0 | Signed tag on the accepted candidate and an updated support contract |
 
 | Separate train | Outcomes | Retained gate on resumption |
 |---|---|---|
 | Paused iOS | [#200](https://github.com/OpenCoven/psyche-build/issues/200), [#241](https://github.com/OpenCoven/psyche-build/issues/241), [#280](https://github.com/OpenCoven/psyche-build/issues/280), [#242](https://github.com/OpenCoven/psyche-build/issues/242), #435 | #241 atomic readiness, invite authentication, discovery/reconnect and physical proof, #242 publication/execution, capability-gated UI, then immutable TestFlight; reconcile unknown effects before permitting retries |
 | Deferred OpenCoven | [#201](https://github.com/OpenCoven/psyche-build/issues/201), [#253](https://github.com/OpenCoven/psyche-build/issues/253), [#279](https://github.com/OpenCoven/psyche-build/issues/279) | Approved profile/ownership, bounded adapters, live recovery, canonical receipts, and rollback evidence |
-| Deferred input parity | [#246](https://github.com/OpenCoven/psyche-build/issues/246) | Stable prerequisite contracts and opt-in, platform-specific terminal/input acceptance |
+| Not planned input parity | [#246](https://github.com/OpenCoven/psyche-build/issues/246) | Closed 2026-09-16; a new outcome and explicit owner prioritization are required to resume |
 | Retired architecture program | [#197](https://github.com/OpenCoven/psyche-build/issues/197) | No broad delivery commitment; new defect-driven work needs an owning outcome |
 
 Delivered and no longer sequenced: [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198)
@@ -258,8 +276,9 @@ generated mirror mutation is part of this closeout.
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
-**Owners:** #196 and #239.  
-**Current gate:** #196/#239 remain the active P0 critical path.
+**Historical owners:** #196 and #239.  
+**Superseded 2026-10-01:** #196 is closed and #239 is superseded by #474, which
+reuses the acceptance scope below against the `v0.1.0` release candidate.
 
 #196 was reopened on 2026-09-06 after PR #350's quoted closing phrase changed
 its tracker state without acceptance evidence. The earlier #239 manifest
@@ -268,7 +287,7 @@ documentation-only merge did not complete the outcome.
 
 Later exact-release CLI smoke did not reverify those records or establish
 packaged GUI acceptance. PR #393 delivered validator remediation, not evidence
-authenticity or human verification; #196/#239 remain open.
+authenticity or human verification; #196/#239 remained open at that time.
 
 The acceptance manifest must cover:
 
@@ -291,7 +310,7 @@ interactive packaged Tauri/tmux acceptance remains required.
 
 **Exit:** no consequential effect remains silently unknown. Every representative
 failure terminates deterministically or enters an explicit `recovery_required`
-state, and reusable gaps are transferred to #199.
+state, and reusable gaps are transferred to #475 or #476.
 
 ## Independent train — trustworthy iOS internal beta (paused)
 
@@ -365,8 +384,9 @@ same-LAN beta; it does not block that beta.
 
 ## Active follow-through — operations and contributor readiness
 
-#199/#243 retains its P1 dependency gate for the scenarios that remain:
-application restart and upgrade recovery still follow observed #239 operator
+#199 closed on 2026-09-16. #199/#243's P1 dependency gate now belongs to #475
+and #476 for the scenarios that remain:
+application restart and upgrade recovery still follow observed #474 operator
 cases rather than being inferred. Both now have source coverage in the harness,
 and source coverage is not the observed case: PR #465 states that its restart
 scenario supplies no packaged GUI evidence and closes neither #196, #199 nor
@@ -395,18 +415,18 @@ control-plane authority. PR #281 delivered the
 debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 
-#199 remains open for the observed operator cases the harness cannot supply —
+#475, #476, and #474 now own the observed operator cases the harness cannot supply —
 application restart and upgrade recovery across two real installed builds —
 plus the remaining support-bundle collectors and UI above. Application restart
 has source coverage in the opt-in `pnpm recovery:restart` scenario, which
 launches the real cockpit twice and is deliberately kept out of the required
 Quality check; it does not observe a crash mid-transition, a restart with live
-agent panes, or the packaged application bundle, so the #239 acceptance debt
+agent panes, or the packaged application bundle, so the #474 acceptance debt
 stays open. The
 `upgrade-recovery` scenario now covers the versioned-state boundary at source:
 a newer config is refused and preserved, and an unversioned one is adopted
 through a named migration with its superseded bytes retained. Recovery across
-two real installed builds still needs observed #239 operator cases and stays
+two real installed builds still needs observed #474 operator cases and stays
 gated rather than inferred. The
 `unavailable-providers` scenario covers the routing and detection boundary at
 source; an agent CLI that fails at launch inside a live shell still has no
@@ -489,7 +509,7 @@ migration while the superseded bytes stay on disk.
 
 The scenario exercises the source path against a disposable workspace. It is
 not two real installed builds, so it is not evidence that an installed upgrade
-recovers; the observed #239 operator cases are still required for that.
+recovers; the observed #474 operator cases are still required for that.
 
 One genuine cross-version invariant is already observable and is not upgrade
 recovery: `listQuarantinedPaneSlugs` treats a pre-current recovery marker's
@@ -541,7 +561,7 @@ It preserves the open-file and rollback context without adding previously absent
 save scheduling, quarantine, or recovery guarantees. Use the
 [slice 2 design record](./superpowers/specs/2026-09-06-workspace-persistence-decomposition-design.md)
 as design history rather than a parallel backlog. Source changes do not
-complete #239's packaged operator acceptance.
+complete #474's packaged operator acceptance.
 
 #201/#253 retains its P2 dependency gate: mapping and design may proceed in
 parallel, while the immutable pin waits for a consumable Psyche profile and
@@ -559,7 +579,7 @@ protocol pin. A live verification against a real daemon also found that the
 CLI adapter catalog can advertise harnesses the daemon rejects, so the picker
 must gate on the daemon's configured set before it is driven from the catalog.
 
-#246 retains its P2 dependency gate: broad cross-platform input rollout follows
+#246 closed as not planned on 2026-09-16. It held a P2 dependency gate: broad cross-platform input rollout follows
 stable input, persistence, action, P0 stabilization, and first iOS readiness
 contracts. PR #327 merged the shared v1 fixture contract as the bounded first
 slice. It remains opt-in and cannot become a prerequisite for #196, #199, or
@@ -593,9 +613,10 @@ required checks on its exact final head.
 
 ## Concurrency rules
 
-- #196/#239 is the active P0 gate.
-- #199 recovery scenarios wait for observed #239 acceptance cases; the #243
-  schema slice is delivered.
+- #474 is the active P0 acceptance gate; #475, #477, and #478 proceed in
+  parallel and feed it. #480 follows #474.
+- #475 recovery scenarios and #476 diagnostics feed observed #474 cases; the
+  #243 schema slice is delivered.
 - iOS work is paused for rollout focus. On resumption:
 - The accepted #241 readiness implementation precedes later iOS composition;
   #280 does not wait for closure of shared physical acceptance.
@@ -603,9 +624,8 @@ required checks on its exact final head.
 - #435 reconciliation guards precede consequential mobile-action acceptance.
 - #197 is retired; defect-driven extraction must belong to a bounded outcome.
 - #201/#253/#279 remain deferred; resumption requires explicit owner
-  prioritization and cannot block #196, #199, or #200.
-- #246 stays P2 until prerequisite contracts stabilize or a bounded slice is
-  explicitly promoted.
+  prioritization and cannot block #474, #475, or #200.
+- #246 is closed as not planned; resumption requires a new outcome.
 
 ## Merge and closure rules
 

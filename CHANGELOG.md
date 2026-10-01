@@ -4,6 +4,13 @@
 
 ### Documentation
 
+- Planning moved from Beads to GitHub Issues and the Psyche Build Project
+  (#473). `docs/TRACKER.md` is the new tracker contract; the Beads archive is
+  recorded in `docs/working-records/beads-retirement-2026-10.md`.
+- Reconciled the roadmap, execution contract, release acceptance, and support
+  matrix to 2026-10-01 live state: #196 and #199 closed with their scope moved
+  to #474–#476, #239 superseded by #474, #246 not planned, the Cask on `0.0.2`,
+  and the `v0.1.0 — macOS production` target. No support claim changed.
 - Reconciled the roadmap, post-release execution contract, support matrix, and
   release-acceptance snapshots to the 2026-09-02 delivery state: Stage 0
   governance/tracker closure, delivered community and support-bundle outcomes,

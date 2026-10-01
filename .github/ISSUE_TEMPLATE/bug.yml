@@ -1,6 +1,9 @@
 name: Bug report
 description: Report a reproducible defect on a supported Psyche Build surface
 title: "[Bug]: "
+labels: [needs-triage]
+type: Bug
+projects: ["OpenCoven/11"]
 body:
   - type: markdown
     attributes:

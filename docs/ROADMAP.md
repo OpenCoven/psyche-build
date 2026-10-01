@@ -2,7 +2,7 @@
 
 **Status:** Active post-release roadmap  
 **Accountable owner:** [@BunsDev](https://github.com/BunsDev)  
-**Last reconciled:** 2026-09-14
+**Last reconciled:** 2026-10-01
 
 **Portfolio control:** [Standing control register](#standing-roadmap-control)
 
@@ -16,7 +16,9 @@ The [post-release execution contract](./POST-RELEASE-EXECUTION.md) expands this
 roadmap into focused issue and pull-request slices.
 
 Live GitHub issues and pull requests are authoritative for implementation state.
-Beads owns internal dependency ordering. Retained runtime, policy, artifact, or
+Sub-issues and issue dependencies own internal ordering on the
+[Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11); see
+[Tracking work](./TRACKER.md). Retained runtime, policy, artifact, or
 physical-device evidence determines whether an outcome is complete.
 
 ## North star
@@ -33,22 +35,33 @@ delivered. iOS and OpenCoven convergence remain separate, deferred trains.
 
 ## macOS-first rollout focus
 
-The active delivery order is #196/#239 operator acceptance, then the observed
-recovery gaps owned by #199. Work that fixes a demonstrated supported-surface
-defect may proceed alongside acceptance; feature breadth and file-size
-reduction are not release gates.
+The active delivery order is release-candidate operator acceptance
+([#474](https://github.com/OpenCoven/psyche-build/issues/474)), with the
+observed recovery gaps ([#475](https://github.com/OpenCoven/psyche-build/issues/475)),
+the signed update channel ([#477](https://github.com/OpenCoven/psyche-build/issues/477)),
+and the security baseline ([#478](https://github.com/OpenCoven/psyche-build/issues/478))
+in parallel, toward the `v0.1.0` production release
+([#480](https://github.com/OpenCoven/psyche-build/issues/480)). The earlier
+#196/#239 acceptance and #199 recovery outcomes are closed; the
+[October 1 reconciliation](#october-1-reconciliation) records where their open
+scope moved. Work that fixes a demonstrated supported-surface defect may proceed
+alongside acceptance; feature breadth and file-size reduction are not release
+gates.
 
 | Disposition | Outcomes | Decision |
 |---|---|---|
-| Active macOS rollout | #196, #239, #199 | Preserve the packaged lifecycle, persistence, Git/cleanup, provider isolation, and recovery evidence gates. |
+| Active macOS production (milestone `v0.1.0 — macOS production`) | #474, #475, #476, #477, #478, #479, #480 | Preserve the packaged lifecycle, persistence, Git/cleanup, provider isolation, upgrade, and recovery evidence gates; they are still to be proven against the release candidate under #474. |
+| Tracker governance | [#473](https://github.com/OpenCoven/psyche-build/issues/473) | Beads retired; GitHub Issues and the Psyche Build Project are the only planning store. |
+| Closed with re-homed scope | #196, #239, #199 | Closure is not a claim of operator acceptance; open scope moved to #474, #475, and #476. |
 | Separate iOS train, paused for rollout focus | #200, #241, #280, #242, [#435](https://github.com/OpenCoven/psyche-build/issues/435) | iOS is not a macOS rollout prerequisite. #435 remains open: a lost consequential-action reply requires authoritative reconciliation, not a fresh retry. |
-| Deferred product expansion | #201, #253, #279, #246 | Preserve ownership and dependency contracts; no implied rollout commitment or protocol/input-parity claim. |
+| Deferred product expansion | #201, #253, #279 | Preserve ownership and dependency contracts; no implied rollout commitment or protocol-conformance claim. |
+| Closed as not planned | #246 | Input parity closed on 2026-09-16; its former Vim mirrors closed on 2026-10-01. The shared v1 fixture contract stays. |
 | Retired broad refactor program | #197 | Retired as not planned. Keep delivered extractions; future extraction must enable a named defect fix rather than a perpetual decomposition target. |
 
 Retiring #197 is not a claim that desktop decomposition or its acceptance is
 complete. Do not remove compatibility, work-preservation, or recovery coverage.
-The iOS and Vim Beads families remain source-owned and retain their current
-mappings; deferring a train does not authorize editing generated mirror state.
+The former iOS mirror family (#208 and its sub-issues) is now ordinary issues
+under #200; deferring a train does not change their gates.
 
 [#195](https://github.com/OpenCoven/psyche-build/issues/195) delivered the
 portfolio-control setup through [PR #453](https://github.com/OpenCoven/psyche-build/pull/453)
@@ -93,9 +106,10 @@ The [v0.0.2 release](https://github.com/OpenCoven/psyche-build/releases/tag/v0.0
 was published on 2026-08-31 from signed tag source
 `a4546f45bb0ee05cfbb388a0fc5f9e951596be51`, with both macOS DMGs and
 `SHA256SUMS`. [Release run 33311851717](https://github.com/OpenCoven/psyche-build/actions/runs/33311851717)
-completed desktop publication and skipped TestFlight. The Homebrew Cask still
-selects `v0.0.1`; a successful tap notification is not proof of a Cask update.
-Publication does not complete #239's operator acceptance, prove an upgrade
+completed desktop publication and skipped TestFlight. Since homebrew-tap commit `2247c1d5` (2026-09-26) the Homebrew Cask selects `0.0.2`, and its checksums match the release `SHA256SUMS`. A
+successful tap notification is not proof of a Cask update; the tap moved
+through its reviewed PR #4.
+Publication does not complete #474's operator acceptance, prove an upgrade
 path, or change iOS availability. Keep the two releases' evidence separate.
 
 ### Delivered release evidence
@@ -186,6 +200,35 @@ gates.
 | [#197](https://github.com/OpenCoven/psyche-build/issues/197) | [PR #362](https://github.com/OpenCoven/psyche-build/pull/362) (`10eed172`), [PR #366](https://github.com/OpenCoven/psyche-build/pull/366) (`081d1f95`), [PR #369](https://github.com/OpenCoven/psyche-build/pull/369) (`4cee937f`), [PR #370](https://github.com/OpenCoven/psyche-build/pull/370) (`a7927dae`), [PR #371](https://github.com/OpenCoven/psyche-build/pull/371) (`5464c931`), [PR #372](https://github.com/OpenCoven/psyche-build/pull/372) (`60eeb6cc`) | Composition root, secure filesystem, path vocabulary, restore helpers, module cfg guards, and initial-workspace transaction finishing; source decomposition, not packaged acceptance |
 | [#197](https://github.com/OpenCoven/psyche-build/issues/197) | [PR #373](https://github.com/OpenCoven/psyche-build/pull/373) (`81a9c754`) | Initial stage/verify/publish function boundary and named `PublishedWorkspace` result; subsequent persistence extraction is recorded below |
 
+### October 1 reconciliation
+
+This snapshot was inspected against `main`
+`c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1`. The previous snapshot was 17 days
+old, which the standing register treats as control drift; this entry closes it.
+
+- [#196](https://github.com/OpenCoven/psyche-build/issues/196) and
+  [#199](https://github.com/OpenCoven/psyche-build/issues/199) were closed as
+  completed on 2026-09-16 without evidence comments. The 2026-10-01 decision
+  comments keep them closed as history; the closure is not a claim of operator
+  acceptance. Release-candidate acceptance moved to #474, the observed recovery
+  gaps to #475, and the remaining support-bundle collectors and UI to #476.
+- [#239](https://github.com/OpenCoven/psyche-build/issues/239) is closed as not
+  planned and superseded by #474: its evidence was pinned to `v0.0.1` source
+  while the Cask now installs `0.0.2`. Its 15 digests and
+  `terminal_state: incomplete` manifest remain history.
+- #246 closed as not planned on 2026-09-16; its Vim mirrors #222–#227 and the
+  broad GPU program #228 closed as not planned on 2026-10-01. #229 and #232
+  moved under #476.
+- Beads was retired under #473. The archive is recorded in
+  [the retirement record](./working-records/beads-retirement-2026-10.md). A
+  final dry run
+  ([36915661182](https://github.com/OpenCoven/psyche-build/actions/runs/36915661182))
+  planned 0 operations, and the scheduled sync was then disabled. Project #11 is
+  now the hand-maintained [Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11).
+- The production target is milestone `v0.1.0 — macOS production`, defined by the
+  [production-readiness plan](./superpowers/plans/2026-10-01-production-readiness.md)
+  (a `reference` record) and outcomes #474–#480.
+
 ### September 14 reconciliation
 
 This snapshot was inspected against `main`
@@ -203,7 +246,7 @@ not a reason to reinterpret the evidence at this source.
 - [PR #393](https://github.com/OpenCoven/psyche-build/pull/393) delivered
   acceptance-validator remediation. The later #239 exact-release CLI smoke
   does not reverify the earlier 15 records or supply packaged GUI/human
-  verification. #196/#239 remain open.
+  verification. #196/#239 remained open at that snapshot.
 - [PR #434](https://github.com/OpenCoven/psyche-build/pull/434) restored
   disabled ritual controls when production execution is unavailable.
   [#435](https://github.com/OpenCoven/psyche-build/issues/435) owns lost-reply
@@ -221,14 +264,14 @@ not a reason to reinterpret the evidence at this source.
 
 | System | Owns | Must not become |
 |---|---|---|
-| GitHub issues and milestones | Public outcomes, accountable ownership, acceptance gates, support decisions, and externally legible status | A duplicate internal task graph |
-| Beads | Internal implementation tasks and dependency ordering | Product support truth or Psyche Build's runtime identity model |
+| GitHub outcome issues, milestones, and the Psyche Build Project | Public outcomes, accountable ownership, priority, train, risk, acceptance gates, support decisions, and externally legible status | Proof that a user path works |
+| GitHub sub-issues and issue dependencies | Internal implementation tasks and their ordering | Product support truth or Psyche Build's runtime identity model |
 | Pull requests | Reviewable implementation slices and focused verification | Proof that a complete user path works merely because tests pass |
 | Specs and plans | Design intent, decisions, and historical reasoning | Executable backlog or evidence that behavior shipped |
 | Acceptance evidence | Runtime, policy, artifact, clean-install, and physical-device observations tied to immutable source | Unstructured screenshots or undocumented maintainer memory |
 
 Protocol-owned familiar, thread, run, action, artifact, and receipt identities
-must outlive Beads, tmux/process IDs, paths, branches, providers, transports,
+must outlive tracker items, tmux/process IDs, paths, branches, providers, transports,
 and UI components. [#201](https://github.com/OpenCoven/psyche-build/issues/201)
 owns future convergence.
 
@@ -252,8 +295,10 @@ Delivered Stage 0 control wave
   #238 via PR #245 + #31 governance + #237/#240 tracker closure
              │
              ▼
-Active P0 critical path
-  #196/#239 operator acceptance ──► #199 observed recovery gaps
+Active P0 production path (milestone v0.1.0 — macOS production)
+  #475 recovery gaps ─┐
+  #477 update channel ─┼──► #474 release-candidate acceptance ──► #480 v0.1.0
+  #478 security ──────┘
 
 Paused independent iOS train (not a macOS rollout prerequisite)
   #241 atomic readiness
@@ -276,7 +321,10 @@ Delivered community floor
   #198/#244 security, ownership, support, and contribution readiness (closed)
 
 Deferred P2 trains
-  #201/#253 Psyche compatibility ── #279 Coven adapter ── #246 input parity
+  #201/#253 Psyche compatibility ── #279 Coven adapter
+
+Closed as not planned
+  #246 input parity (2026-09-16)
 
 Retired program
   #197 broad desktop decomposition (not completed; merged modules retained)
@@ -300,14 +348,22 @@ completion of operator acceptance from source delivery.
 | [#31 — branch governance](https://github.com/OpenCoven/psyche-build/issues/31) | P0 | Governance | **Delivered** — closed 2026-08-30 with sanitized ruleset/protection evidence, direct-push rejection proof, and protected proof PR #283 |
 | [#237 — Beads/mirror reconciliation](https://github.com/OpenCoven/psyche-build/issues/237) | P0 | Tracker integrity | **Delivered** — closed 2026-08-29 after source-first Beads reconciliation left no open generated `priority:P0` mirror |
 | [#240 — tracker drift validation](https://github.com/OpenCoven/psyche-build/issues/240) | P0 | Tracker integrity | **Delivered** — closed 2026-08-28 by PR #263; hardened by PR #330 |
-| [#196 — `v0.0.1` stabilization](https://github.com/OpenCoven/psyche-build/issues/196) | P0 | Reliability | Supported ordinary and representative failure paths have operator-observed evidence; PRs #283 and #336 are merged remediation, not released re-observation |
-| [#239 — operator acceptance manifest](https://github.com/OpenCoven/psyche-build/issues/239) | P0 | Reliability | One sanitized manifest ties exact-source smoke, lifecycle, persistence, Git/cleanup, and provider-isolation evidence to the release; the earlier 15-digest manifest reports `terminal_state: incomplete` and is not reverified by later CLI smoke |
+| [#196 — `v0.0.1` stabilization](https://github.com/OpenCoven/psyche-build/issues/196) | Closed | Reliability | **Closed 2026-09-16 without an evidence comment**; the 2026-10-01 decision keeps it closed as history, not as acceptance. PRs #283 and #336 are merged remediation. Scope moved to #474 |
+| [#239 — operator acceptance manifest](https://github.com/OpenCoven/psyche-build/issues/239) | Superseded | Reliability | **Closed as not planned 2026-10-01, superseded by #474**; the earlier 15-digest manifest reports `terminal_state: incomplete` and remains history |
+| [#473 — retire Beads](https://github.com/OpenCoven/psyche-build/issues/473) | P0 | Governance | Beads archived and retired; GitHub Issues and the Psyche Build Project are the only planning store; external cleanup after a 14-day hold |
+| [#474 — release-candidate acceptance](https://github.com/OpenCoven/psyche-build/issues/474) | P0 | macOS rollout | Gates G1–G6 observed on the packaged `v0.1.0` release candidate, including `v0.0.2` upgrade and rollback, in one sanitized manifest |
+| [#475 — observed recovery gaps](https://github.com/OpenCoven/psyche-build/issues/475) | P0 | Reliability | Agent launch failure, Git-mutation interruption, crash and live-pane restart, and full storage have defined behavior and scenarios |
+| [#476 — support bundle production surface](https://github.com/OpenCoven/psyche-build/issues/476) | P1 | Reliability | Remaining collectors wired or explicitly omitted, an in-app action, and redaction verified on a packaged bundle; owns #229 and #232 |
+| [#477 — signed update channel](https://github.com/OpenCoven/psyche-build/issues/477) | P0 | Release | A signed, verified update path, automated and verified Cask bumps, and version coherence in CI |
+| [#478 — security baseline](https://github.com/OpenCoven/psyche-build/issues/478) | P0 | Governance | Dependabot, CodeQL, dependency review, secret scanning, and pinned actions, with no open critical or high alerts |
+| [#479 — independent review](https://github.com/OpenCoven/psyche-build/issues/479) | P1 | Governance | An independent R3/R4 reviewer and one required approval restored on `main` |
+| [#480 — `v0.1.0` release](https://github.com/OpenCoven/psyche-build/issues/480) | P0 | Release | Signed tag on the accepted candidate, verified Cask bump, and updated support contract |
 | [#200 — iOS internal beta and continuity](https://github.com/OpenCoven/psyche-build/issues/200) | P1 | iOS | An immutable physical build restores authoritative state, performs only wired scoped effects, reconnects, and fails closed on revocation |
 | [#241 — atomic iOS readiness](https://github.com/OpenCoven/psyche-build/issues/241) | P1 | iOS | Readiness core (#326), production composition (#329), and ready-selection hardening (#335/#337/#338) are merged; discovery/reconnect UX, lifecycle acceptance, physical-device, and real-Keychain partial-write evidence remain open |
 | [#280 — single-use iOS invite authentication](https://github.com/OpenCoven/psyche-build/issues/280) | P1 | iOS | The protocol/fixture slice merged in PR #323; desktop issuer, iOS credential exchange, QR/deep-link UX, physical acceptance, and distribution evidence remain open |
 | [#242 — production ritual path](https://github.com/OpenCoven/psyche-build/issues/242) | P1 | iOS | Publication merged in PR #322; the registered execution path, canonical receipts, and capability-gated controls remain open |
 | [#435 — unknown mobile action outcomes](https://github.com/OpenCoven/psyche-build/issues/435) | P1 | iOS | Child of #200; an approved host-owned reconciliation adapter or authorized operator recovery procedure must guard unknown effects through retry, reconnect, restart, and host switches, with production lost-reply evidence and independent R3 review |
-| [#199 — operations, diagnostics, and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | P1 | Reliability | Diagnostics are bounded/redacted and reusable failure harnesses recover deterministically; the harness is delivered through PRs #354-#359 with CI-retained evidence, and the support-bundle production surface plus provider/upgrade scenarios remain open |
+| [#199 — operations, diagnostics, and recovery](https://github.com/OpenCoven/psyche-build/issues/199) | Closed | Reliability | **Closed 2026-09-16** as the delivered harness and diagnostics foundation (PRs #354-#359 and later); remaining scope moved to #475 and #476 |
 | [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) | P1 | Reliability | **Delivered** — closed 2026-09-01 by PR #278 (`69769cc5`); schema, bounds, redaction, and fixture only |
 | [#198 — open-source readiness](https://github.com/OpenCoven/psyche-build/issues/198) | P1 | Community | **Delivered** — closed 2026-08-31 by PR #321 (`3c188481`) with a credential-free clean-checkout run and live community-profile evidence |
 | [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build/issues/244) | P1 | Community | **Delivered** — closed 2026-08-28 by PR #261 (`267b8809`) |
@@ -315,7 +371,7 @@ completion of operator acceptance from source delivery.
 | [#201 — OpenCoven identity and Threads](https://github.com/OpenCoven/psyche-build/issues/201) | P2 | OpenCoven | A cross-device reference flow preserves protocol-owned identity through execution, evidence, disconnect, and resume |
 | [#253 — Psyche compatibility canary and adapters](https://github.com/OpenCoven/psyche-build/issues/253) | P2 | OpenCoven | Pin a consumable protocol profile and introduce bounded canaries/adapters without blocking supported-product work; the pin waits on `OpenCoven/psyche#11` and `#12` |
 | [#279 — Coven launch adapter](https://github.com/OpenCoven/psyche-build/issues/279) | P2 | OpenCoven | Capability-negotiated launches keep prompts out of argv and persisted metadata (PRs #324/#328/#336 merged); live restart/reconnect recovery, canonical runtime receipts, and migration/rollback evidence remain open, and receipt semantics wait on #253 |
-| [#246 — cross-platform Vim and keyboard-mode parity](https://github.com/OpenCoven/psyche-build/issues/246) | P2 | Input | Opt-in shared semantics preserve exact terminal passthrough and earn platform-specific evidence after prerequisite contracts stabilize; the shared v1 fixture contract merged in PR #327 |
+| [#246 — cross-platform Vim and keyboard-mode parity](https://github.com/OpenCoven/psyche-build/issues/246) | Not planned | Input | **Closed as not planned 2026-09-16**; the shared v1 fixture contract from PR #327 stays |
 
 ### Intake disposition
 
@@ -372,6 +428,7 @@ acceptance gate, and pass required checks on its exact final head.
 ## Stage 0 — delivered control-state closure wave
 
 **Owners:** #238, #31, #237, and #240.  
+**Historical record (Beads era, to 2026-10-01).**  
 **Exit state:** reached. Public docs, branch policy, Beads, generated mirrors,
 priorities, and roadmap agree on delivered, active, blocked, and deferred work
 as of this reconciliation.
@@ -446,15 +503,16 @@ record. No Beads or generated mirror mutation is part of this closeout.
 
 ## Stage 1 — close the supported release stabilization baseline
 
-**Owners:** #196 and #239.  
-**Current gate:** #196/#239 remain the active P0 critical path.
+**Historical owners:** #196 and #239.  
+**Superseded 2026-10-01:** #196 is closed and #239 is superseded by #474, which
+reuses the acceptance scope below against the `v0.1.0` release candidate.
 
 Retain exact-source tmux smoke, first-run/onboarding, terminal and agent lanes,
 project/pane lifecycle, restart/recovery, Git/PR/cleanup, optional-provider
 isolation, idempotency, receipt, revocation, and work-preservation evidence.
 Every representative failure must terminate deterministically or enter an
 explicit `recovery_required` state. Transfer reusable infrastructure gaps to
-#199 without reopening the completed #194 release.
+#475 or #476 without reopening the completed #194 release.
 
 The earlier #239 manifest records 15 retained evidence digests and
 `terminal_state: incomplete`. #196 was reopened on 2026-09-06 after PR #350's
@@ -503,11 +561,11 @@ identities.
 
 ## Stage 3 — operationalize support and recovery
 
-**Owner:** #199 (#243 delivered).
+**Owners:** #475 and #476 (successors to #199, closed 2026-09-16; #243 delivered).
 
-#199/#243 retains its P1 dependency gate for the scenarios that remain:
-application restart and upgrade recovery still follow observed #239 operator
-cases rather than being inferred. Both now have source coverage in the harness;
+#199/#243's P1 dependency gate now belongs to #475 and #476 for the scenarios
+that remain: application restart and upgrade recovery still follow observed
+operator cases under #474 rather than being inferred. Both now have source coverage in the harness;
 source coverage is not the observed case, and PR #465 states that its restart
 scenario supplies no packaged GUI evidence and closes neither #196, #199 nor
 #239. Stale-identity coverage now spans both paths
@@ -527,7 +585,7 @@ and runs in the Quality CI job with its report retained as a build artifact.
 The restart scenario is opt-in through `pnpm recovery:restart` and is
 deliberately excluded from the required Quality check. It is source evidence,
 not packaged operator acceptance: it does not observe a crash mid-transition, a
-restart with live agent panes, or the packaged application bundle, so the #239
+restart with live agent panes, or the packaged application bundle, so the #474
 restart acceptance debt stays open.
 
 That seventh scenario interrupts the real cleanup worker before Git mutation,
@@ -543,13 +601,13 @@ lifecycle and updater collectors. Provider, graphics, receipt and terminal
 collectors and any UI remain absent, and a CLI-collected bundle is always
 `unverified` because it holds no control-plane authority.
 
-#199 remains open. The harness covers the failure classes reachable without a
+#199 closed on 2026-09-16; #475 and #476 own what remains. The harness covers the failure classes reachable without a
 running application, including the unavailable-provider routing and detection
 boundary and the replaced-tmux-identity rebinding boundary; application
 upgrade recovery is deliberately uncovered and the support-bundle production
 surface is incomplete. Application restart is covered by the opt-in
 `pnpm recovery:restart` scenario rather than by the default harness, so it is
-observed on request and does not gate a required check. Those follow observed #239
+observed on request and does not gate a required check. Those follow observed #474
 operator cases rather than being inferred, and only focused, safe portions of
 former PR #190 should be integrated where they materially improve the bounded
 contract.
@@ -578,7 +636,7 @@ explains historical boundaries, not a separate executable backlog.
 A future extraction needs a named defect or operational requirement, one
 owning outcome, and preserved public commands, schemas, persisted formats,
 errors, security boundaries, generated outputs, and rollback. Neither source
-decomposition nor the recovery harness substitutes for #239's packaged
+decomposition nor the recovery harness substitutes for #474's packaged
 operator observations. No merged code is reverted by this retirement.
 
 ## Stage 6 — converge on OpenCoven-native identity and execution
@@ -601,14 +659,14 @@ Approve cross-repository ownership and compatibility contracts, wrap current
 pane/worktree/provider behavior with protocol-owned identities, introduce
 migrations and rollback, and connect Threads only after authority, receipt,
 recovery, and continuity semantics are executable. Design may proceed early;
-implementation cannot become an undeclared prerequisite for #196, #199, or
+implementation cannot become an undeclared prerequisite for #474, #475, or
 #200.
 
-## Parallel P2 input train
+## Closed input train
 
-**Owner:** #246.
+**Historical owner:** #246, closed as not planned on 2026-09-16.
 
-#246 retains its P2 dependency gate: bounded semantic-core work may be promoted
+#246 held a P2 dependency gate: bounded semantic-core work may be promoted
 explicitly, but broad cross-platform rollout follows stable input, persistence,
 action, P0 stabilization, and the first iOS readiness seams. It must not become
 an implicit prerequisite for #196, #199, or #200. PR #327 merged the shared v1
@@ -617,9 +675,10 @@ claimed from it.
 
 ## Concurrency rules
 
-- #196/#239 is the active P0 gate.
-- #199 reusable failure scenarios wait for observed #239 cases; the #243 schema
-  slice is already delivered.
+- #474 is the active P0 acceptance gate; #475, #477, and #478 proceed in
+  parallel and feed it. #480 follows #474.
+- #475 failure scenarios and #476 diagnostics feed observed #474 cases; the
+  #243 schema slice is already delivered.
 - iOS work is paused for rollout focus. On resumption:
 - The accepted #241 readiness implementation precedes later iOS capability
   composition; #280 does not wait for closure of shared physical acceptance.
@@ -627,9 +686,9 @@ claimed from it.
 - #435 reconciliation guards precede consequential mobile-action acceptance.
 - #197 is retired; defect-driven extraction must belong to a bounded outcome.
 - #201/#253/#279 remain deferred; resumption requires explicit owner
-  prioritization and cannot block #196, #199, or #200.
-- #246 remains P2 until its prerequisite contracts are stable or a bounded
-  slice is explicitly promoted.
+  prioritization and cannot block #474, #475, or #200.
+- #246 is closed as not planned; resumption requires explicit owner
+  prioritization through a new outcome.
 
 ## Evidence and merge rules
 
@@ -670,11 +729,12 @@ Milestones are release grouping, not a substitute for these fields.
 **Reconciliation procedure:**
 
 1. Read the live open issue and PR inventories, terminal changes since the
-   previous snapshot, release/support evidence, current branch policy, and
-   recent scheduled sync reports. Exclude managed mirrors by their configured
-   marker, not by title. Preserve evidence source SHA and observation time.
-2. Repair source-owned drift through the supported Beads workflow, never by
-   editing generated bodies. A new governance/tracker regression gets a
+   previous snapshot, release/support evidence, current branch policy, and the
+   Psyche Build Project's Triage, Blocked, and Needs-evidence views. Preserve
+   evidence source SHA and observation time.
+2. Repair tracker drift directly in GitHub: Project fields, sub-issue links,
+   and evidence comments, as [Tracking work](./TRACKER.md) describes. A new
+   governance/tracker regression gets a
    bounded owning issue and an explicit priority; do not silently reopen
    completed product acceptance or change support.
 3. Reconcile this register, the execution contract, and affected non-generated
@@ -700,9 +760,9 @@ Unchecked historical task lists are not an implementation backlog.
 - Update the affected owning issue and retain the protected PR evidence in the
   same controlled state transition; #195 need not remain open for maintenance.
 - Never close an outcome without durable evidence tied to immutable source.
-- Never repair generated mirror state by treating generated issue bodies as the
-  authoritative source.
+- Never close an outcome through a PR closing keyword; outcomes close by hand
+  with an evidence comment.
 - Never make iOS, diagnostics expansion, architecture cleanup, community work,
   or OpenCoven convergence an implicit macOS support prerequisite.
-- Never let Beads, tmux, a process, path, branch, provider, transport, or UI
+- Never let a tracker item, tmux, a process, path, branch, provider, transport, or UI
   selection become the only durable identity for user work.

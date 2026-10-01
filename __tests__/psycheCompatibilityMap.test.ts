@@ -28,7 +28,7 @@ describe('Psyche compatibility mapping', () => {
       'Cancellation / interruption',
       'Persistence',
       'Recovery',
-      'Beads / GitHub issue',
+      'GitHub issue / Project item',
     ]) {
       expect(map, `missing ${domain}`).toContain(`| ${domain} |`);
     }
@@ -41,7 +41,6 @@ describe('Psyche compatibility mapping', () => {
       'worktree',
       'branch',
       'provider session',
-      'Bead',
       'GitHub issue',
       'UI selection',
     ];

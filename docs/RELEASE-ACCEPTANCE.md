@@ -2,10 +2,10 @@
 
 **Status:** Reusable release gate; macOS `v0.0.1` and `v0.0.2` published
 
-**Active stabilization owner:** [#196](https://github.com/OpenCoven/psyche-build/issues/196)  
-**Executable evidence slice:** [#239](https://github.com/OpenCoven/psyche-build/issues/239)  
+**Active acceptance owner:** [#474](https://github.com/OpenCoven/psyche-build/issues/474) (succeeds [#196](https://github.com/OpenCoven/psyche-build/issues/196) and [#239](https://github.com/OpenCoven/psyche-build/issues/239), closed)  
+**Production release:** [#480](https://github.com/OpenCoven/psyche-build/issues/480), milestone `v0.1.0 — macOS production`  
 **Bounded operator runbook:** [OPERATOR-ACCEPTANCE-SLICE.md](./OPERATOR-ACCEPTANCE-SLICE.md)  
-**Graphics evidence procedure:** [GPU-VERIFICATION-MATRIX.md](./GPU-VERIFICATION-MATRIX.md) (#232 under #199; no physical acceptance asserted)<br>
+**Graphics evidence procedure:** [GPU-VERIFICATION-MATRIX.md](./GPU-VERIFICATION-MATRIX.md) (#232 under #476; no physical acceptance asserted)<br>
 **Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
 **Execution order:** [POST-RELEASE-EXECUTION.md](./POST-RELEASE-EXECUTION.md)
@@ -27,14 +27,14 @@ operate, recover, and remove the application.
 | Immutable source, signed tag, dual-architecture artifacts, checksums, signing, notarization, stapling, Gatekeeper, and public download verification | **Complete** | #194; accepted source `57c6c71bd5264fde960b062e95de278c8438c94f` |
 | Desktop-only release independence while retaining shared validation | **Complete** | #203 and protected run `32629730508` |
 | Stable GitHub Release and native Homebrew Cask | **Complete** | #194, `OpenCoven/homebrew-tap#2`, and native Apple Silicon/Intel lifecycle runs |
-| Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #196 executed through #239 |
+| Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #474, against the `v0.1.0` release candidate (succeeding #196 and #239) |
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
 | Versioned bounded support bundle | **Schema complete; production surface partial** | Schema #243 via PR #278 (`69769cc5`); CLI and bounded persistence via PR #462; provenance, persistence, lifecycle and updater collectors via PRs #462 and #467. Provider, graphics, receipt and terminal collectors, and any UI, remain absent. All of it postdates `v0.0.1`, which contains none of it |
 | Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359; eleven bounded scenarios in the default run plus the opt-in `pnpm recovery:restart` observation, with CI-retained reports. Source coverage, not a `v0.0.1` feature and not the observed operator case |
-| Operator-observed failure scenarios | **Open post-release stabilization debt** | #196/#239; source harness results do not establish packaged GUI or provider acceptance |
+| Operator-observed failure scenarios | **Open post-release stabilization debt** | #474 (succeeding #196/#239); source harness results do not establish packaged GUI or provider acceptance |
 
-The open #196/#239 row does not make the already-delivered macOS artifact
+The open acceptance row does not make the already-delivered macOS artifact
 unreleased. It is an explicit post-release correctness obligation. Conversely,
 completed publication evidence does not invent the operator-observed acceptance
 work that remains open.
@@ -49,15 +49,17 @@ completed shared verification, both signed/notarized DMG jobs, publication,
 and tap notification; iOS upload was skipped. Its dispatch workflow SHA
 `63667f300bbdccea4dfede4e9e19fedb90876356` is not the release tag source.
 
-The Homebrew Cask still selects `v0.0.1` as of 2026-09-06, at tap commit
+The Homebrew Cask selected `v0.0.1` until 2026-09-26, at tap commit
 [`d080d361`](https://github.com/OpenCoven/homebrew-tap/blob/d080d3618f0dc02239f75625d34518b8c61209e1/Casks/psyche-build.rb).
-Do not label a fresh Cask install as `v0.0.2`, infer a successful tap update
-from its notification job, or transfer `v0.0.1` lifecycle evidence to the newer
+Since homebrew-tap commit `2247c1d5` (2026-09-26) the Homebrew Cask selects `0.0.2`, and its checksums match the release `SHA256SUMS`. The tap moved through its reviewed PR #4, not through the release
+notification job. Do not transfer `v0.0.1` lifecycle evidence to the newer
 DMGs. A separate exact-artifact record is required for `v0.0.2` operator
 acceptance and upgrade/rollback observations.
 
 #196 was reopened on 2026-09-06 after a quoted closing phrase in PR #350
-changed issue state without new acceptance evidence. #239 remains open; its
+changed issue state without new acceptance evidence. On 2026-09-16 #196 was
+closed again, still without an evidence comment, and on 2026-10-01 #239 was
+superseded by #474; neither closure is acceptance. Before that, #239's
 latest update records 15 evidence digests and `terminal_state: incomplete`.
 Neither release publication nor issue closure can replace that manifest.
 
@@ -648,7 +650,7 @@ open -a "Psyche Build"
 ```
 
 Future releases repeat the Homebrew gate against their own immutable assets.
-#239 still owns application-level first-run, ordinary lifecycle, persistence,
+#474 now owns application-level first-run, ordinary lifecycle, persistence,
 and representative failure observations that package lifecycle automation does
 not prove.
 
@@ -696,11 +698,13 @@ it repairs. The full candidate gate then runs again.
 
 ## Closure decisions
 
-[#239](https://github.com/OpenCoven/psyche-build/issues/239) is eligible for
-closure when its sanitized manifest contains exact-source smoke and all
-required operator observations. #196 is eligible when that manifest proves
-the supported ordinary and representative failure paths and every reusable
-gap is transferred to #199 or #243. Do not use closing-keyword syntax in PR
+[#474](https://github.com/OpenCoven/psyche-build/issues/474) is eligible for
+closure when its sanitized manifest for the `v0.1.0` release candidate contains
+exact-source smoke, all required operator observations, and the `v0.0.2`
+upgrade and rollback observations, and every reusable gap is transferred to
+#475 or #476. It succeeds #239 and #196: #196 closed on 2026-09-16 without an
+evidence comment, and #239 was superseded on 2026-10-01. Neither closure is
+acceptance. Do not use closing-keyword syntax in PR
 prose that only discusses these gates; a quoted phrase can close an issue
 without proving its outcome.
 

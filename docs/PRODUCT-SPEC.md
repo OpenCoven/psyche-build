@@ -196,15 +196,15 @@ consequential.
 Bonjour parsing is currently a discovery adapter only. It validates TXT
 metadata, certificate fingerprint shape, supported protocol versions, and
 deduplicates on server ID, but no production caller has shipped the complete
-discovery/connect flow yet (Bead i7c.11 remains open).
+discovery/connect flow yet (#216 remains open).
 
 Known open gaps: #435's lost-reply unknown-outcome guard is implemented on the
 respond path described above; its physical-device reproduction and the
 equivalent guard for a non-interactive `start` dispatch remain open. #241 still
 requires physical-device acceptance and real-Keychain partial-write evidence;
 #280 has only the invite protocol/fixture slice merged; #242 still owns ritual
-execution; Bead i7c.11 owns discovery/connect; Beads i7c.10.3 and i7c.10.4
-remain in progress.
+execution; #216 owns discovery/connect; #213 owns the performance and full
+acceptance matrix.
 
 ## Core model
 

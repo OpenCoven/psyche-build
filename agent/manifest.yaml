@@ -24,9 +24,8 @@ trackers:
   github:
     owns: public outcomes, accountable ownership, acceptance gates, and externally legible status
     runtime_identity: false
-  beads:
-    owns: internal implementation tasks and dependency ordering
-    authoritative_for_generated_mirrors: true
+  github_sub_issues:
+    owns: implementation tasks under an outcome and their real ordering
     runtime_identity: false
   pull_requests:
     owns: reviewable implementation slices and exact-head proof
@@ -41,7 +40,7 @@ canonical_documents:
   - docs/BRIDGE-SECURITY.md
   - docs/RELEASE-ACCEPTANCE.md
   - CONTRIBUTING.md
-  - .beads/README.md
+  - docs/TRACKER.md
 
 toolchain:
   node: ">=20.10.0"
@@ -91,12 +90,9 @@ protected_paths:
   - path: scripts/app-store-connect.mjs
     risk: R4
     evidence: credential-boundary review and distribution acceptance
-  - path: .beads/**
+  - path: .github/ISSUE_TEMPLATE/**
     risk: R4
-    evidence: sole writer or migrator, sanitized source-first reconciliation, and drift report
-  - path: scripts/beads-project-sync/**
-    risk: R4
-    evidence: lease fencing, bounded safe output, dry-run, and managed-ownership tests
+    evidence: issue-form contract tests and Project intake review
 
 generated_paths:
   - path: src/utils/generated-agents-doc.ts
@@ -120,7 +116,7 @@ generated_paths:
 contracts:
   current:
     - product-local cockpit contracts documented in this repository
-    - public GitHub outcomes with Beads as the source for generated mirrors
+    - public GitHub outcomes, sub-issues, and the Psyche Build Project as the only planning store
     - project-scoped authority, approval, receipt, revocation, persistence, and recovery boundaries
   planned:
     - immutable released Psyche consumer profile
@@ -129,5 +125,5 @@ contracts:
   forbidden_inference:
     - source presence proves support
     - simulator or hosted compilation proves physical availability
-    - UI, tmux, process, path, provider session, Bead, branch, or issue identity proves protocol authority
+    - UI, tmux, process, path, provider session, branch, or issue identity proves protocol authority
     - unit-test count alone proves a complete user path

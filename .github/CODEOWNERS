@@ -28,6 +28,6 @@
 /native/ios/PsycheApp/Resources/Info.plist @BunsDev
 /native/desktop/psyche-build-tauri/web/*.bundle.js @BunsDev
 
-# Planning source, migrations, and managed public-mirror automation
-/.beads/ @BunsDev
-/scripts/beads-project-sync/ @BunsDev
+# Tracker contract and issue intake
+/docs/TRACKER.md @BunsDev
+/.github/ISSUE_TEMPLATE/ @BunsDev
