@@ -2167,7 +2167,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           )}
           {updateAvailable && updateInfo && (
             <Text color={COLORS.error} bold>
-              Update available: npm i -g psyche-build@latest{" "}
+              Update available{" "}
             </Text>
           )}
           {currentBranch && (

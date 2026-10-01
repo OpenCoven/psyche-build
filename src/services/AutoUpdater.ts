@@ -108,6 +108,10 @@ export class AutoUpdater {
   }
 
   async shouldCheckForUpdates(): Promise<boolean> {
+    if (!REGISTRY_UPDATES_ENABLED) {
+      return false;
+    }
+
     const settings = await this.loadSettings();
     const now = Date.now();
     
@@ -282,6 +286,19 @@ export class AutoUpdater {
   }
 
   async checkForUpdates(): Promise<UpdateInfo> {
+    // Without a trusted channel there is nothing to check: probing global
+    // package managers would spawn processes (and could stall the TUI) for an
+    // answer nothing uses, and recording a check time would only churn config.
+    if (!REGISTRY_UPDATES_ENABLED) {
+      return {
+        currentVersion: packageJson.version,
+        latestVersion: 'unknown',
+        hasUpdate: false,
+        packageManager: null,
+        installMethod: 'unknown',
+      };
+    }
+
     const latestVersion = await this.getLatestVersion();
     const currentVersion = packageJson.version;
     const { packageManager, installMethod } = await this.detectInstallMethod();

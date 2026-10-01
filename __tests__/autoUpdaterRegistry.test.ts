@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -49,11 +49,22 @@ describe('AutoUpdater without a trusted update channel', () => {
 
     expect(info.hasUpdate).toBe(false);
     expect(info.latestVersion).toBe('unknown');
+    expect(info.packageManager).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
-    const registryCalls = execSync.mock.calls.filter(([command]) =>
-      /\b(?:npm|pnpm|yarn)\s+(?:view|info|show)\b/.test(String(command)),
-    );
-    expect(registryCalls).toEqual([]);
+    // No package-manager probe or registry query runs at all.
+    expect(execSync).not.toHaveBeenCalled();
+  });
+
+  it('never schedules a check and leaves the project config untouched', async () => {
+    const file = configFile();
+    const before = readFileSync(file, 'utf8');
+    const updater = new AutoUpdater(file);
+
+    await expect(updater.shouldCheckForUpdates()).resolves.toBe(false);
+    await updater.checkForUpdates();
+
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    expect(execSync).not.toHaveBeenCalled();
   });
 
   it('never runs a global install even when handed an update', async () => {
