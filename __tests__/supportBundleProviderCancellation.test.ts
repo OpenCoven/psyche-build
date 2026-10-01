@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 // Cancellation has to land *between* probe candidates to be observable, and the
@@ -26,7 +26,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-const { createSupportCollectors } = await import('../src/diagnostics/supportBundleCollectors.js');
+const { createSupportCollectors, surveyInstalledProviders } = await import('../src/diagnostics/supportBundleCollectors.js');
 const { collectSupportBundle } = await import('../src/diagnostics/supportBundle.js');
 
 const directories: string[] = [];
@@ -79,4 +79,29 @@ describe('provider survey cancellation', () => {
     expect(bundle.providers).not.toHaveProperty('count');
     expect(bundle.provenance.verification).toBe('unverified');
   });
+
+  // An abort that lands while the final candidate's I/O is in flight has no
+  // later candidate to notice it. The survey must still reject, whether that
+  // last probe fails or succeeds, rather than return a count it was told to
+  // abandon.
+  for (const [label, installed] of [['fails', false], ['succeeds', true]] as const) {
+    it(`rejects when cancelled during the last candidate's probe that ${label}`, async () => {
+      const root = mkdtempSync(path.join(process.cwd(), '.psyche-support-bundle-cancel-'));
+      directories.push(root);
+      const bin = path.join(root, 'probe', 'bin');
+      mkdirSync(bin, { recursive: true });
+      if (installed) {
+        writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n', { encoding: 'utf8', mode: 0o755 });
+      }
+      const controller = new AbortController();
+      probe.controller = controller;
+      probe.marker = path.join(bin, 'claude');
+
+      await expect(surveyInstalledProviders(
+        [{ id: 'claude', installTestCommand: 'command -v claude', commonPaths: [] }],
+        { pathEntries: [bin], signal: controller.signal },
+      )).rejects.toThrow();
+      expect(probe.probed).toHaveLength(1);
+    });
+  }
 });

@@ -219,15 +219,17 @@ Two limits follow, and the section is not evidence beyond them:
 `PATH` entries are normalized, including a trailing separator, before
 duplicates are removed, so `/usr/bin` and `/usr/bin/` cost one search.
 
-The survey checks at most 512 candidate locations. A survey that hits that
-bound reports `state: 'partial'`, so its `count` is a lower bound rather than a
-checked absence. The budget is spent in registry order, and each provider costs
+The survey checks at most 512 candidate locations. When that budget is
+exhausted before all candidates are checked, the survey reports
+`state: 'partial'`, so its `count` is a lower bound rather than a checked
+absence. A survey whose candidates fit the budget exactly is not partial. The budget is spent in registry order, and each provider costs
 its common paths plus one candidate per `PATH` entry until it is found. A long
 `PATH` therefore makes `partial` common, and the providers late in the registry
 are the ones left unchecked.
 
-Cancellation is checked between candidates. A single filesystem check already
-in flight, such as one stalled on an unresponsive network mount, cannot be
+Cancellation is checked before each candidate and again after its filesystem
+checks finish, so an abort during the last candidate still rejects. A single
+filesystem check already in flight, such as one stalled on an unresponsive network mount, cannot be
 interrupted; the collection deadline still bounds the bundle, and the overrun
 is reported as `recovery_required`. On cancellation the collector rejects
 instead of reporting a zero count, and the collection turns that into

@@ -310,15 +310,22 @@ export async function surveyInstalledProviders(
       }
       budget -= 1;
       options.signal?.throwIfAborted();
+      let installed = false;
       try {
         await access(candidate, fsConstants.X_OK);
         // A directory is executable too, so `access` alone would count
         // `/usr/local/bin/gemini/` as an installed provider.
-        if (!(await stat(candidate)).isFile()) continue;
-        found += 1;
-        break;
+        installed = (await stat(candidate)).isFile();
       } catch {
         // Not at this location; try the next candidate.
+      }
+      // Re-checked after the I/O, on success and failure alike: an abort that
+      // lands during the last candidate's probe has no later check to catch
+      // it, and the survey must reject rather than return a count.
+      options.signal?.throwIfAborted();
+      if (installed) {
+        found += 1;
+        break;
       }
     }
   }
