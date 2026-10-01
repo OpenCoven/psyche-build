@@ -1,0 +1,54 @@
+# Dependency update baseline (outcome #478).
+#
+# Every ecosystem runs weekly and groups minor and patch updates into one pull
+# request so routine bumps stay reviewable; major updates arrive one per pull
+# request. The cooldown keeps proposals older than the pnpm
+# `minimumReleaseAge` (24 hours) in pnpm-workspace.yaml, so a Dependabot pull
+# request does not fail `pnpm install --frozen-lockfile` on a too-new release.
+#
+# Labels are intentionally omitted: the repository has no `dependencies`
+# label, and this file must not imply one exists.
+version: 2
+updates:
+  # Root pnpm workspace. The single pnpm-lock.yaml at the root covers every
+  # member listed in pnpm-workspace.yaml (frontend, docs, packages/vim-core,
+  # native/desktop/psyche-build-tauri).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 2
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Tauri desktop shell. vendor/portable-pty is a vendored path dependency
+  # resolved through this manifest's Cargo.lock, not a separate project.
+  - package-ecosystem: cargo
+    directory: /native/desktop/psyche-build-tauri/src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 2
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Workflow and composite-action pins. Dependabot keeps the full commit SHA
+  # and refreshes the trailing version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 2
+    groups:
+      github-actions-minor-and-patch:
+        update-types: [minor, patch]
