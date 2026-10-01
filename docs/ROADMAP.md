@@ -50,7 +50,7 @@ gates.
 
 | Disposition | Outcomes | Decision |
 |---|---|---|
-| Active macOS production (milestone `v0.1.0 — macOS production`) | #474, #475, #476, #477, #478, #479, #480 | Preserve the packaged lifecycle, persistence, Git/cleanup, provider isolation, upgrade, and recovery evidence gates, now proven against the release candidate. |
+| Active macOS production (milestone `v0.1.0 — macOS production`) | #474, #475, #476, #477, #478, #479, #480 | Preserve the packaged lifecycle, persistence, Git/cleanup, provider isolation, upgrade, and recovery evidence gates; they are still to be proven against the release candidate under #474. |
 | Tracker governance | [#473](https://github.com/OpenCoven/psyche-build/issues/473) | Beads retired; GitHub Issues and the Psyche Build Project are the only planning store. |
 | Closed with re-homed scope | #196, #239, #199 | Closure is not a claim of operator acceptance; open scope moved to #474, #475, and #476. |
 | Separate iOS train, paused for rollout focus | #200, #241, #280, #242, [#435](https://github.com/OpenCoven/psyche-build/issues/435) | iOS is not a macOS rollout prerequisite. #435 remains open: a lost consequential-action reply requires authoritative reconciliation, not a fresh retry. |

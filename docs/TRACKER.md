@@ -30,9 +30,14 @@ action or receipt identity.
 | Risk | R1, R2, R3, R4 | The tier from [AGENTS.md § Risk and review](../AGENTS.md#risk-and-review) |
 | Evidence | A link | The evidence comment or manifest that closed the item |
 
-The Project's built-in workflows add new repository issues and PRs to the
-Project in **Triage**, move closed items and merged PRs to **Done**, and add
-sub-issues automatically. Auto-archive stays **disabled**: archived items drop
+The Project's built-in workflows should add new repository issues and PRs to
+the Project in **Triage**, move closed items and merged PRs to **Done**, and
+add sub-issues automatically. Only the sub-issue workflow is enabled today; the
+others must be enabled in the Project settings UI, which #473 tracks. Until
+then, the weekly reconciliation does those steps by hand: it adds new issues
+and PRs, sets their Status, and moves closed items to **Done**. The **Triage**
+view also lists open items with no Status, so nothing filed through a form is
+missed. Auto-archive stays **disabled**: archived items drop
 out of the **Needs evidence** view, so an outcome closed without evidence would
 silently leave the audit.
 
