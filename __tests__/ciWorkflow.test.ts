@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -12,6 +12,36 @@ const beadsConfigPath = path.resolve('.beads/config.yaml');
 const beadsReadmePath = path.resolve('.beads/README.md');
 const contributingPath = path.resolve('CONTRIBUTING.md');
 const packageJsonPath = path.resolve('package.json');
+const workflowsDir = path.resolve('.github/workflows');
+const actionsDir = path.resolve('.github/actions');
+const codeqlWorkflowPath = path.resolve('.github/workflows/codeql.yml');
+const dependencyReviewWorkflowPath = path.resolve(
+  '.github/workflows/dependency-review.yml',
+);
+const dependabotConfigPath = path.resolve('.github/dependabot.yml');
+
+// Every workflow and local composite action, so a newly added file cannot
+// escape the commit-pinning contract by not being named here.
+function allWorkflowAndActionSources(): Array<[string, string]> {
+  const workflows = readdirSync(workflowsDir)
+    .filter((name) => /\.ya?ml$/.test(name))
+    .map((name) => path.join(workflowsDir, name));
+  const actions = readdirSync(actionsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) =>
+      ['action.yml', 'action.yaml']
+        .map((file) => path.join(actionsDir, entry.name, file))
+        .filter((file) => {
+          try {
+            readFileSync(file);
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+    );
+  return [...workflows, ...actions].map((file) => [file, readFileSync(file, 'utf8')]);
+}
 
 function workflowSource(): string {
   try {
@@ -109,18 +139,34 @@ describe('pull request CI workflow contract', () => {
     expect(checkoutCount).toBeGreaterThan(0);
     expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
 
-    const actionUses = [workflow, releaseWorkflow, beadsProjectSyncWorkflow].flatMap(
-      (source) =>
-        [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
-          ([, action]) => action,
-        ),
+    const sources = allWorkflowAndActionSources();
+    const sourceNames = sources.map(([file]) => path.basename(file));
+    for (const required of [
+      'ci.yml',
+      'release.yml',
+      'beads-project-sync.yml',
+      'contributor-acceptance.yml',
+      'codeql.yml',
+      'dependency-review.yml',
+    ]) {
+      expect(sourceNames).toContain(required);
+    }
+    const actionUses = sources.flatMap(([file, source]) =>
+      [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(\s+#.*)?$/gm)].map(
+        ([, action, comment]) => ({ file: path.basename(file), action, comment }),
+      ),
     );
     expect(actionUses.length).toBeGreaterThan(0);
-    for (const action of actionUses) {
+    for (const { file, action, comment } of actionUses) {
       if (action.startsWith('./')) {
         expect(action).toBe('./.github/actions/setup-xcodegen');
       } else {
-        expect(action, `${action} must be commit-pinned`).toMatch(/@[0-9a-f]{40}$/);
+        expect(action, `${file}: ${action} must be commit-pinned`).toMatch(
+          /@[0-9a-f]{40}$/,
+        );
+        expect(comment, `${file}: ${action} needs a trailing version comment`).toMatch(
+          /#\s*\S/,
+        );
       }
     }
   });
@@ -486,5 +532,87 @@ describe('Beads Project sync workflow contract', () => {
         /local.*dry[- ]run.*read-only.*(?:does not|never).*bootstrap/is,
       );
     }
+  });
+});
+
+describe('security and supply-chain baseline contract', () => {
+  it('runs CodeQL for TypeScript and Rust with least-privilege, pinned steps', () => {
+    const workflow = readFileSync(codeqlWorkflowPath, 'utf8');
+
+    expect(workflow).toContain('name: CodeQL');
+    expect(workflow).toMatch(/pull_request:\s*\n\s+branches: \[main\]/);
+    expect(workflow).toMatch(/push:\s*\n\s+branches: \[main\]/);
+    expect(workflow).toMatch(/schedule:\s*\n\s+- cron: "[^"]+"/);
+    // Workflow default is read-only; only the analyze job may upload results.
+    expect(workflow).toMatch(/^permissions:\n  contents: read\n\n/m);
+    expect(workflow).toMatch(
+      /    permissions:\n      actions: read\n      contents: read\n      security-events: write\n/,
+    );
+    expect(workflow.match(/security-events: write/g) ?? []).toHaveLength(1);
+    expect(workflow).not.toMatch(/: write-all|contents: write|pull-requests: write/);
+    expect(workflow).toContain('- language: javascript-typescript');
+    expect(workflow).toContain('- language: rust');
+    expect(workflow.match(/build-mode: none/g) ?? []).toHaveLength(2);
+    expect(workflow).not.toContain('language: swift');
+    expect(workflow).toContain('cancel-in-progress: true');
+    expect(workflow).toMatch(/timeout-minutes: \d+/);
+    expect(workflow).toContain('persist-credentials: false');
+    expect(workflow).toContain(
+      'github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2',
+    );
+    expect(workflow).toContain(
+      'github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2',
+    );
+    expect(workflow).not.toContain('secrets.');
+  });
+
+  it('fails pull requests that introduce high-severity vulnerable dependencies', () => {
+    const workflow = readFileSync(dependencyReviewWorkflowPath, 'utf8');
+
+    expect(workflow).toMatch(/^on:\n  pull_request:\n/m);
+    expect(workflow).toMatch(/^permissions:\n  contents: read\n\n/m);
+    expect(workflow).not.toContain('pull-requests: write');
+    expect(workflow).not.toMatch(/: write/);
+    expect(workflow).toContain(
+      'actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294',
+    );
+    expect(workflow).toContain('fail-on-severity: high');
+    expect(workflow).toContain('comment-summary-in-pr: never');
+    expect(workflow).toContain('persist-credentials: false');
+    expect(workflow).toMatch(/timeout-minutes: \d+/);
+    expect(workflow).not.toContain('secrets.');
+  });
+
+  it('schedules grouped weekly Dependabot updates for every lockfile-owning ecosystem', () => {
+    const config = readFileSync(dependabotConfigPath, 'utf8');
+    const entries = config.split(/^  - package-ecosystem: /m).slice(1);
+    const byTarget = new Map(
+      entries.map((entry) => {
+        const ecosystem = entry.slice(0, entry.indexOf('\n')).trim();
+        const directory = /^\s+directory: (\S+)$/m.exec(entry)?.[1];
+        return [`${ecosystem} ${directory}`, entry];
+      }),
+    );
+
+    expect(config).toMatch(/^version: 2$/m);
+    // The nested docs lockfile serves the standalone Vercel deployment, so it
+    // is a second npm target rather than part of the root workspace entry.
+    expect([...byTarget.keys()].sort()).toEqual([
+      'cargo /native/desktop/psyche-build-tauri/src-tauri',
+      'github-actions /',
+      'npm /',
+      'npm /docs',
+    ]);
+    const groups = [...config.matchAll(/^      ([a-z0-9-]+):\n\s+update-types:/gm)].map(([, name]) => name);
+    expect(new Set(groups).size).toBe(groups.length);
+    for (const entry of byTarget.values()) {
+      expect(entry).toContain('interval: weekly');
+      expect(entry).toMatch(/open-pull-requests-limit: [1-9]\b/);
+      expect(entry).toContain('update-types: [minor, patch]');
+      // Must outlast pnpm's minimumReleaseAge so frozen installs still pass.
+      expect(entry).toMatch(/default-days: [2-9]\b/);
+    }
+    // No label is created by this file; reference none that may not exist.
+    expect(config).not.toMatch(/^\s+labels:/m);
   });
 });
