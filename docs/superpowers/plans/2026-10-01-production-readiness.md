@@ -81,7 +81,7 @@ require.
 | G7 Security | CodeQL (JS/TS, Rust, Swift where feasible), Dependabot and dependency review are on, with no open critical or high alerts. The bridge threat model has been reviewed. Secrets are rotated and repository-level fallbacks are absent. | Security tab state, review record |
 | G8 Governance | At least one independent reviewer is available for R3/R4 changes, and one required approval is restored on `main`. | Ruleset evidence |
 | G9 Tracker truth | Every open outcome is on the GitHub Project, with priority, train, risk and status set. The control docs agree with live issue state. Beads is retired. | Weekly reconciliation entry |
-| G10 Support | SUPPORT.md routes users. Known issues are published. A triage SLA is stated and met for four consecutive weeks. | Project insights or triage log |
+| G10 Support | SUPPORT.md routes users. Known issues are published. A triage target is stated and met for four consecutive weeks, measured **before** the production claim (starting in Phase 1). | Weekly triage log |
 
 Out of scope for this claim, as separate trains that stay deferred:
 
@@ -102,13 +102,13 @@ independently reviewable, as required by [AGENTS.md](../../../AGENTS.md#change-d
 |---|---|---|
 | 0.1 | **Owner decision on D1 and D2.** Either reopen #196 and #199, or keep them closed and re-home every residual gap from §1.3 into new outcomes (see §4). Record the decision as a comment on #196 and #199. **Recommended:** keep them closed, record why, and create the outcomes in §4. The original outcomes are pinned to `v0.0.1` evidence, and production readiness should be proven against the next release. | R1 |
 | 0.2 | Re-scope #239 from `v0.0.1` source to the production candidate artifact (§3 Phase 4), or close it as superseded with a link to the new acceptance outcome. Either way, the 15 existing evidence digests stay as history. | R1 |
-| 0.3 | Close the Vim mirrors #222–#227 as not planned, following #246. Before the Beads cutover, do this through the Beads source. After the cutover, do it directly. | R1 |
-| 0.4 | Re-home the GPU mirrors #228, #229 and #232 from closed #199 to the diagnostics outcome, or close them as not planned. | R1 |
-| 0.5 | Execute the [Beads retirement plan](./2026-10-01-retire-beads-github-projects.md), phases M0–M4. From that point the GitHub Project is the only planning surface. | R4 |
+| 0.3 | Close the Vim mirrors #222–#227 as not planned, following #246. Do this only as part of the retirement plan's M3, after M2 has disabled synchronization. Never write Beads after the freeze. | R3 (managed tracker state) |
+| 0.4 | Re-home the GPU mirrors #228, #229 and #232 from closed #199 to the diagnostics outcome, or close them as not planned. Do this in M3, under the same constraint as 0.3. | R3 (managed tracker state) |
+| 0.5 | Execute the [Beads retirement plan](./2026-10-01-retire-beads-github-projects.md), phases M0–M5. GitHub becomes authoritative only when the M5 policy PR merges, since AGENTS.md, the agent manifest and CONTRIBUTING change there. M6 and M7 stay tracked under the retirement outcome. | R4 |
 | 0.6 | One reconciliation PR for ROADMAP, POST-RELEASE-EXECUTION, RELEASE-ACCEPTANCE and SUPPORT-MATRIX, fixing D1–D6 (Cask on `0.0.2`, #196/#199/#246 closed, new outcomes). | R1 |
 | 0.7 | Land or discard `feat/support-bundle-provider-collector`. A WIP checkpoint must not become an untracked liability. | R2 |
 
-**Exit:** the board and the documents agree, every §1.3 gap has an owning open issue, and no generated mirror is open.
+**Exit:** the board and the documents agree, every §1.3 gap has an owning open issue, no generated mirror is open, and the M5 policy PR has merged.
 
 ### Phase 1 — Security and governance baseline (weeks 1–2, parallel with Phase 2)
 
@@ -121,6 +121,7 @@ independently reviewable, as required by [AGENTS.md](../../../AGENTS.md#change-d
 | 1.5 | Pin third-party actions to commit SHAs where they are not already pinned. Add an `actions` Dependabot ecosystem to keep the pins fresh. | R4 |
 | 1.6 | Review the bridge threat model against [BRIDGE-SECURITY.md](../../BRIDGE-SECURITY.md) and [CONTROL-PLANE.md](../../CONTROL-PLANE.md). Record findings as issues. | R3 |
 | 1.7 | Recruit or designate an independent reviewer, then restore one required approval on `main`. Until then, record each R3/R4 merge's review substitute explicitly in the PR. | R4 |
+| 1.8 | Start the G10 weekly triage log: date, issues triaged, and the oldest untriaged age. G10 needs four consecutive compliant weeks before the production claim. | R1 |
 
 ### Phase 2 — Close the recovery and diagnostics gaps (weeks 1–4)
 
@@ -142,12 +143,13 @@ independently reviewable, as required by [AGENTS.md](../../../AGENTS.md#change-d
 | 3.3 | Automate the Cask bump from the release workflow, as a PR to `homebrew-tap` rather than a direct push. Verify the bump by reading the tap, not by the notification job succeeding. | R4 |
 | 3.4 | Add a version-coherence check to CI. `package.json`, `tauri.conf.json`, the native bundle, the update manifest and the tag must agree. | R2 |
 | 3.5 | Run an uninstall, reinstall and zap observation for the candidate. User repositories, worktrees and branches must survive. | R2 |
+| 3.6 | **Candidate build path.** `release.yml` accepts only an existing signed stable `vMAJOR.MINOR.PATCH` tag, and it publishes after building, so it cannot produce `v0.1.0-rc.1`. Add a separately reviewed, protected, **non-publishing** candidate build. It signs and notarizes artifacts from an exact `main` SHA without creating a release. It embeds the final `0.1.0` version, so the accepted SHA passes the later `v0.1.0` tag checks unchanged, and records its candidate identity in build provenance rather than in the version string. | R4 |
 
 ### Phase 4 — Release candidate and operator acceptance (weeks 5–7)
 
 | Item | Work | Risk |
 |---|---|---|
-| 4.1 | **Freeze `v0.1.0-rc.1`** on one exact `main` SHA, following the [release-candidate invariants](../../RELEASE-ACCEPTANCE.md#release-candidate-invariants-for-future-releases). Build the artifacts with the release workflow, but do not tag them as a public release yet. | R4 |
+| 4.1 | **Freeze release candidate 1** on one exact `main` SHA, following the [release-candidate invariants](../../RELEASE-ACCEPTANCE.md#release-candidate-invariants-for-future-releases). Build its artifacts through the 3.6 candidate path. Do not create a tag or publish a release. | R4 |
 | 4.2 | **Execute G1–G3** with the [operator runbook](../../OPERATOR-ACCEPTANCE-SLICE.md) on the RC artifacts, on a clean user account, on both architectures if hardware allows (otherwise record the gap). Produce one sanitized manifest. | R3 |
 | 4.3 | **Execute G4.** Install `v0.0.2` from the Cask, use it, upgrade to the RC, verify, then roll back to `v0.0.2` and verify again. | R3 |
 | 4.4 | **Execute G5 and G6** on the packaged RC. | R3 |
@@ -160,7 +162,7 @@ independently reviewable, as required by [AGENTS.md](../../../AGENTS.md#change-d
 | 5.1 | Create the signed annotated tag `v0.1.0` on the accepted RC SHA, publish through the protected release workflow, and bump the Cask. | R4 |
 | 5.2 | Update SUPPORT-MATRIX, ROADMAP and RELEASE-ACCEPTANCE with the `v0.1.0` evidence. The macOS row stays **Supported**, now backed by operator acceptance. | R1 |
 | 5.3 | Publish release notes that list known issues, deferrals, and the upgrade and rollback instructions. | R1 |
-| 5.4 | Start the G10 triage SLA clock: first response within 3 business days for bugs, and same-day acknowledgement for security reports per SECURITY.md. | R1 |
+| 5.4 | Confirm that G10's four-week triage record, begun in Phase 1, is complete. The targets are a first response within 3 business days for bugs and acknowledgement within 3 business days for security reports, per [SECURITY.md](../../../SECURITY.md#response-targets). | R1 |
 
 ### Phase 6 — Steady state (ongoing)
 

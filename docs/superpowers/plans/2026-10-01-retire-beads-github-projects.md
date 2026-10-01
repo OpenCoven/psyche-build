@@ -87,7 +87,7 @@ all reachable through the API.
 - *Item closed* → Done
 - *Pull request merged* → Done
 - *Item reopened* → In Progress
-- *Auto-archive items*: `is:closed updated:<@today-30d`
+- *Auto-archive items*: **leave disabled** until the evidence audit includes archived items. Archived items disappear from normal views, including Needs evidence, and auto-archive filters cannot exclude the `outcome` label, so a closed outcome without Evidence would silently leave the audit after 30 days.
 - Keep *Auto-add sub-issues* enabled.
 
 ### 3.3 Labels
@@ -102,7 +102,7 @@ all reachable through the API.
 ### 3.4 Intake
 
 - The existing forms (`bug.yml`, `feature.yml`, `documentation.yml`) gain `labels: [needs-triage]`, a `type:` key (Bug, Feature or Task), and `projects: ["OpenCoven/11"]`. Verify both keys against the current issue-forms syntax when implementing.
-- **Add `outcome.yml`, for maintainers only.** It has these fields: outcome, exit gate, evidence required, train, risk, priority, owner, and out of scope. It applies the `outcome` label.
+- **Add `outcome.yml` as public intake.** GitHub cannot restrict an issue form to maintainers in a public repository, so anyone may submit it. It has these fields: outcome, exit gate, evidence required, train, risk, priority, owner, and out of scope. It applies only `needs-triage`. A maintainer applies the `outcome` label after approving the proposal, which keeps unapproved proposals out of the Portfolio view.
 - **Agents create issues with `gh issue create --project "Psyche Build"`,** then set fields with `gh project item-edit`. They attach a sub-issue with `gh api` (`POST /repos/{owner}/{repo}/issues/{n}/sub_issues`) and a dependency with the issue-dependencies API.
 
 ### 3.5 Closure and evidence rule
@@ -139,7 +139,7 @@ Beads stays fully recoverable until M5 merges.
 
 1. The owner approves this plan.
 2. Create the outcome issue "Retire Beads; GitHub Issues and Projects are the tracker" (P0, Governance, R4).
-3. Announce a **Beads write freeze**: no `bd` writes from any clone or agent after the freeze time T0, recorded on the outcome issue. Add a temporary note at the top of `.beads/README.md` in the M5 PR, or comment on the outcome before it.
+3. Announce a **Beads write freeze** on the authoritative source: after the freeze time T0, recorded on the outcome issue, no Beads mutation and no `bd dolt push` or other publication from any clone or agent. Isolated writes that publish nothing stay permitted: a disposable bootstrap from the remote, the scratch re-import in M1, and the workflow's ephemeral dry-run database in M2. Add a temporary note at the top of `.beads/README.md` in the M5 PR, or comment on the outcome before it.
 4. Confirm that no other session is mid-`bd` operation. Run `ps -ef | grep -E ' bd |claude --'` on every machine that holds a clone.
 
 ### M1 — Archive (day 0–1)
@@ -148,10 +148,11 @@ The archive is the only copy of the ~84 never-mirrored Beads and of the audit
 journal. Build it without risking the schema.
 
 1. **In a fresh, disposable clone,** not the shared checkout or any existing worktree, install the **pinned Beads CLI 1.2.2** by checksum, exactly as `.github/workflows/beads-project-sync.yml` does. Never run the Homebrew 1.3.0 `bd` against this database.
-2. `bd --readonly export` writes the full JSONL. Also export the Dolt `events` table and copy `.beads/interactions.jsonl`.
-3. Record the SHA-256 of each file, the Dolt commit hash and the count (111).
-4. Store the raw archive **privately**: an org-private repository, or an owner-held encrypted location. The raw export can hold unsanitized descriptions, so it must never go in a public issue, PR or release.
-5. Commit a public **sanitized summary** at `docs/working-records/beads-retirement-2026-10.md` with:
+2. **Hydrate before exporting.** `.beads/.gitignore` excludes the Dolt database, and a read-only export does not initialize one (`scripts/beads-project-sync/source.mjs` stops when it is missing). Run `bd bootstrap --yes` in that disposable clone, which syncs from the authoritative Dolt remote as the workflow does. Then confirm that the Dolt head is the frozen commit before exporting. Never publish from this clone.
+3. `bd --readonly export` writes the full JSONL. Also export the Dolt `events` table and copy `.beads/interactions.jsonl`.
+4. Record the SHA-256 of each file, the Dolt commit hash and the count (111).
+5. Store the raw archive **privately**: an org-private repository, or an owner-held encrypted location. The raw export can hold unsanitized descriptions, so it must never go in a public issue, PR or release.
+6. Commit a public **sanitized summary** at `docs/working-records/beads-retirement-2026-10.md` with:
    - counts by status and type;
    - the archive digests;
    - the Dolt commit;
@@ -266,8 +267,8 @@ Each item is a separate, explicitly authorized side effect:
 
 | Point | Rollback |
 |---|---|
-| Before M5 merges | Re-enable the workflow (`gh workflow enable beads-project-sync.yml`). Beads data, code and token are intact. The next sync restores any adopted mirror bodies and labels; that is acceptable, because GitHub was not yet authoritative. |
-| After M5, before M7 | Revert the M5 and M6 PRs and re-enable the workflow. The refs and secret still exist. Issues adopted in M3 will be overwritten by the sync. Accept that, or re-apply their edits through `bd`. |
+| Before M5 merges | Re-enabling the workflow alone is **not** enough. M3 removes the adopted issues' Bead markers, and the synchronizer's recovery partition (`scripts/beads-project-sync/recovery.mjs`) rejects a managed survivor such as #208 when its marker is missing. So the next sync cannot restore those bodies. Instead: (1) restore each adopted issue's archived body, title and labels from the M3 before-images; (2) carry any post-cutover GitHub work back into Beads; (3) restore the Project fields and options the synchronizer expects (`Bead ID`, `Bead Type`, `Parent Goal`, `Source Updated`, Status and Priority values); (4) review a dry run that plans the expected operations; then (5) re-enable the workflow with explicit authorization. |
+| After M5, before M7 | Revert the M5 and M6 PRs, then follow the same five steps. The refs and secret still exist. |
 | After M7 | Not cheap. Re-create a Beads database from the M1 archive with CLI 1.2.2, re-provision a token and environments, and restore the code from git history. The 14-day hold before M7 exists so this path is never needed. |
 
 ## 6. Risks and controls
