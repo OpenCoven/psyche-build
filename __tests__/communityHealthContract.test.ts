@@ -104,7 +104,7 @@ describe('community health contract', () => {
     for (const field of ['Accountable owner', 'Train', 'Priority', 'Risk', 'Exit gate', 'Evidence required']) {
       expect(outcome).toContain(`label: ${field}`);
     }
-    expect(outcome).toMatch(/Never paste credentials, raw prompts, or unrestricted terminal output/);
+    expect(outcome).toMatch(/Do not paste credentials, raw prompts, or unrestricted terminal output/);
   });
 
   it('does not solicit dangerous material in public templates', () => {
@@ -113,6 +113,7 @@ describe('community health contract', () => {
       '.github/ISSUE_TEMPLATE/bug.yml',
       '.github/ISSUE_TEMPLATE/feature.yml',
       '.github/ISSUE_TEMPLATE/documentation.yml',
+      '.github/ISSUE_TEMPLATE/outcome.yml',
     ].map(read);
 
     const unsafeSolicitations = [
@@ -139,8 +140,8 @@ describe('community health contract', () => {
       '/protocol-fixtures/ @BunsDev',
       '/native/desktop/psyche-build-tauri/src-tauri/ @BunsDev',
       '/native/ios/ @BunsDev',
-      '/.beads/ @BunsDev',
-      '/scripts/beads-project-sync/ @BunsDev',
+      '/docs/TRACKER.md @BunsDev',
+      '/.github/ISSUE_TEMPLATE/ @BunsDev',
     ]) {
       expect(codeowners).toContain(pattern);
     }

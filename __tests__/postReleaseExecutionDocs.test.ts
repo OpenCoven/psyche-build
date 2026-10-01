@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
@@ -339,43 +340,21 @@ describe('post-release execution documentation', () => {
     expect(record).toMatch(/named here by role only/);
   });
 
-  it('documents canonical Beads mapping and review before Dolt publication', async () => {
-    const [beads, roadmap, execution] = await Promise.all([
-      readFile('.beads/README.md', 'utf8'),
+  it('removes the Beads store and keeps mirror history read-only in the control docs', async () => {
+    const [roadmap, execution] = await Promise.all([
       readFile('docs/ROADMAP.md', 'utf8'),
       readFile('docs/POST-RELEASE-EXECUTION.md', 'utf8'),
     ]);
 
-    expect(beads).toMatch(/`external_ref`[\s\S]{0,160}canonical public outcome\/maintenance-bucket field/i);
-    expect(beads).toMatch(/active Bead[\s\S]{0,160}exactly one valid configured target/i);
-    expect(beads).toMatch(/priority[\s\S]{0,100}match(?:es|ing)?\s+(?:the\s+)?roadmap\s+priority/i);
-    expect(beads).toMatch(/generated GitHub bodies[\s\S]{0,160}one-way mirrors/i);
-    expect(beads).toMatch(/never\s+the\s+source\s+of\s+repair/i);
-    expect(beads).toMatch(/review before `bd dolt push`/i);
-    expect(beads).toMatch(/sandbox[\s\S]{0,80}no auto-push/i);
-    expect(beads).toMatch(/generated interactions[\s\S]{0,100}local Dolt diff/i);
-    expect(beads).toMatch(/merge the Git PR[\s\S]{0,120}tracked audit\/config\/code/i);
-    expect(beads).toMatch(/publish the exact reviewed Dolt commit/i);
-    expect(beads).toMatch(/run the protected sync/i);
-    expect(beads).toMatch(
-      /1,361 rows[\s\S]{0,240}bounded three-write audit gap[\s\S]{0,80}not an uninterrupted journal/i,
-    );
-    expect(beads).toMatch(/Use\s+plain\s+issue\s+references[\s\S]{0,120}generated\s+mirror/i);
-    expect(beads).toMatch(
-      /Never\s+place\s+any\s+GitHub-supported\s+closing\s+keyword[\s\S]{0,240}closed[\s\S]{0,240}before\s+a\s+generated\s+mirror\s+reference/i,
-    );
-    expect(beads).toMatch(
-      /Publish\s+the\s+reviewed\s+Beads\s+source[\s\S]{0,80}then\s+let[\s\S]{0,80}protected\s+sync\s+reconcile\s+the\s+mirror/i,
-    );
-    expect(beads).not.toMatch(
-      /(?:edit|change|repair) generated GitHub bodies directly/i,
-    );
+    expect(existsSync('.beads')).toBe(false);
+    expect(existsSync('scripts/beads-project-sync')).toBe(false);
+    expect(existsSync('.github/workflows/beads-project-sync.yml')).toBe(false);
 
-    const permissiveMirrorParagraphs = [beads, roadmap, execution]
+    const permissiveMirrorParagraphs = [roadmap, execution]
       .flatMap((source) => source.split(/\n\s*\n/))
       .filter((paragraph) => /(?:generated GitHub|generated mirror|mirrored issue)/i.test(paragraph))
       .filter((paragraph) => /(?:edit|change|repair|authoritative source)/i.test(paragraph))
-      .filter((paragraph) => !/(?:do not|never|must not|cannot|not the source)/i.test(paragraph));
+      .filter((paragraph) => !/(?:do not|never|must not|cannot|not the source|retired|history)/i.test(paragraph));
     expect(permissiveMirrorParagraphs).toEqual([]);
   });
 

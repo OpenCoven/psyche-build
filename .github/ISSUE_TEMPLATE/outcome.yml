@@ -58,7 +58,7 @@ body:
     id: evidence
     attributes:
       label: Evidence required
-      description: What retained evidence closes this outcome (manifest, run, artifact record). Never paste credentials, raw prompts, or unrestricted terminal output.
+      description: What retained evidence closes this outcome (manifest, run, artifact record). Do not paste credentials, raw prompts, or unrestricted terminal output.
     validations:
       required: true
   - type: textarea

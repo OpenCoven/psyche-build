@@ -27,7 +27,6 @@ Psyche Build is the coding cockpit and product client. Its local project, pane, 
 | `protocol-fixtures/` | checked-in protocol fixtures used by product compatibility tests | `PSYCHE-COMPATIBILITY-MAP.md`, generator source | `pnpm fixtures:generate` and no generated drift; R3/R4 when compatibility changes |
 | `scripts/` | repository automation, builds, release tooling, tracker synchronization and validators | script-specific docs, `AGENTS.md` | focused script tests plus the owning end-to-end/dry-run contract |
 | `.github/` | CI, release workflows, issue/PR intake and issue forms, CODEOWNERS | `SECURITY.md`, `CONTRIBUTOR-SAFETY.md`, `RELEASE.md` | syntax/contract tests and live settings evidence where applicable; R4 |
-| `.beads/` | retired Beads planning store, read-only until its removal under #473 | `TRACKER.md`, `working-records/beads-retirement-2026-10.md` | do not run `bd`; R4 |
 | `docs/` | current product, architecture, support, release and contributor contracts plus the public docs application | `docs/README.md` authority order | `pnpm docs:focus:check`, `pnpm --dir docs build` |
 | `__tests__/` | repository behavior, contract, security, workflow and regression evidence | `__tests__/README.md` | run the narrowest owning test first, then the repository gate |
 | `agent/` | machine-readable repository/agent contract | `AGENTS.md` | `__tests__/agentRepositoryContract.test.ts` plus agent fast/full checks |

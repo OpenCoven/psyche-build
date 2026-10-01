@@ -35,7 +35,6 @@ describe('contributor repository map', () => {
       'protocol-fixtures/',
       'scripts/',
       '.github/',
-      '.beads/',
       'docs/',
       '__tests__/',
       'agent/',
