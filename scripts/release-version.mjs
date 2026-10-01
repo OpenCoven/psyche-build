@@ -280,6 +280,29 @@ export function assertReleaseVersion(root, tag) {
   return expected;
 }
 
+export function assertVersionCoherence(root = process.cwd()) {
+  const versions = readReleaseVersions(root);
+  const entries = Object.entries(versions);
+  const unparseable = entries
+    .filter(([, version]) => !STABLE_VERSION.test(version))
+    .map(([key, version]) => `- ${labels[key]} (${version})`);
+  if (unparseable.length > 0) {
+    throw new Error(
+      `Release versions must use stable MAJOR.MINOR.PATCH:\n${unparseable.join('\n')}`,
+    );
+  }
+  const expected = versions.packageJson;
+  const mismatches = entries
+    .filter(([, version]) => version !== expected)
+    .map(([key, version]) => `- ${labels[key]} (${version})`);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Release versions disagree with ${labels.packageJson} (${expected}):\n${mismatches.join('\n')}`,
+    );
+  }
+  return expected;
+}
+
 function replaceJsonVersion(contents, version) {
   const parsed = JSON.parse(contents);
   if (typeof parsed.version !== 'string') {
@@ -372,9 +395,14 @@ async function main() {
     args.splice(1, 1);
   }
   const [mode, value, ...rest] = args;
+  if (mode === '--coherence' && args.length === 1) {
+    const version = assertVersionCoherence(process.cwd());
+    console.log(`Verified Psyche Build release versions agree on ${version}`);
+    return;
+  }
   if (rest.length > 0 || !['--set', '--check'].includes(mode) || !value) {
     throw new Error(
-      'Usage: node scripts/release-version.mjs --set MAJOR.MINOR.PATCH | --check vMAJOR.MINOR.PATCH',
+      'Usage: node scripts/release-version.mjs --set MAJOR.MINOR.PATCH | --check vMAJOR.MINOR.PATCH | --coherence',
     );
   }
 

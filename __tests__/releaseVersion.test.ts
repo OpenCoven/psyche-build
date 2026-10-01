@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   assertReleaseVersion,
+  assertVersionCoherence,
   normalizeReleaseTag,
   readReleaseVersions,
   setReleaseVersion,
@@ -229,5 +230,86 @@ describe('release version contract', () => {
     );
 
     expect(result.stdout).toContain('Verified Psyche Build release version 0.1.0');
+  });
+});
+
+describe('release version coherence', () => {
+  it('accepts release metadata that agrees on one stable version', async () => {
+    const root = await writeFixture();
+    await setReleaseVersion(root, '0.4.2');
+
+    expect(assertVersionCoherence(root)).toBe('0.4.2');
+    const result = await execFileAsync(process.execPath, [releaseScript, '--coherence'], {
+      cwd: root,
+    });
+    expect(result.stdout).toContain('Verified Psyche Build release versions agree on 0.4.2');
+  });
+
+  it('names every manifest that drifts from package.json', async () => {
+    const root = await writeFixture();
+
+    expect(() => assertVersionCoherence(root)).toThrow(
+      /disagree with package\.json \(0\.0\.11\):[\s\S]*native\/desktop\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*project\.pbxproj \(0\.0\.3\)[\s\S]*src\/mcp\/server\.ts \(0\.0\.9\)/,
+    );
+  });
+
+  it('fails when only the Tauri config drifts', async () => {
+    const root = await writeFixture();
+    await setReleaseVersion(root, '0.4.2');
+    const tauriConfigPath = path.join(
+      root,
+      'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
+    );
+    const contents = await readFile(tauriConfigPath, 'utf8');
+    await writeFile(tauriConfigPath, contents.replace('"0.4.2"', '"0.4.3"'));
+
+    expect(() => assertVersionCoherence(root)).toThrow(/tauri\.conf\.json \(0\.4\.3\)/);
+    await expect(
+      execFileAsync(process.execPath, [releaseScript, '--coherence'], { cwd: root }),
+    ).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('tauri.conf.json (0.4.3)') });
+  });
+
+  it('fails closed on an agreeing but unparseable version', async () => {
+    const root = await writeFixture();
+    await setReleaseVersion(root, '0.4.2');
+    const packageJsonPath = path.join(root, 'package.json');
+    const contents = await readFile(packageJsonPath, 'utf8');
+    await writeFile(packageJsonPath, contents.replace('"0.4.2"', '"0.4.2-beta.1"'));
+
+    expect(() => assertVersionCoherence(root)).toThrow(
+      /stable MAJOR\.MINOR\.PATCH:\n- package\.json \(0\.4\.2-beta\.1\)/,
+    );
+  });
+
+  it('fails closed when a version is missing or a manifest is unreadable', async () => {
+    const root = await writeFixture();
+    await setReleaseVersion(root, '0.4.2');
+    const cargoTomlPath = path.join(root, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml');
+    await writeFile(cargoTomlPath, '[package]\nname = "psyche-build-tauri"\n');
+    expect(() => assertVersionCoherence(root)).toThrow(/Cargo\.toml does not contain \[package\]\.version/);
+
+    const fresh = await writeFixture();
+    await setReleaseVersion(fresh, '0.4.2');
+    const tauriConfigPath = path.join(
+      fresh,
+      'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
+    );
+    await writeFile(tauriConfigPath, '{ "productName": "Psyche Build" }\n');
+    expect(() => assertVersionCoherence(fresh)).toThrow(/tauri\.conf\.json does not contain a string version/);
+
+    await writeFile(tauriConfigPath, '{ not json');
+    expect(() => assertVersionCoherence(fresh)).toThrow(SyntaxError);
+
+    const { rm } = await import('node:fs/promises');
+    await rm(tauriConfigPath);
+    expect(() => assertVersionCoherence(fresh)).toThrow(/ENOENT/);
+  });
+
+  it('rejects stray arguments to the coherence mode', async () => {
+    const root = await writeFixture();
+
+    await expect(
+      execFileAsync(process.execPath, [releaseScript, '--coherence', 'v0.0.1'], { cwd: root }),
+    ).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('Usage:') });
   });
 });

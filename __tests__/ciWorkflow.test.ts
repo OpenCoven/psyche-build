@@ -253,6 +253,14 @@ describe('pull request CI workflow contract', () => {
       /path: \$\{\{ runner\.temp \}\}\/recovery-harness\.json[\s\S]{0,400}if-no-files-found: error/,
     );
     expect(qualityJob).not.toMatch(/if-no-files-found: (?:warn|ignore)/);
+    // Release-metadata drift must fail every change, before tests, while the
+    // tag-bound release:check in release.yml stays the authoritative gate.
+    expect(qualityJob).toContain('- name: Require coherent release versions');
+    expect(qualityJob).toContain('run: pnpm release:coherence');
+    expect(qualityJob.indexOf('pnpm release:coherence')).toBeLessThan(
+      qualityJob.indexOf('pnpm test'),
+    );
+    expect(qualityJob).not.toMatch(/release:coherence[\s\S]{0,80}continue-on-error/);
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
       'pnpm docs:focus:check',

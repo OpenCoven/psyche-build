@@ -82,6 +82,7 @@
     "ios:project:check": "pnpm ios:project:generate && git diff --exit-code -- native/ios/Psyche.xcodeproj native/ios/PsycheApp/Resources/Info.plist",
     "release:version": "node scripts/release-version.mjs --set",
     "release:check": "node scripts/release-version.mjs --check",
+    "release:coherence": "node scripts/release-version.mjs --coherence",
     "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
