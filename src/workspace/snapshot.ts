@@ -125,6 +125,27 @@ export function hasPublishedTmuxBackedPane(
       worktree.panes.some((pane) => pane.id === paneId && isTmuxBackedWorkspacePane(pane))));
 }
 
+/**
+ * Every pane id for which `hasPublishedTmuxBackedPane` holds, so a caller can
+ * answer the same question repeatedly without rescanning the snapshot.
+ */
+export function publishedTmuxBackedPaneIds(
+  workspace: ReadonlyWorkspaceSnapshot,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const project of workspace.projects) {
+    for (const pane of project.projectPanes) {
+      if (isTmuxBackedWorkspacePane(pane)) ids.add(pane.id);
+    }
+    for (const worktree of project.worktrees) {
+      for (const pane of worktree.panes) {
+        if (isTmuxBackedWorkspacePane(pane)) ids.add(pane.id);
+      }
+    }
+  }
+  return ids;
+}
+
 export function hasPublishedRitual(
   workspace: ReadonlyWorkspaceSnapshot,
   projectId: string,

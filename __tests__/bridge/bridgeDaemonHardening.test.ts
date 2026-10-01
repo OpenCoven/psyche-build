@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
-import { BridgeDaemon } from "../../src/services/bridge/BridgeDaemon";
+import { BridgeDaemon, LEGACY_PANE_SCOPE_TTL_MS } from "../../src/services/bridge/BridgeDaemon";
 import { PaneStreamHub } from "../../src/services/bridge/PaneStreamHub";
 import { PairingFlow, PAIR_MAX_ATTEMPTS } from "../../src/services/bridge/PairingFlow";
 import { MAX_CLIENT_FRAME_BYTES } from "../../src/services/bridge/WSSListener";
@@ -416,7 +416,10 @@ describe("bridge daemon v2 pane scope", () => {
     });
     await client.until(() => hub.inputs.length === 1, "input while published");
 
+    // The host announces every pane change (synchronizeWorkspacePublication);
+    // the un-announced case is bounded by the scope TTL, tested separately.
     setWorkspace(withoutPane(workspace(), PUBLISHED_PANE));
+    daemon.notifyWorkspaceChanged();
     client.send({
       type: "sendInput",
       payload: { paneId: PUBLISHED_PANE, data: Buffer.from("two").toString("base64") },
@@ -443,6 +446,133 @@ describe("bridge daemon v2 pane scope", () => {
     await drain(client, "after-legacy");
 
     expect(hub.inputs.map((input) => input.paneId)).toEqual(["%4"]);
+    expect(scopeErrors(client)).toHaveLength(1);
+  });
+});
+
+/** A workspace provider that counts reads and can hold one open on demand. */
+function gatedWorkspace() {
+  let workspace: any = structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace);
+  let gate: Promise<void> | null = null;
+  let release: () => void = () => {};
+  let held = 0;
+  let reads = 0;
+  return {
+    provider: async () => {
+      reads += 1;
+      if (gate) {
+        held += 1;
+        await gate;
+      }
+      return workspace;
+    },
+    hold() { gate = new Promise<void>((r) => { release = r; }); },
+    release() { const r = release; gate = null; r(); },
+    held: () => held,
+    reads: () => reads,
+    set(next: any) { workspace = next; },
+    get: () => workspace,
+  };
+}
+
+async function settle(daemon: BridgeDaemon) {
+  await (daemon as any).workspaceOperationQueue;
+  await new Promise((r) => setTimeout(r, 30));
+}
+
+describe("bridge daemon v2 pane scope races", () => {
+  for (const frame of ["sendInput", "subscribePane"] as const) {
+    for (const ending of ["revoke", "close"] as const) {
+      it(`drops a ${frame} whose session ends (${ending}) during the scope check`, async () => {
+        const ws = gatedWorkspace();
+        const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+        const { port } = await daemon.start();
+        const client = await connect(port);
+        await authenticate(client, pairing);
+        const token = client.messages.find((m) => m.type === "pairAccepted").payload.token;
+
+        ws.hold();
+        client.send(frame === "sendInput"
+          ? { type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("rm -rf ~\r").toString("base64") } }
+          : { type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+        await client.until(() => ws.held() > 0, "scope check in flight");
+
+        if (ending === "revoke") {
+          expect(await daemon.revokeDevice(token)).toBe(true);
+        } else {
+          client.socket.close();
+        }
+        const sessions = (daemon as any).listener.activeSessions as Set<unknown>;
+        await client.until(() => sessions.size === 0, "session torn down");
+        ws.release();
+        await settle(daemon);
+
+        expect(hub.inputs).toEqual([]);
+        expect((daemon as any).paneSubscribers.size).toBe(0);
+        expect(hub.bufferedPaneIds()).toEqual([]);
+      });
+    }
+  }
+});
+
+describe("bridge daemon v2 pane scope cache", () => {
+  it("does not read a workspace snapshot per keystroke once the scope is warm", async () => {
+    const ws = gatedWorkspace();
+    const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    daemon.notifyWorkspaceChanged();
+    await settle(daemon);
+    const warm = ws.reads();
+    expect(warm).toBeGreaterThan(0);
+
+    for (const key of ["l", "s", "\r"]) {
+      client.send({ type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from(key).toString("base64") } });
+    }
+    await client.until(() => hub.inputs.length === 3, "three keystrokes");
+    expect(ws.reads()).toBe(warm);
+  });
+
+  it("applies an unpublish on the next workspace refresh", async () => {
+    const ws = gatedWorkspace();
+    const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+    daemon.notifyWorkspaceChanged();
+    await settle(daemon);
+
+    ws.set(withoutPane(ws.get(), PUBLISHED_PANE));
+    daemon.notifyWorkspaceChanged();
+    client.send({ type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("x").toString("base64") } });
+    await drain(client, "after-refresh");
+
+    expect(hub.inputs).toEqual([]);
+    expect(scopeErrors(client)).toHaveLength(1);
+  });
+
+  it("re-reads the workspace once the cached scope ages out, even without a notification", async () => {
+    const ws = gatedWorkspace();
+    const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+    daemon.notifyWorkspaceChanged();
+    await settle(daemon);
+
+    ws.set(withoutPane(ws.get(), PUBLISHED_PANE));
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + LEGACY_PANE_SCOPE_TTL_MS + 1);
+    try {
+      client.send({ type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("x").toString("base64") } });
+      await drain(client, "after-expiry");
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(hub.inputs).toEqual([]);
     expect(scopeErrors(client)).toHaveLength(1);
   });
 });
