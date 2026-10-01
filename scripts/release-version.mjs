@@ -40,8 +40,27 @@ export function normalizeReleaseTag(value) {
   return candidate;
 }
 
+function readManifest(filePath) {
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${filePath} could not be read: ${reason}`, { cause: error });
+  }
+}
+
 function readJsonVersion(filePath) {
-  const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
+  const contents = readManifest(filePath);
+  let parsed;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${filePath} is not valid JSON: ${reason}`, { cause: error });
+  }
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new Error(`${filePath} does not contain a string version`);
+  }
   if (typeof parsed.version !== 'string') {
     throw new Error(`${filePath} does not contain a string version`);
   }
@@ -251,18 +270,18 @@ export function readReleaseVersions(root = process.cwd()) {
   return {
     packageJson: readJsonVersion(paths.packageJson),
     nativePackageJson: readJsonVersion(paths.nativePackageJson),
-    cargoToml: readCargoPackageVersion(readFileSync(paths.cargoToml, 'utf8'), paths.cargoToml),
-    cargoLock: readCargoLockVersion(readFileSync(paths.cargoLock, 'utf8'), paths.cargoLock),
+    cargoToml: readCargoPackageVersion(readManifest(paths.cargoToml), paths.cargoToml),
+    cargoLock: readCargoLockVersion(readManifest(paths.cargoLock), paths.cargoLock),
     tauriConfig: readJsonVersion(paths.tauriConfig),
     iosProjectYml: readMarketingVersion(
-      findYamlMarketingVersionAssignments(readFileSync(paths.iosProjectYml, 'utf8')),
+      findYamlMarketingVersionAssignments(readManifest(paths.iosProjectYml)),
       paths.iosProjectYml,
     ),
     iosXcodeProject: readMarketingVersion(
-      findXcodeMarketingVersionAssignments(readFileSync(paths.iosXcodeProject, 'utf8')),
+      findXcodeMarketingVersionAssignments(readManifest(paths.iosXcodeProject)),
       paths.iosXcodeProject,
     ),
-    mcpServer: readMcpServerVersion(readFileSync(paths.mcpServer, 'utf8'), paths.mcpServer),
+    mcpServer: readMcpServerVersion(readManifest(paths.mcpServer), paths.mcpServer),
   };
 }
 

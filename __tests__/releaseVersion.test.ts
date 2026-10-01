@@ -298,11 +298,33 @@ describe('release version coherence', () => {
     expect(() => assertVersionCoherence(fresh)).toThrow(/tauri\.conf\.json does not contain a string version/);
 
     await writeFile(tauriConfigPath, '{ not json');
-    expect(() => assertVersionCoherence(fresh)).toThrow(SyntaxError);
+    expect(() => assertVersionCoherence(fresh)).toThrow(
+      /native\/desktop\/psyche-build-tauri\/src-tauri\/tauri\.conf\.json is not valid JSON/,
+    );
 
     const { rm } = await import('node:fs/promises');
     await rm(tauriConfigPath);
-    expect(() => assertVersionCoherence(fresh)).toThrow(/ENOENT/);
+    expect(() => assertVersionCoherence(fresh)).toThrow(
+      /src-tauri\/tauri\.conf\.json could not be read: ENOENT/,
+    );
+  });
+
+  it('names the malformed JSON manifest in both CLI modes', async () => {
+    const root = await writeFixture();
+    await setReleaseVersion(root, '0.4.2');
+    const nativePackagePath = path.join(root, 'native/desktop/psyche-build-tauri/package.json');
+    await writeFile(nativePackagePath, '{ "version": "0.4.2",');
+
+    for (const args of [['--coherence'], ['--check', 'v0.4.2']]) {
+      await expect(
+        execFileAsync(process.execPath, [releaseScript, ...args], { cwd: root }),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(
+          /native\/desktop\/psyche-build-tauri\/package\.json is not valid JSON/,
+        ),
+      });
+    }
   });
 
   it('rejects stray arguments to the coherence mode', async () => {
