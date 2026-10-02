@@ -30,6 +30,12 @@
  * harness kills it there. The harness then confirms on disk that the
  * transition really was in flight before trusting the observation.
  *
+ * The freeze is first-match: any other `pane_current_path` query that runs
+ * between arming and the creation's own (untracked-pane detection queries the
+ * same thing) consumes it. When that freezes the cockpit before the creation
+ * has split its pane, the in-flight check fails and the run reports
+ * `injection_ineffective` — honest, but a flake surface.
+ *
  * ## Agent confinement (mandatory)
  *
  * A previous harness launched the operator's real agent CLIs because tmux
@@ -44,13 +50,26 @@
  *     symlinks to exactly `node`, `git` and `tmux`, and the system
  *     directories, never a directory that holds agent CLIs;
  *   - before the cockpit is launched, a canary pane on that server must report
- *     that `command -v claude opencode coven codex` resolves only into the
- *     fake directory or to nothing; the agent pane repeats the probe before
+ *     that `command -v` for every agent command in the registry resolves only
+ *     into the fake directory or to nothing; the agent pane repeats the probe before
  *     anything is typed into it. Either failure aborts with
  *     {@link RecoveryAgentConfinementError} before any agent command is typed
  *     or any cockpit launched;
+ *   - a relaunch only ever runs on that same server, and only while it still
+ *     reports the confined `default-command`; if the server has gone, the
+ *     relaunch is refused ({@link decideRelaunch}) rather than starting an
+ *     unconfined one;
  *   - the server is killed in `finally`, and any fake-agent process still
  *     recorded is killed after it.
+ *
+ * ## Scope of the live-agent case
+ *
+ * It proves that a live, cockpit-owned, non-shell (agent worktree) pane record
+ * is neither recreated nor duplicated by a restart, and that its process is not
+ * orphaned. It does **not** observe the real `[n]` agent-pane creation, the
+ * worktree slug reservation that creation makes, the resume/recreate launch
+ * path for a dead agent pane, or the product's own title-setting — the harness
+ * sets the pane title itself.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -61,6 +80,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { readPaneSlugOwnershipRecords } from '../services/PaneSlugRegistry.js';
+import { AGENT_REGISTRY } from '../utils/agentLaunch.js';
 import { readWorktreeRecoveryMarkers } from '../services/WorktreeRecoveryMarker.js';
 import {
   assertDisposableRoot,
@@ -89,15 +109,38 @@ import {
   waitFor,
 } from './recoveryApplicationRestart.js';
 
-/** The agent names the confinement probe must never resolve on the host. */
-export const CONFINED_AGENT_NAMES = ['claude', 'opencode', 'coven', 'codex'] as const;
+/**
+ * Every command the cockpit can type to start an agent, taken from the agent
+ * registry so a newly registered agent is probed without editing this file.
+ * The confinement probe requires each to resolve only into the fake directory
+ * or to nothing.
+ *
+ * Caveat: agent *detection* (`findAgentCommand`) also accepts absolute
+ * `commonPaths`, so the cockpit may believe an agent is installed because, for
+ * example, `/opt/homebrew/bin/opencode` exists on the host. Launching still
+ * types the bare command into a pane, which no confined pane can resolve to
+ * that path, so the belief cannot start the real CLI here.
+ */
+export const CONFINED_AGENT_NAMES: readonly string[] = [...new Set(
+  Object.values(AGENT_REGISTRY)
+    .flatMap((entry) => [entry.promptCommand, entry.noPromptCommand])
+    .filter((command): command is string => typeof command === 'string')
+    .map((command) => command.trim().split(/\s+/u)[0])
+    .filter((name) => name.length > 0),
+)];
 /** Printed by the fake agent; never part of any evidence. */
 export const FAKE_AGENT_MARKER = 'PSYCHE-HARNESS-FAKE-AGENT';
 
 const PROBE_OPTION = '@psyche_harness_agents';
 const PROBE_TIMEOUT_MS = 5_000;
-const CRASH_REACH_TIMEOUT_MS = 6_000;
-const CRASH_PRESS_LIMIT = 4;
+/**
+ * A loaded host (observed: load average ~24) can keep the cockpit loading, and
+ * dropping keys, for tens of seconds; these bound the wait without assuming a
+ * quiet machine.
+ */
+const CRASH_REACH_TIMEOUT_MS = 10_000;
+const CRASH_PRESS_LIMIT = 6;
+const AGENT_START_TIMEOUT_MS = 15_000;
 const SETTLE_TIMEOUT_MS = 45_000;
 const LAYOUT_SETTLE_MS = 3_000;
 /**
@@ -189,6 +232,8 @@ interface ConfinedHost {
   readonly entry: { argv: string[] };
   readonly env: NodeJS.ProcessEnv;
   readonly shim?: { armPath: string; reachedPath: string; releasePath: string };
+  /** The confined pane command the private server was started with. */
+  readonly defaultCommand: string;
 }
 
 async function prepareConfinedHost(
@@ -231,11 +276,8 @@ async function prepareConfinedHost(
   const tmuxConfig = path.join(harness, 'tmux.conf');
   // Every pane, including the ones the cockpit splits, runs this. `env` sets
   // PATH explicitly, which tmux's client environment cannot override.
-  await writeFile(
-    tmuxConfig,
-    `set -g default-command "/usr/bin/env PATH=${confinedPath} ENV= /bin/sh"\n`,
-    'utf8',
-  );
+  const defaultCommand = `/usr/bin/env PATH=${confinedPath} ENV= /bin/sh`;
+  await writeFile(tmuxConfig, `set -g default-command "${defaultCommand}"\n`, 'utf8');
 
   const workPath = path.join(projectRoot, 'uncommitted-work.txt');
   const workBefore = 'the only copy of restart work\n';
@@ -252,6 +294,7 @@ async function prepareConfinedHost(
     fakeBin,
     launchLog,
     entry: resolveCockpitEntry(checkoutRoot),
+    defaultCommand,
     env: {
       PATH: confinedPath,
       HOME: home,
@@ -364,7 +407,46 @@ async function quitCockpit(socketPath: string, session: string): Promise<boolean
   return quit;
 }
 
-function startAgain(host: ConfinedHost): boolean {
+export type RelaunchDecision = 'relaunch-into-session' | 'launch-on-confined-server' | 'refuse';
+
+/**
+ * Decides how the cockpit may be started again. A new session is only ever
+ * opened on the **same** private server, and only when that server still
+ * reports the confined `default-command` it was started with. If the server
+ * has exited, `launchCockpit` would start a fresh one without the harness
+ * config, whose panes run the default login shell — on macOS `path_helper`
+ * then adds `/usr/local/bin` and `/etc/paths.d`, and an agent command typed by
+ * the cockpit could reach a real CLI. That case is refused, never launched.
+ */
+export function decideRelaunch(state: {
+  sessionExists: boolean;
+  /** The live server's global `default-command`, or undefined when no server answers. */
+  serverDefaultCommand: string | undefined;
+  confinedDefaultCommand: string;
+}): RelaunchDecision {
+  if (state.serverDefaultCommand !== state.confinedDefaultCommand) return 'refuse';
+  return state.sessionExists ? 'relaunch-into-session' : 'launch-on-confined-server';
+}
+
+/**
+ * Starts the cockpit again on the confined server. Throws
+ * {@link RecoveryRestartUnavailableError} rather than launch on a server whose
+ * confinement it cannot verify; returns false when an allowed launch failed.
+ */
+export function startAgain(
+  host: Pick<ConfinedHost, 'socketPath' | 'session' | 'projectRoot' | 'entry' | 'env' | 'defaultCommand'>,
+  launchers: {
+    relaunch: typeof relaunchCockpit;
+    launch: typeof launchCockpit;
+    readServerDefaultCommand: (socketPath: string) => string | undefined;
+    hasSession: typeof sessionExists;
+  } = {
+    relaunch: relaunchCockpit,
+    launch: launchCockpit,
+    readServerDefaultCommand: serverDefaultCommand,
+    hasSession: sessionExists,
+  },
+): boolean {
   const options = {
     socketPath: host.socketPath,
     session: host.session,
@@ -372,15 +454,33 @@ function startAgain(host: ConfinedHost): boolean {
     entry: host.entry,
     env: host.env,
   };
+  const decision = decideRelaunch({
+    sessionExists: launchers.hasSession(host.socketPath, host.session),
+    serverDefaultCommand: launchers.readServerDefaultCommand(host.socketPath),
+    confinedDefaultCommand: host.defaultCommand,
+  });
+  if (decision === 'refuse') {
+    throw new RecoveryRestartUnavailableError(
+      'the private tmux server is gone or no longer confined, so the cockpit was not relaunched',
+    );
+  }
   try {
-    if (sessionExists(host.socketPath, host.session)) {
-      relaunchCockpit(options);
+    if (decision === 'relaunch-into-session') {
+      launchers.relaunch(options);
     } else {
-      launchCockpit(options);
+      launchers.launch(options);
     }
     return true;
   } catch {
     return false;
+  }
+}
+
+function serverDefaultCommand(socketPath: string): string | undefined {
+  try {
+    return tmux(socketPath, 'show-options', '-g', '-v', 'default-command') || undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -712,7 +812,7 @@ export async function observeLiveAgentRestart(
       async () => (await launchedAgentPids(host!.launchLog)).length === 1
         && paneCommand(host!.socketPath, agentPane!) === 'sleep'
         && safeTmux(host!.socketPath, 'capture-pane', '-p', '-t', agentPane!).includes(FAKE_AGENT_MARKER),
-      PROBE_TIMEOUT_MS,
+      AGENT_START_TIMEOUT_MS,
     );
     const [agentPid] = await launchedAgentPids(host.launchLog);
     if (!agentRunningBeforeQuit || agentPid === undefined) {

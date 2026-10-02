@@ -1413,9 +1413,13 @@ async function runApplicationCrashMidTransition(): Promise<RecoveryScenarioEvide
     let classification: RecoveryClassification = 'unexpected_error';
     try {
       observed = await observeCrashMidTransition(workspace.projectRoot);
-      classification = !observed.transitionInFlightAtKill
-        ? 'injection_ineffective'
-        : CRASH_OUTCOME_CLASSIFICATION[observed.transitionOutcome];
+      // A cockpit that never reached its workspace observed nothing; that is
+      // an unavailable restart, not an ineffective injection.
+      classification = !observed.firstRunReachedWorkspace
+        ? 'restart_unavailable'
+        : !observed.transitionInFlightAtKill
+          ? 'injection_ineffective'
+          : CRASH_OUTCOME_CLASSIFICATION[observed.transitionOutcome];
     } catch (error) {
       classification = restartFailureClassification(error);
     }
@@ -1476,9 +1480,13 @@ async function runApplicationRestartLiveAgent(): Promise<RecoveryScenarioEvidenc
     let classification: RecoveryClassification = 'unexpected_error';
     try {
       observed = await observeLiveAgentRestart(workspace.projectRoot);
-      classification = observed.firstRunReachedWorkspace
-        ? 'workspace_restored'
-        : 'restart_unavailable';
+      // Without a cockpit-created pane running the fake agent there was no
+      // live agent pane to restart around, so the injection did not happen.
+      classification = !observed.firstRunReachedWorkspace
+        ? 'restart_unavailable'
+        : !observed.paneCreatedBeforeQuit || !observed.agentRunningBeforeQuit
+          ? 'injection_ineffective'
+          : 'workspace_restored';
     } catch (error) {
       classification = restartFailureClassification(error);
     }

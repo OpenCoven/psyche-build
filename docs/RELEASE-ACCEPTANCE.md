@@ -475,7 +475,11 @@ was reached and blocks. Product code makes that call with `execSync`, so the
 whole cockpit is frozen at exactly that point when it is killed.
 `transition-in-flight-at-kill` is the setup control: it reads the reservation,
 the live pane and the config at kill time, and a run where the shim was never
-reached reports `injection_ineffective` instead of passing.
+reached reports `injection_ineffective` instead of passing. The freeze is
+first-match: another `pane_current_path` query — untracked-pane detection makes
+the same one — can consume it, and if that freezes the cockpit before the split,
+the run reports `injection_ineffective`. That is honest but a flake surface, and
+a reason this stays opt-in.
 
 After the relaunch, `crash-config-not-silently-overwritten` requires the config
 to be readable, name the same project and keep every pane record it held at the
@@ -502,7 +506,15 @@ that a detached harness session cannot drive. `agent-pane-rebound` requires
 exactly one record keeping that id, bound to the same live pane;
 `agent-not-duplicated` requires one launch in the whole run and one pane running
 the agent; `agent-not-orphaned` requires the original agent process to be alive
-and still a child of its pane.
+and still a child of its pane. A run where the pane or the agent never started
+reports `injection_ineffective`.
+
+What it proves, plainly: a **live, cockpit-owned, non-shell (agent worktree)
+pane record** is neither recreated nor duplicated by a restart, and its process
+is not orphaned. What it does **not** observe: the real `[n]` agent-pane
+creation, the worktree slug reservation that creation makes, the resume and
+recreate launch path for an agent pane whose process is gone, or the product's
+own title-setting — the harness sets the pane title itself.
 
 Agent confinement is mandatory, because an earlier harness launched real agent
 CLIs when tmux replaced `-e PATH=` with the client `PATH`:
@@ -515,10 +527,18 @@ CLIs when tmux replaced `-e PATH=` with the client `PATH`:
   exactly `node`, `git` and `tmux`, and the system directories — never a
   directory that holds agent CLIs. The cockpit itself runs with the same `PATH`,
   `SHELL=/bin/sh` and a disposable `HOME`;
-- before the cockpit is launched, a canary pane must report that
-  `command -v claude opencode coven codex` resolves only into the fake directory
-  or to nothing, and the agent pane repeats the probe before anything is typed
-  into it. Either failure reports `injection_ineffective` and launches nothing;
+- before the cockpit is launched, a canary pane must report that `command -v`
+  for every agent command in the agent registry resolves only into the fake
+  directory or to nothing, and the agent pane repeats the probe before anything
+  is typed into it. Either failure reports `injection_ineffective` and launches
+  nothing. Agent *detection* also accepts absolute install paths, so the
+  cockpit may believe an agent is installed because a host binary exists at one
+  of them; launching still types the bare command into a confined pane, which
+  cannot reach that path;
+- a relaunch only runs on the same private server while it still reports the
+  confined `default-command`. If the server has exited, the relaunch is
+  refused (`restart_unavailable`) rather than starting a fresh, unconfined
+  server whose login shells would pick up `path_helper` directories;
 - the server is killed in `finally`, and any recorded fake-agent process still
   running its own command is killed after it.
 

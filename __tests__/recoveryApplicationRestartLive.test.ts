@@ -4,12 +4,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
+import { RecoveryRestartUnavailableError } from '../src/diagnostics/recoveryApplicationRestart.js';
 import {
+  CONFINED_AGENT_NAMES,
+  decideRelaunch,
   fakeAgentScript,
   FAKE_AGENT_MARKER,
   probeShowsConfinement,
+  startAgain,
   tmuxShimScript,
 } from '../src/diagnostics/recoveryApplicationRestartLive.js';
+import { AGENT_REGISTRY } from '../src/utils/agentLaunch.js';
 import {
   optInRecoveryScenarioIds,
   recoveryScenarioIds,
@@ -97,6 +102,84 @@ describe('restart scenarios with a crash or a live agent', () => {
         .toBe('real:display-message -t %1 -p #{pane_current_path}');
       expect(Number.parseInt(readFileSync(shim.reachedPath, 'utf8'), 10)).toBeGreaterThan(0);
       expect(existsSync(shim.armPath)).toBe(false);
+    });
+  });
+
+  describe('agent names the probe covers', () => {
+    it('includes the launch command of every registered agent', () => {
+      for (const entry of Object.values(AGENT_REGISTRY)) {
+        expect(CONFINED_AGENT_NAMES, entry.id).toContain(entry.promptCommand.split(' ')[0]);
+      }
+      for (const name of ['claude', 'opencode', 'coven', 'codex', 'crush']) {
+        expect(CONFINED_AGENT_NAMES).toContain(name);
+      }
+    });
+
+    it('holds only bare command names, so the probe line stays shell-safe', () => {
+      for (const name of CONFINED_AGENT_NAMES) {
+        expect(name).toMatch(/^[a-z][a-z0-9-]*$/u);
+      }
+    });
+  });
+
+  // An exited private server must never be replaced by a fresh one: the fresh
+  // server would not carry the confined default-command, its panes would run a
+  // login shell, and the cockpit could type an agent command into it.
+  describe('relaunch gate', () => {
+    const confined = '/usr/bin/env PATH=/fake:/tools ENV= /bin/sh';
+    const host = {
+      socketPath: '/tmp/psyche-recovery-x/cockpit.sock',
+      session: 'psyche-project-00000000',
+      projectRoot: '/tmp/psyche-recovery-x/project',
+      entry: { argv: ['node', 'index.js'] },
+      env: {},
+      defaultCommand: confined,
+    };
+    const launchers = (state: { session: boolean; serverCommand: string | undefined }) => {
+      const calls: string[] = [];
+      return {
+        calls,
+        launchers: {
+          relaunch: () => { calls.push('relaunch'); },
+          launch: () => { calls.push('launch'); },
+          readServerDefaultCommand: () => state.serverCommand,
+          hasSession: () => state.session,
+        },
+      };
+    };
+
+    it('refuses whenever the server is gone or its default-command is not the confined one', () => {
+      for (const serverDefaultCommand of [undefined, '', '/bin/zsh', `${confined} `]) {
+        for (const sessionExists of [true, false]) {
+          expect(decideRelaunch({
+            sessionExists,
+            serverDefaultCommand,
+            confinedDefaultCommand: confined,
+          })).toBe('refuse');
+        }
+      }
+    });
+
+    it('never launches when the server has exited', () => {
+      const { calls, launchers: deps } = launchers({ session: false, serverCommand: undefined });
+      expect(() => startAgain(host, deps)).toThrow(RecoveryRestartUnavailableError);
+      expect(calls).toEqual([]);
+    });
+
+    it('never launches on a server that lost its confinement', () => {
+      const { calls, launchers: deps } = launchers({ session: true, serverCommand: '/bin/zsh' });
+      expect(() => startAgain(host, deps)).toThrow(RecoveryRestartUnavailableError);
+      expect(calls).toEqual([]);
+    });
+
+    it('relaunches into the session, or opens one, only on the verified confined server', () => {
+      const surviving = launchers({ session: true, serverCommand: confined });
+      expect(startAgain(host, surviving.launchers)).toBe(true);
+      expect(surviving.calls).toEqual(['relaunch']);
+
+      const sessionGone = launchers({ session: false, serverCommand: confined });
+      expect(startAgain(host, sessionGone.launchers)).toBe(true);
+      expect(sessionGone.calls).toEqual(['launch']);
     });
   });
 
