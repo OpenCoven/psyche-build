@@ -34,9 +34,16 @@ Citations are to `main` at `05364c68`.
 - `:291-326` installs with `npm update -g` / `pnpm update -g` /
   `yarn global upgrade` through `execSync`. That runs only when `:191-263`
   detects a global install, which a source `link` can satisfy.
-- `src/hooks/useAutoUpdater.ts:111-115` calls `process.exit(0)` three seconds
-  after a successful update. The user did not consent to that exit, so it
-  violates the "no silent restart" requirement.
+- `src/hooks/useAutoUpdater.ts:111-115` would call `process.exit(0)` three
+  seconds after a successful update, with no user consent, which violates the
+  "no silent restart" requirement. In practice that exit is never reached. The
+  post-install check in `performUpdate()` re-enters `checkForUpdates()`, whose
+  `currentVersion` comes from the module-level, `require`-cached `packageJson`.
+  Replacing the global package cannot change that value in the running process,
+  so the comparison against the latest version fails, and the hook reports
+  "Update failed" even after a successful install. Remove the exit and fix the
+  stale-version check before any updater is retargeted. (PR #502 has since
+  disabled the registry path entirely.)
 - Settings persist as `updateSettings` inside the **per-project**
   `.psyche/psyche.config.json` (`src/index.ts:277`,
   `AutoUpdater.ts:69-98`). This config sits behind the versioned config gate
@@ -60,7 +67,9 @@ Citations are to `main` at `05364c68`.
   checks pin the asset set to exactly two DMGs plus `SHA256SUMS`: `:793`,
   `:824`, `:882` and `:891`. `:906` then flips the draft to latest.
 - `notify-homebrew` (`:908-936`) sends a `repository_dispatch` to
-  `OpenCoven/homebrew-tap`, signed with `HOMEBREW_TAP_TOKEN`. Success means
+  `OpenCoven/homebrew-tap`, authenticated with the `HOMEBREW_TAP_TOKEN`
+  bearer token. The request and its payload carry no cryptographic signature,
+  so the receiving workflow has nothing to verify. Success means
   only that the dispatch was accepted. It does not show that the tap changed.
 - The release workflow has no updater signing secret and no signing step for
   a manifest.
@@ -155,10 +164,19 @@ It also leaves brew in charge, so nothing changes for Cask users.
    `~/Library/Application Support/dev.opencoven.psyche`, not in project
    configs. On the first launch after `last_seen_version` changes, the app
    reads each open project through the #464 gate and reports the outcome:
-   migrated, current, or `config_newer_schema`. The release notes must state
-   whether the release bumps `PROJECT_CONFIG_SCHEMA_VERSION`, because
-   `v0.0.2` cannot refuse a newer file and a rollback depends on knowing.
-5. **CLI.** Retarget `AutoUpdater` to the same verified manifest, or disable
+   migrated, current, or `config_newer_schema`.
+5. **Rollback safety.** `v0.0.2` predates the #464 gate. It cannot refuse a
+   newer-schema project config; it would read it and could later overwrite
+   fields it does not understand. A note in the release notes does not
+   prevent that. So the first production release **must not bump**
+   `PROJECT_CONFIG_SCHEMA_VERSION`, and CI should assert that the constant
+   equals the value shipped in the previous public release. Only under that
+   constraint does reinstalling `v0.0.2` count as the G4 rollback. A later
+   release that needs a bump must first ship a release that understands the
+   gate, which becomes the rollback floor, and must give the operator a
+   pre-launch path: restore the `config-schema-snapshots` copy written on the
+   first superseding write, or quarantine the project.
+6. **CLI.** Retarget `AutoUpdater` to the same verified manifest, or disable
    its npm path until an npm release exists. Remove the timed
    `process.exit(0)` in `useAutoUpdater.ts:111-115`. Extend the #467 collector
    with the verifier state.
