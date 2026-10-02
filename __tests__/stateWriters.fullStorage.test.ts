@@ -210,4 +210,36 @@ describe('persisted state writers on full storage', () => {
     expect((await lstat(epochLink)).isSymbolicLink()).toBe(false);
     expect(await readFile(outside, 'utf8')).toBe(JSON.stringify({ devices: [] }));
   });
+
+  it('a cloned repo cannot aim project settings or rituals at a file outside it', async () => {
+    const outsideDir = await mkdtemp(path.join(tmpdir(), 'psyche-outside-'));
+    try {
+      const victim = path.join(outsideDir, 'victim.txt');
+      await writeFile(victim, 'user data\n', 'utf8');
+      const project = path.join(root, 'cloned');
+      await mkdir(path.join(project, '.psyche', 'rituals'), { recursive: true });
+      await symlink(victim, path.join(project, '.psyche', 'settings.json'));
+      await symlink(victim, path.join(project, '.psyche', 'rituals.json'));
+      await symlink(victim, path.join(project, '.psyche', 'rituals', 'daily.json'));
+
+      expect(() => new SettingsManager(project).updateSetting('baseBranch', 'develop', 'project'))
+        .toThrow(expect.objectContaining({ code: 'ATOMIC_WRITE_OUTSIDE_ROOT' }));
+      expect(() => setProjectDefaultRitualId(project, 'daily'))
+        .toThrow(expect.objectContaining({ code: 'ATOMIC_WRITE_OUTSIDE_ROOT' }));
+      const ritual = {
+        version: 1,
+        id: 'daily',
+        name: 'Daily',
+        scope: 'project',
+        projects: [{ projectRoot: '.', panes: [{ kind: 'terminal', name: 'Shell', command: 'git status' }] }],
+      } as never;
+      expect(() => saveProjectRitual(project, ritual))
+        .toThrow(expect.objectContaining({ code: 'ATOMIC_WRITE_OUTSIDE_ROOT' }));
+
+      expect(await readFile(victim, 'utf8')).toBe('user data\n');
+      expect(temporaryLeftovers(await readdir(outsideDir))).toEqual([]);
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -298,6 +298,7 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
 
 export class SettingsManager {
   private globalPath: string;
+  private projectRoot: string;
   private projectPath: string;
   private teamDefaultsPath: string;
   private globalSettings: PsycheSettings = {};
@@ -307,6 +308,7 @@ export class SettingsManager {
   constructor(projectRoot?: string) {
     const root = projectRoot || process.cwd();
     this.globalPath = GLOBAL_SETTINGS_PATH;
+    this.projectRoot = root;
     this.projectPath = join(root, '.psyche', 'settings.json');
     this.teamDefaultsPath = join(root, TEAM_DEFAULTS_FILENAME);
     this.loadSettings();
@@ -645,7 +647,9 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      atomicWriteFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2), { followSymlinks: true });
+      atomicWriteFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2), {
+        followSymlinks: { within: this.projectRoot },
+      });
     } catch (error) {
       console.error('Failed to save project settings:', error);
       throw error;

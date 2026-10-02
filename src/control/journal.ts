@@ -917,6 +917,9 @@ export class ControlJournal {
       const dropped = this.events.findIndex((event) => event.sequence > coveredSequence);
       const keepFrom = dropped === -1 ? this.events.length : dropped;
       if (keepFrom === 0) {
+        // Nothing is rewritten, so a torn tail from a failed rollback is still
+        // on disk and its remembered length still applies: the next append
+        // repairs it, or refuses. A no-op compaction is not a recovery.
         resolveDone();
         return;
       }

@@ -10,7 +10,8 @@ vi.mock('node:fs/promises', async (importOriginal) =>
 vi.mock('node:fs', async (importOriginal) =>
   (await import('./helpers/storageFaults.js')).faultyFs(await importOriginal()));
 
-const { atomicWriteFile, atomicWriteFileSync, atomicWriteJson } = await import('../src/utils/atomicWrite.js');
+const { AtomicWriteOutsideRootError, atomicWriteFile, atomicWriteFileSync, atomicWriteJson } =
+  await import('../src/utils/atomicWrite.js');
 
 const PRIOR = '{"prior":"state that must survive"}\n';
 const NEXT = JSON.stringify({ next: 'x'.repeat(4096) });
@@ -145,5 +146,82 @@ describe('atomic writes on full storage', () => {
     expect((await lstat(link)).isSymbolicLink()).toBe(false);
     expect(await readFile(link, 'utf8')).toBe(NEXT);
     expect(await readFile(outside, 'utf8')).toBe(PRIOR);
+  });
+
+  it('a planted symlink lends no mode, and setuid bits are never copied', async () => {
+    const outside = path.join(dir, 'loose.json');
+    await writeFile(outside, PRIOR, 'utf8');
+    await chmod(outside, 0o777);
+    const link = path.join(dir, 'epoch.json');
+    await symlink(outside, link);
+
+    await atomicWriteFile(link, NEXT);
+    expect((await lstat(link)).isSymbolicLink()).toBe(false);
+    // Created fresh under umask, not 0777 borrowed from the link's target.
+    expect((await stat(link)).mode & 0o777).not.toBe(0o777);
+    expect((await stat(link)).mode & 0o002).toBe(0);
+
+    await chmod(target, 0o4755);
+    await atomicWriteFile(target, NEXT);
+    expect((await stat(target)).mode & 0o7777).toBe(0o755);
+  });
+
+  it('followSymlinks creates the file a dangling link names and keeps the link', async () => {
+    const realDir = path.join(dir, 'dotfiles');
+    await mkdir(realDir);
+    const missing = path.join(realDir, 'not-yet.json');
+    const link = path.join(dir, 'dangling.json');
+    await symlink(missing, link);
+
+    await atomicWriteFile(link, NEXT, { followSymlinks: true });
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(missing, 'utf8')).toBe(NEXT);
+
+    const relativeMissing = path.join(realDir, 'relative.json');
+    const relativeLink = path.join(dir, 'relative-link.json');
+    await symlink(path.join('dotfiles', 'relative.json'), relativeLink);
+    atomicWriteFileSync(relativeLink, PRIOR, { followSymlinks: true });
+    expect((await lstat(relativeLink)).isSymbolicLink()).toBe(true);
+    expect(await readFile(relativeMissing, 'utf8')).toBe(PRIOR);
+  });
+
+  it('followSymlinks raises ELOOP on a symlink loop and leaves the links alone', async () => {
+    const a = path.join(dir, 'a.json');
+    const b = path.join(dir, 'b.json');
+    await symlink(b, a);
+    await symlink(a, b);
+
+    await expect(atomicWriteFile(a, NEXT, { followSymlinks: true })).rejects.toMatchObject({ code: 'ELOOP' });
+    expect(() => atomicWriteFileSync(a, NEXT, { followSymlinks: true }))
+      .toThrow(expect.objectContaining({ code: 'ELOOP' }));
+    expect((await lstat(a)).isSymbolicLink()).toBe(true);
+    expect((await lstat(b)).isSymbolicLink()).toBe(true);
+    expect(temporaryLeftovers(await readdir(dir))).toEqual([]);
+  });
+
+  it('followSymlinks within a root refuses a link that leaves it and follows one that stays', async () => {
+    const project = path.join(dir, 'project');
+    await mkdir(path.join(project, '.psyche'), { recursive: true });
+    const outside = path.join(dir, 'user-file.txt');
+    await writeFile(outside, PRIOR, 'utf8');
+    const escaping = path.join(project, '.psyche', 'settings.json');
+    await symlink(outside, escaping);
+
+    const refused = await atomicWriteFile(escaping, NEXT, { followSymlinks: { within: project } })
+      .then(() => undefined, (error: unknown) => error);
+    expect(refused).toBeInstanceOf(AtomicWriteOutsideRootError);
+    expect((refused as Error).message).not.toContain(dir);
+    expect(() => atomicWriteFileSync(escaping, NEXT, { followSymlinks: { within: project } }))
+      .toThrow(AtomicWriteOutsideRootError);
+    expect(await readFile(outside, 'utf8')).toBe(PRIOR);
+    expect((await lstat(escaping)).isSymbolicLink()).toBe(true);
+
+    const inside = path.join(project, 'shared.json');
+    await writeFile(inside, PRIOR, 'utf8');
+    const staying = path.join(project, '.psyche', 'rituals.json');
+    await symlink(inside, staying);
+    await atomicWriteFile(staying, NEXT, { followSymlinks: { within: project } });
+    expect((await lstat(staying)).isSymbolicLink()).toBe(true);
+    expect(await readFile(inside, 'utf8')).toBe(NEXT);
   });
 });

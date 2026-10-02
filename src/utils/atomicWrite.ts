@@ -2,14 +2,15 @@ import {
   closeSync,
   fchmodSync,
   fsyncSync,
+  lstatSync,
   openSync,
+  readlinkSync,
   realpathSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { open, realpath, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { open, rename, unlink, type FileHandle } from 'node:fs/promises';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 
@@ -36,18 +37,25 @@ import { randomBytes } from 'crypto';
  */
 export interface AtomicWriteOptions {
   /**
-   * Mode for the new file. When omitted, an existing target's permission bits
-   * are kept (a 0600 file stays 0600); a new file gets 0o666 before umask.
+   * Mode for the new file. When omitted, an existing regular file's
+   * permission bits (masked to 0o777) are kept, so a 0600 file stays 0600; a
+   * new file gets 0o666 before umask.
    */
   mode?: number;
   /**
    * Replace the file a symlink points at instead of the symlink itself, so a
    * user's linked config (a dotfiles checkout, say) stays linked. The temp file
    * is written beside the resolved target, keeping the rename on one
-   * filesystem. Leave unset for Psyche-private state such as tokens and the
-   * owner epoch, where a planted link must never be followed.
+   * filesystem. A dangling link creates the file it names; a loop raises ELOOP.
+   *
+   * `true` is for files under the user's own home. A file inside a project,
+   * which a cloned repository controls, must pass `{ within: projectRoot }`:
+   * a link resolving outside that root is refused, so a committed link cannot
+   * aim the write at an arbitrary user file. Leave unset for Psyche-private
+   * state such as tokens and the owner epoch, where a planted link must never
+   * be followed.
    */
-  followSymlinks?: boolean;
+  followSymlinks?: boolean | { within: string };
 }
 
 /**
@@ -94,42 +102,101 @@ function injectedFaultError(targetPath: string, tempPath: string): NodeJS.ErrnoE
   return error;
 }
 
-const PERMISSION_BITS = 0o7777;
+const PERMISSION_BITS = 0o777;
+/** Symlink hops followed before giving up with ELOOP, matching common SYMLOOP_MAX. */
+const MAX_SYMLINK_HOPS = 40;
 
-/** The existing target's permission bits, or undefined when there is none. */
-function existingModeSync(targetPath: string): number | undefined {
-  try {
-    return statSync(targetPath).mode & PERMISSION_BITS;
-  } catch {
-    return undefined;
+/**
+ * Raised when `followSymlinks.within` is set and the link resolves outside
+ * that root. The message names no path; a repository could otherwise use a
+ * committed link to make Psyche overwrite any file the user can write.
+ */
+export class AtomicWriteOutsideRootError extends Error {
+  readonly code = 'ATOMIC_WRITE_OUTSIDE_ROOT';
+
+  constructor() {
+    super('refusing to write through a symlink that resolves outside its allowed root');
+    this.name = 'AtomicWriteOutsideRootError';
   }
 }
 
-async function existingMode(targetPath: string): Promise<number | undefined> {
-  try {
-    return (await stat(targetPath)).mode & PERMISSION_BITS;
-  } catch {
-    return undefined;
-  }
+function errnoError(code: string, syscall: string, filePath: string): NodeJS.ErrnoException {
+  const error = new Error(`${code}: ${syscall} '${filePath}'`) as NodeJS.ErrnoException;
+  error.code = code;
+  error.syscall = syscall;
+  error.path = filePath;
+  return error;
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 }
 
 /**
- * Resolves symlinks for an existing target. A missing (or dangling) target is
- * written at the given path, which is what a plain write would have created.
+ * Follows a symlink chain hop by hop. A dangling link resolves to the missing
+ * file it names, so the write creates it there, as a plain write would. A
+ * chain longer than {@link MAX_SYMLINK_HOPS} (a loop) raises ELOOP rather than
+ * quietly replacing the link with a regular file.
  */
-function resolveExistingSync(filePath: string): string {
+function followLinkChain(filePath: string): string {
+  let current = path.resolve(filePath);
+  for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop += 1) {
+    let isLink: boolean;
+    try {
+      isLink = lstatSync(current).isSymbolicLink();
+    } catch (error) {
+      if (isMissing(error)) return current;
+      throw error;
+    }
+    if (!isLink) return current;
+    current = path.resolve(path.dirname(current), readlinkSync(current));
+  }
+  throw errnoError('ELOOP', 'open', filePath);
+}
+
+/** Canonical form of a path whose last component may not exist yet. */
+function canonicalize(target: string): string {
   try {
-    return realpathSync(filePath);
-  } catch {
-    return filePath;
+    return realpathSync(target);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+    return path.join(realpathSync(path.dirname(target)), path.basename(target));
   }
 }
 
-async function resolveExisting(filePath: string): Promise<string> {
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+/**
+ * Where the write lands and which permission bits it keeps.
+ *
+ * Without `followSymlinks`, the target path itself is replaced; a symlink
+ * there is replaced, never followed, and it lends no mode (only an existing
+ * regular file's bits are kept). With it, the chain is followed to the real
+ * file, optionally confined to `within`.
+ */
+function resolveWriteTarget(
+  filePath: string,
+  options: AtomicWriteOptions,
+): { targetPath: string; mode: number | undefined } {
+  let targetPath = filePath;
+  if (options.followSymlinks) {
+    targetPath = followLinkChain(filePath);
+    const within = typeof options.followSymlinks === 'object' ? options.followSymlinks.within : undefined;
+    // Checked on the canonical path, so a symlinked parent directory cannot
+    // carry the write out of the root either.
+    if (within !== undefined && !isWithin(canonicalize(within), canonicalize(targetPath))) {
+      throw new AtomicWriteOutsideRootError();
+    }
+  }
+  if (options.mode !== undefined) return { targetPath, mode: options.mode };
   try {
-    return await realpath(filePath);
+    const existing = lstatSync(targetPath);
+    return { targetPath, mode: existing.isFile() ? existing.mode & PERMISSION_BITS : undefined };
   } catch {
-    return filePath;
+    return { targetPath, mode: undefined };
   }
 }
 
@@ -176,8 +243,7 @@ async function syncDirectoryBestEffort(directory: string): Promise<void> {
  * @param content - The content to write
  */
 export function atomicWriteFileSync(filePath: string, content: string, options: AtomicWriteOptions = {}): void {
-  const targetPath = options.followSymlinks ? resolveExistingSync(filePath) : filePath;
-  const mode = options.mode ?? existingModeSync(targetPath);
+  const { targetPath, mode } = resolveWriteTarget(filePath, options);
   const tempPath = temporaryPathFor(targetPath);
   const buffer = Buffer.from(content, 'utf-8');
   let fd: number | undefined;
@@ -237,8 +303,7 @@ export async function atomicWriteFile(
   content: string,
   options: AtomicWriteOptions = {},
 ): Promise<void> {
-  const targetPath = options.followSymlinks ? await resolveExisting(filePath) : filePath;
-  const mode = options.mode ?? await existingMode(targetPath);
+  const { targetPath, mode } = resolveWriteTarget(filePath, options);
   const tempPath = temporaryPathFor(targetPath);
   let handle: FileHandle | undefined;
   let created = false;

@@ -380,7 +380,9 @@ export function saveProjectRitual(projectRoot: string, ritual: RitualDefinition)
   const dir = getProjectRitualsDir(projectRoot);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `${normalized.id}.json`);
-  atomicWriteFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, { followSymlinks: true });
+  atomicWriteFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, {
+    followSymlinks: { within: projectRoot },
+  });
   return normalized;
 }
 
@@ -1100,7 +1102,9 @@ export function setProjectDefaultRitualId(projectRoot: string, ritualId?: string
   };
   const manifestPath = getProjectRitualManifestPath(projectRoot);
   fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  atomicWriteFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { followSymlinks: true });
+  atomicWriteFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+    followSymlinks: { within: projectRoot },
+  });
   return manifest;
 }
 
