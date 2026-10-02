@@ -226,8 +226,11 @@ An unpublished pane, or a scope that cannot be read, is refused with the v3
 `unknown_pane` error and nothing reaches tmux. So that each keystroke does not
 rebuild the snapshot, the published pane set from the latest workspace read is
 reused until a workspace-change notification arrives or
-`LEGACY_PANE_SCOPE_TTL_MS` passes. A session revoked or closed while the check
-waits is dropped before anything is subscribed or typed.
+`LEGACY_PANE_SCOPE_TTL_MS` passes. A notification that lands during a scope
+read forces one re-read, and a second one refuses the request. A session that
+is revoked, closed, or in its closing handshake when the check returns is
+dropped before anything is subscribed or typed. Scope-read failures are logged
+as an error class name only, never the provider's message or stack.
 
 Ritual metadata publication is wired and bounded, but production mobile ritual
 execution is still a gap until #242 completes. Fixture roots, `DemoStore`,

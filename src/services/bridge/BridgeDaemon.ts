@@ -87,6 +87,12 @@ export interface BridgeDaemonOptions {
   bonjourFactory?: () => Pick<BridgeBonjour, "publish" | "stop">;
 }
 
+/** A loggable label for a scope-read failure: the error's class name, nothing it carries. */
+function classifyScopeError(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  return /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(name) ? name : "unknown";
+}
+
 /** The v3 `unknown_pane` refusal, reused verbatim so v2 leaks no more than v3. */
 function sendUnpublishedPaneError(s: Session): void {
   s.send({ type: "error", payload: { code: "unknown_pane", message: "pane is not published by this host" } });
@@ -606,9 +612,15 @@ export class BridgeDaemon {
     };
   }
 
-  /** True while the session is still authenticated and its socket is open. */
+  /**
+   * True while the session is still authenticated, registered, and its socket
+   * is OPEN. Registration alone is not enough: a socket in its closing
+   * handshake stays in activeSessions until 'close' fires.
+   */
   private isSessionLive(s: Session): boolean {
-    return s.state === "authenticated" && (this.listener?.activeSessions.has(s) ?? false);
+    return s.state === "authenticated"
+      && s.isOpen()
+      && (this.listener?.activeSessions.has(s) ?? false);
   }
 
   private async handleControl(
@@ -906,13 +918,22 @@ export class BridgeDaemon {
       ) {
         return cached.paneIds.has(paneId);
       }
-      return await this.isPublishedPane(paneId);
+      // A provider captures its panes before awaiting slower reads, so a
+      // notification during the read means the answer may already be stale.
+      // Re-read once; if the workspace changes again during that read, refuse
+      // rather than authorize from a snapshot known to be out of date.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const generation = this.workspaceGeneration;
+        const published = await this.isPublishedPane(paneId);
+        if (generation === this.workspaceGeneration) return published;
+      }
+      return false;
     } catch (error) {
+      // The provider's message and stack can carry private paths, so only a
+      // bounded classification of the failure is logged.
       LogService.getInstance().error(
-        "bridge v2 pane scope check failed; refusing the request",
+        `bridge v2 pane scope check failed (${classifyScopeError(error)}); refusing the request`,
         "BridgeDaemon",
-        undefined,
-        error instanceof Error ? error : undefined,
       );
       return false;
     }

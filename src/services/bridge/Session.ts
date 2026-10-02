@@ -33,6 +33,15 @@ export class Session {
 
   constructor(public readonly ctx: SessionContext) {}
 
+  /**
+   * True only while the socket is OPEN. A socket in its closing handshake is
+   * still registered with the listener until 'close' fires, but nothing sent
+   * or started for it can be delivered or cleaned up.
+   */
+  isOpen(): boolean {
+    return this.ctx.socket.readyState === 1; // 1 = OPEN
+  }
+
   send(msg: ServerMessage): void {
     if (this.ctx.socket.readyState !== 1) return; // 1 = OPEN
     try {
