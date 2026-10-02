@@ -158,6 +158,64 @@ function describeExit(result: CommandResult): string {
     : 'ended without an exit code';
 }
 
+const ORPHAN_SCAN_MAX_DEPTH = 6;
+const ORPHAN_SCAN_MAX_ENTRIES = 20_000;
+const ORPHAN_SCAN_SKIPPED = new Set(['node_modules', 'vendor', '.pnpm']);
+
+/**
+ * Nested directories under `root` whose `.git` link names a
+ * `<repo>/.git/worktrees/<id>` admin entry that no longer exists: what an
+ * interrupted nested `git worktree remove` leaves behind. Bounded in depth and
+ * entries, skips hidden and dependency directories like worktree discovery,
+ * and reads only link files. Unreadable directories are skipped.
+ */
+export function findOrphanedNestedWorktreeLinks(
+  root: string,
+): Array<{ repoPath: string; worktreePath: string; depth: number }> {
+  const found: Array<{ repoPath: string; worktreePath: string; depth: number }> = [];
+  let budget = ORPHAN_SCAN_MAX_ENTRIES;
+  const visit = (directory: string, depth: number) => {
+    if (depth > ORPHAN_SCAN_MAX_DEPTH) return;
+    let entries: import('fs').Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (--budget < 0) return;
+      if (!entry.isDirectory() || entry.name.startsWith('.') || ORPHAN_SCAN_SKIPPED.has(entry.name)) {
+        continue;
+      }
+      const child = path.join(directory, entry.name);
+      const adminDir = readGitLinkTarget(child);
+      if (adminDir && path.basename(path.dirname(adminDir)) === 'worktrees'
+        && path.basename(path.dirname(path.dirname(adminDir))) === '.git') {
+        const repoPath = path.dirname(path.dirname(path.dirname(adminDir)));
+        if (inspectWorktreeGitLink(child, repoPath) === 'orphaned') {
+          found.push({ repoPath, worktreePath: child, depth });
+        }
+      }
+      visit(child, depth + 1);
+    }
+  };
+  visit(root, 1);
+  return found;
+}
+
+/** The absolute admin directory a `.git` link file names, if it is one. */
+function readGitLinkTarget(directory: string): string | undefined {
+  const linkPath = path.join(directory, '.git');
+  try {
+    const stat = lstatSync(linkPath);
+    if (!stat.isFile() || stat.size > MAX_GIT_LINK_BYTES) return undefined;
+    const match = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(readFileSync(linkPath, 'utf8'));
+    return match ? path.resolve(directory, match[1]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Recovery markers name a pane; cleanup paths without one use these. */
 const ROLLBACK_MARKER_PANE = { id: 'worktree-rollback', paneId: 'uncreated', slug: 'rollback' };
 const PRUNE_MARKER_PANE = { id: 'managed-worktree-prune', paneId: 'none', slug: 'managed prune' };
@@ -1808,6 +1866,19 @@ export class WorktreeCleanupService {
         'paneActions',
         pane.id
       );
+    }
+
+    // Discovery asks Git about each nested checkout, so a nested worktree an
+    // interrupted removal left with a link to its repository's deleted admin
+    // entry is invisible to it. Keep those as targets: capture then refuses
+    // the whole cleanup (Git does not register them) and the next-attempt
+    // check reclassifies each one, instead of the root being removed around
+    // a half-removed child nobody recorded.
+    const known = new Set(Array.from(targets.values(), (target) => target.worktreePath));
+    for (const orphan of findOrphanedNestedWorktreeLinks(pane.worktreePath)) {
+      if (!known.has(canonicalizePathWithExistingAncestor(orphan.worktreePath))) {
+        addTarget(orphan.repoPath, orphan.worktreePath, orphan.depth);
+      }
     }
 
     return Array.from(targets.values()).sort((left, right) => {

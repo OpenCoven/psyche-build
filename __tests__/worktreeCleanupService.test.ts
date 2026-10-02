@@ -2167,6 +2167,52 @@ describe('WorktreeCleanupService', () => {
       expect(readFileSyncActual(join(older, 'survivor.txt'))).toBe('remaining user file\n');
     });
 
+    it('keeps a nested worktree discovery cannot see once its admin entry is gone', async () => {
+      const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      const nested = join(root, 'packages', 'sub');
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, 'survivor.txt'), 'nested remaining file\n');
+      // The interrupted nested removal deleted its admin entry, so Git-based
+      // discovery no longer returns it while the root stays healthy.
+      writeFileSync(join(nested, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/sub\n');
+      configureCleanupIdentity(root);
+      detectAllWorktreesMock.mockReturnValue([]);
+
+      await enqueuePaneAt(root);
+
+      // The root is not removed around a half-removed child.
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot: '/test/project',
+        worktreePath: nested,
+      }));
+      expect(markerReason()).toContain('partially removed');
+      expect(readFileSyncActual(join(nested, 'survivor.txt'))).toBe('nested remaining file\n');
+      expect(branchOids.get('/test/project')).toBe('abc123');
+    });
+
+    it('finds only nested links whose worktree admin entry is missing', async () => {
+      const { findOrphanedNestedWorktreeLinks } = await import('../src/services/WorktreeCleanupService.js');
+      const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      const liveRepo = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-live-repo-')));
+      tempDirs.push(liveRepo);
+      mkdirSync(join(liveRepo, '.git', 'worktrees', 'live'), { recursive: true });
+      const orphan = join(root, 'a', 'orphan');
+      const live = join(root, 'b', 'live');
+      const submodule = join(root, 'c', 'lib');
+      const hidden = join(root, '.cache', 'orphan');
+      for (const dir of [orphan, live, submodule, hidden]) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(orphan, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/orphan\n');
+      writeFileSync(join(live, '.git'), `gitdir: ${liveRepo}/.git/worktrees/live\n`);
+      writeFileSync(join(submodule, '.git'), 'gitdir: ../../.git/modules/lib\n');
+      writeFileSync(join(hidden, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/hidden\n');
+
+      expect(findOrphanedNestedWorktreeLinks(root)).toEqual([
+        { repoPath: '/test/sub-repo', worktreePath: orphan, depth: 2 },
+      ]);
+    });
+
     it('leaves a nested submodule checkout alone on the next attempt', async () => {
       const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
       const nested = join(root, 'vendor', 'lib');
