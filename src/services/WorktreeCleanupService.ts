@@ -148,12 +148,6 @@ export function inspectWorktreeGitLink(
   return pathEntryPresent(adminDir) ? 'other' : 'orphaned';
 }
 
-function isRecoveryRequiredState(
-  state: WorktreeRemovalState,
-): state is 'partially_removed' | 'unregistered' {
-  return state === 'partially_removed' || state === 'unregistered';
-}
-
 /**
  * A fixed description of how Git ended. Git's stderr carries absolute paths
  * and free text, so it never enters a durable marker.
@@ -517,9 +511,7 @@ export class WorktreeCleanupService {
       // checking every removal target against its own repository.
       const unresolvedTargets = job.configPath && job.currentProjectRoot
         ? this.getWorktreeRemovalTargets(job.pane, job.mainRepoPath)
-          .filter((target) => isRecoveryRequiredState(
-            this.inspectWorktreeRemovalState(target.repoPath, target.worktreePath),
-          ))
+          .filter((target) => this.nextAttemptRecoveryState(target) !== undefined)
         : [];
       if (unresolvedTargets.length > 0) {
         this.cleanupQueue = this.cleanupQueue
@@ -850,9 +842,9 @@ export class WorktreeCleanupService {
       mutationLeases,
     );
     if (!removeResult.success) {
-      let handled: boolean;
+      let outcome: Awaited<ReturnType<WorktreeCleanupService['reportFailedRemoval']>>;
       try {
-        handled = await this.reportFailedRemoval(
+        outcome = await this.reportFailedRemoval(
           ROLLBACK_MARKER_PANE,
           identity.mainRepoPath,
           identity.mainRepoPath,
@@ -867,7 +859,13 @@ export class WorktreeCleanupService {
           }`,
         };
       }
-      if (handled) {
+      if (outcome === 'unverified') {
+        return {
+          success: false,
+          error: `removal state unverified for newly created worktree ${identity.canonicalWorktreePath}; Git reported failure and its worktree list could not be read; no recovery marker written`,
+        };
+      }
+      if (outcome === 'recovery_required') {
         return {
           success: false,
           error: `recovery_required: removal of newly created worktree ${identity.canonicalWorktreePath} did not leave it intact; preserved remaining files and branch`,
@@ -1426,14 +1424,14 @@ export class WorktreeCleanupService {
       // Git can fail after it has begun writing. Only a worktree it left whole
       // is "preserved"; anything else must be reported, never retried. The
       // target was verified registered under these leases just before Git ran.
-      const handled = await this.reportFailedRemoval(
+      const outcome = await this.reportFailedRemoval(
         job.pane,
         job.mainRepoPath,
         target.repoPath,
         target.canonicalWorktreePath,
         removeResult,
       );
-      if (handled) {
+      if (outcome !== 'preserved') {
         return false;
       }
       this.logger.warn(
@@ -1478,11 +1476,11 @@ export class WorktreeCleanupService {
 
   /**
    * After a failed `git worktree remove`, decides whether the ordinary
-   * "preserved" report is true. Returns true when this method reported the
-   * outcome itself (recovery_required, or an unverifiable state), so the
-   * caller must not also call the worktree preserved. Throws only when a
-   * required recovery marker could not be written; nothing is deleted either
-   * way.
+   * "preserved" report is true. `recovery_required` means a marker was
+   * written; `unverified` means the state could not be read and no marker
+   * exists; only `preserved` lets the caller report preservation. Throws only
+   * when a required recovery marker could not be written; nothing is deleted
+   * either way.
    */
   private async reportFailedRemoval(
     pane: { id: string; paneId: string; slug?: string },
@@ -1491,7 +1489,7 @@ export class WorktreeCleanupService {
     canonicalWorktreePath: string,
     removeResult: CommandResult,
     removalObserved = true,
-  ): Promise<boolean> {
+  ): Promise<'recovery_required' | 'unverified' | 'preserved'> {
     const state = this.inspectWorktreeRemovalState(
       repoPath,
       canonicalWorktreePath,
@@ -1503,12 +1501,12 @@ export class WorktreeCleanupService {
         'paneActions',
         pane.id,
       );
-      return true;
+      return 'unverified';
     }
     // `unregistered` here means the path was not registered before Git ran
     // either, so Git had nothing of ours to begin removing: plain preservation.
     if (state !== 'partially_removed') {
-      return false;
+      return 'preserved';
     }
     await this.publishPartialRemovalRecovery(
       pane,
@@ -1517,7 +1515,23 @@ export class WorktreeCleanupService {
       state,
       `git worktree remove ${describeExit(removeResult)} after it began removing a registered worktree`,
     );
-    return true;
+    return 'recovery_required';
+  }
+
+  /**
+   * The recovery state a next attempt should record for one removal target,
+   * or undefined. The pane's own worktree gets a marker for any unexplained
+   * unregistered directory; a nested target only with positive evidence that
+   * its own repository began removing it, so a submodule or a nested checkout
+   * that was never one of our worktrees is left alone.
+   */
+  private nextAttemptRecoveryState(
+    target: WorktreeRemovalTarget,
+  ): 'partially_removed' | 'unregistered' | undefined {
+    const state = this.inspectWorktreeRemovalState(target.repoPath, target.worktreePath);
+    if (state === 'partially_removed') return state;
+    if (state === 'unregistered' && target.depth === 0) return state;
+    return undefined;
   }
 
   /**
@@ -1554,8 +1568,8 @@ export class WorktreeCleanupService {
                 );
                 return;
               }
-              const state = this.inspectWorktreeRemovalState(target.repoPath, target.worktreePath);
-              if (!isRecoveryRequiredState(state)) {
+              const state = this.nextAttemptRecoveryState(target);
+              if (!state) {
                 return;
               }
               await this.publishPartialRemovalRecovery(
@@ -1891,9 +1905,9 @@ export class WorktreeCleanupService {
               );
 
               if (!removeResult.success) {
-                let handled = false;
+                let outcome: Awaited<ReturnType<WorktreeCleanupService['reportFailedRemoval']>>;
                 try {
-                  handled = await this.reportFailedRemoval(
+                  outcome = await this.reportFailedRemoval(
                     PRUNE_MARKER_PANE,
                     job.projectRoot,
                     job.projectRoot,
@@ -1910,7 +1924,7 @@ export class WorktreeCleanupService {
                   );
                   return;
                 }
-                if (handled) {
+                if (outcome !== 'preserved') {
                   return;
                 }
                 this.logger.warn(
