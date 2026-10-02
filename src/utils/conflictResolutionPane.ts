@@ -6,7 +6,6 @@
 
 import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { LogService } from '../services/LogService.js';
 import {
   tearDownGenerationBoundPane,
 } from './TmuxGenerationGuard.js';
@@ -28,7 +27,13 @@ import {
   writePromptFile,
 } from './promptStore.js';
 import { ensureGeminiFolderTrusted } from './geminiTrust.js';
-import { describePromptBootstrapSkipped, resolvePaneShell } from './paneShellDialect.js';
+import {
+  reportPromptBootstrapSkipped,
+  resolvePaneShell,
+  type PaneShellProbeOptions,
+  type PromptBootstrapSkipReason,
+  type PromptSkipReportDeps,
+} from './paneShellDialect.js';
 import {
   buildAgentCommand,
   buildInitialPromptCommand,
@@ -77,6 +82,10 @@ export interface ConflictResolutionPaneOptions {
   /** Must durably add this exact record before merge/agent commands run. */
   persistConflictPane: (pane: PsychePane) => Promise<void>;
   refreshPanes?: () => Promise<void>;
+  /** Clock and sleep for the bounded pane-shell probe; injectable for tests. */
+  paneShellProbe?: PaneShellProbeOptions;
+  /** Log and toast seams for a skipped prompt; injectable for tests. */
+  promptSkipReport?: PromptSkipReportDeps;
 }
 
 /**
@@ -203,6 +212,16 @@ async function createConflictResolutionPaneWithReservation(
   }
 
   try {
+    // Read the pane's shell before typing anything into this fresh pane (see
+    // paneShellDialect.ts). Read after the merge, a slow merge or hook would
+    // report `git` and the conflict brief would be dropped. It is the
+    // send-keys baseline and decides the prompt bootstrap's dialect: never
+    // Psyche's own $SHELL (#508).
+    const paneShell = await resolvePaneShell(
+      () => tmuxService.getPaneCurrentCommand(paneInfo),
+      options.paneShellProbe,
+    );
+
     // The durable record exists before the pane touches the worktree or starts
     // a merge. This lets cleanup see it even if the agent command fails.
     await tmuxService.sendShellCommand(paneInfo, `cd "${targetRepoPath}"`);
@@ -219,19 +238,19 @@ async function createConflictResolutionPaneWithReservation(
     const shouldSendPromptViaTmux = promptTransport === 'send-keys';
     const omitsPromptDelivery = promptTransport === 'launch-only';
     const takesCommandLinePrompt = !shouldSendPromptViaTmux && !omitsPromptDelivery;
-
-    // The pane's current command is its shell (the merge commands above have
-    // returned). It is the send-keys baseline and decides the dialect of the
-    // prompt bootstrap: never Psyche's own $SHELL (#508).
-    const paneShell = await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneInfo));
     const baselineCommand = shouldSendPromptViaTmux ? paneShell.paneCommand : undefined;
 
+    // The prompt travels only through a file read by the pane's own shell; it
+    // is never typed or placed in argv (AGENTS.md).
+    let initialPromptSkipped: PromptBootstrapSkipReason | null = null;
     let promptFilePath: string | null = null;
-    if (takesCommandLinePrompt && paneShell.dialect) {
+    if (takesCommandLinePrompt && paneShell.dialect === null) {
+      initialPromptSkipped = paneShell.reason;
+    } else if (takesCommandLinePrompt) {
       try {
         promptFilePath = await writePromptFile(targetRepoPath, slug, prompt);
       } catch {
-        // Fall back to escaped inline flows if prompt file creation fails
+        initialPromptSkipped = 'prompt_file_unwritable';
       }
     }
 
@@ -240,16 +259,7 @@ async function createConflictResolutionPaneWithReservation(
     }
 
     let launchCommand: string;
-    if (takesCommandLinePrompt && paneShell.dialect === null) {
-      // No known dialect: the bootstrap and the inline-escaped prompt are both
-      // shell-specific, and a rejected line would stop the agent from starting.
-      LogService.getInstance().warn(
-        describePromptBootstrapSkipped(agent, paneShell.reason),
-        'conflictResolutionPane',
-        paneInfo,
-      );
-      launchCommand = buildAgentCommand(agent, settings.permissionMode);
-    } else if (promptFilePath && paneShell.dialect && !shouldSendPromptViaTmux) {
+    if (promptFilePath && paneShell.dialect) {
       const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath, paneShell.dialect);
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
@@ -257,19 +267,10 @@ async function createConflictResolutionPaneWithReservation(
         settings.permissionMode
       )}`;
       promptFilePath = null;
-    } else if (omitsPromptDelivery) {
-      launchCommand = buildAgentCommand(agent, settings.permissionMode);
     } else {
-      const escapedPrompt = prompt
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/`/g, '\\`')
-        .replace(/\$/g, '\\$');
-      launchCommand = buildInitialPromptCommand(
-        agent,
-        `"${escapedPrompt}"`,
-        settings.permissionMode
-      );
+      // launch-only and send-keys agents, or a prompt that cannot be
+      // delivered safely: launch bare.
+      launchCommand = buildAgentCommand(agent, settings.permissionMode);
     }
 
     if (!launchCommand) {
@@ -278,6 +279,16 @@ async function createConflictResolutionPaneWithReservation(
 
     await tmuxService.sendShellCommand(paneInfo, launchCommand);
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
+
+    if (initialPromptSkipped) {
+      await reportPromptBootstrapSkipped(
+        agent,
+        initialPromptSkipped,
+        'conflictResolutionPane',
+        paneInfo,
+        options.promptSkipReport,
+      );
+    }
 
     if (shouldSendPromptViaTmux) {
       await sendPromptViaTmux({

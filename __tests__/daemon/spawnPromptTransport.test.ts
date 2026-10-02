@@ -51,6 +51,17 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+/** A fake clock for the pane-shell probe: it advances only when the probe sleeps. */
+function fakeProbe() {
+  let t = 0;
+  return {
+    now: () => t,
+    sleep: async (ms: number) => {
+      t += ms;
+    },
+  };
+}
+
 function harness(paneShell: string | Error = 'zsh') {
   const commands: string[] = [];
   const sendPromptKeys = vi.fn(async (_request: BridgeSpawnPromptKeysRequest) => {});
@@ -67,6 +78,7 @@ function harness(paneShell: string | Error = 'zsh') {
     },
     sendPromptKeys,
     readPaneCommand,
+    paneShellProbe: fakeProbe(),
   };
   return {
     commands,
@@ -145,15 +157,45 @@ describe('spawnBridgePane prompt bootstrap follows the pane shell (#508)', () =>
   });
 
   it.each([
-    ['an unknown shell', 'nu'],
-    ['a read error', new Error('no pane')],
-  ] as const)('launches bare with no prompt file and warns for %s', async (_label, paneShell) => {
+    ['an unknown shell', 'nu', 'unrecognized_shell'],
+    ['a program in the foreground', 'vim', 'not_a_shell'],
+    ['a read error', new Error('no pane'), 'unreadable_shell'],
+  ] as const)('launches bare with no prompt file and returns a warning for %s', async (_label, paneShell, reason) => {
     const h = await spawn('opencode', 'Fix it', harness(paneShell));
     expect(h.commands[0]).toBe('opencode');
     expect(promptFiles()).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain('without its initial prompt');
-    expect(warn.mock.calls[0][0]).not.toContain('Fix it');
+    expect(h.result.warnings).toEqual([{
+      code: 'initial_prompt_skipped',
+      message: expect.stringContaining('without its initial prompt'),
+    }]);
+    const message = h.result.warnings![0].message;
+    expect(message).not.toContain('Fix it');
+    expect(message).not.toContain(root);
+    expect(message.length).toBeLessThanOrEqual(1_024);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`[initial_prompt_skipped:${reason}]`), 'bridge', '%9');
+  });
+
+  it('keeps the prompt when an rc-file program gives way to the shell', async () => {
+    const h = harness();
+    h.readPaneCommand
+      .mockResolvedValueOnce('fastfetch')
+      .mockResolvedValueOnce('fastfetch');
+    const result = await spawn('opencode', 'Fix it', h);
+    expect(result.commands[0]).toMatch(/^PSYCHE_PROMPT_FILE='/u);
+    expect(result.result.warnings).toBeUndefined();
+  });
+
+  // AGENTS.md: the prompt is never typed or put in argv. A failed prompt-file
+  // write used to throw before any command was typed.
+  it('launches bare and warns when the prompt file cannot be written', async () => {
+    fs.mkdirSync(path.join(root, '.psyche'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.psyche', 'prompts'), 'not a directory');
+    const h = await spawn('opencode', 'Fix it', harness('zsh'));
+    expect(h.commands[0]).toBe('opencode');
+    expect(h.result.warnings).toEqual([{
+      code: 'initial_prompt_skipped',
+      message: expect.stringContaining('prompt file could not be written'),
+    }]);
   });
 
   it('treats a missing pane-shell reader as unreadable', async () => {
@@ -162,6 +204,7 @@ describe('spawnBridgePane prompt bootstrap follows the pane shell (#508)', () =>
     const result = await spawn('claude', 'Fix it', h);
     expect(result.commands[0]).toBe('claude');
     expect(promptFiles()).toEqual([]);
+    expect(result.result.warnings?.[0]?.code).toBe('initial_prompt_skipped');
   });
 });
 

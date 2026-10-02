@@ -81,6 +81,18 @@ describe('buildPromptReadAndDeleteSnippet dialects (#508)', () => {
     expect(snippet).not.toContain('PSYCHE_PROMPT_FILE=');
   });
 
+  // In fish single quotes, `\\` and `\'` are escapes: a path containing a
+  // backslash must have it doubled or the path (or the quoting) breaks.
+  it('escapes backslashes and quotes in the path for fish', () => {
+    const snippet = buildPromptReadAndDeleteSnippet(`/tmp/a\\b'c\\`, 'fish');
+    expect(snippet.startsWith(`set PSYCHE_PROMPT_FILE '/tmp/a\\\\b\\'c\\\\'; `)).toBe(true);
+  });
+
+  it('keeps POSIX single-quoting unchanged for backslashes', () => {
+    const snippet = buildPromptReadAndDeleteSnippet(`/tmp/a\\b`, 'posix');
+    expect(snippet.startsWith(`PSYCHE_PROMPT_FILE='/tmp/a\\b'; `)).toBe(true);
+  });
+
   // Run the real bootstrap (no agent) to prove it reads the prompt and deletes
   // the file in each shell this host has.
   const prompt = `multi-line\n"quoted" $HOME \`tick\` it's ;|&`;

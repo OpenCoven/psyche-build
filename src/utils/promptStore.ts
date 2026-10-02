@@ -29,6 +29,15 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * fish single quotes treat `\\` and `\'` as escapes, so both must be escaped;
+ * the POSIX `'\''` form would leave a trailing backslash able to eat the
+ * closing quote.
+ */
+export function fishQuote(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
 export function getPromptsDir(projectRoot: string): string {
   return path.join(projectRoot, '.psyche', PROMPTS_SUBDIR);
 }
@@ -102,9 +111,8 @@ export function buildPromptReadAndDeleteSnippet(
   promptPath: string,
   dialect: PaneShellDialect,
 ): string {
-  const quotedPromptPath = shellQuote(promptPath);
   if (dialect === 'fish') {
-    return `set PSYCHE_PROMPT_FILE ${quotedPromptPath}; set PSYCHE_PROMPT_CONTENT "$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
+    return `set PSYCHE_PROMPT_FILE ${fishQuote(promptPath)}; set PSYCHE_PROMPT_CONTENT "$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
   }
-  return `PSYCHE_PROMPT_FILE=${quotedPromptPath}; PSYCHE_PROMPT_CONTENT="$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
+  return `PSYCHE_PROMPT_FILE=${shellQuote(promptPath)}; PSYCHE_PROMPT_CONTENT="$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
 }

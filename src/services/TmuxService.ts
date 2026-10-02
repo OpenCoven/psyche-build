@@ -124,6 +124,8 @@ function isPermanentError(error: unknown): boolean {
  * - Logging and debugging
  * - Type-safe tmux operations
  */
+const PANE_CURRENT_COMMAND_TIMEOUT_MS = 1_000;
+
 export class TmuxService {
   private static instance: TmuxService;
   private logger = LogService.getInstance();
@@ -800,10 +802,17 @@ export class TmuxService {
   /**
    * Get the current foreground command for a pane as reported by tmux.
    */
+  /**
+   * The pane's foreground command. Bounded: the launch path polls it to pick
+   * the pane's shell dialect, and one hung tmux call must not stall a launch.
+   */
   async getPaneCurrentCommand(paneId: string): Promise<string> {
     return this.executeWithRetry(
       () =>
-        this.execute(`tmux display-message -t '${paneId}' -p '#{pane_current_command}'`).trim(),
+        this.execute(
+          `tmux display-message -t '${paneId}' -p '#{pane_current_command}'`,
+          { timeout: PANE_CURRENT_COMMAND_TIMEOUT_MS },
+        ).trim(),
       RetryStrategy.FAST,
       `getPaneCurrentCommand(${paneId})`
     );

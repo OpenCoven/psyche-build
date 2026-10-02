@@ -314,22 +314,25 @@ describe('conflict resolution pane transaction', () => {
 
   describe('prompt bootstrap follows the pane shell (#508)', () => {
     const savedShell = process.env.SHELL;
-    let warn: ReturnType<typeof vi.spyOn>;
-    beforeEach(async () => {
-      const { LogService } = await import('../src/services/LogService.js');
-      warn = vi.spyOn(LogService.getInstance(), 'warn').mockImplementation(() => {});
+    const newReport = () => ({
+      logWarn: vi.fn<(message: string, source: string, paneId: string) => void>(),
+      showToast: vi.fn<(message: string) => void>(),
+    });
+    let report = newReport();
+    beforeEach(() => {
+      report = newReport();
       writePromptFileMock.mockImplementation(async () => '/repo/.psyche/prompts/p.txt');
       getPromptTransportMock.mockReturnValue('option');
     });
     afterEach(() => {
       process.env.SHELL = savedShell;
-      warn.mockRestore();
     });
 
     async function createPane() {
       const { createConflictResolutionPane } = await import(
         '../src/utils/conflictResolutionPane.js'
       );
+      let t = 0;
       await createConflictResolutionPane({
         sourceBranch: 'feature',
         targetBranch: 'main',
@@ -340,6 +343,8 @@ describe('conflict resolution pane transaction', () => {
         existingPanes: [] as PsychePane[],
         agent: 'opencode',
         persistConflictPane: async () => {},
+        paneShellProbe: { now: () => t, sleep: async (ms: number) => { t += ms; } },
+        promptSkipReport: report,
       });
       const last = tmuxService.sendShellCommand.mock.calls.at(-1) as SendShellCommandCall | undefined;
       return last?.[1];
@@ -359,18 +364,53 @@ describe('conflict resolution pane transaction', () => {
       expect(buildPromptReadAndDeleteSnippetMock).toHaveBeenCalledWith('/repo/.psyche/prompts/p.txt', 'fish');
     });
 
+    // A slow merge or hook still running when the shell was read used to
+    // report `git`, silently dropping the conflict brief. The shell is read
+    // before the pane is given any command.
+    it('reads the pane shell before typing the cd and merge lines', async () => {
+      const order: string[] = [];
+      tmuxService.getPaneCurrentCommand.mockImplementation(async () => {
+        order.push('read-shell');
+        return order.some((entry) => entry.startsWith('command:git merge')) ? 'git' : 'zsh';
+      });
+      (tmuxService.sendShellCommand as any).mockImplementation(async (_paneId: string, command: string) => {
+        order.push(`command:${command}`);
+      });
+      await createPane();
+      expect(order[0]).toBe('read-shell');
+      expect(order.filter((entry) => entry === 'read-shell')).toHaveLength(1);
+      expect(buildPromptReadAndDeleteSnippetMock).toHaveBeenCalledWith('/repo/.psyche/prompts/p.txt', 'posix');
+      expect(report.logWarn).not.toHaveBeenCalled();
+    });
+
     it.each([
-      ['an unknown shell', () => tmuxService.getPaneCurrentCommand.mockResolvedValue('nu')],
-      ['a read error', () => tmuxService.getPaneCurrentCommand.mockRejectedValue(new Error('no pane'))],
-    ])('launches bare without a prompt file or inline prompt for %s', async (_label, arrange) => {
+      ['an unknown shell', 'unrecognized_shell', () => tmuxService.getPaneCurrentCommand.mockResolvedValue('nu')],
+      ['a read error', 'unreadable_shell', () => tmuxService.getPaneCurrentCommand.mockRejectedValue(new Error('no pane'))],
+    ])('launches bare without a prompt file or inline prompt for %s', async (_label, reason, arrange) => {
       arrange();
       const line = await createPane();
       expect(writePromptFileMock).not.toHaveBeenCalled();
       expect(buildPromptReadAndDeleteSnippetMock).not.toHaveBeenCalled();
       expect(buildInitialPromptCommandMock).not.toHaveBeenCalled();
       expect(line).toBe('opencode');
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn.mock.calls[0][0]).toContain('without its initial prompt');
+      expect(report.logWarn).toHaveBeenCalledTimes(1);
+      expect(report.logWarn.mock.calls[0][0]).toContain(`[initial_prompt_skipped:${reason}]`);
+      expect(report.logWarn.mock.calls[0][1]).toBe('conflictResolutionPane');
+      expect(report.showToast).toHaveBeenCalledTimes(1);
+      expect(report.showToast.mock.calls[0][0]).toContain('without its initial prompt');
+    });
+
+    // AGENTS.md: the prompt is never inlined into the typed line or argv.
+    it('launches bare and reports instead of inlining when the prompt file cannot be written', async () => {
+      tmuxService.getPaneCurrentCommand.mockResolvedValue('zsh');
+      writePromptFileMock.mockImplementation(async () => {
+        throw new Error('disk full');
+      });
+      const line = await createPane();
+      expect(buildInitialPromptCommandMock).not.toHaveBeenCalled();
+      expect(line).toBe('opencode');
+      expect(report.logWarn.mock.calls[0][0]).toContain('[initial_prompt_skipped:prompt_file_unwritable]');
+      expect(report.showToast).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -42,7 +42,12 @@ import {
   settlePaneSlugReservationAfterFailure,
 } from '../services/PaneSlugReservation.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
-import { describePromptBootstrapSkipped, resolvePaneShell } from '../utils/paneShellDialect.js';
+import {
+  describePromptBootstrapSkipped,
+  resolvePaneShell,
+  type PaneShellProbeOptions,
+  type PromptBootstrapSkipReason,
+} from '../utils/paneShellDialect.js';
 import { LogService } from '../services/LogService.js';
 import { derivePaneSlug } from '../utils/slug.js';
 import {
@@ -149,6 +154,8 @@ export interface BridgeSpawnDeps {
    * unknown and the agent launches without its command-line prompt.
    */
   readPaneCommand?: (paneId: string) => Promise<string | undefined>;
+  /** Clock and sleep for the bounded pane-shell probe; injectable for tests. */
+  paneShellProbe?: PaneShellProbeOptions;
 }
 
 export interface BridgeSpawnResult {
@@ -1875,7 +1882,7 @@ export async function spawnBridgePane(
 
     if (agent) {
       try {
-        const launchCommand = await buildLaunchCommand(
+        const launch = await buildLaunchCommand(
           scoped.projectRoot,
           paneSlug,
           agent,
@@ -1883,9 +1890,14 @@ export async function spawnBridgePane(
           request.permissionMode
             ?? (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
           persistedPaneId,
-          deps.readPaneCommand,
+          deps,
         );
-        deps.sendTmuxCommand(persistedPaneId, launchCommand);
+        deps.sendTmuxCommand(persistedPaneId, launch.command);
+        if (launch.initialPromptSkipped) {
+          // The pane and agent are fine; only the prompt was withheld. Say so
+          // to the client instead of only in the daemon log.
+          warnings.push(initialPromptSkippedWarning(agent, launch.initialPromptSkipped, persistedPaneId));
+        }
 
         // send-keys agents were launched bare above; type the prompt into their
         // TUI once it is up. Without this the prompt is silently dropped.
@@ -2665,6 +2677,18 @@ function assertGeneratedWorktreePath(projectRoot: string, worktreePath: string):
   }
 }
 
+interface BridgeLaunchCommand {
+  command: string;
+  initialPromptSkipped: PromptBootstrapSkipReason | null;
+}
+
+/**
+ * Builds the line typed into a pane this spawn has just created (the
+ * fresh-pane assumption in paneShellDialect.ts). The prompt reaches the agent
+ * only through a file read by the pane's own shell, in that shell's dialect;
+ * when that cannot be done safely, the agent launches bare and the reason is
+ * returned for the client warning.
+ */
 async function buildLaunchCommand(
   projectRoot: string,
   slug: string,
@@ -2672,9 +2696,13 @@ async function buildLaunchCommand(
   prompt: string | undefined,
   permissionMode: PsycheConfig['settings']['permissionMode'],
   paneId: string,
-  readPaneCommand: BridgeSpawnDeps['readPaneCommand'],
-): Promise<string> {
+  deps: Pick<BridgeSpawnDeps, 'readPaneCommand' | 'paneShellProbe'>,
+): Promise<BridgeLaunchCommand> {
   const promptTransport = getPromptTransport(agent);
+  const bare = (initialPromptSkipped: PromptBootstrapSkipReason | null): BridgeLaunchCommand => ({
+    command: buildAgentCommand(agent, permissionMode),
+    initialPromptSkipped,
+  });
   // send-keys agents take no prompt on the command line — it is typed into
   // their TUI after launch. Writing a prompt file here would read it into a
   // variable, delete the file, and then run a bare command, destroying the
@@ -2685,30 +2713,49 @@ async function buildLaunchCommand(
     || promptTransport === 'send-keys'
     || promptTransport === 'launch-only'
   ) {
-    return buildAgentCommand(agent, permissionMode);
+    return bare(null);
   }
 
   // The bootstrap is shell syntax, so it must match the pane's own shell. With
   // no known dialect, a rejected line would stop the agent from starting at
-  // all: launch it bare, write no prompt file, and say so.
+  // all: launch it bare and write no prompt file.
+  const { readPaneCommand } = deps;
   const paneShell = await resolvePaneShell(
     readPaneCommand ? () => readPaneCommand(paneId) : undefined,
+    deps.paneShellProbe,
   );
   if (paneShell.dialect === null) {
-    LogService.getInstance().warn(
-      describePromptBootstrapSkipped(agent, paneShell.reason),
-      'bridge',
-      paneId,
-    );
-    return buildAgentCommand(agent, permissionMode);
+    return bare(paneShell.reason);
   }
 
-  const promptFile = await writePromptFile(projectRoot, slug, prompt);
-  return `${buildPromptReadAndDeleteSnippet(promptFile, paneShell.dialect)}; ${buildInitialPromptCommand(
-    agent,
-    '"$PSYCHE_PROMPT_CONTENT"',
-    permissionMode,
-  )}`;
+  let promptFile: string;
+  try {
+    promptFile = await writePromptFile(projectRoot, slug, prompt);
+  } catch {
+    // Never fall back to putting the prompt on the typed line.
+    return bare('prompt_file_unwritable');
+  }
+  return {
+    command: `${buildPromptReadAndDeleteSnippet(promptFile, paneShell.dialect)}; ${buildInitialPromptCommand(
+      agent,
+      '"$PSYCHE_PROMPT_CONTENT"',
+      permissionMode,
+    )}`,
+    initialPromptSkipped: null,
+  };
+}
+
+function initialPromptSkippedWarning(
+  agent: AgentName,
+  reason: PromptBootstrapSkipReason,
+  paneId: string,
+): DurableEffectWarning {
+  const message = describePromptBootstrapSkipped(agent, reason);
+  LogService.getInstance().warn(`${message} [initial_prompt_skipped:${reason}]`, 'bridge', paneId);
+  return {
+    code: 'initial_prompt_skipped',
+    message: message.replace(/[\r\n\0]/g, ' ').slice(0, 1_024),
+  };
 }
 
 function bridgeError(code: string, message: string): Error & BridgeError {

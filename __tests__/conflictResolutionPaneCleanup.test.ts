@@ -11,6 +11,7 @@ const tmuxService = vi.hoisted(() => ({
   sendTmuxKeys: vi.fn(async () => {}),
   selectPane: vi.fn(async () => {}),
   killPane: vi.fn(async () => {}),
+  getPaneCurrentCommand: vi.fn(async () => 'zsh'),
 }));
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%9'));
 const beginReservationMock = vi.hoisted(() => vi.fn());

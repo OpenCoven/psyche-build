@@ -55,7 +55,9 @@ export function summarizeOrchestrationWarnings(
       ? `${subject}, but launch command outcome is unknown`
       : codes.size === 1 && codes.has('pane_cleanup_repair_required')
         ? `${subject}, but cleanup marker removal requires repair`
-        : `${subject} with recovery warnings`;
+        : codes.size === 1 && codes.has('initial_prompt_skipped')
+          ? `${subject} without its initial prompt`
+          : `${subject} with recovery warnings`;
 
   if (visibleDetails.length > 0) {
     message += `: ${visibleDetails.join('; ')}`;

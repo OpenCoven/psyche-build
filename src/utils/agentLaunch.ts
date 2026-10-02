@@ -14,10 +14,12 @@ import {
   type AgentExitRecorder,
 } from './agentLaunchOutcome.js';
 import {
-  describePromptBootstrapSkipped,
+  reportPromptBootstrapSkipped,
   resolvePaneShell,
+  type PaneShellProbeOptions,
+  type PromptBootstrapSkipReason,
+  type PromptSkipReportDeps,
 } from './paneShellDialect.js';
-import { LogService } from '../services/LogService.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
@@ -597,6 +599,10 @@ export interface LaunchAgentInPaneOptions {
    * when the pane's own shell is one known to accept the suffix.
    */
   exitRecorder?: AgentExitRecorder;
+  /** Clock and sleep for the bounded pane-shell probe; injectable for tests. */
+  paneShellProbe?: PaneShellProbeOptions;
+  /** Log and toast seams for a skipped prompt; injectable for tests. */
+  promptSkipReport?: PromptSkipReportDeps;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
@@ -618,6 +624,8 @@ export interface LaunchAgentInPaneOptions {
 export interface LaunchAgentInPaneResult {
   /** True only when the exit recorder was appended to the typed command. */
   readonly exitRecorderArmed: boolean;
+  /** Why a command-line prompt was not delivered, or null when it was (or none was due). */
+  readonly initialPromptSkipped: PromptBootstrapSkipReason | null;
 }
 
 export async function launchAgentInPane(
@@ -634,6 +642,8 @@ export async function launchAgentInPane(
     psychePaneId,
     codexHookEventFile,
     exitRecorder,
+    paneShellProbe,
+    promptSkipReport,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -654,32 +664,31 @@ export async function launchAgentInPane(
 
   // The pane's current command is its shell before the agent is typed. It is
   // the send-keys baseline and the only trustworthy answer to which shell will
-  // parse the prompt bootstrap and the exit recorder (#475, #508).
+  // parse the prompt bootstrap and the exit recorder (#475, #508). Callers own
+  // a fresh pane (see paneShellDialect.ts), so a program still in the
+  // foreground after the bounded probe is an rc-file leftover, not an editor.
   const paneShell = shouldSendPromptViaTmux || exitRecorder || takesCommandLinePrompt
-    ? await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneId))
+    ? await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneId), paneShellProbe)
     : null;
   const dialect = paneShell?.dialect ?? null;
   const baselineCommand = shouldSendPromptViaTmux ? paneShell?.paneCommand : undefined;
 
-  let launchCommand: string;
+  let launchCommand = buildAgentCommand(agent, permissionMode);
+  let initialPromptSkipped: PromptBootstrapSkipReason | null = null;
   if (takesCommandLinePrompt && paneShell && paneShell.dialect === null) {
-    // No known dialect: both the prompt bootstrap and the inline-escaped
-    // fallback are shell-specific, and a line the pane's shell rejects would
-    // stop the agent from starting at all. Launch it bare, write no prompt
-    // file, and say so.
-    launchCommand = buildAgentCommand(agent, permissionMode);
-    LogService.getInstance().warn(
-      describePromptBootstrapSkipped(agent, paneShell.reason),
-      'agentLaunch',
-      paneId,
-    );
+    // No known dialect: the bootstrap is shell syntax, and a line the pane's
+    // shell rejects would stop the agent from starting at all. Launch it bare
+    // and write no prompt file.
+    initialPromptSkipped = paneShell.reason;
   } else if (takesCommandLinePrompt && dialect) {
-    // Prefer a prompt file so the prompt never has to survive shell quoting.
+    // The prompt travels only through a file read by the pane's own shell; it
+    // is never typed or placed in argv (AGENTS.md). If the file cannot be
+    // written, the agent launches bare rather than inlining the prompt.
     let promptFilePath: string | null = null;
     try {
       promptFilePath = await writePromptFile(projectRoot, slug, prompt);
     } catch {
-      // Fall back to inline escaping if the prompt file cannot be written.
+      promptFilePath = null;
     }
 
     if (promptFilePath) {
@@ -690,19 +699,8 @@ export async function launchAgentInPane(
         permissionMode,
       )}`;
     } else {
-      const escapedPrompt = prompt
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/`/g, '\\`')
-        .replace(/\$/g, '\\$');
-      launchCommand = buildInitialPromptCommand(
-        agent,
-        `"${escapedPrompt}"`,
-        permissionMode,
-      );
+      initialPromptSkipped = 'prompt_file_unwritable';
     }
-  } else {
-    launchCommand = buildAgentCommand(agent, permissionMode);
   }
 
   if (agent === 'codex') {
@@ -721,6 +719,10 @@ export async function launchAgentInPane(
   await tmuxService.sendShellCommand(paneId, launchCommand);
   await tmuxService.sendTmuxKeys(paneId, 'Enter');
 
+  if (initialPromptSkipped) {
+    await reportPromptBootstrapSkipped(agent, initialPromptSkipped, 'agentLaunch', paneId, promptSkipReport);
+  }
+
   if (shouldSendPromptViaTmux) {
     await sendPromptViaTmux({
       paneId,
@@ -735,5 +737,8 @@ export async function launchAgentInPane(
     });
   }
 
-  return { exitRecorderArmed: Boolean(exitRecorder && recorderSyntax) };
+  return {
+    exitRecorderArmed: Boolean(exitRecorder && recorderSyntax),
+    initialPromptSkipped,
+  };
 }
