@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import type { PsycheConfig, PsychePane } from '../types.js';
 import { triggerHook } from '../utils/hooks.js';
@@ -33,6 +33,7 @@ import {
 import {
   findBlockingWorktreeRecoveryMarker,
   findBlockingWorktreeReuseRecoveryMarker,
+  writeWorktreeRecoveryMarker,
 } from './WorktreeRecoveryMarker.js';
 
 export interface WorktreeCleanupJob {
@@ -42,6 +43,55 @@ export interface WorktreeCleanupJob {
   configPath: string;
   currentProjectRoot: string;
   deleteBranch: boolean;
+}
+
+/**
+ * What Git and the filesystem jointly say about a worktree after a removal
+ * attempt. `git worktree remove` deletes the tree first and the registration
+ * second, and keeps going after a failed delete, so a fault inside Git's write
+ * (a read-only subdirectory, a killed process, a full disk) can leave any
+ * combination behind:
+ *
+ * - `removed`: unregistered and gone. Nothing to do.
+ * - `intact`: registered, present, Git link present. Git refused before
+ *   writing, or never ran; ordinary preservation.
+ * - `registration_only`: registered but the directory is gone. Non-forced
+ *   `git worktree remove` reconciles this by deleting only the administrative
+ *   entry; no user file exists to lose.
+ * - `partially_removed`: a directory Git no longer fully owns — unregistered
+ *   while present, or registered without its `.git` link. What remains may be
+ *   the only copy of ignored files, and nothing safe can be inferred about it,
+ *   so this is `recovery_required`: an operator marker, never a deletion.
+ * - `unknown`: the registration could not be read. Treated as unsafe.
+ */
+export type WorktreeRemovalState =
+  | 'removed'
+  | 'intact'
+  | 'registration_only'
+  | 'partially_removed'
+  | 'unknown';
+
+export function classifyWorktreeRemovalState(observed: {
+  registered: boolean | undefined;
+  directoryPresent: boolean;
+  gitLinkPresent: boolean;
+}): WorktreeRemovalState {
+  if (observed.registered === undefined) return 'unknown';
+  if (!observed.directoryPresent) {
+    return observed.registered ? 'registration_only' : 'removed';
+  }
+  if (!observed.registered || !observed.gitLinkPresent) return 'partially_removed';
+  return 'intact';
+}
+
+/** Anything at the path counts as present; only ENOENT proves absence. */
+function pathEntryPresent(target: string): boolean {
+  try {
+    lstatSync(target);
+    return true;
+  } catch (error) {
+    return !(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
+  }
 }
 
 export interface CreatedWorktreeRollbackJob {
@@ -384,6 +434,28 @@ export class WorktreeCleanupService {
 
     const queuedJob = this.captureCleanupJob(job, canonicalWorktreePath, generation);
     if (!queuedJob) {
+      // A worktree Git no longer registers but whose directory survives is what
+      // an owner killed inside `git worktree remove` leaves behind. Capture
+      // refuses it, which is right, but refusing silently would strand the
+      // remaining files with no record. Publish recovery_required instead.
+      if (
+        job.configPath
+        && job.currentProjectRoot
+        && this.inspectWorktreeRemovalState(job.mainRepoPath, canonicalWorktreePath)
+          === 'partially_removed'
+      ) {
+        this.cleanupQueue = this.cleanupQueue
+          .then(() => this.recordPartialRemovalOnNextAttempt(job, canonicalWorktreePath))
+          .catch((error) => {
+            const errorObj = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+              `Could not record partially removed worktree for ${job.pane.slug}: ${errorObj.message}`,
+              'paneActions',
+              job.pane.id,
+              errorObj
+            );
+          });
+      }
       return;
     }
 
@@ -1250,6 +1322,20 @@ export class WorktreeCleanupService {
     );
 
     if (!removeResult.success) {
+      // Git can fail after it has begun writing. Only a worktree it left whole
+      // is "preserved"; anything else must be reported, never retried.
+      if (
+        this.inspectWorktreeRemovalState(target.repoPath, target.canonicalWorktreePath)
+          === 'partially_removed'
+      ) {
+        await this.publishPartialRemovalRecovery(
+          job.pane,
+          job.mainRepoPath,
+          target.canonicalWorktreePath,
+          `git worktree remove failed after it began writing: ${removeResult.error}`,
+        );
+        return false;
+      }
       this.logger.warn(
         `Worktree removal preserved ${target.canonicalWorktreePath} for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
         'paneActions',
@@ -1274,6 +1360,102 @@ export class WorktreeCleanupService {
     }
 
     return true;
+  }
+
+  private inspectWorktreeRemovalState(
+    repoPath: string,
+    canonicalWorktreePath: string,
+  ): WorktreeRemovalState {
+    const registration = this.getWorktreeBranch(repoPath, canonicalWorktreePath);
+    return classifyWorktreeRemovalState({
+      registered: registration.success ? registration.found === true : undefined,
+      directoryPresent: pathEntryPresent(canonicalWorktreePath),
+      gitLinkPresent: pathEntryPresent(path.join(canonicalWorktreePath, '.git')),
+    });
+  }
+
+  /**
+   * Next-attempt half of partial-removal recovery. Runs under the same project
+   * and worktree leases a removal would take, so a removal still live in
+   * another process is never mistaken for a half-removed tree, and re-reads the
+   * state under them. It never mutates Git or the filesystem beyond the marker.
+   */
+  private async recordPartialRemovalOnNextAttempt(
+    job: WorktreeCleanupJob,
+    canonicalWorktreePath: string,
+  ): Promise<void> {
+    await this.withProjectLifecycleLease(
+      job.mainRepoPath,
+      canonicalWorktreePath,
+      'cleanup',
+      (projectLifecycleLease) => this.withWorktreeLifecycleLock(
+        canonicalWorktreePath,
+        job.mainRepoPath,
+        'cleanup',
+        async () => {
+          const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+            job.currentProjectRoot,
+            job.mainRepoPath,
+            canonicalWorktreePath,
+          );
+          if (recoveryMarker.blocked) {
+            this.logger.warn(
+              `Skipping background worktree cleanup for ${job.pane.slug}: ${recoveryMarker.reason}`,
+              'paneActions',
+              job.pane.id,
+            );
+            return;
+          }
+          if (
+            this.inspectWorktreeRemovalState(job.mainRepoPath, canonicalWorktreePath)
+              !== 'partially_removed'
+          ) {
+            return;
+          }
+          await this.publishPartialRemovalRecovery(
+            job.pane,
+            job.mainRepoPath,
+            canonicalWorktreePath,
+            'found on a later cleanup attempt; an earlier removal was interrupted after Git began writing',
+          );
+        },
+        projectLifecycleLease,
+      ),
+    );
+    this.logger.debug(
+      `Finished background worktree cleanup for ${job.pane.slug}`,
+      'paneActions',
+      job.pane.id
+    );
+  }
+
+  /**
+   * recovery_required for a worktree Git left partially removed. The marker
+   * blocks every later destructive cleanup and reuse of the path until an
+   * operator acknowledges it through `psyche recover`; the remaining files and
+   * the branch are left exactly as Git left them.
+   */
+  private async publishPartialRemovalRecovery(
+    pane: PsychePane,
+    projectRoot: string,
+    canonicalWorktreePath: string,
+    detail: string,
+  ): Promise<void> {
+    const { marker } = await writeWorktreeRecoveryMarker({
+      projectRoot,
+      worktreePath: canonicalWorktreePath,
+      pane: { id: pane.id, paneId: pane.paneId },
+      operation: 'cleanup',
+      reason: `worktree partially removed; ${detail}. Remaining files and the branch were preserved. `
+        + 'Inspect what remains, copy anything needed, then remove or restore the directory '
+        + 'before acknowledging.',
+    });
+    this.logger.warn(
+      `recovery_required: ${canonicalWorktreePath} for ${pane.slug} was partially removed; `
+        + `preserved remaining files and branch; recovery marker ${marker.id} requires operator acknowledgement`,
+      'paneActions',
+      pane.id,
+    );
   }
 
   private haveUnchangedQueuedBranchOids(job: QueuedWorktreeCleanupJob): boolean {

@@ -24,6 +24,7 @@ import {
   RecoveryTmuxUnavailableError,
 } from './recoveryTmuxIdentity.js';
 import { observeMidMutationCleanup } from './recoveryMidMutationCleanup.js';
+import { observePartialGitWrite } from './recoveryPartialGitWrite.js';
 import {
   observeAgentLaunchFailure,
   RecoveryAgentLaunchConfinementError,
@@ -72,6 +73,7 @@ export type RecoveryScenarioId =
   | 'unavailable-providers'
   | 'stale-pane-identity'
   | 'interrupted-git-mutation'
+  | 'git-mutation-partial-write'
   | 'agent-launch-failure'
   | 'upgrade-recovery'
   | 'application-restart';
@@ -87,6 +89,7 @@ export type RecoveryInjectionId =
   | 'capability-provider-unregistered-and-daemon-socket-absent'
   | 'tmux-server-replaced-reusing-recorded-pane-id'
   | 'cleanup-owner-killed-during-supervised-git-mutation'
+  | 'git-worktree-remove-fails-after-deleting-part-of-tree'
   | 'agent-cli-exits-at-launch-inside-live-shell'
   | 'pane-config-aged-across-schema-versions'
   | 'application-quit-and-relaunched';
@@ -102,6 +105,7 @@ export type RecoveryClassification =
   | 'outcome_reconciled'
   | 'owner_restart_fenced'
   | 'cleanup_recoverable'
+  | 'recovery_required'
   | 'provider_unavailable'
   | 'agent_launch_failed'
   | 'stale_identity_rejected'
@@ -160,6 +164,10 @@ export type RecoveryInvariantId =
   | 'cleanup-owner-killed-during-mutation'
   | 'worktree-state-self-consistent'
   | 'interrupted-mutation-left-no-orphan'
+  | 'partial-write-landed-inside-git'
+  | 'partial-removal-flagged-recovery-required'
+  | 'partial-removal-detected-on-next-attempt'
+  | 'remaining-worktree-files-preserved'
   | 'replaced-server-reused-pane-id'
   | 'stale-pane-identity-reported'
   | 'reused-pane-id-not-adopted'
@@ -1085,6 +1093,87 @@ async function runInterruptedGitMutation(): Promise<RecoveryScenarioEvidence> {
 }
 
 /**
+ * Closes the scope gap `interrupted-git-mutation` states: a fault *inside*
+ * Git's write rather than around it. A committed read-only directory makes
+ * `git worktree remove` delete part of the tree, fail, and unregister the rest
+ * (see `recoveryPartialGitWrite.ts`). Neither outcome the earlier scenario
+ * calls self-consistent is available any more, so the product must say so:
+ *
+ *   - its own failed removal publishes recovery_required, an operator marker
+ *     naming the worktree, instead of logging the worktree as "preserved";
+ *   - a half-removed worktree an earlier owner never inspected is detected on
+ *     the next cleanup attempt and gets the same marker;
+ *   - a retry behind the marker changes nothing and adds no second marker;
+ *   - every file Git left behind, and both branches, are untouched, checked
+ *     after the injected read-only fault was lifted so the product's own
+ *     restraint is what is being measured.
+ *
+ * `partial-write-landed-inside-git` is the positive control: Git must have
+ * deleted something and then stopped, or nothing here was exercised.
+ *
+ * Scope: one deterministic fault class (a permission failure partway through
+ * deletion). A SIGKILL at an arbitrary instruction can also leave a registered
+ * worktree without its `.git` link; the product classifies that state the same
+ * way, which unit tests cover, but this scenario does not produce it.
+ */
+async function runGitMutationPartialWrite(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+    const workBefore = await readFile(workspace.workPath);
+
+    let observed: Awaited<ReturnType<typeof observePartialGitWrite>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observePartialGitWrite(workspace.projectRoot);
+      // A partial write the product did not report is the silent outcome this
+      // scenario exists to rule out, not a pass with a different label.
+      classification = !observed.partialWriteLanded
+        ? 'injection_ineffective'
+        : observed.flaggedByFailedRemoval && observed.detectedOnNextAttempt
+          ? 'recovery_required'
+          : 'unexpected_success';
+    } catch {
+      classification = 'unexpected_error';
+    }
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfterBytes = await readFile(workspace.workPath);
+    const landed = observed?.partialWriteLanded === true;
+    // Every preservation invariant is conditioned on the positive control, so
+    // an ineffective injection cannot report them as held.
+    const held = (value: boolean | undefined) => landed && value === true;
+
+    return evidence(
+      'git-mutation-partial-write',
+      'git-worktree-remove-fails-after-deleting-part-of-tree',
+      classification,
+      [
+        { id: 'partial-write-landed-inside-git', held: landed },
+        { id: 'partial-removal-flagged-recovery-required', held: held(observed?.flaggedByFailedRemoval) },
+        { id: 'partial-removal-detected-on-next-attempt', held: held(observed?.detectedOnNextAttempt) },
+        { id: 'recovery-marker-names-the-worktree', held: held(observed?.markersNameWorktrees) },
+        {
+          id: 'recovery-marker-carries-operator-instructions',
+          held: held(observed?.markersCarryInstructions),
+        },
+        { id: 'cleanup-retry-blocked-by-marker', held: held(observed?.retryBlockedByMarker) },
+        { id: 'remaining-worktree-files-preserved', held: held(observed?.remainingFilesPreserved) },
+        { id: 'worktree-branch-unchanged', held: held(observed?.branchesUnchanged) },
+        { id: 'uncommitted-work-untouched', held: workAfterBytes.equals(workBefore) },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+      ],
+      { configBefore, configAfter, workAfter: digest(workAfterBytes) },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
+/**
  * The upgrade-recovery scenario #199 held open.
  *
  * It was deliberately absent while the persisted project config carried no
@@ -1299,6 +1388,7 @@ const SCENARIOS: Readonly<
   'unavailable-providers': runUnavailableProviders,
   'stale-pane-identity': runStalePaneIdentity,
   'interrupted-git-mutation': runInterruptedGitMutation,
+  'git-mutation-partial-write': runGitMutationPartialWrite,
   'agent-launch-failure': runAgentLaunchFailure,
   'upgrade-recovery': runUpgradeRecovery,
   'application-restart': runApplicationRestart,
