@@ -493,9 +493,11 @@ async function waitForPaths(paths: readonly string[]): Promise<void> {
 async function readPositivePid(pidPath: string): Promise<number> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const pid = Number.parseInt(readFileSync(pidPath, 'utf8'), 10);
-    if (Number.isInteger(pid) && pid > 0) {
-      return pid;
+    // Accept only a complete, newline-terminated decimal record: a partial
+    // write such as "12" of "12345" must never be signalled.
+    const record = /^([1-9][0-9]*)\n$/.exec(readFileSync(pidPath, 'utf8'));
+    if (record) {
+      return Number(record[1]);
     }
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
   }
@@ -966,13 +968,16 @@ describe('macOS build channels', () => {
           `Promise.all([
             import("node:child_process"),
             import("node:fs"),
-          ]).then(([{ spawn }, { writeFileSync }]) => {
+          ]).then(([{ spawn }, { renameSync, writeFileSync }]) => {
             const child = spawn(
               process.execPath,
               ["-e", "setInterval(() => {}, 1000)"],
               { stdio: "ignore" },
             );
-            writeFileSync(process.argv[1], String(child.pid));
+            // Publish the PID atomically and newline-terminated so the reader can
+            // never observe a partial number.
+            writeFileSync(process.argv[1] + ".tmp", String(child.pid) + "\\n");
+            renameSync(process.argv[1] + ".tmp", process.argv[1]);
             setInterval(() => {}, 1000);
           })`,
           childPidPath,
