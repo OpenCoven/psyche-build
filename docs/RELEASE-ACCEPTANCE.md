@@ -481,9 +481,17 @@ the same one — can consume it, and if that freezes the cockpit before the spli
 the run reports `injection_ineffective`. That is honest but a flake surface, and
 a reason this stays opt-in.
 
-After the relaunch, `crash-config-not-silently-overwritten` requires the config
-to be readable, name the same project and keep every pane record it held at the
-crash — or, if unreadable, to be byte-identical. No pane record id or tmux pane
+Before arming, the scenario creates one terminal pane through the same `[t]`
+path and waits for its record to be durable (`durable-pane-seeded-before-crash`).
+Without it the config would hold no records at the crash, and "kept every
+record" would compare an empty set. The sidebar is focused again before the
+armed press, as a person's would be; otherwise a squeezed welcome pane can be
+the active one and the cockpit's untargeted split fails with "no space for a new
+pane". After the relaunch,
+`crash-config-not-silently-overwritten` requires that seeded record to have been
+present at the kill, and the config to be readable, name the same project and
+keep every pane record it held at the crash with the same tmux pane id — or, if
+unreadable, to be byte-identical. An empty set fails. No pane record id or tmux pane
 id may appear twice, the worktree list must be unchanged, exactly one cockpit
 and one session must run, and `crash-transition-settled` requires the half-done
 creation to end **completed** (one durable record, live pane, reservation
@@ -520,9 +528,12 @@ Agent confinement is mandatory, because an earlier harness launched real agent
 CLIs when tmux replaced `-e PATH=` with the client `PATH`:
 
 - the private tmux server (`-S`, a socket in the disposable root) starts with a
-  config whose `default-command` is `/usr/bin/env PATH=<confined> ENV= /bin/sh`,
+  config whose `default-command` is `/usr/bin/env "PATH=<confined>" ENV= /bin/sh`,
   so every pane — the harness's and the cockpit's — runs a non-login shell with
-  an explicit `PATH`;
+  an explicit `PATH`. The `PATH` word is quoted so a temp root with a space stays
+  one value, and a root containing `:`, quotes, `$`, a backtick or a backslash is
+  refused rather than quoted around. The probe joins resolved paths with `:`,
+  which no confined directory may contain;
 - that `PATH` is the fake-agent directory, a tool directory holding symlinks to
   exactly `node`, `git` and `tmux`, and the system directories — never a
   directory that holds agent CLIs. The cockpit itself runs with the same `PATH`,
@@ -541,6 +552,11 @@ CLIs when tmux replaced `-e PATH=` with the client `PATH`:
   server whose login shells would pick up `path_helper` directories;
 - the server is killed in `finally`, and any recorded fake-agent process still
   running its own command is killed after it.
+
+Classification follows what was observed: `workspace_restored` and the crash
+outcomes are reported only when the relaunch actually restored the workspace,
+and a run whose setup never happened reports `injection_ineffective` or
+`restart_unavailable` instead.
 
 Both scenarios are opt-in for the same reason as `application-restart`, and
 their evidence carries only closed-union fields and booleans.

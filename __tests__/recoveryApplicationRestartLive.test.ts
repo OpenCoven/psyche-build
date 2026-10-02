@@ -1,12 +1,27 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { RecoveryRestartUnavailableError } from '../src/diagnostics/recoveryApplicationRestart.js';
 import {
+  classifyCrashMidTransition,
+  classifyLiveAgentRestart,
+  confinedDefaultCommand,
+  confinedPathFor,
   CONFINED_AGENT_NAMES,
+  probeAgents,
+  tmuxDefaultCommandConfig,
   decideRelaunch,
   fakeAgentScript,
   FAKE_AGENT_MARKER,
@@ -33,17 +48,20 @@ describe('restart scenarios with a crash or a live agent', () => {
   describe('agent confinement probe', () => {
     it('accepts names that resolve only into the fake directory or to nothing', () => {
       expect(probeShowsConfinement('ok', FAKE_BIN)).toBe(true);
-      expect(probeShowsConfinement(`ok ${FAKE_BIN}/claude`, FAKE_BIN, ['claude'])).toBe(true);
+      expect(probeShowsConfinement(`ok:${FAKE_BIN}/claude`, FAKE_BIN, ['claude'])).toBe(true);
+      expect(probeShowsConfinement(`ok:${FAKE_BIN}/claude\n`, FAKE_BIN, ['claude'])).toBe(true);
     });
 
     it('refuses any agent resolved outside the fake directory', () => {
       for (const leaked of [
-        `ok ${FAKE_BIN}/claude /Users/someone/.local/bin/opencode`,
-        'ok /opt/homebrew/bin/claude',
+        `ok:${FAKE_BIN}/claude:/Users/someone/.local/bin/opencode`,
+        'ok:/opt/homebrew/bin/claude',
         // A fake directory prefix is not the fake directory.
-        `ok ${FAKE_BIN}-real/claude`,
+        `ok:${FAKE_BIN}-real/claude`,
         // A file of another name inside the fake directory is not a fake agent.
-        `ok ${FAKE_BIN}/claude-real`,
+        `ok:${FAKE_BIN}/claude-real`,
+        // Two entries run together are not one fake path.
+        `ok:${FAKE_BIN}/claude ${FAKE_BIN}/claude`,
       ]) {
         expect(probeShowsConfinement(leaked, FAKE_BIN), leaked).toBe(false);
       }
@@ -53,6 +71,7 @@ describe('restart scenarios with a crash or a live agent', () => {
       expect(probeShowsConfinement(undefined, FAKE_BIN)).toBe(false);
       expect(probeShowsConfinement('', FAKE_BIN)).toBe(false);
       expect(probeShowsConfinement(`${FAKE_BIN}/claude`, FAKE_BIN)).toBe(false);
+      expect(probeShowsConfinement(`ok ${FAKE_BIN}/claude`, FAKE_BIN)).toBe(false);
       // The live-agent pane must actually reach the fake it is about to run.
       expect(probeShowsConfinement('ok', FAKE_BIN, ['claude'])).toBe(false);
     });
@@ -180,6 +199,118 @@ describe('restart scenarios with a crash or a live agent', () => {
       const sessionGone = launchers({ session: false, serverCommand: confined });
       expect(startAgain(host, sessionGone.launchers)).toBe(true);
       expect(sessionGone.calls).toEqual(['launch']);
+    });
+  });
+
+  // A TMPDIR with a space must not split the confined PATH into extra `env`
+  // arguments or the probe output into extra entries.
+  describe('a disposable root containing a space', () => {
+    const tmuxPath = (() => {
+      try {
+        return execFileSync('/bin/sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
+      } catch {
+        return '';
+      }
+    })();
+
+    it('refuses directories the confined PATH cannot carry', () => {
+      for (const bad of ['/tmp/a:b', '/tmp/a"b', "/tmp/a'b", '/tmp/a$b', '/tmp/a`b', '/tmp/a\\b', 'relative/dir']) {
+        expect(() => confinedPathFor([bad, '/usr/bin']), bad).toThrow(RecoveryRestartUnavailableError);
+      }
+      expect(confinedPathFor(['/tmp/with space/fake-bin', '/usr/bin']))
+        .toBe('/tmp/with space/fake-bin:/usr/bin');
+    });
+
+    it('keeps a spaced PATH as one value when the default command runs under sh', () => {
+      const confinedPath = confinedPathFor(['/tmp/with space/fake-bin', '/usr/bin', '/bin']);
+      const printed = execFileSync('/bin/sh', [
+        '-c',
+        confinedDefaultCommand(confinedPath).replace(/ \/bin\/sh$/u, ' /bin/sh -c \'printf %s "$PATH"\''),
+      ], { encoding: 'utf8' });
+      expect(printed).toBe(confinedPath);
+    });
+
+    it.skipIf(!tmuxPath)('confines a real pane and probes it on a spaced root', async () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'psyche space-'));
+      cleanup.push(root);
+      const fakeBin = path.join(root, 'fake bin');
+      const toolBin = path.join(root, 'tool bin');
+      mkdirSync(fakeBin);
+      mkdirSync(toolBin);
+      writeFileSync(path.join(fakeBin, 'claude'), '#!/bin/sh\nexit 0\n');
+      chmodSync(path.join(fakeBin, 'claude'), 0o755);
+      symlinkSync(tmuxPath, path.join(toolBin, 'tmux'));
+      const defaultCommand = confinedDefaultCommand(
+        confinedPathFor([fakeBin, toolBin, '/usr/bin', '/bin', '/usr/sbin', '/sbin']),
+      );
+      const config = path.join(root, 'tmux.conf');
+      writeFileSync(config, tmuxDefaultCommandConfig(defaultCommand));
+      const socket = path.join(root, 's');
+      const env = { PATH: '/usr/bin:/bin', HOME: root, SHELL: '/bin/sh', TERM: 'xterm-256color' };
+      execFileSync(tmuxPath, ['-S', socket, '-f', config, 'new-session', '-d', '-s', 'probe'], { env });
+      try {
+        const tmux = (...args: string[]) => execFileSync(tmuxPath, ['-S', socket, ...args], { encoding: 'utf8' }).trim();
+        expect(tmux('show-options', '-g', '-v', 'default-command')).toBe(defaultCommand);
+        const pane = tmux('display-message', '-p', '-t', 'probe', '#{pane_id}');
+        const probe = await probeAgents(socket, pane);
+        expect(probe).toBe(`ok:${fakeBin}/claude`);
+        expect(probeShowsConfinement(probe, fakeBin, ['claude'])).toBe(true);
+      } finally {
+        execFileSync(tmuxPath, ['-S', socket, 'kill-server']);
+      }
+    });
+  });
+
+  // Classification follows what was observed, never just that the first run
+  // reached a workspace.
+  describe('classification', () => {
+    const crash = {
+      firstRunReachedWorkspace: true,
+      durablePaneSeeded: true,
+      transitionInFlightAtKill: true,
+      crashEndedCockpit: true,
+      restartRestoredWorkspace: true,
+      configNotSilentlyOverwritten: true,
+      noDuplicatePanes: true,
+      noDuplicateWorktrees: true,
+      noDuplicateSessions: true,
+      noDuplicateCockpits: true,
+      workPreserved: true,
+      transitionOutcome: 'recovery_required' as const,
+    };
+    const live = {
+      firstRunReachedWorkspace: true,
+      agentPaneConfined: true,
+      agentRunningBeforeQuit: true,
+      paneCreatedBeforeQuit: true,
+      quitEndedCockpitProcess: true,
+      agentSurvivedQuit: true,
+      restartRestoredWorkspace: true,
+      agentPaneRebound: true,
+      agentNotDuplicated: true,
+      agentNotOrphaned: true,
+      noDuplicateWorktrees: true,
+      noDuplicateSessions: true,
+      noDuplicateCockpits: true,
+      workPreserved: true,
+    };
+
+    it('classifies the crash scenario from its setup controls and relaunch', () => {
+      expect(classifyCrashMidTransition(crash)).toBe('recovery_required');
+      expect(classifyCrashMidTransition({ ...crash, transitionOutcome: 'completed' })).toBe('transition_completed');
+      expect(classifyCrashMidTransition({ ...crash, transitionOutcome: 'unsettled' })).toBe('unexpected_error');
+      expect(classifyCrashMidTransition({ ...crash, firstRunReachedWorkspace: false })).toBe('restart_unavailable');
+      expect(classifyCrashMidTransition({ ...crash, durablePaneSeeded: false })).toBe('injection_ineffective');
+      expect(classifyCrashMidTransition({ ...crash, transitionInFlightAtKill: false })).toBe('injection_ineffective');
+      expect(classifyCrashMidTransition({ ...crash, restartRestoredWorkspace: false })).toBe('restart_unavailable');
+    });
+
+    it('never labels a live-agent run restored unless the relaunch restored it', () => {
+      expect(classifyLiveAgentRestart(live)).toBe('workspace_restored');
+      expect(classifyLiveAgentRestart({ ...live, restartRestoredWorkspace: false })).toBe('restart_unavailable');
+      expect(classifyLiveAgentRestart({ ...live, paneCreatedBeforeQuit: false })).toBe('injection_ineffective');
+      expect(classifyLiveAgentRestart({ ...live, agentRunningBeforeQuit: false })).toBe('injection_ineffective');
+      expect(classifyLiveAgentRestart({ ...live, firstRunReachedWorkspace: false })).toBe('restart_unavailable');
     });
   });
 

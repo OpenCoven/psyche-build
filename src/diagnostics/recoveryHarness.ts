@@ -35,6 +35,8 @@ import {
   RecoveryRestartUnavailableError,
 } from './recoveryApplicationRestart.js';
 import {
+  classifyCrashMidTransition,
+  classifyLiveAgentRestart,
   observeCrashMidTransition,
   observeLiveAgentRestart,
   RecoveryAgentConfinementError,
@@ -190,6 +192,7 @@ export type RecoveryInvariantId =
   | 'unversioned-config-adopted-by-named-migration'
   | 'pre-migration-snapshot-retained'
   | 'adopted-config-carries-current-schema'
+  | 'durable-pane-seeded-before-crash'
   | 'transition-in-flight-at-kill'
   | 'crash-ended-cockpit'
   | 'crash-config-not-silently-overwritten'
@@ -1415,11 +1418,7 @@ async function runApplicationCrashMidTransition(): Promise<RecoveryScenarioEvide
       observed = await observeCrashMidTransition(workspace.projectRoot);
       // A cockpit that never reached its workspace observed nothing; that is
       // an unavailable restart, not an ineffective injection.
-      classification = !observed.firstRunReachedWorkspace
-        ? 'restart_unavailable'
-        : !observed.transitionInFlightAtKill
-          ? 'injection_ineffective'
-          : CRASH_OUTCOME_CLASSIFICATION[observed.transitionOutcome];
+      classification = classifyCrashMidTransition(observed);
     } catch (error) {
       classification = restartFailureClassification(error);
     }
@@ -1429,6 +1428,7 @@ async function runApplicationCrashMidTransition(): Promise<RecoveryScenarioEvide
       classification,
       [
         { id: 'first-run-reached-workspace', held: observed?.firstRunReachedWorkspace === true },
+        { id: 'durable-pane-seeded-before-crash', held: observed?.durablePaneSeeded === true },
         { id: 'transition-in-flight-at-kill', held: observed?.transitionInFlightAtKill === true },
         { id: 'crash-ended-cockpit', held: observed?.crashEndedCockpit === true },
         { id: 'restart-restored-workspace', held: observed?.restartRestoredWorkspace === true },
@@ -1454,15 +1454,6 @@ async function runApplicationCrashMidTransition(): Promise<RecoveryScenarioEvide
   }
 }
 
-const CRASH_OUTCOME_CLASSIFICATION: Readonly<Record<
-  Awaited<ReturnType<typeof observeCrashMidTransition>>['transitionOutcome'],
-  RecoveryClassification
->> = {
-  completed: 'transition_completed',
-  rolled_back: 'transition_rolled_back',
-  recovery_required: 'recovery_required',
-  unsettled: 'unexpected_error',
-};
 
 /**
  * #475 gate 3, second half: a pane the cockpit created runs a fake agent
@@ -1482,11 +1473,7 @@ async function runApplicationRestartLiveAgent(): Promise<RecoveryScenarioEvidenc
       observed = await observeLiveAgentRestart(workspace.projectRoot);
       // Without a cockpit-created pane running the fake agent there was no
       // live agent pane to restart around, so the injection did not happen.
-      classification = !observed.firstRunReachedWorkspace
-        ? 'restart_unavailable'
-        : !observed.paneCreatedBeforeQuit || !observed.agentRunningBeforeQuit
-          ? 'injection_ineffective'
-          : 'workspace_restored';
+      classification = classifyLiveAgentRestart(observed);
     } catch (error) {
       classification = restartFailureClassification(error);
     }

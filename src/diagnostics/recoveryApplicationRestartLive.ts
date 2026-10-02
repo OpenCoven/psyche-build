@@ -43,7 +43,7 @@
  *
  *   - the private tmux server (`-S` with a socket in the disposable root) is
  *     started with a config whose `default-command` is
- *     `/usr/bin/env PATH=<confined> ENV= /bin/sh`, so every pane — the
+ *     `/usr/bin/env "PATH=<confined>" ENV= /bin/sh`, so every pane — the
  *     harness's and the cockpit's — runs a non-login shell with an explicit
  *     PATH no client environment can override;
  *   - the confined PATH holds a fake-agent directory, a tool directory with
@@ -80,6 +80,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { readPaneSlugOwnershipRecords } from '../services/PaneSlugRegistry.js';
+import type { RecoveryClassification } from './recoveryHarness.js';
 import { AGENT_REGISTRY } from '../utils/agentLaunch.js';
 import { readWorktreeRecoveryMarkers } from '../services/WorktreeRecoveryMarker.js';
 import {
@@ -162,9 +163,49 @@ export class RecoveryAgentConfinementError extends Error {
 }
 
 /**
+ * Characters a confined directory may not contain. `:` separates PATH entries
+ * (and the probe's output); the rest are special inside the double-quoted
+ * `PATH=…` word of the default command or the single-quoted tmux config value.
+ * A temp root containing one is refused rather than quoted around, so a space
+ * — the realistic case — works and nothing exotic can reshape the command.
+ */
+const UNCONFINABLE_PATH_CHARACTERS = /[:"'`$\\\n\r]/u;
+
+/** Joins confined directories into a PATH, refusing any that cannot be quoted safely. */
+export function confinedPathFor(directories: readonly string[]): string {
+  for (const directory of directories) {
+    if (!path.isAbsolute(directory) || UNCONFINABLE_PATH_CHARACTERS.test(directory)) {
+      throw new RecoveryRestartUnavailableError(
+        'the disposable root contains characters the confined PATH cannot carry',
+      );
+    }
+  }
+  return directories.join(':');
+}
+
+/**
+ * The pane command every pane on the private server runs. The `PATH=…` word is
+ * double-quoted for the `sh -c` tmux runs it through, so a directory with a
+ * space stays one PATH value instead of splitting into `env` arguments.
+ */
+export function confinedDefaultCommand(confinedPath: string): string {
+  return `/usr/bin/env "PATH=${confinedPath}" ENV= /bin/sh`;
+}
+
+/** The tmux config line; single-quoted, so tmux expands nothing inside it. */
+export function tmuxDefaultCommandConfig(defaultCommand: string): string {
+  if (defaultCommand.includes("'") || /[\n\r]/u.test(defaultCommand)) {
+    throw new RecoveryRestartUnavailableError('the confined default command cannot be quoted for tmux');
+  }
+  return `set -g default-command '${defaultCommand}'\n`;
+}
+
+/**
  * Reads the probe result a pane shell wrote: `ok` followed by every path that
- * `command -v` resolved. Confined only when each resolved path is the fake
- * agent of that name, and when `requireFake` names are all present.
+ * `command -v` resolved, joined with `:` — a character no confined directory
+ * may contain, so a path with spaces stays one entry. Confined only when each
+ * resolved path is the fake agent of that name, and when `requireFake` names
+ * are all present.
  */
 export function probeShowsConfinement(
   probe: string | undefined,
@@ -172,7 +213,7 @@ export function probeShowsConfinement(
   requireFake: readonly string[] = [],
 ): boolean {
   if (!probe) return false;
-  const [head, ...resolved] = probe.trim().split(/\s+/u);
+  const [head, ...resolved] = probe.replace(/[\r\n]+$/u, '').split(':');
   if (head !== 'ok') return false;
   const allowed = new Set(CONFINED_AGENT_NAMES.map((name) => path.join(fakeBin, name)));
   if (!resolved.every((entry) => allowed.has(entry))) return false;
@@ -272,12 +313,12 @@ async function prepareConfinedHost(
     await symlink(realTmux, path.join(toolBin, 'tmux'));
   }
 
-  const confinedPath = [fakeBin, toolBin, ...SYSTEM_PATH].join(':');
+  const confinedPath = confinedPathFor([fakeBin, toolBin, ...SYSTEM_PATH]);
   const tmuxConfig = path.join(harness, 'tmux.conf');
   // Every pane, including the ones the cockpit splits, runs this. `env` sets
   // PATH explicitly, which tmux's client environment cannot override.
-  const defaultCommand = `/usr/bin/env PATH=${confinedPath} ENV= /bin/sh`;
-  await writeFile(tmuxConfig, `set -g default-command "${defaultCommand}"\n`, 'utf8');
+  const defaultCommand = confinedDefaultCommand(confinedPath);
+  await writeFile(tmuxConfig, tmuxDefaultCommandConfig(defaultCommand), 'utf8');
 
   const workPath = path.join(projectRoot, 'uncommitted-work.txt');
   const workBefore = 'the only copy of restart work\n';
@@ -334,6 +375,39 @@ async function prepareConfinedHost(
   return host;
 }
 
+/**
+ * Asks the cockpit for a terminal pane ([t]) and waits until its record is
+ * durable and its pane live. The record therefore carries the cockpit's own
+ * pane identity and tmux server generation. Presses are retried because the
+ * first-run primer or a loading cockpit can swallow one; a retry happens only
+ * while no new record has appeared.
+ */
+async function createTerminalPaneThroughCockpit(
+  host: ConfinedHost,
+): Promise<{ paneId: string; recordId: string } | undefined> {
+  const recordsBefore = new Set(
+    paneRecords(await readFileOrUndefined(host.configPath)).map((record) => record.id),
+  );
+  let created: { paneId: string; recordId: string } | undefined;
+  const findCreated = async (): Promise<boolean> => {
+    const record = paneRecords(await readFileOrUndefined(host.configPath))
+      .find((candidate) => !recordsBefore.has(candidate.id));
+    if (typeof record?.id === 'string' && typeof record.paneId === 'string') {
+      created = { paneId: record.paneId, recordId: record.id };
+    }
+    return created !== undefined;
+  };
+  for (let attempt = 0; attempt < CRASH_PRESS_LIMIT && !created; attempt += 1) {
+    const target = cockpitPane(host.socketPath, host.session);
+    if (!target) break;
+    tmux(host.socketPath, 'send-keys', '-t', target, 't');
+    await waitFor(findCreated, CRASH_REACH_TIMEOUT_MS);
+  }
+  return created && listPaneIds(host.socketPath, host.session).includes(created.paneId)
+    ? created
+    : undefined;
+}
+
 function startServer(host: ConfinedHost, tmuxConfig: string): void {
   try {
     execFileSync(
@@ -360,12 +434,12 @@ function dropCanary(socketPath: string): void {
  * `command -v` resolves for the agent names into a pane option. Only shell
  * builtins and `tmux` run; no agent name is ever executed.
  */
-async function probeAgents(socketPath: string, paneId: string): Promise<string | undefined> {
+export async function probeAgents(socketPath: string, paneId: string): Promise<string | undefined> {
   const names = CONFINED_AGENT_NAMES.join(' ');
   tmux(
     socketPath,
     'send-keys', '-t', paneId,
-    `r=ok; for c in ${names}; do p=$(command -v "$c") && r="$r $p"; done; `
+    `r=ok; for c in ${names}; do p=$(command -v "$c") && r="$r:$p"; done; `
       + `tmux set-option -p -t "$TMUX_PANE" ${PROBE_OPTION} "$r"`,
     'Enter',
   );
@@ -532,6 +606,12 @@ export interface CrashMidTransitionObservation {
   /** Setup control: the first launch reached a persisted workspace. */
   readonly firstRunReachedWorkspace: boolean;
   /**
+   * Setup control: a terminal pane was created and persisted through the
+   * cockpit before the crash, so the config has a record whose survival the
+   * relaunch must prove.
+   */
+  readonly durablePaneSeeded: boolean;
+  /**
    * Setup control: at kill time the reservation was durable and provisional,
    * the split pane existed, and the config held no record for it — the
    * transition was genuinely in flight.
@@ -570,8 +650,22 @@ export async function observeCrashMidTransition(
     launchCockpit({ ...host });
     dropCanary(host.socketPath);
     const firstRunReachedWorkspace = await driveFirstRun(host.socketPath, host.session, host.configPath);
-    if (!firstRunReachedWorkspace) return crashUnobserved(false);
+    if (!firstRunReachedWorkspace) return crashUnobserved({ firstRunReachedWorkspace });
     await makeRoomForPanes(host);
+
+    // Seed one durable pane record through the cockpit's own [t] path before
+    // arming. Without it the config holds no records at the crash, and the
+    // claim that the relaunch kept them would compare an empty set.
+    const seeded = await createTerminalPaneThroughCockpit(host);
+    if (!seeded) return crashUnobserved({ firstRunReachedWorkspace });
+    // Let the seeded creation finish its own pane-path queries before the shim
+    // is armed, so they cannot consume the one-shot freeze.
+    await delay(LAYOUT_SETTLE_MS);
+    // A person presses [t] with the sidebar focused. After the seeded creation
+    // a squeezed welcome pane can be the active one, and the cockpit's
+    // untargeted split then fails with "no space for a new pane".
+    const sidebar = cockpitPane(host.socketPath, host.session);
+    if (sidebar) safeTmux(host.socketPath, 'select-pane', '-t', sidebar);
 
     const worktreesBefore = listManagedWorktrees(host.projectRoot);
     const panesBefore = new Set(listPaneIds(host.socketPath, host.session));
@@ -593,7 +687,7 @@ export async function observeCrashMidTransition(
         ?.records.some((record) => record.operation === 'terminal-pane');
       if (!reached && started !== false) break;
     }
-    if (!reached) return crashUnobserved(true);
+    if (!reached) return crashUnobserved({ firstRunReachedWorkspace, durablePaneSeeded: true });
 
     // Confirm on disk that this is the in-flight state the scenario claims.
     const splitPanes = listPaneIds(host.socketPath, host.session).filter((id) => !panesBefore.has(id));
@@ -646,15 +740,22 @@ export async function observeCrashMidTransition(
     const configAfter = await readFileOrUndefined(host.configPath);
     const after = await readPersistedWorkspace(host.configPath);
     const recordsAfter = paneRecords(configAfter);
-    const configNotSilentlyOverwritten = after !== undefined
-      ? after.projectRoot === host.projectRoot
-        && recordsAtKill.every((record) => recordsAfter.some((candidate) => candidate.id === record.id))
-      : configAfter === configAtKill;
+    // Load-bearing only because a record was seeded: an empty set at the kill
+    // would make "kept every record" vacuous, so it fails instead.
+    const configNotSilentlyOverwritten = recordsAtKill.length > 0
+      && recordsAtKill.some((record) => record.id === seeded.recordId)
+      && (after !== undefined
+        ? after.projectRoot === host.projectRoot
+          && recordsAtKill.every((record) => recordsAfter.some((candidate) => (
+            candidate.id === record.id && candidate.paneId === record.paneId
+          )))
+        : configAfter === configAtKill);
 
     const ids = recordsAfter.map((record) => record.id);
     const tmuxIds = recordsAfter.map((record) => record.paneId);
     return {
       firstRunReachedWorkspace,
+      durablePaneSeeded: true,
       transitionInFlightAtKill,
       crashEndedCockpit,
       restartRestoredWorkspace,
@@ -705,9 +806,12 @@ async function settleOutcome(
   return 'unsettled';
 }
 
-function crashUnobserved(firstRunReachedWorkspace: boolean): CrashMidTransitionObservation {
+function crashUnobserved(
+  partial: Partial<CrashMidTransitionObservation>,
+): CrashMidTransitionObservation {
   return {
-    firstRunReachedWorkspace,
+    firstRunReachedWorkspace: false,
+    durablePaneSeeded: false,
     transitionInFlightAtKill: false,
     crashEndedCockpit: false,
     restartRestoredWorkspace: false,
@@ -718,6 +822,7 @@ function crashUnobserved(firstRunReachedWorkspace: boolean): CrashMidTransitionO
     noDuplicateCockpits: false,
     workPreserved: false,
     transitionOutcome: 'unsettled',
+    ...partial,
   };
 }
 
@@ -771,28 +876,10 @@ export async function observeLiveAgentRestart(
     // The cockpit creates the pane through its own transactional path ([t]),
     // so the record carries the cockpit's real pane identity and tmux server
     // generation. Its shell is the server's confined default command.
-    const recordsBefore = new Set(
-      paneRecords(await readFileOrUndefined(host.configPath)).map((record) => record.id),
-    );
-    let agentPane: string | undefined;
-    let paneRecordId: string | undefined;
-    const findCreated = async (): Promise<boolean> => {
-      const created = paneRecords(await readFileOrUndefined(host!.configPath))
-        .find((record) => !recordsBefore.has(record.id));
-      if (typeof created?.id === 'string' && typeof created.paneId === 'string') {
-        paneRecordId = created.id;
-        agentPane = created.paneId;
-      }
-      return agentPane !== undefined;
-    };
-    for (let attempt = 0; attempt < CRASH_PRESS_LIMIT && !agentPane; attempt += 1) {
-      const target = cockpitPane(host.socketPath, host.session);
-      if (!target) break;
-      tmux(host.socketPath, 'send-keys', '-t', target, 't');
-      await waitFor(findCreated, CRASH_REACH_TIMEOUT_MS);
-    }
-    const paneCreatedBeforeQuit = agentPane !== undefined
-      && listPaneIds(host.socketPath, host.session).includes(agentPane);
+    const created = await createTerminalPaneThroughCockpit(host);
+    const agentPane = created?.paneId;
+    const paneRecordId = created?.recordId;
+    const paneCreatedBeforeQuit = created !== undefined;
     if (!agentPane || !paneCreatedBeforeQuit) {
       return liveUnobserved({ firstRunReachedWorkspace, paneCreatedBeforeQuit });
     }
@@ -1023,4 +1110,44 @@ async function writeExecutable(filePath: string, content: string): Promise<void>
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+// ---------------------------------------------------------------------------
+// Classification
+// ---------------------------------------------------------------------------
+
+const CRASH_OUTCOME_CLASSIFICATION: Readonly<Record<CrashTransitionOutcome, RecoveryClassification>> = {
+  completed: 'transition_completed',
+  rolled_back: 'transition_rolled_back',
+  recovery_required: 'recovery_required',
+  unsettled: 'unexpected_error',
+};
+
+/**
+ * Classifies from what was observed, in order: no first workspace or no
+ * restored relaunch is an unavailable restart; no seeded record or no
+ * in-flight transition is an ineffective injection; only then does the
+ * settled outcome name the result.
+ */
+export function classifyCrashMidTransition(
+  observed: CrashMidTransitionObservation,
+): RecoveryClassification {
+  if (!observed.firstRunReachedWorkspace) return 'restart_unavailable';
+  if (!observed.durablePaneSeeded || !observed.transitionInFlightAtKill) return 'injection_ineffective';
+  if (!observed.restartRestoredWorkspace) return 'restart_unavailable';
+  return CRASH_OUTCOME_CLASSIFICATION[observed.transitionOutcome];
+}
+
+/**
+ * `workspace_restored` only when the agent was running before the quit and
+ * the relaunch actually restored the workspace; an early return or a failed
+ * relaunch never carries that label.
+ */
+export function classifyLiveAgentRestart(
+  observed: LiveAgentRestartObservation,
+): RecoveryClassification {
+  if (!observed.firstRunReachedWorkspace) return 'restart_unavailable';
+  if (!observed.paneCreatedBeforeQuit || !observed.agentRunningBeforeQuit) return 'injection_ineffective';
+  if (!observed.restartRestoredWorkspace) return 'restart_unavailable';
+  return 'workspace_restored';
 }
