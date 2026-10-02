@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import type { PsycheConfig, PsychePane } from '../types.js';
 import { triggerHook } from '../utils/hooks.js';
@@ -33,6 +33,7 @@ import {
 import {
   findBlockingWorktreeRecoveryMarker,
   findBlockingWorktreeReuseRecoveryMarker,
+  writeWorktreeRecoveryMarker,
 } from './WorktreeRecoveryMarker.js';
 
 export interface WorktreeCleanupJob {
@@ -43,6 +44,181 @@ export interface WorktreeCleanupJob {
   currentProjectRoot: string;
   deleteBranch: boolean;
 }
+
+/**
+ * What Git and the filesystem jointly say about a worktree after a removal
+ * attempt. `git worktree remove` deletes the tree first and the registration
+ * second, and keeps going after a failed delete, so a fault inside Git's write
+ * (a read-only subdirectory, a killed process, a full disk) can leave any
+ * combination behind:
+ *
+ * - `removed`: unregistered and gone. Nothing to do.
+ * - `intact`: registered, present, Git link present. Git refused before
+ *   writing, or never ran; ordinary preservation. This includes a worktree a
+ *   killed Git left with some committed files deleted but its link intact:
+ *   Git then refuses every later non-forced removal as dirty, which loses
+ *   nothing (the files are on the branch) but stays stuck until an operator
+ *   restores or force-removes it.
+ * - `registration_only`: registered but the directory is gone. Non-forced
+ *   `git worktree remove` reconciles this by deleting only the administrative
+ *   entry; no user file exists to lose.
+ * - `partially_removed`: positive evidence Git began removing a tree that is
+ *   still present — registered without its `.git` link, unregistered while its
+ *   link names this repository's now-missing administrative entry, or
+ *   unregistered right after a removal the caller saw start from a registered
+ *   worktree. recovery_required, with advice to inspect and then remove or
+ *   restore.
+ * - `unregistered`: present, not registered, and no evidence a removal ran (a
+ *   plain directory, a link into another repository). recovery_required with a
+ *   neutral reason and no deletion advice: it may be a healthy worktree.
+ * - `unknown`: the registration could not be read. Never acted on.
+ */
+export type WorktreeRemovalState =
+  | 'removed'
+  | 'intact'
+  | 'registration_only'
+  | 'partially_removed'
+  | 'unregistered'
+  | 'unknown';
+
+/**
+ * The worktree's `.git` entry: absent, a link to this repository's
+ * administrative entry that no longer exists, or anything else (a live link, a
+ * link into another repository, a directory, an unreadable entry).
+ */
+export type WorktreeGitLink = 'missing' | 'orphaned' | 'other';
+
+export function classifyWorktreeRemovalState(observed: {
+  registered: boolean | undefined;
+  directoryPresent: boolean;
+  gitLink: WorktreeGitLink;
+  /** The caller saw this path registered immediately before running Git's removal. */
+  removalObserved?: boolean;
+}): WorktreeRemovalState {
+  if (observed.registered === undefined) return 'unknown';
+  if (!observed.directoryPresent) {
+    return observed.registered ? 'registration_only' : 'removed';
+  }
+  if (observed.registered) {
+    return observed.gitLink === 'missing' ? 'partially_removed' : 'intact';
+  }
+  return observed.gitLink === 'orphaned' || observed.removalObserved === true
+    ? 'partially_removed'
+    : 'unregistered';
+}
+
+/** Anything at the path counts as present; only ENOENT proves absence. */
+function pathEntryPresent(target: string): boolean {
+  try {
+    lstatSync(target);
+    return true;
+  } catch (error) {
+    return !isMissingPathError(error);
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
+}
+
+/** A Git link file is a single short line; anything larger is not one. */
+const MAX_GIT_LINK_BYTES = 4096;
+
+export function inspectWorktreeGitLink(
+  canonicalWorktreePath: string,
+  repoPath: string,
+): WorktreeGitLink {
+  const linkPath = path.join(canonicalWorktreePath, '.git');
+  let content: string;
+  try {
+    const stat = lstatSync(linkPath);
+    if (!stat.isFile() || stat.size > MAX_GIT_LINK_BYTES) return 'other';
+    content = readFileSync(linkPath, 'utf8');
+  } catch (error) {
+    return isMissingPathError(error) ? 'missing' : 'other';
+  }
+  const match = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(content);
+  if (!match) return 'other';
+  const adminDir = path.resolve(canonicalWorktreePath, match[1]);
+  const adminParent = path.dirname(adminDir);
+  const ownedByRepo = path.basename(adminParent) === 'worktrees'
+    && canonicalizePathWithExistingAncestor(path.dirname(adminParent))
+      === canonicalizePathWithExistingAncestor(path.join(repoPath, '.git'));
+  if (!ownedByRepo) return 'other';
+  return pathEntryPresent(adminDir) ? 'other' : 'orphaned';
+}
+
+/**
+ * A fixed description of how Git ended. Git's stderr carries absolute paths
+ * and free text, so it never enters a durable marker.
+ */
+function describeExit(result: CommandResult): string {
+  return typeof result.exitCode === 'number'
+    ? `exited with code ${result.exitCode}`
+    : 'ended without an exit code';
+}
+
+const ORPHAN_SCAN_MAX_DEPTH = 6;
+const ORPHAN_SCAN_MAX_ENTRIES = 20_000;
+const ORPHAN_SCAN_SKIPPED = new Set(['node_modules', 'vendor', '.pnpm']);
+
+/**
+ * Nested directories under `root` whose `.git` link names a
+ * `<repo>/.git/worktrees/<id>` admin entry that no longer exists: what an
+ * interrupted nested `git worktree remove` leaves behind. Bounded in depth and
+ * entries, skips hidden and dependency directories like worktree discovery,
+ * and reads only link files. Unreadable directories are skipped.
+ */
+export function findOrphanedNestedWorktreeLinks(
+  root: string,
+): Array<{ repoPath: string; worktreePath: string; depth: number }> {
+  const found: Array<{ repoPath: string; worktreePath: string; depth: number }> = [];
+  let budget = ORPHAN_SCAN_MAX_ENTRIES;
+  const visit = (directory: string, depth: number) => {
+    if (depth > ORPHAN_SCAN_MAX_DEPTH) return;
+    let entries: import('fs').Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (--budget < 0) return;
+      if (!entry.isDirectory() || entry.name.startsWith('.') || ORPHAN_SCAN_SKIPPED.has(entry.name)) {
+        continue;
+      }
+      const child = path.join(directory, entry.name);
+      const adminDir = readGitLinkTarget(child);
+      if (adminDir && path.basename(path.dirname(adminDir)) === 'worktrees'
+        && path.basename(path.dirname(path.dirname(adminDir))) === '.git') {
+        const repoPath = path.dirname(path.dirname(path.dirname(adminDir)));
+        if (inspectWorktreeGitLink(child, repoPath) === 'orphaned') {
+          found.push({ repoPath, worktreePath: child, depth });
+        }
+      }
+      visit(child, depth + 1);
+    }
+  };
+  visit(root, 1);
+  return found;
+}
+
+/** The absolute admin directory a `.git` link file names, if it is one. */
+function readGitLinkTarget(directory: string): string | undefined {
+  const linkPath = path.join(directory, '.git');
+  try {
+    const stat = lstatSync(linkPath);
+    if (!stat.isFile() || stat.size > MAX_GIT_LINK_BYTES) return undefined;
+    const match = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(readFileSync(linkPath, 'utf8'));
+    return match ? path.resolve(directory, match[1]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Recovery markers name a pane; cleanup paths without one use these. */
+const ROLLBACK_MARKER_PANE = { id: 'worktree-rollback', paneId: 'uncreated', slug: 'rollback' };
+const PRUNE_MARKER_PANE = { id: 'managed-worktree-prune', paneId: 'none', slug: 'managed prune' };
 
 export interface CreatedWorktreeRollbackJob {
   worktreePath: string;
@@ -116,6 +292,8 @@ interface WorktreePruneJob {
 interface CommandResult {
   success: boolean;
   error?: string;
+  /** Git's exit code when Git ran and exited; absent when it never ran. */
+  exitCode?: number | null;
 }
 
 interface GitTextResult extends CommandResult {
@@ -384,6 +562,28 @@ export class WorktreeCleanupService {
 
     const queuedJob = this.captureCleanupJob(job, canonicalWorktreePath, generation);
     if (!queuedJob) {
+      // A worktree Git no longer registers but whose directory survives is what
+      // an owner killed inside `git worktree remove` leaves behind. Capture
+      // refuses it, which is right, but refusing silently would strand the
+      // remaining files with no record. Publish recovery_required instead,
+      // checking every removal target against its own repository.
+      const unresolvedTargets = job.configPath && job.currentProjectRoot
+        ? this.getWorktreeRemovalTargets(job.pane, job.mainRepoPath)
+          .filter((target) => this.nextAttemptRecoveryState(target) !== undefined)
+        : [];
+      if (unresolvedTargets.length > 0) {
+        this.cleanupQueue = this.cleanupQueue
+          .then(() => this.recordPartialRemovalOnNextAttempt(job, unresolvedTargets))
+          .catch((error) => {
+            const errorObj = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+              `Could not record partially removed worktree for ${job.pane.slug}: ${errorObj.message}`,
+              'paneActions',
+              job.pane.id,
+              errorObj
+            );
+          });
+      }
       return;
     }
 
@@ -700,6 +900,35 @@ export class WorktreeCleanupService {
       mutationLeases,
     );
     if (!removeResult.success) {
+      let outcome: Awaited<ReturnType<WorktreeCleanupService['reportFailedRemoval']>>;
+      try {
+        outcome = await this.reportFailedRemoval(
+          ROLLBACK_MARKER_PANE,
+          identity.mainRepoPath,
+          identity.mainRepoPath,
+          identity.canonicalWorktreePath,
+          removeResult,
+        );
+      } catch (error) {
+        return {
+          success: false,
+          error: `recovery_required: newly created worktree was partially removed and its recovery marker could not be written; preserved remaining files and branch at ${identity.canonicalWorktreePath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (outcome === 'unverified') {
+        return {
+          success: false,
+          error: `removal state unverified for newly created worktree ${identity.canonicalWorktreePath}; Git reported failure and its worktree list could not be read; no recovery marker written`,
+        };
+      }
+      if (outcome === 'recovery_required') {
+        return {
+          success: false,
+          error: `recovery_required: removal of newly created worktree ${identity.canonicalWorktreePath} did not leave it intact; preserved remaining files and branch`,
+        };
+      }
       const error = `failed to remove newly created worktree; preserved worktree and branch at ${identity.canonicalWorktreePath}: ${removeResult.error}`;
       this.logger.warn(
         error,
@@ -1250,6 +1479,19 @@ export class WorktreeCleanupService {
     );
 
     if (!removeResult.success) {
+      // Git can fail after it has begun writing. Only a worktree it left whole
+      // is "preserved"; anything else must be reported, never retried. The
+      // target was verified registered under these leases just before Git ran.
+      const outcome = await this.reportFailedRemoval(
+        job.pane,
+        job.mainRepoPath,
+        target.repoPath,
+        target.canonicalWorktreePath,
+        removeResult,
+      );
+      if (outcome !== 'preserved') {
+        return false;
+      }
       this.logger.warn(
         `Worktree removal preserved ${target.canonicalWorktreePath} for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
         'paneActions',
@@ -1274,6 +1516,174 @@ export class WorktreeCleanupService {
     }
 
     return true;
+  }
+
+  private inspectWorktreeRemovalState(
+    repoPath: string,
+    canonicalWorktreePath: string,
+    removalObserved = false,
+  ): WorktreeRemovalState {
+    const registration = this.getWorktreeBranch(repoPath, canonicalWorktreePath);
+    return classifyWorktreeRemovalState({
+      registered: registration.success ? registration.found === true : undefined,
+      directoryPresent: pathEntryPresent(canonicalWorktreePath),
+      gitLink: inspectWorktreeGitLink(canonicalWorktreePath, repoPath),
+      removalObserved,
+    });
+  }
+
+  /**
+   * After a failed `git worktree remove`, decides whether the ordinary
+   * "preserved" report is true. `recovery_required` means a marker was
+   * written; `unverified` means the state could not be read and no marker
+   * exists; only `preserved` lets the caller report preservation. Throws only
+   * when a required recovery marker could not be written; nothing is deleted
+   * either way.
+   */
+  private async reportFailedRemoval(
+    pane: { id: string; paneId: string; slug?: string },
+    markerProjectRoot: string,
+    repoPath: string,
+    canonicalWorktreePath: string,
+    removeResult: CommandResult,
+    removalObserved = true,
+  ): Promise<'recovery_required' | 'unverified' | 'preserved'> {
+    const state = this.inspectWorktreeRemovalState(
+      repoPath,
+      canonicalWorktreePath,
+      removalObserved,
+    );
+    if (state === 'unknown') {
+      this.logger.warn(
+        `Worktree removal state unverified for ${canonicalWorktreePath} (${pane.slug ?? pane.id}): Git reported failure and its worktree list could not be read; nothing further was changed`,
+        'paneActions',
+        pane.id,
+      );
+      return 'unverified';
+    }
+    // `unregistered` here means the path was not registered before Git ran
+    // either, so Git had nothing of ours to begin removing: plain preservation.
+    if (state !== 'partially_removed') {
+      return 'preserved';
+    }
+    await this.publishPartialRemovalRecovery(
+      pane,
+      markerProjectRoot,
+      canonicalWorktreePath,
+      state,
+      `git worktree remove ${describeExit(removeResult)} after it began removing a registered worktree`,
+    );
+    return 'recovery_required';
+  }
+
+  /**
+   * The recovery state a next attempt should record for one removal target,
+   * or undefined. The pane's own worktree gets a marker for any unexplained
+   * unregistered directory; a nested target only with positive evidence that
+   * its own repository began removing it, so a submodule or a nested checkout
+   * that was never one of our worktrees is left alone.
+   */
+  private nextAttemptRecoveryState(
+    target: WorktreeRemovalTarget,
+  ): 'partially_removed' | 'unregistered' | undefined {
+    const state = this.inspectWorktreeRemovalState(target.repoPath, target.worktreePath);
+    if (state === 'partially_removed') return state;
+    if (state === 'unregistered' && target.depth === 0) return state;
+    return undefined;
+  }
+
+  /**
+   * Next-attempt half of partial-removal recovery. Runs under the same project
+   * and worktree leases a removal would take, so a removal still live in
+   * another process is never mistaken for a half-removed tree, and re-reads the
+   * state under them. It never mutates Git or the filesystem beyond the marker.
+   */
+  private async recordPartialRemovalOnNextAttempt(
+    job: WorktreeCleanupJob,
+    targets: readonly WorktreeRemovalTarget[],
+  ): Promise<void> {
+    await this.withProjectLifecycleLease(
+      job.mainRepoPath,
+      targets[0]!.worktreePath,
+      'cleanup',
+      async (projectLifecycleLease) => {
+        for (const target of targets) {
+          await this.withWorktreeLifecycleLock(
+            target.worktreePath,
+            job.mainRepoPath,
+            'cleanup',
+            async () => {
+              const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+                job.currentProjectRoot,
+                job.mainRepoPath,
+                target.worktreePath,
+              );
+              if (recoveryMarker.blocked) {
+                this.logger.warn(
+                  `Skipping background worktree cleanup for ${job.pane.slug}: ${recoveryMarker.reason}`,
+                  'paneActions',
+                  job.pane.id,
+                );
+                return;
+              }
+              const state = this.nextAttemptRecoveryState(target);
+              if (!state) {
+                return;
+              }
+              await this.publishPartialRemovalRecovery(
+                job.pane,
+                job.mainRepoPath,
+                target.worktreePath,
+                state,
+                'found on a later cleanup attempt',
+              );
+            },
+            projectLifecycleLease,
+          );
+        }
+      },
+    );
+    this.logger.debug(
+      `Finished background worktree cleanup for ${job.pane.slug}`,
+      'paneActions',
+      job.pane.id
+    );
+  }
+
+  /**
+   * recovery_required for a worktree path Git no longer fully owns. The marker
+   * blocks every later destructive cleanup and reuse of the path until an
+   * operator acknowledges it through `psyche recover`; the remaining files and
+   * the branch are left exactly as they are. Only a state with positive
+   * evidence of a removal carries advice to remove the directory.
+   */
+  private async publishPartialRemovalRecovery(
+    pane: { id: string; paneId: string; slug?: string },
+    projectRoot: string,
+    canonicalWorktreePath: string,
+    state: 'partially_removed' | 'unregistered',
+    detail: string,
+  ): Promise<void> {
+    const reason = state === 'partially_removed'
+      ? `worktree partially removed; ${detail}. Remaining files and the branch were preserved. `
+        + 'Inspect what remains, copy anything needed, then remove or restore the directory '
+        + 'before acknowledging.'
+      : `unregistered directory at pane path; ${detail}. Git does not list it as a worktree `
+        + 'of this repository and there is no evidence a removal ran. Nothing was changed; '
+        + 'verify before acknowledging.';
+    const { marker } = await writeWorktreeRecoveryMarker({
+      projectRoot,
+      worktreePath: canonicalWorktreePath,
+      pane: { id: pane.id, paneId: pane.paneId },
+      operation: 'cleanup',
+      reason,
+    });
+    this.logger.warn(
+      `recovery_required: ${canonicalWorktreePath} for ${pane.slug ?? pane.id} is ${state.replace('_', ' ')}; `
+        + `preserved remaining files and branch; recovery marker ${marker.id} requires operator acknowledgement`,
+      'paneActions',
+      pane.id,
+    );
   }
 
   private haveUnchangedQueuedBranchOids(job: QueuedWorktreeCleanupJob): boolean {
@@ -1458,6 +1868,19 @@ export class WorktreeCleanupService {
       );
     }
 
+    // Discovery asks Git about each nested checkout, so a nested worktree an
+    // interrupted removal left with a link to its repository's deleted admin
+    // entry is invisible to it. Keep those as targets: capture then refuses
+    // the whole cleanup (Git does not register them) and the next-attempt
+    // check reclassifies each one, instead of the root being removed around
+    // a half-removed child nobody recorded.
+    const known = new Set(Array.from(targets.values(), (target) => target.worktreePath));
+    for (const orphan of findOrphanedNestedWorktreeLinks(pane.worktreePath)) {
+      if (!known.has(canonicalizePathWithExistingAncestor(orphan.worktreePath))) {
+        addTarget(orphan.repoPath, orphan.worktreePath, orphan.depth);
+      }
+    }
+
     return Array.from(targets.values()).sort((left, right) => {
       if (left.depth !== right.depth) {
         return right.depth - left.depth;
@@ -1542,6 +1965,10 @@ export class WorktreeCleanupService {
                 return;
               }
 
+              const registeredBefore = this.getWorktreeBranch(
+                job.projectRoot,
+                target.canonicalWorktreePath,
+              );
               const removeResult = await this.runGitCommand(
                 ['worktree', 'remove', target.canonicalWorktreePath],
                 job.projectRoot,
@@ -1549,6 +1976,28 @@ export class WorktreeCleanupService {
               );
 
               if (!removeResult.success) {
+                let outcome: Awaited<ReturnType<WorktreeCleanupService['reportFailedRemoval']>>;
+                try {
+                  outcome = await this.reportFailedRemoval(
+                    PRUNE_MARKER_PANE,
+                    job.projectRoot,
+                    job.projectRoot,
+                    target.canonicalWorktreePath,
+                    removeResult,
+                    registeredBefore.success && registeredBefore.found === true,
+                  );
+                } catch (error) {
+                  this.logger.error(
+                    `Managed worktree pruning left ${target.canonicalWorktreePath} partially removed and could not record recovery_required: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                    'paneActions',
+                  );
+                  return;
+                }
+                if (outcome !== 'preserved') {
+                  return;
+                }
                 this.logger.warn(
                   `Managed worktree pruning skipped ${target.canonicalWorktreePath}: preserved dirty or inaccessible worktree: ${removeResult.error}`,
                   'paneActions'
@@ -1700,6 +2149,7 @@ export class WorktreeCleanupService {
           ? { success: true }
           : {
             success: false,
+            exitCode: result.exitCode,
             error: result.stderr
               || `git ${args.join(' ')} failed with exit code ${
                 result.exitCode ?? 'unknown'
@@ -1796,6 +2246,7 @@ export class WorktreeCleanupService {
 
         resolve({
           success: false,
+          exitCode: code,
           error:
             stderr.trim() ||
             `git ${args.join(' ')} failed with exit code ${code ?? 'unknown'}`,

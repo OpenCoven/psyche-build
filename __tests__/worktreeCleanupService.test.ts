@@ -10,8 +10,12 @@ import {
   writeFileSync,
 } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { join, resolve, sep } from 'path';
 import type { PsychePane } from '../src/types.js';
+
+// `fs.readFileSync` is mocked for config reads; evidence uses the real one.
+const actualFs = vi.hoisted(() => ({ current: undefined as undefined | typeof import('fs') }));
+const readFileSyncActual = (file: string): string => actualFs.current!.readFileSync(file, 'utf8');
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileSyncMock = vi.hoisted(() => vi.fn());
@@ -22,6 +26,10 @@ const acquireWorktreeOperationLeaseMock = vi.hoisted(() => vi.fn());
 const acquireProjectWorktreeLifecycleLeaseMock = vi.hoisted(() => vi.fn());
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
+const writeWorktreeRecoveryMarkerMock = vi.hoisted(() => vi.fn());
+const findBlockingOverride = vi.hoisted(() => ({
+  current: undefined as undefined | { blocked: boolean; reason?: string },
+}));
 const logger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
@@ -35,6 +43,7 @@ vi.mock('child_process', () => ({
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
+  actualFs.current = actual;
   return {
     ...actual,
     readFileSync: readFileSyncMock,
@@ -64,6 +73,19 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
 }));
+
+vi.mock('../src/services/WorktreeRecoveryMarker.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/WorktreeRecoveryMarker.js')>(
+    '../src/services/WorktreeRecoveryMarker.js',
+  );
+  return {
+    ...actual,
+    writeWorktreeRecoveryMarker: writeWorktreeRecoveryMarkerMock,
+    findBlockingWorktreeRecoveryMarker: (
+      ...args: Parameters<typeof actual.findBlockingWorktreeRecoveryMarker>
+    ) => findBlockingOverride.current ?? actual.findBlockingWorktreeRecoveryMarker(...args),
+  };
+});
 
 type MockChildProcess = EventEmitter & {
   stderr: EventEmitter | null;
@@ -103,6 +125,14 @@ describe('WorktreeCleanupService', () => {
     liveTmuxPanePaths = '';
     liveTmuxQueryError = undefined;
     branchAdvanceBeforeDelete = undefined;
+    findBlockingOverride.current = undefined;
+    writeWorktreeRecoveryMarkerMock.mockImplementation(async (request: {
+      worktreePath: string;
+    }) => ({
+      marker: { id: 'partial-removal-marker', worktreePath: request.worktreePath },
+      path: '/test/project/.psyche/runtime/worktree-recovery/partial-removal-marker.json',
+      state: 'complete',
+    }));
     currentConfig = {
       projectRoot: '/test/project',
       panes: [],
@@ -115,7 +145,12 @@ describe('WorktreeCleanupService', () => {
       return { config: currentConfig, result };
     });
     readProjectPaneConfigUnderLockMock.mockImplementation(async () => currentConfig);
-    readFileSyncMock.mockImplementation(() => JSON.stringify(currentConfig));
+    readFileSyncMock.mockImplementation((file: unknown, ...rest: unknown[]) => (
+      // Git link files are real fixtures; everything else is the mocked config.
+      String(file).endsWith(`${sep}.git`)
+        ? (actualFs.current!.readFileSync as (...args: unknown[]) => unknown)(file, ...rest)
+        : JSON.stringify(currentConfig)
+    ));
     detectAllWorktreesMock.mockReturnValue([]);
     acquireWorktreeOperationLeaseMock.mockImplementation(async ({
       worktreePath,
@@ -1668,5 +1703,644 @@ describe('WorktreeCleanupService', () => {
       expect.stringContaining('actively reserved for reuse'),
       'paneActions'
     );
+  });
+  describe('partial Git removal', () => {
+    const ADMIN_LINK = 'gitdir: /test/project/.git/worktrees/react\n';
+
+    function createHalfRemovedWorktree(options: { gitLink?: string }): string {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-partial-removal-')));
+      tempDirs.push(root);
+      const worktreePath = join(root, 'react');
+      mkdirSync(join(worktreePath, 'locked'), { recursive: true });
+      writeFileSync(join(worktreePath, 'locked', 'survivor.txt'), 'remaining user file\n');
+      if (options.gitLink !== undefined) {
+        writeFileSync(join(worktreePath, '.git'), options.gitLink);
+      }
+      return worktreePath;
+    }
+
+    function failRemovalAfterGitBeganWriting(options: {
+      dropRegistration: boolean;
+      message: string;
+      afterRemoval?: () => void;
+    }) {
+      spawnMock.mockImplementation((_command, args, spawnOptions) => {
+        const gitArgs = args as string[];
+        const cwd = String((spawnOptions as { cwd?: string } | undefined)?.cwd || '');
+        const child = new EventEmitter() as MockChildProcess;
+        child.stderr = new EventEmitter();
+        process.nextTick(() => {
+          if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
+            // Real Git deletes the administrative entry even after it failed
+            // to delete the whole tree: "there's no going back from here".
+            if (options.dropRegistration) {
+              worktreeMappings.get(cwd)?.delete(resolve(gitArgs[2]));
+            }
+            options.afterRemoval?.();
+            child.stderr?.emit('data', options.message);
+            child.emit('close', 255);
+            return;
+          }
+          child.emit('close', 0);
+        });
+        return child;
+      });
+    }
+
+    function failWorktreeListing(): void {
+      const previous = execFileSyncMock.getMockImplementation()!;
+      execFileSyncMock.mockImplementation((command, args, options) => {
+        const gitArgs = args as string[];
+        if (command === 'git' && gitArgs[0] === 'worktree' && gitArgs[1] === 'list') {
+          throw new Error('fatal: not a git repository');
+        }
+        return previous(command, args, options);
+      });
+    }
+
+    async function enqueuePaneAt(worktreePath: string): Promise<any> {
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const service = WorktreeCleanupService.getInstance() as any;
+      service.enqueueCleanup({
+        pane: { ...createCleanupPane(), worktreePath },
+        paneProjectRoot: '/test/project',
+        mainRepoPath: '/test/project',
+        configPath: '/test/project/.psyche/psyche.config.json',
+        currentProjectRoot: '/test/project',
+        deleteBranch: true,
+      });
+      await service.cleanupQueue;
+      return service;
+    }
+
+    function markerReason(): string {
+      return String(writeWorktreeRecoveryMarkerMock.mock.calls[0]?.[0]?.reason);
+    }
+
+    it('classifies only evidenced removals as partially removed', async () => {
+      const { classifyWorktreeRemovalState: classify } = await import('../src/services/WorktreeCleanupService.js');
+      const base = { registered: false, directoryPresent: true, gitLink: 'other' as const };
+      expect(classify({ ...base, directoryPresent: false })).toBe('removed');
+      expect(classify({ ...base, registered: true, directoryPresent: false })).toBe('registration_only');
+      expect(classify({ ...base, registered: true })).toBe('intact');
+      expect(classify({ ...base, registered: true, gitLink: 'missing' })).toBe('partially_removed');
+      expect(classify({ ...base, gitLink: 'orphaned' })).toBe('partially_removed');
+      expect(classify({ ...base, removalObserved: true })).toBe('partially_removed');
+      // No evidence a removal ran: a plain directory or a link elsewhere.
+      expect(classify({ ...base, gitLink: 'missing' })).toBe('unregistered');
+      expect(classify(base)).toBe('unregistered');
+      expect(classify({ ...base, registered: undefined })).toBe('unknown');
+    });
+
+    it('reads a Git link as orphaned only when it names this repository\'s missing admin entry', async () => {
+      const { inspectWorktreeGitLink } = await import('../src/services/WorktreeCleanupService.js');
+      const otherRepo = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-other-repo-')));
+      tempDirs.push(otherRepo);
+      mkdirSync(join(otherRepo, '.git', 'worktrees', 'react'), { recursive: true });
+
+      expect(inspectWorktreeGitLink(createHalfRemovedWorktree({ gitLink: ADMIN_LINK }), '/test/project'))
+        .toBe('orphaned');
+      expect(inspectWorktreeGitLink(createHalfRemovedWorktree({}), '/test/project')).toBe('missing');
+      expect(inspectWorktreeGitLink(
+        createHalfRemovedWorktree({ gitLink: `gitdir: ${otherRepo}/.git/worktrees/react\n` }),
+        '/test/project',
+      )).toBe('other');
+      expect(inspectWorktreeGitLink(
+        createHalfRemovedWorktree({ gitLink: `gitdir: ${otherRepo}/.git/worktrees/react\n` }),
+        otherRepo,
+      )).toBe('other');
+      expect(inspectWorktreeGitLink(createHalfRemovedWorktree({ gitLink: 'not a link\n' }), '/test/project'))
+        .toBe('other');
+    });
+
+    it('enters recovery_required when Git fails after unregistering a still-present worktree', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({
+        dropRegistration: true,
+        message: `error: failed to delete '${worktreePath}': Permission denied`,
+      });
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot: '/test/project',
+        worktreePath,
+        operation: 'cleanup',
+        pane: { id: 'psyche-1', paneId: '%1' },
+      }));
+      expect(markerReason()).toContain('partially removed');
+      expect(markerReason()).toContain('exited with code 255');
+      // Git's stderr carries paths and free text; it never enters the marker.
+      expect(markerReason()).not.toContain('Permission denied');
+      expect(markerReason()).not.toContain(worktreePath);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('recovery_required'),
+        'paneActions',
+        'psyche-1',
+      );
+      // Nothing Git left behind is deleted, and the branch is never deleted.
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(branchOids.get('/test/project')).toBe('abc123');
+    });
+
+    it('treats a worktree unregistered by its own failed removal as partially removed even without a link', async () => {
+      const worktreePath = createHalfRemovedWorktree({});
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({ dropRegistration: true, message: 'error: failed to delete' });
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(markerReason()).toContain('partially removed');
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+    });
+
+    it('enters recovery_required when a registered worktree lost its Git link mid-removal', async () => {
+      const worktreePath = createHalfRemovedWorktree({});
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({
+        dropRegistration: false,
+        message: `fatal: validation failed, cannot remove working tree: '${worktreePath}/.git' does not exist`,
+      });
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        worktreePath,
+        operation: 'cleanup',
+      }));
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('does not flag an intact worktree whose removal Git refused before writing', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({
+        dropRegistration: false,
+        message: 'fatal: contains modified or untracked files, use --force to delete it',
+      });
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Worktree removal preserved'),
+        'paneActions',
+        'psyche-1',
+      );
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+    });
+
+    it('reports an unverifiable state after a failed removal without calling it preserved', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({
+        dropRegistration: true,
+        message: 'error: failed to delete',
+        afterRemoval: failWorktreeListing,
+      });
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('removal state unverified'),
+        'paneActions',
+        'psyche-1',
+      );
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('Worktree removal preserved'),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('deletes no branch when the recovery marker cannot be written', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({ dropRegistration: true, message: 'error: failed to delete' });
+      writeWorktreeRecoveryMarkerMock.mockRejectedValueOnce(new Error('recovery directory unwritable'));
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+      expect(branchOids.get('/test/project')).toBe('abc123');
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('recovery directory unwritable'),
+        'paneActions',
+        'psyche-1',
+        expect.any(Error),
+      );
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('detects a worktree an interrupted owner left half-removed on the next cleanup attempt', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      // The owner died after Git unregistered the worktree: nothing maps it.
+      branchOids.set('/test/project', 'abc123');
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot: '/test/project',
+        worktreePath,
+        operation: 'cleanup',
+      }));
+      expect(markerReason()).toContain('partially removed');
+      // Detection never mutates: no Git write runs, under any lease.
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(acquireProjectWorktreeLifecycleLeaseMock).toHaveBeenCalled();
+      expect(acquireWorktreeOperationLeaseMock).toHaveBeenCalled();
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+      expect(branchOids.get('/test/project')).toBe('abc123');
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Finished background worktree cleanup for react',
+        'paneActions',
+        'psyche-1',
+      );
+    });
+
+    it('gives a worktree linked to another repository a neutral marker with no deletion advice', async () => {
+      const otherRepo = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-other-repo-')));
+      tempDirs.push(otherRepo);
+      mkdirSync(join(otherRepo, '.git', 'worktrees', 'react'), { recursive: true });
+      const worktreePath = createHalfRemovedWorktree({
+        gitLink: `gitdir: ${otherRepo}/.git/worktrees/react\n`,
+      });
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(markerReason()).toContain('unregistered directory at pane path');
+      expect(markerReason()).toContain('verify before acknowledging');
+      expect(markerReason()).not.toMatch(/remove or restore|partially removed/u);
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it('gives a plain unregistered directory a neutral marker with no deletion advice', async () => {
+      const worktreePath = createHalfRemovedWorktree({});
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(markerReason()).toContain('unregistered directory at pane path');
+      expect(markerReason()).not.toMatch(/remove or restore|partially removed/u);
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('inspects each nested removal target against its own repository', async () => {
+      const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      const nested = join(root, 'packages', 'sub');
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/sub\n');
+      // The root is still a healthy registered worktree; only the nested one
+      // was left behind by its own repository.
+      configureCleanupIdentity(root);
+      worktreeMappings.get('/test/project')!.set(resolve(root), 'other-branch');
+      detectAllWorktreesMock.mockReturnValue([
+        { parentRepoPath: '/test/sub-repo', worktreePath: nested, depth: 1 },
+      ]);
+
+      await enqueuePaneAt(root);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot: '/test/project',
+        worktreePath: nested,
+      }));
+      expect(markerReason()).toContain('partially removed');
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it('takes no action on the next attempt when the registration cannot be read', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      failWorktreeListing();
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('does not publish a second marker for a worktree already awaiting acknowledgement', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      findBlockingOverride.current = {
+        blocked: true,
+        reason: 'recovery marker existing requires operator acknowledgement',
+      };
+
+      await enqueuePaneAt(worktreePath);
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('requires operator acknowledgement'),
+        'paneActions',
+        'psyche-1',
+      );
+    });
+
+    it('treats an unregistered worktree whose directory is gone as already removed', async () => {
+      await enqueuePaneAt('/test/project/.psyche/worktrees/react');
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it('reconciles a registration whose directory is already gone through non-forced removal', async () => {
+      configureCleanupIdentity();
+
+      await enqueuePaneAt('/test/project/.psyche/worktrees/react');
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        'git',
+        ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
+        expect.anything(),
+      );
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+    });
+
+    async function rollbackAt(worktreePath: string) {
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      return WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+        worktreePath,
+        branchName: 'react',
+        branchOid: 'abc123',
+        mainRepoPath: '/test/project',
+        deleteBranch: true,
+      });
+    }
+
+    function preparePrunePartial(): { projectRoot: string; older: string } {
+      const projectRoot = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-prune-partial-')));
+      tempDirs.push(projectRoot);
+      const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+      writeFileSync(join(older, 'survivor.txt'), 'remaining user file\n');
+      worktreeMappings.set(projectRoot, new Map([[resolve(older), 'older']]));
+      branchOids.set(projectRoot, 'abc123');
+      writeFileSync(join(projectRoot, '.psyche', 'psyche.config.json'), '{}');
+      currentConfig = { projectRoot, panes: [] };
+      failRemovalAfterGitBeganWriting({ dropRegistration: true, message: 'error: failed to delete' });
+      return { projectRoot, older };
+    }
+
+    async function pruneTarget(projectRoot: string, older: string): Promise<void> {
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const service = WorktreeCleanupService.getInstance() as any;
+      await service.runPruneManagedWorktrees(
+        { projectRoot, activePanes: [], maxManagedWorktrees: 1 },
+        [{
+          canonicalWorktreePath: older,
+          mtimeMs: 0,
+          expectedGeneration: 0,
+          blockedByActiveReuseReservation: false,
+        }],
+      );
+    }
+
+    it('reports an unverifiable rollback without claiming a recovery marker', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({
+        dropRegistration: true,
+        message: 'error: failed to delete',
+        afterRemoval: failWorktreeListing,
+      });
+
+      const result = await rollbackAt(worktreePath);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('removal state unverified');
+      expect(result.error).toContain('no recovery marker written');
+      expect(result.error).not.toContain('recovery_required');
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(branchOids.get('/test/project')).toBe('abc123');
+    });
+
+    it('deletes no branch when a rollback recovery marker cannot be written', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({ dropRegistration: true, message: 'error: failed to delete' });
+      writeWorktreeRecoveryMarkerMock.mockRejectedValueOnce(new Error('recovery directory unwritable'));
+
+      const result = await rollbackAt(worktreePath);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('could not be written');
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+      expect(branchOids.get('/test/project')).toBe('abc123');
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('deletes nothing further when a prune recovery marker cannot be written', async () => {
+      const { projectRoot, older } = preparePrunePartial();
+      writeWorktreeRecoveryMarkerMock.mockRejectedValueOnce(new Error('recovery directory unwritable'));
+
+      await pruneTarget(projectRoot, older);
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock).not.toHaveBeenCalledWith('git', expect.arrayContaining(['update-ref']), expect.anything());
+      expect(branchOids.get(projectRoot)).toBe('abc123');
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('recovery directory unwritable'),
+        'paneActions',
+      );
+      expect(readFileSyncActual(join(older, 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('keeps a nested worktree discovery cannot see once its admin entry is gone', async () => {
+      const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      const nested = join(root, 'packages', 'sub');
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, 'survivor.txt'), 'nested remaining file\n');
+      // The interrupted nested removal deleted its admin entry, so Git-based
+      // discovery no longer returns it while the root stays healthy.
+      writeFileSync(join(nested, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/sub\n');
+      configureCleanupIdentity(root);
+      detectAllWorktreesMock.mockReturnValue([]);
+
+      await enqueuePaneAt(root);
+
+      // The root is not removed around a half-removed child.
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledTimes(1);
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot: '/test/project',
+        worktreePath: nested,
+      }));
+      expect(markerReason()).toContain('partially removed');
+      expect(readFileSyncActual(join(nested, 'survivor.txt'))).toBe('nested remaining file\n');
+      expect(branchOids.get('/test/project')).toBe('abc123');
+    });
+
+    it('finds only nested links whose worktree admin entry is missing', async () => {
+      const { findOrphanedNestedWorktreeLinks } = await import('../src/services/WorktreeCleanupService.js');
+      const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      const liveRepo = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-live-repo-')));
+      tempDirs.push(liveRepo);
+      mkdirSync(join(liveRepo, '.git', 'worktrees', 'live'), { recursive: true });
+      const orphan = join(root, 'a', 'orphan');
+      const live = join(root, 'b', 'live');
+      const submodule = join(root, 'c', 'lib');
+      const hidden = join(root, '.cache', 'orphan');
+      for (const dir of [orphan, live, submodule, hidden]) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(orphan, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/orphan\n');
+      writeFileSync(join(live, '.git'), `gitdir: ${liveRepo}/.git/worktrees/live\n`);
+      writeFileSync(join(submodule, '.git'), 'gitdir: ../../.git/modules/lib\n');
+      writeFileSync(join(hidden, '.git'), 'gitdir: /test/sub-repo/.git/worktrees/hidden\n');
+
+      expect(findOrphanedNestedWorktreeLinks(root)).toEqual([
+        { repoPath: '/test/sub-repo', worktreePath: orphan, depth: 2 },
+      ]);
+    });
+
+    it('leaves a nested submodule checkout alone on the next attempt', async () => {
+      const root = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      const nested = join(root, 'vendor', 'lib');
+      mkdirSync(nested, { recursive: true });
+      // A submodule links into `.git/modules/`, never `.git/worktrees/`.
+      writeFileSync(join(nested, '.git'), 'gitdir: ../../.git/modules/lib\n');
+      configureCleanupIdentity(root);
+      worktreeMappings.get('/test/project')!.set(resolve(root), 'other-branch');
+      detectAllWorktreesMock.mockReturnValue([
+        { parentRepoPath: root, worktreePath: nested, depth: 1 },
+      ]);
+
+      await enqueuePaneAt(root);
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it('enters recovery_required when a rollback removal stops partway', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({ dropRegistration: true, message: 'error: failed to delete' });
+
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const result = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+        worktreePath,
+        branchName: 'react',
+        branchOid: 'abc123',
+        mainRepoPath: '/test/project',
+        deleteBranch: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('recovery_required');
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot: '/test/project',
+        worktreePath,
+        operation: 'cleanup',
+      }));
+      expect(markerReason()).toContain('partially removed');
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(branchOids.get('/test/project')).toBe('abc123');
+      expect(readFileSyncActual(join(worktreePath, 'locked', 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('keeps a dirty rollback refusal as preservation without a marker', async () => {
+      const worktreePath = createHalfRemovedWorktree({ gitLink: ADMIN_LINK });
+      configureCleanupIdentity(worktreePath);
+      failRemovalAfterGitBeganWriting({ dropRegistration: false, message: 'fatal: contains modified files' });
+
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const result = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+        worktreePath,
+        branchName: 'react',
+        branchOid: 'abc123',
+        mainRepoPath: '/test/project',
+        deleteBranch: true,
+      });
+
+      expect(result.error).toContain('preserved worktree and branch');
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+    });
+
+    it('enters recovery_required when a managed prune removal stops partway', async () => {
+      const projectRoot = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-prune-partial-')));
+      tempDirs.push(projectRoot);
+      const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+      writeFileSync(join(older, 'survivor.txt'), 'remaining user file\n');
+      worktreeMappings.set(projectRoot, new Map([[resolve(older), 'older']]));
+      writeFileSync(join(projectRoot, '.psyche', 'psyche.config.json'), '{}');
+      currentConfig = { projectRoot, panes: [] };
+      failRemovalAfterGitBeganWriting({ dropRegistration: true, message: 'error: failed to delete' });
+
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const service = WorktreeCleanupService.getInstance() as any;
+      await service.runPruneManagedWorktrees(
+        { projectRoot, activePanes: [], maxManagedWorktrees: 1 },
+        [{
+          canonicalWorktreePath: older,
+          mtimeMs: 0,
+          expectedGeneration: 0,
+          blockedByActiveReuseReservation: false,
+        }],
+      );
+
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(expect.objectContaining({
+        projectRoot,
+        worktreePath: older,
+        operation: 'cleanup',
+        pane: { id: 'managed-worktree-prune', paneId: 'none' },
+      }));
+      expect(markerReason()).toContain('partially removed');
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('preserved dirty or inaccessible'),
+        expect.anything(),
+      );
+      expect(readFileSyncActual(join(older, 'survivor.txt'))).toBe('remaining user file\n');
+    });
+
+    it('keeps a managed prune refusal of a never-registered directory as preservation', async () => {
+      const projectRoot = realpathSync(mkdtempSync(join(tmpdir(), 'psyche-prune-partial-')));
+      tempDirs.push(projectRoot);
+      const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+      writeFileSync(join(projectRoot, '.psyche', 'psyche.config.json'), '{}');
+      currentConfig = { projectRoot, panes: [] };
+      failRemovalAfterGitBeganWriting({ dropRegistration: false, message: 'fatal: not a working tree' });
+
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const service = WorktreeCleanupService.getInstance() as any;
+      await service.runPruneManagedWorktrees(
+        { projectRoot, activePanes: [], maxManagedWorktrees: 1 },
+        [{
+          canonicalWorktreePath: older,
+          mtimeMs: 0,
+          expectedGeneration: 0,
+          blockedByActiveReuseReservation: false,
+        }],
+      );
+
+      expect(writeWorktreeRecoveryMarkerMock).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('preserved dirty or inaccessible'),
+        'paneActions',
+      );
+    });
   });
 });

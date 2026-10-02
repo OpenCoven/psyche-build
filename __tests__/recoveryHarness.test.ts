@@ -66,6 +66,10 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'restart-did-not-duplicate-sessions',
   'restart-did-not-duplicate-worktrees',
   'restart-did-not-duplicate-managed-panes',
+  'partial-write-landed-inside-git',
+  'partial-removal-flagged-recovery-required',
+  'partial-removal-detected-on-next-attempt',
+  'remaining-worktree-files-preserved',
 ];
 
 const DIGEST_IDS: readonly RecoveryDigestId[] = [
@@ -254,6 +258,38 @@ describe('disposable recovery harness', () => {
     expect(byId.get('cleanup-project-lease-recovered')).toBe(true);
     expect(byId.get('worktree-branch-unchanged')).toBe(true);
     expect(byId.get('uncommitted-work-untouched')).toBe(true);
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+  });
+
+  it('flags a worktree Git left half-removed as recovery_required without deleting what remains', async () => {
+    expect(recoveryScenarioIds()).toContain('git-mutation-partial-write');
+    const report = await runRecoveryHarness(['git-mutation-partial-write']);
+    const [scenario] = report.scenarios;
+
+    // Positive control: `injection_ineffective` means Git never deleted part of
+    // the tree before failing (for example when run as root, where a
+    // read-only directory does not stop it), so nothing below was exercised.
+    expect(scenario.classification).not.toBe('injection_ineffective');
+    expect(scenario.classification).toBe('recovery_required');
+    expect(scenario.outcome).toBe('passed');
+    const byId = new Map(scenario.invariants.map((entry) => [entry.id, entry.held]));
+    const expected: readonly RecoveryInvariantId[] = [
+      'partial-write-landed-inside-git',
+      // The product's own supervised removal stopped partway.
+      'partial-removal-flagged-recovery-required',
+      // An owner that died before it could look: the next attempt must notice.
+      'partial-removal-detected-on-next-attempt',
+      'recovery-marker-names-the-worktree',
+      'recovery-marker-carries-operator-instructions',
+      'cleanup-retry-blocked-by-marker',
+      'remaining-worktree-files-preserved',
+      'worktree-branch-unchanged',
+      'uncommitted-work-untouched',
+      'persisted-config-unchanged',
+    ];
+    for (const id of expected) {
+      expect(byId.get(id), id).toBe(true);
+    }
     expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
   });
 
