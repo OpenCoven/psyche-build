@@ -375,9 +375,10 @@ Current scenarios:
 
 ### Opt-in: application restart
 
-`pnpm recovery:restart` runs one further scenario, `application-restart`, which
-is deliberately **not** part of `pnpm recovery:harness` and therefore not part
-of the required Quality check. It launches the real cockpit twice, so it costs
+`pnpm recovery:restart` runs three further scenarios — `application-restart`,
+`application-crash-mid-transition`, and `application-restart-live-agent` — which
+are deliberately **not** part of `pnpm recovery:harness` and therefore not part
+of the required Quality check. Each launches the real cockpit twice, so it costs
 seconds rather than milliseconds and depends on first-run prompt text — a flake
 surface a required check should not carry. This is the same shape as
 `PSYCHE_AGENT_CHECK_IOS` for the iOS simulator gate: an expensive observation an
@@ -450,9 +451,115 @@ it stays readable and `restart-preserved-project-identity` asserts it still
 names the same project.
 
 Scope: it observes quit and relaunch of a workspace whose panes run no agents.
-It does not observe a crash mid-transition, a restart with live agent panes, or
-the packaged application bundle, and it is source evidence rather than packaged
-operator acceptance.
+The two scenarios below cover a crash mid-transition and a restart with a live
+agent pane. None of the three observes the packaged application bundle, and all
+are source evidence rather than packaged operator acceptance.
+
+The relaunch opens the cockpit in a new **current** window of the surviving
+session. The cockpit resolves its own pane with an untargeted
+`tmux display-message`, which answers with the session's current window; a
+detached relaunch window left an older pane current, and the relaunched cockpit
+then recorded that pane as its control pane. A person relaunching in a focused
+terminal never sees that, so the harness no longer produces it.
+
+#### `application-crash-mid-transition`
+
+The cockpit is SIGKILLed between splitting a terminal pane (`[t]`) and
+persisting its record: the crash-safe slug reservation is durable and holds the
+split pane, the pane is live, and the config does not yet name it. **No product
+code changes and no test hook exists in the product.** The cockpit's `PATH`
+resolves `tmux` to a disposable shim that execs the real binary; while armed,
+the first `display-message … #{pane_current_path}` call — the query
+`createShellPane` makes after the split and before persistence — records that it
+was reached and blocks. Product code makes that call with `execSync`, so the
+whole cockpit is frozen at exactly that point when it is killed.
+`transition-in-flight-at-kill` is the setup control: it reads the reservation,
+the live pane and the config at kill time, and a run where the shim was never
+reached reports `injection_ineffective` instead of passing. The freeze is
+first-match: another `pane_current_path` query — untracked-pane detection makes
+the same one — can consume it, and if that freezes the cockpit before the split,
+the run reports `injection_ineffective`. That is honest but a flake surface, and
+a reason this stays opt-in.
+
+Before arming, the scenario creates one terminal pane through the same `[t]`
+path and waits for its record to be durable (`durable-pane-seeded-before-crash`).
+Without it the config would hold no records at the crash, and "kept every
+record" would compare an empty set. The sidebar is focused again before the
+armed press, as a person's would be; otherwise a squeezed welcome pane can be
+the active one and the cockpit's untargeted split fails with "no space for a new
+pane". After the relaunch,
+`crash-config-not-silently-overwritten` requires that seeded record to have been
+present at the kill, and the config to be readable, name the same project and
+keep every pane record it held at the crash with the same tmux pane id — or, if
+unreadable, to be byte-identical. An empty set fails. No pane record id or tmux pane
+id may appear twice, the worktree list must be unchanged, exactly one cockpit
+and one session must run, and `crash-transition-settled` requires the half-done
+creation to end **completed** (one durable record, live pane, reservation
+settled), **rolled back** (pane gone, no record, reservation settled), or
+**`recovery_required`** (a restart-reconciliation marker for that reservation,
+which `psyche recover` lists). The classification names which. Observed on
+macOS with tmux 3.7c: `recovery_required` — the relaunch reconciles the stale
+reservation when it next reserves a slug, finds the pane still present, and
+quarantines it with a marker rather than guessing.
+
+#### `application-restart-live-agent`
+
+The cockpit creates a terminal pane through `[t]`; a **fake** `claude` — a
+script in a disposable directory that records its pid, prints a marker, and
+sleeps for a bounded time — is started in it; the record is given the shape of
+an agent worktree pane (same id, pane id and tmux server identity, which the
+cockpit wrote); and the cockpit is quit and relaunched. The record is shaped
+rather than created through `[n]` because the agent-pane flow needs a tmux popup
+that a detached harness session cannot drive. `agent-pane-rebound` requires
+exactly one record keeping that id, bound to the same live pane;
+`agent-not-duplicated` requires one launch in the whole run and one pane running
+the agent; `agent-not-orphaned` requires the original agent process to be alive
+and still a child of its pane. A run where the pane or the agent never started
+reports `injection_ineffective`.
+
+What it proves, plainly: a **live, cockpit-owned, non-shell (agent worktree)
+pane record** is neither recreated nor duplicated by a restart, and its process
+is not orphaned. What it does **not** observe: the real `[n]` agent-pane
+creation, the worktree slug reservation that creation makes, the resume and
+recreate launch path for an agent pane whose process is gone, or the product's
+own title-setting — the harness sets the pane title itself.
+
+Agent confinement is mandatory, because an earlier harness launched real agent
+CLIs when tmux replaced `-e PATH=` with the client `PATH`:
+
+- the private tmux server (`-S`, a socket in the disposable root) starts with a
+  config whose `default-command` is `/usr/bin/env "PATH=<confined>" ENV= /bin/sh`,
+  so every pane — the harness's and the cockpit's — runs a non-login shell with
+  an explicit `PATH`. The `PATH` word is quoted so a temp root with a space stays
+  one value, and a root containing `:`, quotes, `$`, a backtick or a backslash is
+  refused rather than quoted around. The probe joins resolved paths with `:`,
+  which no confined directory may contain;
+- that `PATH` is the fake-agent directory, a tool directory holding symlinks to
+  exactly `node`, `git` and `tmux`, and the system directories — never a
+  directory that holds agent CLIs. The cockpit itself runs with the same `PATH`,
+  `SHELL=/bin/sh` and a disposable `HOME`;
+- before the cockpit is launched, a canary pane must report that `command -v`
+  for every agent command in the agent registry resolves only into the fake
+  directory or to nothing, and the agent pane repeats the probe before anything
+  is typed into it. Either failure reports `injection_ineffective` and launches
+  nothing. Agent *detection* also accepts absolute install paths, so the
+  cockpit may believe an agent is installed because a host binary exists at one
+  of them; launching still types the bare command into a confined pane, which
+  cannot reach that path;
+- a relaunch only runs on the same private server while it still reports the
+  confined `default-command`. If the server has exited, the relaunch is
+  refused (`restart_unavailable`) rather than starting a fresh, unconfined
+  server whose login shells would pick up `path_helper` directories;
+- the server is killed in `finally`, and any recorded fake-agent process still
+  running its own command is killed after it.
+
+Classification follows what was observed: `workspace_restored` and the crash
+outcomes are reported only when the relaunch actually restored the workspace,
+and a run whose setup never happened reports `injection_ineffective` or
+`restart_unavailable` instead.
+
+Both scenarios are opt-in for the same reason as `application-restart`, and
+their evidence carries only closed-union fields and booleans.
 
 `stale-lease-released` is verified by reacquiring the lease rather than by
 trusting `release()` to have returned. A lease still held by the live harness

@@ -582,11 +582,17 @@ tmux server that reuses a recorded pane identity, a cleanup owner killed
 during its supervised Git mutation, a config aged across schema versions, and
 an application restart — runs from a clean checkout as `pnpm recovery:harness`,
 and runs in the Quality CI job with its report retained as a build artifact.
-The restart scenario is opt-in through `pnpm recovery:restart` and is
-deliberately excluded from the required Quality check. It is source evidence,
-not packaged operator acceptance: it does not observe a crash mid-transition, a
-restart with live agent panes, or the packaged application bundle, so the #474
-restart acceptance debt stays open.
+The restart scenarios are opt-in through `pnpm recovery:restart` and are
+deliberately excluded from the required Quality check. Besides a clean quit and
+relaunch, they cover a crash mid-transition — the cockpit SIGKILLed between
+splitting a terminal pane and persisting its record, which the relaunch must
+settle as completed, rolled back, or `recovery_required` — and a restart around
+one live, cockpit-owned agent worktree pane running a confined fake agent, which
+must be neither recreated nor duplicated. They are source evidence, not packaged
+operator acceptance: they do not observe the real `[n]` agent-pane creation, its
+worktree slug reservation, the resume and recreate launch path, product
+title-setting, or the packaged application bundle, so the #474 restart
+acceptance debt stays open.
 
 That seventh scenario interrupts the real cleanup worker before Git mutation,
 recovers its project lease, and proves a fresh retry respects an

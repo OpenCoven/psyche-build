@@ -418,11 +418,16 @@ recovery reporting under #199.
 #475, #476, and #474 now own the observed operator cases the harness cannot supply —
 application restart and upgrade recovery across two real installed builds —
 plus the remaining support-bundle collectors and UI above. Application restart
-has source coverage in the opt-in `pnpm recovery:restart` scenario, which
-launches the real cockpit twice and is deliberately kept out of the required
-Quality check; it does not observe a crash mid-transition, a restart with live
-agent panes, or the packaged application bundle, so the #474 acceptance debt
-stays open. The
+has source coverage in the opt-in `pnpm recovery:restart` scenarios, which
+launch the real cockpit twice each and are deliberately kept out of the required
+Quality check. Beyond a clean quit and relaunch, they observe a SIGKILL between
+splitting a terminal pane and persisting its record (the half-done creation must
+end completed, rolled back, or `recovery_required`), and a restart around one
+live, cockpit-owned agent worktree pane running a confined fake agent (the pane
+must be neither recreated nor duplicated and its process not orphaned). They do
+not observe the real `[n]` agent-pane creation, its worktree slug reservation,
+the resume and recreate launch path, product title-setting, or the packaged
+application bundle, so the #474 acceptance debt stays open. The
 `upgrade-recovery` scenario now covers the versioned-state boundary at source:
 a newer config is refused and preserved, and an unversioned one is adopted
 through a named migration with its superseded bytes retained. Recovery across
