@@ -36,6 +36,17 @@ describe('TmuxService command construction', () => {
     );
   });
 
+  // The pane-shell probe polls this read; one hung tmux call must not stall a
+  // launch past the probe's bound (#508).
+  it('bounds the pane current-command read with a one-second timeout', async () => {
+    execSyncMock.mockReturnValue('zsh\n');
+    await expect(TmuxService.getInstance().getPaneCurrentCommand('%1')).resolves.toBe('zsh');
+    expect(execSyncMock).toHaveBeenCalledWith(
+      "tmux display-message -t '%1' -p '#{pane_current_command}'",
+      expect.objectContaining({ timeout: 1_000 }),
+    );
+  });
+
   it('shell-quotes pane IDs across async and sync pane selection APIs', async () => {
     const paneId = "%1'; touch /tmp/id-injection; #";
     const expectedCommand =

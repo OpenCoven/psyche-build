@@ -1196,6 +1196,7 @@ describe('daemon bridge pane helpers', () => {
         return '%42';
       },
       sendTmuxCommand: (_paneId, command) => commands.push(command),
+      readPaneCommand: async () => 'zsh',
       getTmuxServerIdentity: () => tmuxServerIdentity,
     });
 

@@ -276,6 +276,10 @@ describe('Pane Lifecycle Integration Tests', () => {
         if (cmd.includes('#{session_name}')) {
           return returnValue('psyche-test');
         }
+        // A fresh pane's foreground command is its shell (#508 probes it).
+        if (cmd.includes('#{pane_current_command}')) {
+          return returnValue('zsh');
+        }
         return returnValue('%0');
       }
 

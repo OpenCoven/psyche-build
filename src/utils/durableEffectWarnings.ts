@@ -1,5 +1,10 @@
 export interface DurableEffectWarning {
-  code: 'effect_unknown' | 'pane_cleanup_repair_required';
+  /**
+   * `initial_prompt_skipped`: the pane and agent launched, but the agent's
+   * initial prompt was withheld because it could not be delivered safely
+   * (#508). Nothing needs recovery; the operator pastes the prompt.
+   */
+  code: 'effect_unknown' | 'pane_cleanup_repair_required' | 'initial_prompt_skipped';
   message: string;
   recoveryId?: string;
   projectRoot?: string;
@@ -39,5 +44,9 @@ export function summarizeDurableEffectWarnings(
   const details = Array.from(new Set(
     warnings.map((warning) => warning.message.replace(/[\r\n\0]/g, ' ').trim()),
   )).filter(Boolean);
+  // A withheld prompt needs no recovery: the pane and agent are fine.
+  if (warnings.every((warning) => warning.code === 'initial_prompt_skipped')) {
+    return `${subject}, but ${details.join('; ')}`.slice(0, 512);
+  }
   return `${subject}, but recovery is required: ${details.join('; ')}`.slice(0, 512);
 }

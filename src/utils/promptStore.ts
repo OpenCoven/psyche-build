@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import type { Dirent } from 'fs';
 import path from 'path';
+import type { PaneShellDialect } from './paneShellDialect.js';
 
 const PROMPTS_SUBDIR = 'prompts';
 const PROMPT_FILE_EXTENSION = '.txt';
@@ -26,6 +27,15 @@ function randomSuffix(): string {
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * fish single quotes treat `\\` and `\'` as escapes, so both must be escaped;
+ * the POSIX `'\''` form would leave a trailing backslash able to eat the
+ * closing quote.
+ */
+export function fishQuote(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
 export function getPromptsDir(projectRoot: string): string {
@@ -90,14 +100,19 @@ export async function cleanupPromptFilesForSlug(
   return results.reduce((sum, value) => sum + value, 0 as number);
 }
 
-export function buildPromptReadAndDeleteSnippet(promptPath: string): string {
-  const quotedPromptPath = shellQuote(promptPath);
-  if (isFishShell(process.env.SHELL)) {
-    return `set PSYCHE_PROMPT_FILE ${quotedPromptPath}; set PSYCHE_PROMPT_CONTENT "$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
+/**
+ * Shell line that reads the prompt file into `$PSYCHE_PROMPT_CONTENT` and
+ * deletes the file, so the prompt never appears on the typed line or in argv
+ * of the typing process. The dialect is the pane's own shell
+ * (`resolvePaneShell`), never Psyche's `$SHELL`: tmux's `default-shell` can
+ * differ (#508). A pane with no known dialect must not receive this line.
+ */
+export function buildPromptReadAndDeleteSnippet(
+  promptPath: string,
+  dialect: PaneShellDialect,
+): string {
+  if (dialect === 'fish') {
+    return `set PSYCHE_PROMPT_FILE ${fishQuote(promptPath)}; set PSYCHE_PROMPT_CONTENT "$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
   }
-  return `PSYCHE_PROMPT_FILE=${quotedPromptPath}; PSYCHE_PROMPT_CONTENT="$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
-}
-
-function isFishShell(shellPath?: string): boolean {
-  return path.basename(shellPath || '').toLowerCase() === 'fish';
+  return `PSYCHE_PROMPT_FILE=${shellQuote(promptPath)}; PSYCHE_PROMPT_CONTENT="$(cat "$PSYCHE_PROMPT_FILE" 2>/dev/null || true)"; rm -f "$PSYCHE_PROMPT_FILE"`;
 }

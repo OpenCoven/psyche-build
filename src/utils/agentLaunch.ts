@@ -11,9 +11,15 @@ import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import {
   buildAgentExitRecorderSuffix,
-  exitRecorderSyntaxForPaneCommand,
   type AgentExitRecorder,
 } from './agentLaunchOutcome.js';
+import {
+  reportPromptBootstrapSkipped,
+  resolvePaneShell,
+  type PaneShellProbeOptions,
+  type PromptBootstrapSkipReason,
+  type PromptSkipReportDeps,
+} from './paneShellDialect.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
@@ -593,6 +599,10 @@ export interface LaunchAgentInPaneOptions {
    * when the pane's own shell is one known to accept the suffix.
    */
   exitRecorder?: AgentExitRecorder;
+  /** Clock and sleep for the bounded pane-shell probe; injectable for tests. */
+  paneShellProbe?: PaneShellProbeOptions;
+  /** Log and toast seams for a skipped prompt; injectable for tests. */
+  promptSkipReport?: PromptSkipReportDeps;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
@@ -614,6 +624,8 @@ export interface LaunchAgentInPaneOptions {
 export interface LaunchAgentInPaneResult {
   /** True only when the exit recorder was appended to the typed command. */
   readonly exitRecorderArmed: boolean;
+  /** Why a command-line prompt was not delivered, or null when it was (or none was due). */
+  readonly initialPromptSkipped: PromptBootstrapSkipReason | null;
 }
 
 export async function launchAgentInPane(
@@ -630,6 +642,8 @@ export async function launchAgentInPane(
     psychePaneId,
     codexHookEventFile,
     exitRecorder,
+    paneShellProbe,
+    promptSkipReport,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -646,50 +660,47 @@ export async function launchAgentInPane(
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
-  // The pane's current command is its shell before the agent is typed. It is
-  // both the send-keys baseline and the only trustworthy answer to which
-  // shell will parse the exit recorder.
-  let paneCommand: string | undefined;
-  if (shouldSendPromptViaTmux || exitRecorder) {
-    try {
-      paneCommand = await tmuxService.getPaneCurrentCommand(paneId);
-    } catch {
-      paneCommand = undefined;
-    }
-  }
-  const baselineCommand = shouldSendPromptViaTmux ? paneCommand : undefined;
+  const takesCommandLinePrompt = hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery;
 
-  let launchCommand: string;
-  if (hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery) {
-    // Prefer a prompt file so the prompt never has to survive shell quoting.
+  // The pane's current command is its shell before the agent is typed. It is
+  // the send-keys baseline and the only trustworthy answer to which shell will
+  // parse the prompt bootstrap and the exit recorder (#475, #508). Callers own
+  // a fresh pane (see paneShellDialect.ts), so a program still in the
+  // foreground after the bounded probe is an rc-file leftover, not an editor.
+  const paneShell = shouldSendPromptViaTmux || exitRecorder || takesCommandLinePrompt
+    ? await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneId), paneShellProbe)
+    : null;
+  const dialect = paneShell?.dialect ?? null;
+  const baselineCommand = shouldSendPromptViaTmux ? paneShell?.paneCommand : undefined;
+
+  let launchCommand = buildAgentCommand(agent, permissionMode);
+  let initialPromptSkipped: PromptBootstrapSkipReason | null = null;
+  if (takesCommandLinePrompt && paneShell && paneShell.dialect === null) {
+    // No known dialect: the bootstrap is shell syntax, and a line the pane's
+    // shell rejects would stop the agent from starting at all. Launch it bare
+    // and write no prompt file.
+    initialPromptSkipped = paneShell.reason;
+  } else if (takesCommandLinePrompt && dialect) {
+    // The prompt travels only through a file read by the pane's own shell; it
+    // is never typed or placed in argv (AGENTS.md). If the file cannot be
+    // written, the agent launches bare rather than inlining the prompt.
     let promptFilePath: string | null = null;
     try {
       promptFilePath = await writePromptFile(projectRoot, slug, prompt);
     } catch {
-      // Fall back to inline escaping if the prompt file cannot be written.
+      promptFilePath = null;
     }
 
     if (promptFilePath) {
-      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
+      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath, dialect);
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
         permissionMode,
       )}`;
     } else {
-      const escapedPrompt = prompt
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/`/g, '\\`')
-        .replace(/\$/g, '\\$');
-      launchCommand = buildInitialPromptCommand(
-        agent,
-        `"${escapedPrompt}"`,
-        permissionMode,
-      );
+      initialPromptSkipped = 'prompt_file_unwritable';
     }
-  } else {
-    launchCommand = buildAgentCommand(agent, permissionMode);
   }
 
   if (agent === 'codex') {
@@ -700,13 +711,17 @@ export async function launchAgentInPane(
     });
   }
 
-  const recorderSyntax = exitRecorder ? exitRecorderSyntaxForPaneCommand(paneCommand) : null;
+  const recorderSyntax = exitRecorder ? dialect : null;
   if (exitRecorder && recorderSyntax) {
     launchCommand += buildAgentExitRecorderSuffix(exitRecorder, recorderSyntax);
   }
 
   await tmuxService.sendShellCommand(paneId, launchCommand);
   await tmuxService.sendTmuxKeys(paneId, 'Enter');
+
+  if (initialPromptSkipped) {
+    await reportPromptBootstrapSkipped(agent, initialPromptSkipped, 'agentLaunch', paneId, promptSkipReport);
+  }
 
   if (shouldSendPromptViaTmux) {
     await sendPromptViaTmux({
@@ -722,5 +737,8 @@ export async function launchAgentInPane(
     });
   }
 
-  return { exitRecorderArmed: Boolean(exitRecorder && recorderSyntax) };
+  return {
+    exitRecorderArmed: Boolean(exitRecorder && recorderSyntax),
+    initialPromptSkipped,
+  };
 }
