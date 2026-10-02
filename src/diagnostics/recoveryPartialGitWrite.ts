@@ -128,9 +128,14 @@ export async function observePartialGitWrite(
     branchBefore.set(name, git(projectRoot, 'rev-parse', `refs/heads/${name}`));
   }
 
+  // Each directory is restored independently: one failed chmod must not leave
+  // the other at 0500, where it would break the caller's disposal.
   const restoreWritable = async () => {
-    for (const name of WORKTREES) {
-      if (existsSync(lockedDir(name))) await chmod(lockedDir(name), 0o700);
+    const results = await Promise.allSettled(WORKTREES
+      .filter((name) => existsSync(lockedDir(name)))
+      .map((name) => chmod(lockedDir(name), 0o700)));
+    if (results.some((result) => result.status === 'rejected')) {
+      throw new Error('Partial Git write fixture could not restore directory permissions');
     }
   };
 
@@ -195,9 +200,19 @@ export async function observePartialGitWrite(
         && marker.projectRoot === projectRoot
         && marker.operation === 'cleanup')
       && new Set(afterRetry.map((marker) => marker.worktreePath)).size === 2;
+    // The product's own failed removal saw the worktree registered just before
+    // Git ran, so its marker must carry the partial-removal advice. The other
+    // depends on whether Git deleted the `.git` link before it stopped: with
+    // the link left naming a missing admin entry it is evidenced partial,
+    // without it only a neutral "verify" marker is justified. Neither may
+    // carry Git's raw stderr.
+    const reasonOf = (name: WorktreeName) => afterRetry
+      .find((marker) => marker.worktreePath === worktreePath(name))?.reason ?? '';
     const markersCarryInstructions = afterRetry.length === 2
       && afterRetry.every((marker) => marker.operatorInstructions.includes(marker.id)
-        && marker.reason.includes('partially removed'));
+        && !marker.reason.includes('Permission denied'))
+      && reasonOf('control').includes('partially removed')
+      && /partially removed|unregistered directory at pane path/u.test(reasonOf('retained'));
 
     let remainingFilesPreserved = true;
     for (const name of WORKTREES) {
