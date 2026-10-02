@@ -42,17 +42,25 @@ export interface CrashSafePaneSlugReservationOptions {
   lockOptions?: ProjectPaneConfigLockOptions;
   writeOwnershipRecord?: Parameters<typeof reservePaneSlug>[0]['writeOwnershipRecord'];
   removeCleanupBlocker?: typeof removePaneSlugCleanupBlocker;
+  /**
+   * Set only by a caller that ran {@link reconcileStalePaneSlugReservations}
+   * for this session moments earlier in the same operation, so one polling
+   * cycle does not reconcile (and take its locks) twice.
+   */
+  skipStaleReconciliation?: boolean;
 }
 
 export async function reserveCrashSafePaneSlug(
   options: CrashSafePaneSlugReservationOptions,
 ): Promise<PaneSlugReservation> {
-  await reconcileStalePaneSlugReservations({
-    sessionProjectRoot: options.sessionProjectRoot,
-    probePane: options.probePane,
-    ownerProbe: options.ownerProbe,
-    lockOptions: options.lockOptions,
-  });
+  if (!options.skipStaleReconciliation) {
+    await reconcileStalePaneSlugReservations({
+      sessionProjectRoot: options.sessionProjectRoot,
+      probePane: options.probePane,
+      ownerProbe: options.ownerProbe,
+      lockOptions: options.lockOptions,
+    });
+  }
   const targetLock = await acquireProjectWorktreeRecoveryLock(
     options.projectRoot,
     options.lockOptions,
@@ -136,6 +144,9 @@ export async function reconcileStalePaneSlugReservations(
           id: snapshot.pane.id,
           paneId: paneId || 'unresolved',
           slug: snapshot.slug,
+          ...(paneId && snapshot.pane.tmuxServerIdentity
+            ? { tmuxServerIdentity: snapshot.pane.tmuxServerIdentity }
+            : {}),
         },
         allowWorktreeReuse: true,
         operation: `${snapshot.operation}-restart-reconciliation`,
@@ -273,6 +284,9 @@ export async function settlePaneSlugReservationAfterFailure(
       id: reservation.paneId,
       paneId: effect?.paneId || 'unresolved',
       slug: reservation.slug,
+      ...(effect?.paneId && effect.tmuxServerIdentity
+        ? { tmuxServerIdentity: effect.tmuxServerIdentity }
+        : {}),
     },
     allowWorktreeReuse: true,
     operation: options.operation,

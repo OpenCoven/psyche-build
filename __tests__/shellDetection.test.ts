@@ -10,6 +10,8 @@ const detectShellPaneProjectInfoMock = vi.hoisted(() => vi.fn());
 const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
 const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
 const createPsychePaneIdMock = vi.hoisted(() => vi.fn());
+const gateUntrackedPaneAdoptionMock = vi.hoisted(() => vi.fn());
+const logServiceMock = vi.hoisted(() => ({ error: vi.fn(), debug: vi.fn() }));
 const tmuxServiceMock = vi.hoisted(() => ({
   getAllPaneIds: vi.fn(),
   getServerIdentity: vi.fn(),
@@ -49,6 +51,10 @@ vi.mock('../src/services/PaneSlugReservation.js', () => ({
   settlePaneSlugReservationAfterFailure: settlePaneSlugReservationAfterFailureMock,
 }));
 
+vi.mock('../src/services/UntrackedPaneAdoptionGate.js', () => ({
+  gateUntrackedPaneAdoption: gateUntrackedPaneAdoptionMock,
+}));
+
 vi.mock('../src/utils/paneColors.js', () => ({
   syncPaneColorThemes: vi.fn((panes: PsychePane[]) => panes),
 }));
@@ -66,7 +72,7 @@ vi.mock('../src/services/TmuxService.js', () => ({
 
 vi.mock('../src/services/LogService.js', () => ({
   LogService: {
-    getInstance: () => ({ error: vi.fn() }),
+    getInstance: () => logServiceMock,
   },
 }));
 
@@ -81,6 +87,11 @@ describe('detectAndAddShellPanes', () => {
     let nextPaneId = 1;
     createPsychePaneIdMock.mockImplementation(() => `detected-${nextPaneId++}`);
     detectShellPaneProjectInfoMock.mockResolvedValue({});
+    gateUntrackedPaneAdoptionMock.mockImplementation(async (_root, panes) => ({
+      adoptable: panes,
+      excluded: [],
+      reconciled: false,
+    }));
     tmuxServiceMock.getServerIdentity.mockReturnValue({
       pid: 42,
       socketPath: '/tmux.sock',
@@ -315,5 +326,142 @@ describe('detectAndAddShellPanes', () => {
       updatedPanes: [focused],
       shellPanesAdded: false,
     });
+  });
+
+  it('does not re-adopt a pane whose earlier failure is already quarantined (#516)', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    const focused = pane('focused', '%1');
+    gateUntrackedPaneAdoptionMock.mockResolvedValue({
+      adoptable: [],
+      excluded: [{ paneId: '%2', reason: 'recovery-quarantined', recoveryId: 'r-1' }],
+      reconciled: false,
+    });
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const result = await detectAndAddShellPanes(
+        '/session/.psyche/psyche.config.json',
+        [focused],
+        ['%0', '%1', '%2'],
+      );
+      expect(result).toEqual({ updatedPanes: [focused], shellPanesAdded: false });
+    }
+
+    expect(gateUntrackedPaneAdoptionMock).toHaveBeenCalledWith(
+      '/session',
+      [{ paneId: '%2', title: 'zsh' }],
+      expect.objectContaining({
+        serverIdentityOf: expect.any(Function),
+        readSavedPaneIds: expect.any(Function),
+      }),
+    );
+    expect(reserveCrashSafePaneSlugMock).not.toHaveBeenCalled();
+    expect(settlePaneSlugReservationAfterFailureMock).not.toHaveBeenCalled();
+    expect(capturePaneInsertionMock).not.toHaveBeenCalled();
+  });
+
+  it('adopts nothing while a pane creation is in flight (#517)', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    const focused = pane('focused', '%1');
+    gateUntrackedPaneAdoptionMock.mockResolvedValue({
+      adoptable: [],
+      excluded: [],
+      deferred: { reason: 'creation-in-flight', recoveryId: 'r-2' },
+      reconciled: false,
+    });
+
+    const result = await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [focused],
+      ['%0', '%1', '%2'],
+    );
+
+    expect(result).toEqual({ updatedPanes: [focused], shellPanesAdded: false });
+    expect(reserveCrashSafePaneSlugMock).not.toHaveBeenCalled();
+    expect(settlePaneSlugReservationAfterFailureMock).not.toHaveBeenCalled();
+    expect(logServiceMock.debug).toHaveBeenCalledWith(
+      expect.stringContaining('r-2 is in flight'),
+      'shellDetection',
+    );
+  });
+
+  it('adopts only the panes the gate allows', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    const focused = pane('focused', '%1');
+    getUntrackedPanesMock.mockResolvedValue([
+      { paneId: '%2', title: 'zsh' },
+      { paneId: '%3', title: 'bash' },
+    ]);
+    gateUntrackedPaneAdoptionMock.mockResolvedValue({
+      adoptable: [{ paneId: '%3', title: 'bash' }],
+      excluded: [{ paneId: '%2', reason: 'creation-in-flight', recoveryId: 'r-3' }],
+      reconciled: true,
+    });
+
+    const result = await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [focused],
+      ['%0', '%1', '%2', '%3'],
+    );
+
+    expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledTimes(1);
+    // The gate already reconciled this cycle, so the reservation does not.
+    expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledWith(
+      expect.objectContaining({ skipStaleReconciliation: true }),
+    );
+    expect(logServiceMock.debug).toHaveBeenCalledWith(
+      expect.stringContaining('Not adopting pane %2'),
+      'shellDetection',
+      '%2',
+    );
+    expect(result.updatedPanes.map((candidate) => candidate.paneId)).toEqual(['%1', '%3']);
+  });
+
+  it('treats panes already saved on disk as tracked even when the caller snapshot is older (#517)', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    readFileMock.mockResolvedValue(JSON.stringify({
+      controlPaneId: '%0',
+      panes: [{ id: 'saved', slug: 'shell-1', paneId: '%2' }, null, { id: 'no-pane' }],
+    }));
+
+    await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [pane('focused', '%1')],
+      ['%0', '%1', '%2'],
+    );
+
+    expect(getUntrackedPanesMock).toHaveBeenCalledWith(
+      '',
+      ['%1', '%2'],
+      '%0',
+      undefined,
+    );
+  });
+
+  it('hands the gate a config re-read that sees a pane saved after detection read the config (#517)', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    readFileMock
+      .mockResolvedValueOnce(JSON.stringify({ controlPaneId: '%0', panes: [] }))
+      .mockResolvedValueOnce(JSON.stringify({
+        controlPaneId: '%0',
+        panes: [{ id: 'created', slug: 'shell-2', paneId: '%2' }],
+      }));
+    gateUntrackedPaneAdoptionMock.mockImplementation(async (_root, panes, options) => {
+      const saved = new Set(await options.readSavedPaneIds());
+      return {
+        adoptable: panes.filter((candidate: { paneId: string }) => !saved.has(candidate.paneId)),
+        excluded: [],
+        reconciled: false,
+      };
+    });
+
+    const result = await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [pane('focused', '%1')],
+      ['%0', '%1', '%2'],
+    );
+
+    expect(readFileMock).toHaveBeenCalledTimes(2);
+    expect(reserveCrashSafePaneSlugMock).not.toHaveBeenCalled();
+    expect(result.shellPanesAdded).toBe(false);
   });
 });
