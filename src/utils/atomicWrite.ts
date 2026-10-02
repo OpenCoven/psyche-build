@@ -1,5 +1,15 @@
-import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeSync } from 'node:fs';
-import { open, rename, unlink, type FileHandle } from 'node:fs/promises';
+import {
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { open, realpath, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 
@@ -16,10 +26,28 @@ import { randomBytes } from 'crypto';
  * The fsync matters: without it a rename can publish a file whose data the
  * filesystem has not yet allocated, and a full disk discovered at writeback
  * would then have replaced good state with a truncated file.
+ *
+ * After the rename the parent directory is fsynced, best effort, so the new
+ * directory entry is durable too. Platforms that refuse a directory fsync are
+ * tolerated: a crash there can at worst revert to the previous file, which is
+ * still whole. On macOS, fsync does not force the drive's write cache to
+ * stable media; F_FULLFSYNC is not used here, so a power loss (not a process
+ * crash) can still lose the most recent write there.
  */
 export interface AtomicWriteOptions {
-  /** Mode for the newly created file. Defaults to 0o666 before umask. */
+  /**
+   * Mode for the new file. When omitted, an existing target's permission bits
+   * are kept (a 0600 file stays 0600); a new file gets 0o666 before umask.
+   */
   mode?: number;
+  /**
+   * Replace the file a symlink points at instead of the symlink itself, so a
+   * user's linked config (a dotfiles checkout, say) stays linked. The temp file
+   * is written beside the resolved target, keeping the rename on one
+   * filesystem. Leave unset for Psyche-private state such as tokens and the
+   * owner epoch, where a planted link must never be followed.
+   */
+  followSymlinks?: boolean;
 }
 
 /**
@@ -66,6 +94,80 @@ function injectedFaultError(targetPath: string, tempPath: string): NodeJS.ErrnoE
   return error;
 }
 
+const PERMISSION_BITS = 0o7777;
+
+/** The existing target's permission bits, or undefined when there is none. */
+function existingModeSync(targetPath: string): number | undefined {
+  try {
+    return statSync(targetPath).mode & PERMISSION_BITS;
+  } catch {
+    return undefined;
+  }
+}
+
+async function existingMode(targetPath: string): Promise<number | undefined> {
+  try {
+    return (await stat(targetPath)).mode & PERMISSION_BITS;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolves symlinks for an existing target. A missing (or dangling) target is
+ * written at the given path, which is what a plain write would have created.
+ */
+function resolveExistingSync(filePath: string): string {
+  try {
+    return realpathSync(filePath);
+  } catch {
+    return filePath;
+  }
+}
+
+async function resolveExisting(filePath: string): Promise<string> {
+  try {
+    return await realpath(filePath);
+  } catch {
+    return filePath;
+  }
+}
+
+/**
+ * Makes the rename's directory entry durable where the platform allows it.
+ * The new file is already published when this runs, so a refusal here must not
+ * be reported as a failed write.
+ */
+function syncDirectoryBestEffortSync(directory: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(directory, 'r');
+    fsyncSync(fd);
+  } catch {
+    // EISDIR/EINVAL/EPERM on platforms that refuse a directory fsync.
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Nothing to report.
+      }
+    }
+  }
+}
+
+async function syncDirectoryBestEffort(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, 'r');
+    await handle.sync();
+  } catch {
+    // EISDIR/EINVAL/EPERM on platforms that refuse a directory fsync.
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 /**
  * Atomically writes content to a file using write-and-rename pattern
  * This prevents readers from seeing partial/incomplete data
@@ -74,14 +176,19 @@ function injectedFaultError(targetPath: string, tempPath: string): NodeJS.ErrnoE
  * @param content - The content to write
  */
 export function atomicWriteFileSync(filePath: string, content: string, options: AtomicWriteOptions = {}): void {
-  const tempPath = temporaryPathFor(filePath);
+  const targetPath = options.followSymlinks ? resolveExistingSync(filePath) : filePath;
+  const mode = options.mode ?? existingModeSync(targetPath);
+  const tempPath = temporaryPathFor(targetPath);
   const buffer = Buffer.from(content, 'utf-8');
   let fd: number | undefined;
   let created = false;
 
   try {
-    fd = openSync(tempPath, 'wx', options.mode ?? 0o666);
+    // Created no wider than the intended mode, then set exactly, since umask
+    // applies at creation. A new file with no requested mode keeps umask.
+    fd = openSync(tempPath, 'wx', mode ?? 0o666);
     created = true;
+    if (mode !== undefined) fchmodSync(fd, mode);
     const allowed = injectedAllowance(filePath, buffer.length);
     const limit = allowed ?? buffer.length;
     let offset = 0;
@@ -96,8 +203,9 @@ export function atomicWriteFileSync(filePath: string, content: string, options: 
     fd = undefined;
 
     // On POSIX systems, rename() is atomic and will replace the target
-    renameSync(tempPath, filePath);
+    renameSync(tempPath, targetPath);
     created = false;
+    syncDirectoryBestEffortSync(path.dirname(targetPath));
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -129,13 +237,18 @@ export async function atomicWriteFile(
   content: string,
   options: AtomicWriteOptions = {},
 ): Promise<void> {
-  const tempPath = temporaryPathFor(filePath);
+  const targetPath = options.followSymlinks ? await resolveExisting(filePath) : filePath;
+  const mode = options.mode ?? await existingMode(targetPath);
+  const tempPath = temporaryPathFor(targetPath);
   let handle: FileHandle | undefined;
   let created = false;
 
   try {
-    handle = await open(tempPath, 'wx', options.mode ?? 0o666);
+    // Created no wider than the intended mode, then set exactly, since umask
+    // applies at creation. A new file with no requested mode keeps umask.
+    handle = await open(tempPath, 'wx', mode ?? 0o666);
     created = true;
+    if (mode !== undefined) await handle.chmod(mode);
     const buffer = Buffer.from(content, 'utf-8');
     const allowed = injectedAllowance(filePath, buffer.length);
     if (allowed === undefined) {
@@ -149,8 +262,9 @@ export async function atomicWriteFile(
     handle = undefined;
 
     // On POSIX systems, rename() is atomic and will replace the target
-    await rename(tempPath, filePath);
+    await rename(tempPath, targetPath);
     created = false;
+    await syncDirectoryBestEffort(path.dirname(targetPath));
   } catch (error) {
     if (handle) {
       await handle.close().catch(() => undefined);

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -138,5 +138,76 @@ describe('persisted state writers on full storage', () => {
     expect(fault.landed).toBe(2);
     await expectPreserved(ritualPath, priorRitual);
     await expectPreserved(manifestPath, priorManifest);
+  });
+
+  it('symlinked user config (settings, onboarding, rituals) stays linked and keeps its mode', async () => {
+    const dotfiles = path.join(root, 'dotfiles');
+    await mkdir(dotfiles, { recursive: true });
+    await mkdir(path.join(root, '.psyche'), { recursive: true });
+
+    const realSettings = path.join(dotfiles, 'settings.json');
+    await writeFile(realSettings, '{}', 'utf8');
+    await chmod(realSettings, 0o600);
+    const settingsLink = path.join(root, '.psyche', 'settings.json');
+    await symlink(realSettings, settingsLink);
+    new SettingsManager(root).updateSetting('baseBranch', 'develop', 'project');
+    expect((await lstat(settingsLink)).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(await readFile(realSettings, 'utf8'))).toMatchObject({ baseBranch: 'develop' });
+    expect((await stat(realSettings)).mode & 0o777).toBe(0o600);
+
+    const realOnboarding = path.join(dotfiles, 'onboarding.json');
+    await writeFile(realOnboarding, '{}', 'utf8');
+    const onboardingLink = path.join(root, '.psyche', 'onboarding.json');
+    await symlink(realOnboarding, onboardingLink);
+    await writeStartupPrimerState('dismissed', root);
+    expect((await lstat(onboardingLink)).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(await readFile(realOnboarding, 'utf8'))).toHaveProperty('startupPrimer');
+
+    const ritual = {
+      version: 1,
+      id: 'daily',
+      name: 'Daily',
+      scope: 'project',
+      projects: [{ projectRoot: '.', panes: [{ kind: 'terminal', name: 'Shell', command: 'git status' }] }],
+    } as never;
+    const ritualsDir = getProjectRitualsDir(root);
+    await mkdir(ritualsDir, { recursive: true });
+    const realRitual = path.join(dotfiles, 'daily.json');
+    await writeFile(realRitual, '{}', 'utf8');
+    const ritualLink = path.join(ritualsDir, 'daily.json');
+    await symlink(realRitual, ritualLink);
+    saveProjectRitual(root, ritual);
+    expect((await lstat(ritualLink)).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(await readFile(realRitual, 'utf8'))).toMatchObject({ id: 'daily' });
+
+    expect(temporaryLeftovers(await readdir(dotfiles))).toEqual([]);
+  });
+
+  it('bridge tokens and the owner epoch never follow a planted symlink', async () => {
+    const outside = path.join(root, 'outside.json');
+    await writeFile(outside, 'untouched', 'utf8');
+
+    const bridgeDir = path.join(root, '.psyche', 'bridge');
+    await mkdir(bridgeDir, { recursive: true });
+    const tokensLink = path.join(bridgeDir, 'devices.json');
+    await symlink(outside, tokensLink);
+    await rm(tokensLink);
+    await symlink(outside, tokensLink);
+    // The store reads through the link it finds, but the write replaces the
+    // link with a private regular file rather than writing through it.
+    await writeFile(outside, JSON.stringify({ devices: [] }), 'utf8');
+    await new TokenStore().issue('ios-1', 'iPad');
+    expect((await lstat(tokensLink)).isSymbolicLink()).toBe(false);
+    expect((await stat(tokensLink)).mode & 0o777).toBe(0o600);
+    expect(await readFile(outside, 'utf8')).toBe(JSON.stringify({ devices: [] }));
+
+    const runtimeDir = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtimeDir, { recursive: true });
+    const epochLink = path.join(runtimeDir, 'owner-epoch.json');
+    await symlink(outside, epochLink);
+    const lock = await acquireOwnerLock(root, { pid: 101, isProcessAlive: () => false });
+    await lock.release();
+    expect((await lstat(epochLink)).isSymbolicLink()).toBe(false);
+    expect(await readFile(outside, 'utf8')).toBe(JSON.stringify({ devices: [] }));
   });
 });

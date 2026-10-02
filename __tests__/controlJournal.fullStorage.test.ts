@@ -57,4 +57,51 @@ describe('control journal append on full storage', () => {
     const reopened = await ControlJournal.open(root, 2);
     expect(reopened.read(0).map((event) => event.kind)).toEqual(['first', 'second', 'third']);
   });
+
+  it('a failed rollback remembered across compaction never pads the journal with NULs', async () => {
+    // Reproduces the review finding: 6 appends, a sync fault (so the rollback's
+    // own sync fails and the committed length is remembered), compact(5), then
+    // one append. The remembered length predates compaction, so truncating to
+    // it would extend the now-shorter file with NUL bytes.
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 1);
+    for (let n = 1; n <= 6; n += 1) await journal.append(`event-${n}`, { n, pad: 'x'.repeat(200) });
+    const journalPath = journalPathOf(root);
+
+    const fault = injectStorageFault({ code: 'ENOSPC', at: 'sync', match: (filePath) => filePath === journalPath });
+    await expect(journal.append('lost', { n: 7 })).rejects.toMatchObject({ code: 'ENOSPC' });
+    fault.remove();
+
+    await journal.compact(5);
+    const compactedLength = (await readFile(journalPath)).length;
+    await journal.append('after-compaction', { n: 7 });
+
+    const raw = await readFile(journalPath);
+    expect(raw.includes(0)).toBe(false);
+    expect(raw.length).toBeGreaterThan(compactedLength);
+    const reopened = await ControlJournal.open(root, 2);
+    expect(reopened.read(0).map((event) => event.kind)).toEqual(['event-6', 'after-compaction']);
+  });
+
+  it('refuses to append rather than extend a journal shorter than its remembered committed length', async () => {
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 1);
+    await journal.append('first', { n: 1 });
+    await journal.append('second', { n: 2 });
+    const journalPath = journalPathOf(root);
+
+    const fault = injectStorageFault({ code: 'ENOSPC', at: 'sync', match: (filePath) => filePath === journalPath });
+    await expect(journal.append('lost', { n: 3 })).rejects.toMatchObject({ code: 'ENOSPC' });
+    fault.remove();
+
+    // Something outside this journal shortened the file below what was committed.
+    const committed = await readFile(journalPath);
+    const { truncate } = await import('node:fs/promises');
+    await truncate(journalPath, 10);
+    await expect(journal.append('third', { n: 3 })).rejects.toThrow(/refusing to append/);
+    const after = await readFile(journalPath);
+    expect(after.length).toBe(10);
+    expect(after.includes(0)).toBe(false);
+    expect(committed.length).toBeGreaterThan(10);
+  });
 });

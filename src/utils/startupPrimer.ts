@@ -53,5 +53,5 @@ export async function writeStartupPrimerState(
   };
 
   await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await atomicWriteFile(statePath, JSON.stringify(nextState, null, 2));
+  await atomicWriteFile(statePath, JSON.stringify(nextState, null, 2), { followSymlinks: true });
 }

@@ -62,6 +62,9 @@ describe('project pane config on full storage', () => {
       expect(error).toBeInstanceOf(ProjectPaneConfigError);
       expect((error as InstanceType<typeof ProjectPaneConfigError>).code).toBe('config_write_failed');
       expect((error as Error).message).toContain(code);
+      // The message carries no path; the original errno error is the cause.
+      expect((error as Error).message).not.toContain(projectRoot);
+      expect((error as Error).cause).toMatchObject({ code });
       expect(await readFile(configPath, 'utf8')).toBe(prior);
       expect(temporaryLeftovers(await readdir(path.dirname(configPath)))).toEqual([]);
 

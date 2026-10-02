@@ -632,7 +632,7 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      atomicWriteFileSync(this.globalPath, JSON.stringify(this.globalSettings, null, 2));
+      atomicWriteFileSync(this.globalPath, JSON.stringify(this.globalSettings, null, 2), { followSymlinks: true });
     } catch (error) {
       console.error('Failed to save global settings:', error);
       throw error;
@@ -645,7 +645,7 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      atomicWriteFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2));
+      atomicWriteFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2), { followSymlinks: true });
     } catch (error) {
       console.error('Failed to save project settings:', error);
       throw error;

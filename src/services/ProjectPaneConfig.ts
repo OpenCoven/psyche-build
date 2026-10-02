@@ -162,8 +162,9 @@ export class ProjectPaneConfigError extends Error {
   constructor(
     code: ProjectPaneConfigErrorCode,
     message: string,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
     this.name = 'ProjectPaneConfigError';
     this.code = code;
   }
@@ -1088,9 +1089,15 @@ async function writeProjectPaneConfig(
       schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
     });
   } catch (error) {
+    // The message names only the errno code; the original error, with its
+    // path, stays available as `cause` for local diagnostics.
+    const code = (error as NodeJS.ErrnoException)?.code;
     throw new ProjectPaneConfigError(
       'config_write_failed',
-      `could not write ${configPath}: ${errorMessage(error)}. The previous config was left in place.`,
+      `could not write the project config${
+        typeof code === 'string' && /^[A-Z0-9_]+$/.test(code) ? ` (${code})` : ''
+      }. The previous config was left in place.`,
+      { cause: error },
     );
   }
 }

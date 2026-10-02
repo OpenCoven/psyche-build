@@ -1,5 +1,5 @@
 import { constants, type BigIntStats } from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, rmdir, truncate, type FileHandle, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rmdir, stat, truncate, type FileHandle, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
@@ -510,15 +510,31 @@ export class ControlJournal {
     return { events, firstSequence };
   }
 
+  /**
+   * Finishes a rollback that failed during an earlier append. It only ever
+   * cuts bytes past the remembered committed length: a file that is already
+   * that length needs nothing, and a shorter one means the file changed under
+   * us, so appending is refused rather than extending it (truncate would pad
+   * with NULs) or cutting committed records.
+   */
   private async repairUnrolledAppend(): Promise<void> {
-    if (this.unrolledAppendLength === undefined) return;
+    const committedLength = this.unrolledAppendLength;
+    if (committedLength === undefined) return;
+    let currentLength: number;
     try {
-      await truncate(this.path, this.unrolledAppendLength);
+      currentLength = (await stat(this.path)).size;
     } catch (error) {
-      throw new Error(
-        'control journal holds a torn partial append that could not be rolled back; refusing to append after it',
-        { cause: error },
-      );
+      throw unrolledAppendError(error);
+    }
+    if (currentLength < committedLength) {
+      throw unrolledAppendError(new Error('journal is shorter than its last committed length'));
+    }
+    if (currentLength > committedLength) {
+      try {
+        await truncate(this.path, committedLength);
+      } catch (error) {
+        throw unrolledAppendError(error);
+      }
     }
     this.unrolledAppendLength = undefined;
   }
@@ -554,6 +570,13 @@ export class ControlJournal {
         // bury it mid-file and the whole journal would fail to replay. Cut it
         // back to the last committed line; if even that fails, remember the
         // length so no later append lands after the fragment.
+        //
+        // Known residual case: if the line was written whole and both the
+        // fsync and the rollback fail, then the process crashes before the
+        // next append repairs it, the unacknowledged event can survive on
+        // disk and be replayed on reopen. The caller was told the append
+        // failed, so that event's effect may be retried; idempotency keys,
+        // not this rollback, are what make such a retry safe.
         if (committedLength !== undefined) {
           try {
             await handle.truncate(committedLength);
@@ -934,6 +957,10 @@ export class ControlJournal {
 
       this.events.splice(0, keepFrom);
       this.firstRetainedSequence = firstSequence;
+      // The rewrite came from committed in-memory events, so any torn tail an
+      // earlier failed append left behind is gone, and its remembered length
+      // no longer describes this file.
+      this.unrolledAppendLength = undefined;
       for (const [key, event] of this.idempotencyIndex) {
         if (event.sequence < firstSequence) this.idempotencyIndex.delete(key);
       }
@@ -1602,6 +1629,13 @@ function runtimeDirectorySyncUnsupportedDuringCompaction(): Error {
 
 function parentDirectorySyncUnsupportedDuringCreation(): Error {
   return new Error('parent directory fsync is unsupported during runtime directory creation');
+}
+
+function unrolledAppendError(cause: unknown): Error {
+  return new Error(
+    'control journal holds a torn partial append that could not be rolled back; refusing to append after it',
+    { cause },
+  );
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {
