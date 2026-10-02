@@ -40,8 +40,27 @@ export function normalizeReleaseTag(value) {
   return candidate;
 }
 
+function readManifest(filePath) {
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${filePath} could not be read: ${reason}`, { cause: error });
+  }
+}
+
 function readJsonVersion(filePath) {
-  const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
+  const contents = readManifest(filePath);
+  let parsed;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${filePath} is not valid JSON: ${reason}`, { cause: error });
+  }
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new Error(`${filePath} does not contain a string version`);
+  }
   if (typeof parsed.version !== 'string') {
     throw new Error(`${filePath} does not contain a string version`);
   }
@@ -251,18 +270,18 @@ export function readReleaseVersions(root = process.cwd()) {
   return {
     packageJson: readJsonVersion(paths.packageJson),
     nativePackageJson: readJsonVersion(paths.nativePackageJson),
-    cargoToml: readCargoPackageVersion(readFileSync(paths.cargoToml, 'utf8'), paths.cargoToml),
-    cargoLock: readCargoLockVersion(readFileSync(paths.cargoLock, 'utf8'), paths.cargoLock),
+    cargoToml: readCargoPackageVersion(readManifest(paths.cargoToml), paths.cargoToml),
+    cargoLock: readCargoLockVersion(readManifest(paths.cargoLock), paths.cargoLock),
     tauriConfig: readJsonVersion(paths.tauriConfig),
     iosProjectYml: readMarketingVersion(
-      findYamlMarketingVersionAssignments(readFileSync(paths.iosProjectYml, 'utf8')),
+      findYamlMarketingVersionAssignments(readManifest(paths.iosProjectYml)),
       paths.iosProjectYml,
     ),
     iosXcodeProject: readMarketingVersion(
-      findXcodeMarketingVersionAssignments(readFileSync(paths.iosXcodeProject, 'utf8')),
+      findXcodeMarketingVersionAssignments(readManifest(paths.iosXcodeProject)),
       paths.iosXcodeProject,
     ),
-    mcpServer: readMcpServerVersion(readFileSync(paths.mcpServer, 'utf8'), paths.mcpServer),
+    mcpServer: readMcpServerVersion(readManifest(paths.mcpServer), paths.mcpServer),
   };
 }
 
@@ -275,6 +294,29 @@ export function assertReleaseVersion(root, tag) {
   if (mismatches.length > 0) {
     throw new Error(
       `Release version ${expected} does not match:\n${mismatches.join('\n')}`,
+    );
+  }
+  return expected;
+}
+
+export function assertVersionCoherence(root = process.cwd()) {
+  const versions = readReleaseVersions(root);
+  const entries = Object.entries(versions);
+  const unparseable = entries
+    .filter(([, version]) => !STABLE_VERSION.test(version))
+    .map(([key, version]) => `- ${labels[key]} (${version})`);
+  if (unparseable.length > 0) {
+    throw new Error(
+      `Release versions must use stable MAJOR.MINOR.PATCH:\n${unparseable.join('\n')}`,
+    );
+  }
+  const expected = versions.packageJson;
+  const mismatches = entries
+    .filter(([, version]) => version !== expected)
+    .map(([key, version]) => `- ${labels[key]} (${version})`);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Release versions disagree with ${labels.packageJson} (${expected}):\n${mismatches.join('\n')}`,
     );
   }
   return expected;
@@ -372,9 +414,14 @@ async function main() {
     args.splice(1, 1);
   }
   const [mode, value, ...rest] = args;
+  if (mode === '--coherence' && args.length === 1) {
+    const version = assertVersionCoherence(process.cwd());
+    console.log(`Verified Psyche Build release versions agree on ${version}`);
+    return;
+  }
   if (rest.length > 0 || !['--set', '--check'].includes(mode) || !value) {
     throw new Error(
-      'Usage: node scripts/release-version.mjs --set MAJOR.MINOR.PATCH | --check vMAJOR.MINOR.PATCH',
+      'Usage: node scripts/release-version.mjs --set MAJOR.MINOR.PATCH | --check vMAJOR.MINOR.PATCH | --coherence',
     );
   }
 

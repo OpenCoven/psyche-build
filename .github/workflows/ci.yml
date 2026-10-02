@@ -57,6 +57,11 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      # Catch release-metadata drift on every change, before a tag exists. The
+      # tag-bound `release:check` in release.yml remains the authoritative gate.
+      - name: Require coherent release versions
+        run: pnpm release:coherence
+
       - name: Run repository tests
         run: pnpm test
 
