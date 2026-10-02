@@ -82,9 +82,10 @@ import {
   TMUX_PANE_TITLE_LABEL_FORMAT,
   TMUX_PANE_TITLE_PREFIX_FORMAT,
 } from './utils/paneTitlePrefix.js';
-import type { PsycheConfig, PsychePane } from './types.js';
+import type { PsycheConfig } from './types.js';
 import { BridgeDaemon } from './services/bridge/BridgeDaemon.js';
 import type { PaneSnapshot, Project, Ritual } from './services/bridge/wireProtocol.js';
+import { toLegacyPaneSnapshot } from './services/bridge/legacyPaneSnapshot.js';
 import { tmuxSessionNameForRoot } from './services/tmuxControl.js';
 import { listAvailableRituals } from './utils/rituals.js';
 import {
@@ -815,35 +816,7 @@ class Psyche {
         projectName: this.projectName || null,
         sessionName: tmuxSessionNameForRoot(this.projectRoot),
         workspaceProvider,
-        paneProvider: (): PaneSnapshot[] => {
-          return this.stateManager.getPanes().map((p: PsychePane): PaneSnapshot => {
-            let status: PaneSnapshot['status'];
-            switch (p.agentStatus) {
-              case 'working':
-              case 'analyzing':
-                status = 'working';
-                break;
-              case 'idle':
-                status = 'idle';
-                break;
-              case 'waiting':
-                status = 'waiting';
-                break;
-              default:
-                status = 'unknown';
-            }
-            return {
-              id: p.paneId,
-              displayName: p.displayName ?? p.slug ?? p.id,
-              kind: p.type ?? 'worktree',
-              projectId: p.projectRoot ?? null,
-              projectName: p.projectName ?? null,
-              worktreePath: p.worktreePath ?? null,
-              agent: p.agent ?? null,
-              status,
-            };
-          });
-        },
+        paneProvider: (): PaneSnapshot[] => this.stateManager.getPanes().map(toLegacyPaneSnapshot),
         projectProvider: (): Project[] => {
           const panes = this.stateManager.getPanes();
           const projectMap = new Map<string, { displayName: string; attentionCount: number }>();

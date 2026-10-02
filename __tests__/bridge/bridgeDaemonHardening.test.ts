@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
-import { BridgeDaemon } from "../../src/services/bridge/BridgeDaemon";
+import { BridgeDaemon, LEGACY_PANE_SCOPE_TTL_MS } from "../../src/services/bridge/BridgeDaemon";
 import { PaneStreamHub } from "../../src/services/bridge/PaneStreamHub";
 import { PairingFlow, PAIR_MAX_ATTEMPTS } from "../../src/services/bridge/PairingFlow";
 import { MAX_CLIENT_FRAME_BYTES } from "../../src/services/bridge/WSSListener";
 import { PROTOCOL_VERSION } from "../../src/services/bridge/wireProtocol";
+import { WORKSPACE_SNAPSHOT_FIXTURE } from "../../protocol-fixtures/fixtures";
+import { LogService } from "../../src/services/LogService";
 
 /**
  * Hardening tests for the LAN-facing bridge daemon.
@@ -70,7 +72,9 @@ function startDaemon(overrides: Record<string, unknown> = {}) {
     projectName: "psyche",
     sessionName: "test-session",
     hubFactory: () => hub,
-    paneProvider: () => [],
+    // The legacy pane list is what v2 publishes when no workspace snapshot is
+    // wired, so the ids the tests below drive must appear in it.
+    paneProvider: () => [{ id: "%1" }, { id: "%4" }],
     projectProvider: () => [],
     ritualProvider: () => [],
     launchRitual: async () => {},
@@ -250,6 +254,428 @@ describe("bridge daemon pane input validation", () => {
     // The pong proves the sendInput frame was already processed and ignored.
     await client.until(() => client.messages.some((m) => m.type === "pong"), "pong");
     expect(hub.inputs).toEqual([]);
+  });
+});
+
+/** A tmux pane the fixture workspace publishes. */
+const PUBLISHED_PANE = "%3";
+/** Well-formed tmux pane ids the fixture workspace does not publish. */
+const UNPUBLISHED_PANES = ["%999", "%1"];
+/** The fixture publishes this pane, but it is a Coven session, not tmux. */
+const NON_TMUX_PANE = "coven:review";
+
+function startScopedDaemon() {
+  let workspace: any = structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace);
+  const started = startDaemon({ workspaceProvider: () => workspace });
+  return {
+    ...started,
+    setWorkspace(next: any) { workspace = next; },
+    workspace: () => workspace,
+  };
+}
+
+function withoutPane(workspace: any, paneId: string) {
+  const next = structuredClone(workspace);
+  for (const project of next.projects) {
+    project.projectPanes = project.projectPanes.filter((pane: any) => pane.id !== paneId);
+    for (const worktree of project.worktrees) {
+      worktree.panes = worktree.panes.filter((pane: any) => pane.id !== paneId);
+    }
+  }
+  return next;
+}
+
+/** Proves every earlier frame on the socket has been handled. */
+async function drain(client: Awaited<ReturnType<typeof connect>>, token: string) {
+  client.send({ type: "ping", payload: { token } });
+  await client.until(
+    () => client.messages.some((m) => m.type === "pong" && m.payload?.token === token),
+    `pong ${token}`,
+  );
+}
+
+function scopeErrors(client: Awaited<ReturnType<typeof connect>>) {
+  return client.messages.filter((m) => m.type === "error" && m.payload?.code === "unknown_pane");
+}
+
+/**
+ * Issue #503: tmux pane ids are server-global, so a v2 frame naming a
+ * well-formed id outside the published workspace would otherwise reach a
+ * shell Psyche Build never created. v2 must apply the v3 published-pane scope.
+ */
+describe("bridge daemon v2 pane scope", () => {
+  it("refuses input to a well-formed pane the workspace does not publish", async () => {
+    const { daemon, hub, pairing } = startScopedDaemon();
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    for (const paneId of [...UNPUBLISHED_PANES, NON_TMUX_PANE]) {
+      client.send({
+        type: "sendInput",
+        payload: { paneId, data: Buffer.from("whoami\r").toString("base64") },
+      });
+    }
+    await drain(client, "after-input");
+
+    expect(hub.inputs).toEqual([]);
+    // The non-tmux id fails the shape check first; the tmux-shaped ones fail scope.
+    expect(scopeErrors(client)).toHaveLength(UNPUBLISHED_PANES.length);
+  });
+
+  it("refuses a subscription to a well-formed pane the workspace does not publish", async () => {
+    const { daemon, hub, pairing } = startScopedDaemon();
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    for (const paneId of UNPUBLISHED_PANES) {
+      client.send({ type: "subscribePane", payload: { paneId, sinceSeq: null } });
+    }
+    await drain(client, "after-subscribe");
+
+    expect(scopeErrors(client)).toHaveLength(UNPUBLISHED_PANES.length);
+    // No replay buffer was allocated for the refused ids.
+    expect(hub.bufferedPaneIds()).toEqual([]);
+    expect((daemon as any).paneSubscribers.size).toBe(0);
+  });
+
+  it("answers with a bounded error that leaks neither internals nor the pane list", async () => {
+    const { daemon, pairing } = startScopedDaemon();
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    client.send({
+      type: "sendInput",
+      payload: { paneId: "%999", data: Buffer.from("x").toString("base64") },
+    });
+    await client.until(() => scopeErrors(client).length === 1, "unknown_pane error");
+
+    const [error] = scopeErrors(client);
+    expect(error).toEqual({
+      type: "error",
+      payload: { code: "unknown_pane", message: "pane is not published by this host" },
+    });
+    const text = JSON.stringify(error);
+    expect(text).not.toContain(PUBLISHED_PANE);
+    expect(text).not.toContain("%9");
+    expect(text).not.toMatch(/Error|stack|at \w/);
+  });
+
+  it("fails closed with the same bounded error when the workspace cannot be read", async () => {
+    const { daemon, hub, pairing } = startDaemon({
+      workspaceProvider: () => { throw new Error("secret internal path /Users/someone/x"); },
+    });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    client.send({
+      type: "sendInput",
+      payload: { paneId: PUBLISHED_PANE, data: Buffer.from("ls\r").toString("base64") },
+    });
+    client.send({ type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+    await drain(client, "after-failure");
+
+    expect(hub.inputs).toEqual([]);
+    expect(scopeErrors(client)).toHaveLength(2);
+    expect(JSON.stringify(client.messages)).not.toContain("secret internal path");
+  });
+
+  it("logs the refusal without the provider's error text, stack or paths", async () => {
+    const logger = LogService.getInstance();
+    const spies = (["error", "warn", "info", "debug"] as const)
+      .filter((level) => typeof (logger as any)[level] === "function")
+      .map((level) => vi.spyOn(logger as any, level));
+    try {
+      const { daemon, hub, pairing } = startDaemon({
+        workspaceProvider: () => { throw new Error("secret internal path /Users/someone/x"); },
+      });
+      const { port } = await daemon.start();
+      const client = await connect(port);
+      await authenticate(client, pairing);
+
+      client.send({
+        type: "sendInput",
+        payload: { paneId: PUBLISHED_PANE, data: Buffer.from("ls\r").toString("base64") },
+      });
+      await drain(client, "after-logged-failure");
+
+      expect(hub.inputs).toEqual([]);
+      const calls = spies.flatMap((spy) => spy.mock.calls);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const args of calls) {
+        for (const arg of args) {
+          expect(arg instanceof Error).toBe(false);
+          const text = typeof arg === "string" ? arg : JSON.stringify(arg) ?? "";
+          expect(text).not.toContain("secret internal path");
+          expect(text).not.toContain("/Users/");
+          expect(text).not.toMatch(/\n\s+at /);
+        }
+      }
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it("still serves a pane the workspace publishes", async () => {
+    const { daemon, hub, pairing } = startScopedDaemon();
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    hub.bufferFor(PUBLISHED_PANE).write(Buffer.from("seed\n"));
+    client.send({ type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+    client.send({
+      type: "sendInput",
+      payload: { paneId: PUBLISHED_PANE, data: Buffer.from("ls\r").toString("base64") },
+    });
+    await client.until(() => hub.inputs.length === 1, "forwarded input");
+    await client.until(
+      () => client.messages.some((m) => m.type === "paneOutput" && m.payload.paneId === PUBLISHED_PANE),
+      "replayed output",
+    );
+
+    expect(hub.inputs[0]).toEqual({ paneId: PUBLISHED_PANE, data: Buffer.from("ls\r") });
+    expect(scopeErrors(client)).toEqual([]);
+  });
+
+  it("refuses a pane once the workspace stops publishing it", async () => {
+    const { daemon, hub, pairing, setWorkspace, workspace } = startScopedDaemon();
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    client.send({
+      type: "sendInput",
+      payload: { paneId: PUBLISHED_PANE, data: Buffer.from("one").toString("base64") },
+    });
+    await client.until(() => hub.inputs.length === 1, "input while published");
+
+    // The host announces every pane change (synchronizeWorkspacePublication);
+    // the un-announced case is bounded by the scope TTL, tested separately.
+    setWorkspace(withoutPane(workspace(), PUBLISHED_PANE));
+    daemon.notifyWorkspaceChanged();
+    client.send({
+      type: "sendInput",
+      payload: { paneId: PUBLISHED_PANE, data: Buffer.from("two").toString("base64") },
+    });
+    client.send({ type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+    await drain(client, "after-unpublish");
+
+    expect(hub.inputs.map((input) => input.data.toString("utf8"))).toEqual(["one"]);
+    expect(scopeErrors(client)).toHaveLength(2);
+  });
+
+  it("scopes to the legacy pane list when no workspace snapshot is wired", async () => {
+    const { daemon, hub, pairing } = startDaemon({ paneProvider: () => [{ id: "%4" }] });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    for (const paneId of ["%4", "%5"]) {
+      client.send({
+        type: "sendInput",
+        payload: { paneId, data: Buffer.from("ls\r").toString("base64") },
+      });
+    }
+    await drain(client, "after-legacy");
+
+    expect(hub.inputs.map((input) => input.paneId)).toEqual(["%4"]);
+    expect(scopeErrors(client)).toHaveLength(1);
+  });
+});
+
+/** A workspace provider that counts reads and can hold one open on demand. */
+function gatedWorkspace() {
+  let workspace: any = structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace);
+  let gate: Promise<void> | null = null;
+  let release: () => void = () => {};
+  let held = 0;
+  let reads = 0;
+  return {
+    // Like the TUI provider, capture the panes first and only then wait on
+    // slower reads, so a held read returns the workspace as it was.
+    provider: async () => {
+      reads += 1;
+      const captured = workspace;
+      if (gate) {
+        held += 1;
+        await gate;
+      }
+      return captured;
+    },
+    hold() { gate = new Promise<void>((r) => { release = r; }); },
+    release() { const r = release; gate = null; r(); },
+    held: () => held,
+    reads: () => reads,
+    set(next: any) { workspace = next; },
+    get: () => workspace,
+  };
+}
+
+async function settle(daemon: BridgeDaemon) {
+  await (daemon as any).workspaceOperationQueue;
+  await new Promise((r) => setTimeout(r, 30));
+}
+
+describe("bridge daemon v2 pane scope races", () => {
+  for (const frame of ["sendInput", "subscribePane"] as const) {
+    for (const ending of ["revoke", "close"] as const) {
+      it(`drops a ${frame} whose session ends (${ending}) during the scope check`, async () => {
+        const ws = gatedWorkspace();
+        const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+        const { port } = await daemon.start();
+        const client = await connect(port);
+        await authenticate(client, pairing);
+        const token = client.messages.find((m) => m.type === "pairAccepted").payload.token;
+
+        ws.hold();
+        client.send(frame === "sendInput"
+          ? { type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("rm -rf ~\r").toString("base64") } }
+          : { type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+        await client.until(() => ws.held() > 0, "scope check in flight");
+
+        if (ending === "revoke") {
+          expect(await daemon.revokeDevice(token)).toBe(true);
+        } else {
+          client.socket.close();
+        }
+        const sessions = (daemon as any).listener.activeSessions as Set<unknown>;
+        await client.until(() => sessions.size === 0, "session torn down");
+        ws.release();
+        await settle(daemon);
+
+        expect(hub.inputs).toEqual([]);
+        expect((daemon as any).paneSubscribers.size).toBe(0);
+        expect(hub.bufferedPaneIds()).toEqual([]);
+      });
+    }
+  }
+});
+
+describe("bridge daemon v2 pane scope read races", () => {
+  for (const frame of ["sendInput", "subscribePane"] as const) {
+    it(`refuses a ${frame} when the pane is unpublished while its scope read is in flight`, async () => {
+      const ws = gatedWorkspace();
+      const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+      const { port } = await daemon.start();
+      const client = await connect(port);
+      await authenticate(client, pairing);
+
+      ws.hold();
+      client.send(frame === "sendInput"
+        ? { type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("x").toString("base64") } }
+        : { type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+      await client.until(() => ws.held() > 0, "scope read captured and held");
+
+      // The held read already captured a workspace that publishes the pane.
+      ws.set(withoutPane(ws.get(), PUBLISHED_PANE));
+      daemon.notifyWorkspaceChanged();
+      ws.release();
+      await drain(client, `after-${frame}-race`);
+
+      expect(hub.inputs).toEqual([]);
+      expect((daemon as any).paneSubscribers.size).toBe(0);
+      expect(scopeErrors(client)).toHaveLength(1);
+    });
+
+    it(`drops a ${frame} whose scope read completes during the closing handshake`, async () => {
+      const ws = gatedWorkspace();
+      const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+      const { port } = await daemon.start();
+      const client = await connect(port);
+      await authenticate(client, pairing);
+
+      ws.hold();
+      client.send(frame === "sendInput"
+        ? { type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("x").toString("base64") } }
+        : { type: "subscribePane", payload: { paneId: PUBLISHED_PANE, sinceSeq: null } });
+      await client.until(() => ws.held() > 0, "scope check in flight");
+
+      // A paused peer never acknowledges the close, so the server socket stays
+      // CLOSING and the session stays registered until 'close' would fire.
+      const sessions = (daemon as any).listener.activeSessions as Set<any>;
+      const [session] = [...sessions];
+      client.socket.pause();
+      try {
+        session.ctx.socket.close(1000, "closing");
+        expect(session.ctx.socket.readyState).toBe(2);
+        ws.release();
+        await settle(daemon);
+
+        expect(sessions.has(session)).toBe(true);
+        expect(session.state).toBe("authenticated");
+        expect(hub.inputs).toEqual([]);
+        expect((daemon as any).paneSubscribers.size).toBe(0);
+        expect(hub.bufferedPaneIds()).toEqual([]);
+      } finally {
+        client.socket.resume();
+      }
+    });
+  }
+});
+
+describe("bridge daemon v2 pane scope cache", () => {
+  it("does not read a workspace snapshot per keystroke once the scope is warm", async () => {
+    const ws = gatedWorkspace();
+    const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    daemon.notifyWorkspaceChanged();
+    await settle(daemon);
+    const warm = ws.reads();
+    expect(warm).toBeGreaterThan(0);
+
+    for (const key of ["l", "s", "\r"]) {
+      client.send({ type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from(key).toString("base64") } });
+    }
+    await client.until(() => hub.inputs.length === 3, "three keystrokes");
+    expect(ws.reads()).toBe(warm);
+  });
+
+  it("applies an unpublish on the next workspace refresh", async () => {
+    const ws = gatedWorkspace();
+    const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+    daemon.notifyWorkspaceChanged();
+    await settle(daemon);
+
+    ws.set(withoutPane(ws.get(), PUBLISHED_PANE));
+    daemon.notifyWorkspaceChanged();
+    client.send({ type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("x").toString("base64") } });
+    await drain(client, "after-refresh");
+
+    expect(hub.inputs).toEqual([]);
+    expect(scopeErrors(client)).toHaveLength(1);
+  });
+
+  it("re-reads the workspace once the cached scope ages out, even without a notification", async () => {
+    const ws = gatedWorkspace();
+    const { daemon, hub, pairing } = startDaemon({ workspaceProvider: ws.provider });
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+    daemon.notifyWorkspaceChanged();
+    await settle(daemon);
+
+    ws.set(withoutPane(ws.get(), PUBLISHED_PANE));
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + LEGACY_PANE_SCOPE_TTL_MS + 1);
+    try {
+      client.send({ type: "sendInput", payload: { paneId: PUBLISHED_PANE, data: Buffer.from("x").toString("base64") } });
+      await drain(client, "after-expiry");
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(hub.inputs).toEqual([]);
+    expect(scopeErrors(client)).toHaveLength(1);
   });
 });
 

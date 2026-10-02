@@ -59,8 +59,16 @@ import { LogService } from "../LogService.js";
 import {
   hasPublishedRitual,
   hasPublishedTmuxBackedPane,
+  publishedTmuxBackedPaneIds,
   type ReadonlyWorkspaceSnapshot,
 } from "../../workspace/snapshot.js";
+
+/**
+ * How long a cached v2 pane scope is trusted without a workspace-change
+ * notification. Notifications invalidate it immediately; this only bounds how
+ * long a change the host forgot to announce can go unseen.
+ */
+export const LEGACY_PANE_SCOPE_TTL_MS = 1000;
 
 export interface BridgeDaemonOptions {
   serverId?: string;
@@ -77,6 +85,17 @@ export interface BridgeDaemonOptions {
   tokenStore?: TokenStore;       // for tests; production creates a fresh one
   pairingFlow?: PairingFlow;     // for tests; same
   bonjourFactory?: () => Pick<BridgeBonjour, "publish" | "stop">;
+}
+
+/** A loggable label for a scope-read failure: the error's class name, nothing it carries. */
+function classifyScopeError(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  return /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(name) ? name : "unknown";
+}
+
+/** The v3 `unknown_pane` refusal, reused verbatim so v2 leaks no more than v3. */
+function sendUnpublishedPaneError(s: Session): void {
+  s.send({ type: "error", payload: { code: "unknown_pane", message: "pane is not published by this host" } });
 }
 
 export class BridgeDaemon {
@@ -97,6 +116,10 @@ export class BridgeDaemon {
   private workspaceOperationQueue: Promise<void> = Promise.resolve();
   private workspaceBroadcastInFlight = false;
   private workspaceBroadcastPending = false;
+  /** Bumped by every workspace-change notification; stales the pane scope. */
+  private workspaceGeneration = 0;
+  /** Published tmux pane ids from the most recent workspace read. */
+  private legacyPaneScope: { paneIds: ReadonlySet<string>; generation: number; readAt: number } | null = null;
   readonly serverId: string;
   readonly serverName: string;
 
@@ -150,6 +173,7 @@ export class BridgeDaemon {
    * Provider failures are logged, and a pending rescan still runs afterward.
    */
   notifyWorkspaceChanged(): void {
+    this.workspaceGeneration += 1;
     if (this.workspaceBroadcastInFlight) {
       this.workspaceBroadcastPending = true;
       return;
@@ -340,6 +364,14 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "invalid_pane", message: "paneId must be a tmux pane id such as %3" } });
           return;
         }
+        if (!await this.isLegacyPaneInScope(m.payload.paneId)) {
+          sendUnpublishedPaneError(s);
+          return;
+        }
+        // The scope check can wait on a workspace read. A session revoked or
+        // closed meanwhile has already been torn down, so subscribing now
+        // would pin a buffer and a subscriber nothing will ever release.
+        if (!this.isSessionLive(s)) return;
         this.subscribePane(s, m.payload.paneId, m.payload.sinceSeq ?? null);
         return;
       }
@@ -363,6 +395,16 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "invalid_input", message: "data must be a base64 string" } });
           return;
         }
+        // tmux pane ids are server-global: a well-formed id outside the
+        // published workspace still names a real shell, so scope is checked
+        // per frame rather than trusted from an earlier subscription.
+        if (!await this.isLegacyPaneInScope(m.payload.paneId)) {
+          sendUnpublishedPaneError(s);
+          return;
+        }
+        // A device revoked while the scope check waited must not have its
+        // keystrokes delivered after the fact.
+        if (!this.isSessionLive(s)) return;
         await this.hub!.sendInput(m.payload.paneId, bytes);
         return;
       }
@@ -432,7 +474,9 @@ export class BridgeDaemon {
     return this.enqueueWorkspaceOperation(async () => {
       if (!this.listener || !this.opts.workspaceProvider) return;
 
+      const generation = this.workspaceGeneration;
       const workspace = await this.opts.workspaceProvider();
+      this.rememberPublishedPanes(workspace, generation);
       if (workspace.revision === this.lastBroadcastWorkspaceRevision) return;
 
       this.workspaceSequence += 1;
@@ -537,7 +581,9 @@ export class BridgeDaemon {
       if (!provider) {
         throw new Error("workspace provider is not available");
       }
+      const generation = this.workspaceGeneration;
       const workspace = await provider();
+      this.rememberPublishedPanes(workspace, generation);
       return { workspace, sequence: this.workspaceSequence };
     });
   }
@@ -556,6 +602,25 @@ export class BridgeDaemon {
       panes: this.opts.paneProvider(),
       projects: this.opts.projectProvider(),
     };
+  }
+
+  private rememberPublishedPanes(workspace: ReadonlyWorkspaceSnapshot, generation: number): void {
+    this.legacyPaneScope = {
+      paneIds: publishedTmuxBackedPaneIds(workspace),
+      generation,
+      readAt: Date.now(),
+    };
+  }
+
+  /**
+   * True while the session is still authenticated, registered, and its socket
+   * is OPEN. Registration alone is not enough: a socket in its closing
+   * handshake stays in activeSessions until 'close' fires.
+   */
+  private isSessionLive(s: Session): boolean {
+    return s.state === "authenticated"
+      && s.isOpen()
+      && (this.listener?.activeSessions.has(s) ?? false);
   }
 
   private async handleControl(
@@ -827,6 +892,51 @@ export class BridgeDaemon {
   private async isPublishedPane(paneId: string): Promise<boolean> {
     const { workspace } = await this.readWorkspaceSnapshot();
     return hasPublishedTmuxBackedPane(workspace, paneId);
+  }
+
+  /**
+   * The v2 `subscribePane` / `sendInput` scope. It applies the same
+   * published-pane predicate as v3 terminal streams (from a fresh read or the
+   * scope cached by the most recent one), falling back to the
+   * legacy pane list (what v2 `listPanes` publishes) only when no workspace
+   * snapshot is wired. Any failure to read scope fails closed; the cause is
+   * logged on the host and never sent to the client.
+   */
+  private async isLegacyPaneInScope(paneId: string): Promise<boolean> {
+    try {
+      if (!this.opts.workspaceProvider) {
+        return this.opts.paneProvider().some((pane) => pane.id === paneId);
+      }
+      // Input arrives per keystroke and a snapshot read is expensive, so a
+      // scope that no notification has invalidated and that is younger than
+      // the TTL answers directly, in both directions. Anything else re-reads.
+      const cached = this.legacyPaneScope;
+      if (
+        cached
+        && cached.generation === this.workspaceGeneration
+        && Date.now() - cached.readAt <= LEGACY_PANE_SCOPE_TTL_MS
+      ) {
+        return cached.paneIds.has(paneId);
+      }
+      // A provider captures its panes before awaiting slower reads, so a
+      // notification during the read means the answer may already be stale.
+      // Re-read once; if the workspace changes again during that read, refuse
+      // rather than authorize from a snapshot known to be out of date.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const generation = this.workspaceGeneration;
+        const published = await this.isPublishedPane(paneId);
+        if (generation === this.workspaceGeneration) return published;
+      }
+      return false;
+    } catch (error) {
+      // The provider's message and stack can carry private paths, so only a
+      // bounded classification of the failure is logged.
+      LogService.getInstance().error(
+        `bridge v2 pane scope check failed (${classifyScopeError(error)}); refusing the request`,
+        "BridgeDaemon",
+      );
+      return false;
+    }
   }
 
   private async isPublishedRitual(projectId: string, ritualId: string): Promise<boolean> {

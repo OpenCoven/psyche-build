@@ -39,6 +39,22 @@ class FakeTokenStore {
 }
 
 // Default no-op stubs for required ritual options
+/**
+ * v2 subscribePane is scoped to published panes (#503); without a workspace
+ * snapshot the legacy pane list is that scope, so tests that subscribe to %1
+ * must publish it.
+ */
+const LEGACY_PANE_1: PaneSnapshot = {
+  id: "%1",
+  displayName: "pane 1",
+  kind: "worktree",
+  projectId: null,
+  projectName: null,
+  worktreePath: null,
+  agent: null,
+  status: "idle",
+};
+
 const noopRituals = {
   ritualProvider: (_projectId: string | null) => [],
   launchRitual: async () => {},
@@ -1257,7 +1273,7 @@ describe("BridgeDaemon", () => {
     const daemon = new BridgeDaemon({
       serverId: "test", serverName: "test", projectName: "psyche",
       sessionName: "test-session",
-      paneProvider: () => [],
+      paneProvider: () => [LEGACY_PANE_1],
       projectProvider: () => [],
       hubFactory: () => fakeHub,
       ...noopRituals,
@@ -1327,7 +1343,7 @@ describe("BridgeDaemon", () => {
 
     const daemon = new BridgeDaemon({
       sessionName: "test-session",
-      paneProvider: () => [],
+      paneProvider: () => [LEGACY_PANE_1],
       projectProvider: () => [],
       hubFactory: () => fakeHub,
       ...noopRituals,
@@ -1384,7 +1400,7 @@ describe("BridgeDaemon", () => {
 
     const daemon = new BridgeDaemon({
       sessionName: "test-session",
-      paneProvider: () => [],
+      paneProvider: () => [LEGACY_PANE_1],
       projectProvider: () => [],
       hubFactory: () => fakeHub,
       ...noopRituals,

@@ -218,6 +218,20 @@ to an owner-scoped pending action session. Unsupported, missing, or unwired
 executors return correlated errors such as `command_not_supported` rather than
 fixture-shaped success.
 
+The legacy v2 `subscribePane` and `sendInput` messages apply the same
+published-pane check on every frame, because tmux pane ids are server-global
+and a well-formed id outside the workspace still names a real shell. Without a
+workspace snapshot the scope is the legacy pane list that `listPanes` returns.
+An unpublished pane, or a scope that cannot be read, is refused with the v3
+`unknown_pane` error and nothing reaches tmux. So that each keystroke does not
+rebuild the snapshot, the published pane set from the latest workspace read is
+reused until a workspace-change notification arrives or
+`LEGACY_PANE_SCOPE_TTL_MS` passes. A notification that lands during a scope
+read forces one re-read, and a second one refuses the request. A session that
+is revoked, closed, or in its closing handshake when the check returns is
+dropped before anything is subscribed or typed. Scope-read failures are logged
+as an error class name only, never the provider's message or stack.
+
 Ritual metadata publication is wired and bounded, but production mobile ritual
 execution is still a gap until #242 completes. Fixture roots, `DemoStore`,
 `-uiFixture`, and fixture-only debug controls are test scaffolding and must not
@@ -233,7 +247,8 @@ The rules above are pinned by:
 | `__tests__/utils/base64.test.ts` | strict base64 validation of wire payloads |
 | `__tests__/services/tmuxControl.test.ts` | no tmux command is built from an injecting pane id |
 | `__tests__/bridge/PairingFlow.test.ts` | the pairing attempt budget |
-| `__tests__/bridge/bridgeDaemonHardening.test.ts` | pairing, input validation, socket errors, frame cap — over a real TLS WebSocket |
+| `__tests__/bridge/bridgeDaemonHardening.test.ts` | pairing, input validation, v2 pane scope (races, cache), socket errors, frame cap — over a real TLS WebSocket |
+| `__tests__/bridge/legacyPaneScope.test.ts` | every pane v2 `listPanes` advertises passes the v2 pane scope |
 | `__tests__/daemon/daemonConnection.test.ts` | auth, project scoping, crash resistance, stream limits |
 | `__tests__/daemon/bridgeConfigIntegrity.test.ts` | config reads, atomic writes, concurrent mutation |
 
