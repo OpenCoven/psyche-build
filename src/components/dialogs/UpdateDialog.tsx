@@ -30,7 +30,7 @@ const UpdateDialog: React.FC<UpdateDialogProps> = ({ updateInfo }) => {
             </Text>
           ) : (
             <Text>
-              Manual update required: <Text color={COLORS.info}>{updateInfo.packageManager || 'npm'} update -g psyche</Text>
+              Manual update required: see the release notes for the supported install path
               {'\n'}[S]kip this version • [L]ater
             </Text>
           )}
