@@ -19,7 +19,7 @@ vi.mock('../src/utils/geminiTrust.js', () => ({
 const { sendPromptViaTmux } = await import('../src/utils/agentPromptDispatch.js');
 const { ensureGeminiFolderTrusted } = await import('../src/utils/geminiTrust.js');
 
-function createTmux() {
+function createTmux(paneCommand = 'zsh') {
   const shellCommands: string[] = [];
   const keys: Array<[string, string]> = [];
   return {
@@ -31,7 +31,7 @@ function createTmux() {
     sendTmuxKeys: vi.fn(async (paneId: string, key: string) => {
       keys.push([paneId, key]);
     }),
-    getPaneCurrentCommand: vi.fn(async () => 'zsh'),
+    getPaneCurrentCommand: vi.fn(async () => paneCommand),
   };
 }
 
@@ -50,9 +50,10 @@ async function launch(
   agent: AgentName,
   prompt = 'Fix the failing tests',
   extra: Partial<LaunchAgentInPaneOptions> = {},
+  paneCommand = 'zsh',
 ) {
-  const tmux = createTmux();
-  await launchAgentInPane({
+  const tmux = createTmux(paneCommand);
+  const result = await launchAgentInPane({
     paneId: '%1',
     agent,
     prompt,
@@ -62,7 +63,7 @@ async function launch(
     tmuxService: tmux as never,
     ...extra,
   });
-  return tmux;
+  return Object.assign(tmux, { result });
 }
 
 describe('launchAgentInPane', () => {
@@ -198,6 +199,116 @@ describe('launchAgentInPane', () => {
 
       expect(tmux.shellCommands[0]).toBe('coven');
       expect(tmux.shellCommands[0]).not.toContain('PSYCHE_PROMPT_CONTENT');
+    });
+  });
+  describe('exit recording', () => {
+    it('appends the exit recorder after the agent command when asked', async () => {
+      const tmux = await launch('coven-code', '', {
+        exitRecorder: { nonce: '0a1b2c3d' },
+      });
+
+      expect(tmux.shellCommands[0]).toBe(
+        'coven; tmux set-option -p -t "$TMUX_PANE" @psyche_agent_exit "0a1b2c3d:$?" 2>/dev/null',
+      );
+    });
+
+    it('records the status of the agent, not of the prompt bootstrap', async () => {
+      const tmux = await launch('opencode', 'Fix it', {
+        exitRecorder: { nonce: '0a1b2c3d' },
+      });
+
+      const command = tmux.shellCommands[0];
+      // The recorder must follow the agent invocation directly, so `$?` is
+      // the agent's own exit status.
+      expect(command).toMatch(
+        /--prompt "\$PSYCHE_PROMPT_CONTENT"; tmux set-option -p -t "\$TMUX_PANE" @psyche_agent_exit "0a1b2c3d:\$\?" 2>\/dev\/null$/u,
+      );
+      expect(command).not.toContain('Fix it');
+    });
+
+    it('wraps the hooked codex command too', async () => {
+      const tmux = await launch('codex', '', {
+        exitRecorder: { nonce: '0a1b2c3d' },
+      });
+
+      expect(tmux.shellCommands[0]).toMatch(/codex.*; tmux set-option -p .*"0a1b2c3d:\$\?" 2>\/dev\/null$/u);
+    });
+
+    it('sends no recorder when none is requested', async () => {
+      const tmux = await launch('coven-code', '');
+      expect(tmux.shellCommands[0]).not.toContain('@psyche_agent_exit');
+      expect(tmux.result.exitRecorderArmed).toBe(false);
+    });
+
+    it('reports the recorder armed for a POSIX shell', async () => {
+      const tmux = await launch('coven-code', '', { exitRecorder: { nonce: '0a1b2c3d' } }, 'bash');
+      expect(tmux.result.exitRecorderArmed).toBe(true);
+    });
+
+    it('uses $status when the pane runs fish, whatever $SHELL says', async () => {
+      const savedShell = process.env.SHELL;
+      process.env.SHELL = '/bin/zsh';
+      try {
+        const tmux = await launch('coven-code', '', { exitRecorder: { nonce: '0a1b2c3d' } }, 'fish');
+        expect(tmux.shellCommands[0]).toBe(
+          'coven; tmux set-option -p -t "$TMUX_PANE" @psyche_agent_exit "0a1b2c3d:$status" 2>/dev/null',
+        );
+        expect(tmux.result.exitRecorderArmed).toBe(true);
+      } finally {
+        process.env.SHELL = savedShell;
+      }
+    });
+
+    it('uses $? when the pane runs zsh even if $SHELL is fish', async () => {
+      const savedShell = process.env.SHELL;
+      process.env.SHELL = '/opt/homebrew/bin/fish';
+      try {
+        const tmux = await launch('coven-code', '', { exitRecorder: { nonce: '0a1b2c3d' } }, 'zsh');
+        expect(tmux.shellCommands[0]).toContain('"0a1b2c3d:$?"');
+      } finally {
+        process.env.SHELL = savedShell;
+      }
+    });
+
+    // An unknown shell would reject the suffix and the agent would never
+    // start, which is worse than an unclassified launch.
+    it.each(['nu', 'tcsh', 'xonsh', ''])('launches bare and unarmed in a %j pane', async (paneCommand) => {
+      const tmux = await launch('coven-code', '', { exitRecorder: { nonce: '0a1b2c3d' } }, paneCommand);
+      expect(tmux.shellCommands[0]).toBe('coven');
+      expect(tmux.result.exitRecorderArmed).toBe(false);
+    });
+
+    it('launches bare and unarmed when the pane shell cannot be read', async () => {
+      const tmux = createTmux();
+      tmux.getPaneCurrentCommand.mockRejectedValueOnce(new Error('tmux busy'));
+      const result = await launchAgentInPane({
+        paneId: '%1',
+        agent: 'coven-code',
+        prompt: '',
+        slug: 'fix-tests',
+        projectRoot,
+        exitRecorder: { nonce: '0a1b2c3d' },
+        tmuxService: tmux as never,
+      });
+      expect(tmux.shellCommands[0]).toBe('coven');
+      expect(result.exitRecorderArmed).toBe(false);
+    });
+
+    // The suffix is joined with `;`. A command ending in `#` (comment), `&`
+    // (background), or `\` (continuation) would swallow or detach it.
+    const suffix = '; tmux set-option -p -t "$TMUX_PANE" @psyche_agent_exit "0a1b2c3d:$?" 2>/dev/null';
+    it.each(AGENT_IDS.flatMap((agent) => [
+      [agent, 'Fix the failing tests'],
+      [agent, ''],
+    ] as const))('ends the %s launch (prompt %j) with the recorder intact', async (agent, prompt) => {
+      const tmux = await launch(agent as AgentName, prompt, { exitRecorder: { nonce: '0a1b2c3d' } }, 'sh');
+      const command = tmux.shellCommands[0];
+
+      expect(command.endsWith(suffix)).toBe(true);
+      const agentPart = command.slice(0, -suffix.length);
+      expect(agentPart).not.toMatch(/[#&\\]\s*$/u);
+      expect(agentPart).not.toMatch(/(^|\s)#/u);
+      expect(tmux.result.exitRecorderArmed).toBe(true);
     });
   });
 });

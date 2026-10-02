@@ -25,6 +25,11 @@ import {
 } from './recoveryTmuxIdentity.js';
 import { observeMidMutationCleanup } from './recoveryMidMutationCleanup.js';
 import {
+  observeAgentLaunchFailure,
+  RecoveryAgentLaunchConfinementError,
+  RecoveryAgentLaunchTmuxUnavailableError,
+} from './recoveryAgentLaunch.js';
+import {
   observeApplicationRestart,
   RecoveryRestartUnavailableError,
 } from './recoveryApplicationRestart.js';
@@ -67,6 +72,7 @@ export type RecoveryScenarioId =
   | 'unavailable-providers'
   | 'stale-pane-identity'
   | 'interrupted-git-mutation'
+  | 'agent-launch-failure'
   | 'upgrade-recovery'
   | 'application-restart';
 
@@ -81,6 +87,7 @@ export type RecoveryInjectionId =
   | 'capability-provider-unregistered-and-daemon-socket-absent'
   | 'tmux-server-replaced-reusing-recorded-pane-id'
   | 'cleanup-owner-killed-during-supervised-git-mutation'
+  | 'agent-cli-exits-at-launch-inside-live-shell'
   | 'pane-config-aged-across-schema-versions'
   | 'application-quit-and-relaunched';
 
@@ -96,6 +103,7 @@ export type RecoveryClassification =
   | 'owner_restart_fenced'
   | 'cleanup_recoverable'
   | 'provider_unavailable'
+  | 'agent_launch_failed'
   | 'stale_identity_rejected'
   | 'tmux_unavailable'
   | 'workspace_restored'
@@ -130,6 +138,11 @@ export type RecoveryInvariantId =
   | 'provider-failure-classified'
   | 'available-provider-still-executes'
   | 'plain-terminal-lane-remains-usable'
+  | 'failing-agent-classified-as-launch-failure'
+  | 'missing-agent-classified-as-not-found'
+  | 'running-agent-not-classified-as-failed'
+  | 'agent-pane-shell-preserved'
+  | 'launch-report-carries-no-terminal-content'
   | 'first-run-reached-workspace'
   | 'pane-created-before-quit'
   | 'restart-kept-its-project-config'
@@ -830,6 +843,85 @@ async function runUnavailableProviders(): Promise<RecoveryScenarioEvidence> {
 }
 
 /**
+ * Left unobserved after #199 and named in #475: an agent CLI that fails at
+ * launch inside a live shell. The pane survives and its shell returns to the
+ * prompt, so nothing else in the product notices.
+ *
+ * The real launch path types each agent command into a real `sh` on a
+ * disposable tmux server, and the real classifier reads the exit status the
+ * shell recorded. The failing CLI writes a sentinel to stderr and the failing
+ * launch carries a sentinel prompt, so a classification or message that
+ * leaked terminal content, the prompt, or a path fails
+ * `launch-report-carries-no-terminal-content`.
+ *
+ * `running-agent-not-classified-as-failed` is the positive control: reporting
+ * every launch as failed would satisfy both classification invariants.
+ *
+ * Scope: this observes the launch window only. An agent that exits later is
+ * an operator quitting it and is deliberately not classified; the desktop
+ * bridge does not yet carry this classification.
+ */
+async function runAgentLaunchFailure(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    const configPath = projectPaneConfigPath(workspace.projectRoot);
+    const configBefore = digest(await readFile(configPath));
+
+    let observed: Awaited<ReturnType<typeof observeAgentLaunchFailure>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observeAgentLaunchFailure(workspace.projectRoot);
+      classification = observed.failingCliClassified && observed.missingCliClassified
+        ? 'agent_launch_failed'
+        : 'unexpected_success';
+    } catch (error) {
+      // A PATH that could not be confined means nothing was launched: the
+      // injection never happened, which is not the product passing.
+      classification = error instanceof RecoveryAgentLaunchTmuxUnavailableError
+        ? 'tmux_unavailable'
+        : error instanceof RecoveryAgentLaunchConfinementError
+          ? 'injection_ineffective'
+          : 'unexpected_error';
+    }
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+
+    return evidence(
+      'agent-launch-failure',
+      'agent-cli-exits-at-launch-inside-live-shell',
+      classification,
+      [
+        {
+          id: 'failing-agent-classified-as-launch-failure',
+          held: observed?.failingCliClassified === true,
+        },
+        {
+          id: 'missing-agent-classified-as-not-found',
+          held: observed?.missingCliClassified === true,
+        },
+        {
+          id: 'running-agent-not-classified-as-failed',
+          held: observed?.runningAgentNotClassified === true,
+        },
+        { id: 'agent-pane-shell-preserved', held: observed?.shellsPreserved === true },
+        {
+          id: 'launch-report-carries-no-terminal-content',
+          held: observed?.reportBounded === true,
+        },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'uncommitted-work-untouched', held: workAfter === digest('the only copy of this work\n') },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
+/**
  * Named in #196 and left partially covered by #199: a stale or replaced tmux
  * identity must be reported and never rebound to unrelated state. Every other
  * scenario in this harness ages a *lease*; this one ages the pane identity
@@ -1207,6 +1299,7 @@ const SCENARIOS: Readonly<
   'unavailable-providers': runUnavailableProviders,
   'stale-pane-identity': runStalePaneIdentity,
   'interrupted-git-mutation': runInterruptedGitMutation,
+  'agent-launch-failure': runAgentLaunchFailure,
   'upgrade-recovery': runUpgradeRecovery,
   'application-restart': runApplicationRestart,
 };
