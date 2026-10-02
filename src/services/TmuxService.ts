@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'child_process';
+import { execFile, execFileSync, execSync } from 'child_process';
 import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
@@ -125,6 +125,8 @@ function isPermanentError(error: unknown): boolean {
  * - Type-safe tmux operations
  */
 const PANE_CURRENT_COMMAND_TIMEOUT_MS = 1_000;
+/** A command name is tiny; anything larger is not an answer worth buffering. */
+const PANE_CURRENT_COMMAND_MAX_BYTES = 4 * 1024;
 
 export class TmuxService {
   private static instance: TmuxService;
@@ -800,22 +802,39 @@ export class TmuxService {
   }
 
   /**
-   * Get the current foreground command for a pane as reported by tmux.
-   */
-  /**
-   * The pane's foreground command. Bounded: the launch path polls it to pick
-   * the pane's shell dialect, and one hung tmux call must not stall a launch.
+   * The pane's foreground command as reported by tmux. The launch path polls
+   * it to pick the pane's shell dialect, so it must be cheap and bounded:
+   *
+   * - asynchronous, so a slow tmux never blocks the daemon's event loop;
+   * - one attempt with a one-second timeout and no retries, so one read costs
+   *   at most that timeout (the caller's bounded poll is the retry);
+   * - `execFile` with argv, so the pane id never passes through a shell (#519).
    */
   async getPaneCurrentCommand(paneId: string): Promise<string> {
-    return this.executeWithRetry(
-      () =>
-        this.execute(
-          `tmux display-message -t '${paneId}' -p '#{pane_current_command}'`,
-          { timeout: PANE_CURRENT_COMMAND_TIMEOUT_MS },
-        ).trim(),
-      RetryStrategy.FAST,
-      `getPaneCurrentCommand(${paneId})`
-    );
+    return new Promise<string>((resolve, reject) => {
+      execFile(
+        'tmux',
+        ['display-message', '-t', paneId, '-p', '#{pane_current_command}'],
+        {
+          encoding: 'utf8',
+          timeout: PANE_CURRENT_COMMAND_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          maxBuffer: PANE_CURRENT_COMMAND_MAX_BYTES,
+        },
+        (error, stdout) => {
+          if (error) {
+            this.logger.debug(
+              'tmux pane current-command read failed',
+              'error',
+              error instanceof Error ? error.message : String(error),
+            );
+            reject(error);
+            return;
+          }
+          resolve(String(stdout).trim());
+        },
+      );
+    });
   }
 
   /**

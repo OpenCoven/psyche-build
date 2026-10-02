@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const execSyncMock = vi.hoisted(() => vi.fn(() => ''));
+type ExecFileCallback = (error: Error | null, stdout: string, stderr: string) => void;
+const execFileMock = vi.hoisted(() => vi.fn());
 
 vi.mock('child_process', async (importOriginal) => ({
   ...await importOriginal<typeof import('child_process')>(),
   execSync: execSyncMock,
+  execFile: execFileMock,
 }));
 
 import { TmuxService } from '../src/services/TmuxService.js';
@@ -13,6 +16,7 @@ describe('TmuxService command construction', () => {
   beforeEach(() => {
     execSyncMock.mockReset();
     execSyncMock.mockReturnValue('');
+    execFileMock.mockReset();
   });
 
   it('shell-quotes pane titles and pane IDs across async and sync title APIs', async () => {
@@ -37,14 +41,50 @@ describe('TmuxService command construction', () => {
   });
 
   // The pane-shell probe polls this read; one hung tmux call must not stall a
-  // launch past the probe's bound (#508).
-  it('bounds the pane current-command read with a one-second timeout', async () => {
-    execSyncMock.mockReturnValue('zsh\n');
-    await expect(TmuxService.getInstance().getPaneCurrentCommand('%1')).resolves.toBe('zsh');
-    expect(execSyncMock).toHaveBeenCalledWith(
-      "tmux display-message -t '%1' -p '#{pane_current_command}'",
-      expect.objectContaining({ timeout: 1_000 }),
-    );
+  // launch past the probe's bound (#508), and must not block the daemon's
+  // event loop while it waits (#519).
+  describe('pane current-command read', () => {
+    it('runs tmux without a shell, passing the pane id as one argv entry, with a one-second timeout', async () => {
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        cb(null, 'zsh\n', '');
+      });
+      const paneId = "%1'; touch /tmp/id-injection; #";
+      await expect(TmuxService.getInstance().getPaneCurrentCommand(paneId)).resolves.toBe('zsh');
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['display-message', '-t', paneId, '-p', '#{pane_current_command}'],
+        expect.objectContaining({ timeout: 1_000 }),
+        expect.any(Function),
+      );
+      expect(execSyncMock).not.toHaveBeenCalled();
+    });
+
+    it('does not retry a timed-out read, so one read costs at most its timeout', async () => {
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        const error = Object.assign(new Error('spawnSync tmux ETIMEDOUT'), { code: 'ETIMEDOUT', killed: true });
+        cb(error, '', '');
+      });
+      await expect(TmuxService.getInstance().getPaneCurrentCommand('%1')).rejects.toThrow(/ETIMEDOUT/);
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets timers fire while the read is outstanding', async () => {
+      let finish: ExecFileCallback | undefined;
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        finish = cb;
+      });
+      let timerFired = false;
+      const read = TmuxService.getInstance().getPaneCurrentCommand('%1');
+      await new Promise<void>((resolve) => setTimeout(() => {
+        timerFired = true;
+        resolve();
+      }, 5));
+      expect(timerFired).toBe(true);
+      expect(finish).toBeDefined();
+      finish?.(null, 'bash\n', '');
+      await expect(read).resolves.toBe('bash');
+    });
   });
 
   it('shell-quotes pane IDs across async and sync pane selection APIs', async () => {
