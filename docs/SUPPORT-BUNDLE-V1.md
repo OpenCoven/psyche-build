@@ -164,7 +164,8 @@ the honest state for an operator-invoked snapshot; it is not a defect to
 Collectors currently report platform, release, architecture, a project
 identity digest, project-config presence, outstanding recovery state —
 worktree recovery markers and quarantined recovery files, which raise the
-bundle status to `recovery_required` — plus pane lifecycle and updater state.
+bundle status to `recovery_required` — plus pane lifecycle, updater, and
+installed-provider state.
 
 `lifecycle` carries the persisted pane count and whether a pane layout exists.
 `updater` carries whether auto-update is effectively enabled — `AutoUpdater`
@@ -190,8 +191,52 @@ corrupt, or written by a newer Psyche — reports `lifecycle.state` and
 the meaning: the file is there and this version cannot read it. One unreadable
 config does not fail the whole collection.
 
-Provider, graphics, receipt, and terminal facts remain uncollected; those
-sections are empty rather than fabricated.
+`providers` reports how many of the agent registry's providers have an
+executable present (`count`), how many the registry knows (`items`), and
+`capability: 'available'` when at least one was found or `'missing'` when none
+was. It never names which providers were found, where, or by what command.
+
+The survey reads the filesystem only. The desktop app resolves an agent by
+running `$SHELL -i -c "command -v …"`, which starts an interactive shell per
+agent, sources the user's rc files, and cannot be cancelled; the bundle does
+not. Instead it checks each registry entry's absolute common install paths and
+then each absolute entry of the command's own `PATH` for a regular executable
+file. Empty and relative `PATH` entries are ignored so the answer does not
+depend on the working directory. The collector receives the search path from
+the CLI already split and never reads the environment itself, so no
+environment value reaches the bundle through it.
+
+Two limits follow, and the section is not evidence beyond them:
+
+- An executable on disk is not a working provider. It may still fail at
+  launch, and an agent CLI that fails inside a live shell has no product
+  classification yet (#199).
+- The command's `PATH` can differ from the interactive login shell the app
+  uses, so `count` can disagree with what the app's picker shows in either
+  direction. `capability: 'missing'` means nothing was found where the bundle
+  looked, not that the app cannot launch an agent.
+
+`PATH` entries are normalized, including a trailing separator, before
+duplicates are removed, so `/usr/bin` and `/usr/bin/` cost one search.
+
+The survey checks at most 512 candidate locations. When that budget is
+exhausted before all candidates are checked, the survey reports
+`state: 'partial'`, so its `count` is a lower bound rather than a checked
+absence. A survey whose candidates fit the budget exactly is not partial. The budget is spent in registry order, and each provider costs
+its common paths plus one candidate per `PATH` entry until it is found. A long
+`PATH` therefore makes `partial` common, and the providers late in the registry
+are the ones left unchecked.
+
+Cancellation is checked before each candidate and again after its filesystem
+checks finish, so an abort during the last candidate still rejects. A single
+filesystem check already in flight, such as one stalled on an unresponsive network mount, cannot be
+interrupted; the collection deadline still bounds the bundle, and the overrun
+is reported as `recovery_required`. On cancellation the collector rejects
+instead of reporting a zero count, and the collection turns that into
+`collection_timeout_or_cancelled` and `recovery_required`.
+
+Graphics, receipt, and terminal facts remain uncollected; those sections are
+empty rather than fabricated.
 
 The project identity digest hashes the canonical project root, resolved the way
 the recovery readers resolve it, so one project reached through a symlink
