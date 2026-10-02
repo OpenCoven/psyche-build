@@ -11,9 +11,13 @@ import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import {
   buildAgentExitRecorderSuffix,
-  exitRecorderSyntaxForPaneCommand,
   type AgentExitRecorder,
 } from './agentLaunchOutcome.js';
+import {
+  describePromptBootstrapSkipped,
+  resolvePaneShell,
+} from './paneShellDialect.js';
+import { LogService } from '../services/LogService.js';
 
 /**
  * Registry order is user-visible: it drives the new-pane agent picker, the
@@ -646,21 +650,30 @@ export async function launchAgentInPane(
   // send-keys agents are launched bare, then typed into once their TUI is up.
   const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
+  const takesCommandLinePrompt = hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery;
+
   // The pane's current command is its shell before the agent is typed. It is
-  // both the send-keys baseline and the only trustworthy answer to which
-  // shell will parse the exit recorder.
-  let paneCommand: string | undefined;
-  if (shouldSendPromptViaTmux || exitRecorder) {
-    try {
-      paneCommand = await tmuxService.getPaneCurrentCommand(paneId);
-    } catch {
-      paneCommand = undefined;
-    }
-  }
-  const baselineCommand = shouldSendPromptViaTmux ? paneCommand : undefined;
+  // the send-keys baseline and the only trustworthy answer to which shell will
+  // parse the prompt bootstrap and the exit recorder (#475, #508).
+  const paneShell = shouldSendPromptViaTmux || exitRecorder || takesCommandLinePrompt
+    ? await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneId))
+    : null;
+  const dialect = paneShell?.dialect ?? null;
+  const baselineCommand = shouldSendPromptViaTmux ? paneShell?.paneCommand : undefined;
 
   let launchCommand: string;
-  if (hasInitialPrompt && !shouldSendPromptViaTmux && !omitsPromptDelivery) {
+  if (takesCommandLinePrompt && paneShell && paneShell.dialect === null) {
+    // No known dialect: both the prompt bootstrap and the inline-escaped
+    // fallback are shell-specific, and a line the pane's shell rejects would
+    // stop the agent from starting at all. Launch it bare, write no prompt
+    // file, and say so.
+    launchCommand = buildAgentCommand(agent, permissionMode);
+    LogService.getInstance().warn(
+      describePromptBootstrapSkipped(agent, paneShell.reason),
+      'agentLaunch',
+      paneId,
+    );
+  } else if (takesCommandLinePrompt && dialect) {
     // Prefer a prompt file so the prompt never has to survive shell quoting.
     let promptFilePath: string | null = null;
     try {
@@ -670,7 +683,7 @@ export async function launchAgentInPane(
     }
 
     if (promptFilePath) {
-      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
+      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath, dialect);
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
@@ -700,7 +713,7 @@ export async function launchAgentInPane(
     });
   }
 
-  const recorderSyntax = exitRecorder ? exitRecorderSyntaxForPaneCommand(paneCommand) : null;
+  const recorderSyntax = exitRecorder ? dialect : null;
   if (exitRecorder && recorderSyntax) {
     launchCommand += buildAgentExitRecorderSuffix(exitRecorder, recorderSyntax);
   }

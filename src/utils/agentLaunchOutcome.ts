@@ -22,7 +22,7 @@
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
+import { paneShellDialectForCommand, type PaneShellDialect } from './paneShellDialect.js';
 
 /** Pane user option the launch recorder writes. */
 export const AGENT_EXIT_PANE_OPTION = '@psyche_agent_exit';
@@ -65,9 +65,7 @@ export function createAgentExitRecorder(): AgentExitRecorder {
 }
 
 /** How the pane's shell spells the last exit status, when it is known. */
-export type AgentExitRecorderSyntax = 'posix' | 'fish';
-
-const POSIX_STATUS_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+export type AgentExitRecorderSyntax = PaneShellDialect;
 
 /**
  * Chooses the recorder syntax from the shell actually running in the pane
@@ -75,16 +73,13 @@ const POSIX_STATUS_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'zsh', '
  * `default-shell` can differ from the login shell. Any shell not known to
  * accept the suffix gets none, so its launch is unclassified rather than
  * broken — a nushell or tcsh pane would otherwise reject the whole line and
- * the agent would never start.
+ * the agent would never start. Shares its parsing with the prompt bootstrap
+ * so the two cannot disagree about a pane (#508).
  */
 export function exitRecorderSyntaxForPaneCommand(
   paneCommand: string | undefined,
 ): AgentExitRecorderSyntax | null {
-  // Login shells can report as `-zsh`; a path can appear on some platforms.
-  const name = path.basename((paneCommand ?? '').trim()).replace(/^-/u, '').toLowerCase();
-  if (POSIX_STATUS_SHELLS.has(name)) return 'posix';
-  if (name === 'fish') return 'fish';
-  return null;
+  return paneShellDialectForCommand(paneCommand);
 }
 
 /**

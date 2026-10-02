@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PaneSlugAllocationState } from '../src/services/PaneSlugRegistry.js';
 import type { CrashSafePaneSlugReservationOptions } from '../src/services/PaneSlugReservation.js';
 import type { TmuxServerIdentity } from '../src/services/TmuxServerIdentity.js';
@@ -16,6 +16,7 @@ const tmuxService = vi.hoisted(() => ({
   sendTmuxKeys: vi.fn(async () => {}),
   selectPane: vi.fn(async () => {}),
   killPane: vi.fn(async () => {}),
+  getPaneCurrentCommand: vi.fn(async (): Promise<string> => 'zsh'),
 }));
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%9'));
 const persistExactMock = vi.hoisted(() => vi.fn());
@@ -31,7 +32,7 @@ const buildAgentCommandMock = vi.hoisted(() => vi.fn<(
 const buildInitialPromptCommandMock = vi.hoisted(() => vi.fn(() => 'opencode --prompt'));
 const getPromptTransportMock = vi.hoisted(() => vi.fn(() => 'inline'));
 const buildPromptReadAndDeleteSnippetMock = vi.hoisted(() => vi.fn(() => 'read-prompt'));
-const writePromptFileMock = vi.hoisted(() => vi.fn(async () => {
+const writePromptFileMock = vi.hoisted(() => vi.fn(async (): Promise<string> => {
   throw new Error('use inline prompt');
 }));
 const sendPromptViaTmuxMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -178,6 +179,8 @@ describe('conflict resolution pane transaction', () => {
     tmuxService.sendShellCommand.mockResolvedValue(undefined);
     tmuxService.sendTmuxKeys.mockResolvedValue(undefined);
     tmuxService.selectPane.mockResolvedValue(undefined);
+    tmuxService.getPaneCurrentCommand.mockReset();
+    tmuxService.getPaneCurrentCommand.mockResolvedValue('zsh');
   });
 
   it('persists the exact conflict pane before issuing merge or agent commands', async () => {
@@ -307,5 +310,67 @@ describe('conflict resolution pane transaction', () => {
       | SendShellCommandCall
       | undefined;
     expect(lastSendShellCommandCall?.[1]).toBe('coven');
+  });
+
+  describe('prompt bootstrap follows the pane shell (#508)', () => {
+    const savedShell = process.env.SHELL;
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(async () => {
+      const { LogService } = await import('../src/services/LogService.js');
+      warn = vi.spyOn(LogService.getInstance(), 'warn').mockImplementation(() => {});
+      writePromptFileMock.mockImplementation(async () => '/repo/.psyche/prompts/p.txt');
+      getPromptTransportMock.mockReturnValue('option');
+    });
+    afterEach(() => {
+      process.env.SHELL = savedShell;
+      warn.mockRestore();
+    });
+
+    async function createPane() {
+      const { createConflictResolutionPane } = await import(
+        '../src/utils/conflictResolutionPane.js'
+      );
+      await createConflictResolutionPane({
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        targetRepoPath: '/repo/.psyche/worktrees/feature',
+        sessionProjectRoot: '/repo',
+        targetProjectRoot: '/repo',
+        projectName: 'repo',
+        existingPanes: [] as PsychePane[],
+        agent: 'opencode',
+        persistConflictPane: async () => {},
+      });
+      const last = tmuxService.sendShellCommand.mock.calls.at(-1) as SendShellCommandCall | undefined;
+      return last?.[1];
+    }
+
+    it('uses the posix dialect in a zsh pane even when $SHELL is fish', async () => {
+      process.env.SHELL = '/opt/homebrew/bin/fish';
+      tmuxService.getPaneCurrentCommand.mockResolvedValue('zsh');
+      await createPane();
+      expect(buildPromptReadAndDeleteSnippetMock).toHaveBeenCalledWith('/repo/.psyche/prompts/p.txt', 'posix');
+    });
+
+    it('uses the fish dialect in a fish pane even when $SHELL is zsh', async () => {
+      process.env.SHELL = '/bin/zsh';
+      tmuxService.getPaneCurrentCommand.mockResolvedValue('fish');
+      await createPane();
+      expect(buildPromptReadAndDeleteSnippetMock).toHaveBeenCalledWith('/repo/.psyche/prompts/p.txt', 'fish');
+    });
+
+    it.each([
+      ['an unknown shell', () => tmuxService.getPaneCurrentCommand.mockResolvedValue('nu')],
+      ['a read error', () => tmuxService.getPaneCurrentCommand.mockRejectedValue(new Error('no pane'))],
+    ])('launches bare without a prompt file or inline prompt for %s', async (_label, arrange) => {
+      arrange();
+      const line = await createPane();
+      expect(writePromptFileMock).not.toHaveBeenCalled();
+      expect(buildPromptReadAndDeleteSnippetMock).not.toHaveBeenCalled();
+      expect(buildInitialPromptCommandMock).not.toHaveBeenCalled();
+      expect(line).toBe('opencode');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('without its initial prompt');
+    });
   });
 });

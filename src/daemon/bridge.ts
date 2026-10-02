@@ -42,6 +42,8 @@ import {
   settlePaneSlugReservationAfterFailure,
 } from '../services/PaneSlugReservation.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
+import { describePromptBootstrapSkipped, resolvePaneShell } from '../utils/paneShellDialect.js';
+import { LogService } from '../services/LogService.js';
 import { derivePaneSlug } from '../utils/slug.js';
 import {
   paneRecoveryInstructions,
@@ -140,6 +142,13 @@ export interface BridgeSpawnDeps {
    * not be a compile error for callers in tests, just a runtime TypeError.
    */
   sendPromptKeys?: (request: BridgeSpawnPromptKeysRequest) => Promise<void>;
+  /**
+   * Reads the pane's `#{pane_current_command}` — its shell, before anything is
+   * typed — so the prompt bootstrap uses the pane's dialect rather than the
+   * daemon's `$SHELL` (#508). Absent or failing, the shell is treated as
+   * unknown and the agent launches without its command-line prompt.
+   */
+  readPaneCommand?: (paneId: string) => Promise<string | undefined>;
 }
 
 export interface BridgeSpawnResult {
@@ -1873,6 +1882,8 @@ export async function spawnBridgePane(
           request.prompt,
           request.permissionMode
             ?? (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
+          persistedPaneId,
+          deps.readPaneCommand,
         );
         deps.sendTmuxCommand(persistedPaneId, launchCommand);
 
@@ -2343,6 +2354,7 @@ export async function sendPromptKeysToPane(
 
 export const defaultSpawnDeps: BridgeSpawnDeps = {
   sendPromptKeys: sendPromptKeysToPane,
+  readPaneCommand: (paneId) => TmuxService.getInstance().getPaneCurrentCommand(paneId),
   tmuxSessionExists: (name) => {
     try {
       execFileSync('tmux', ['has-session', '-t', name], { stdio: 'ignore' });
@@ -2659,6 +2671,8 @@ async function buildLaunchCommand(
   agent: AgentName,
   prompt: string | undefined,
   permissionMode: PsycheConfig['settings']['permissionMode'],
+  paneId: string,
+  readPaneCommand: BridgeSpawnDeps['readPaneCommand'],
 ): Promise<string> {
   const promptTransport = getPromptTransport(agent);
   // send-keys agents take no prompt on the command line — it is typed into
@@ -2674,8 +2688,23 @@ async function buildLaunchCommand(
     return buildAgentCommand(agent, permissionMode);
   }
 
+  // The bootstrap is shell syntax, so it must match the pane's own shell. With
+  // no known dialect, a rejected line would stop the agent from starting at
+  // all: launch it bare, write no prompt file, and say so.
+  const paneShell = await resolvePaneShell(
+    readPaneCommand ? () => readPaneCommand(paneId) : undefined,
+  );
+  if (paneShell.dialect === null) {
+    LogService.getInstance().warn(
+      describePromptBootstrapSkipped(agent, paneShell.reason),
+      'bridge',
+      paneId,
+    );
+    return buildAgentCommand(agent, permissionMode);
+  }
+
   const promptFile = await writePromptFile(projectRoot, slug, prompt);
-  return `${buildPromptReadAndDeleteSnippet(promptFile)}; ${buildInitialPromptCommand(
+  return `${buildPromptReadAndDeleteSnippet(promptFile, paneShell.dialect)}; ${buildInitialPromptCommand(
     agent,
     '"$PSYCHE_PROMPT_CONTENT"',
     permissionMode,

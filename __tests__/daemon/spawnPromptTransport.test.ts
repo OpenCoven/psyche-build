@@ -8,6 +8,7 @@ import {
   type BridgeSpawnDeps,
   type BridgeSpawnPromptKeysRequest,
 } from '../../src/daemon/bridge.js';
+import { LogService } from '../../src/services/LogService.js';
 import { generateSiblingSlugForTargetPane } from '../../src/utils/attachAgent.js';
 import {
   mutateProjectPaneConfig,
@@ -50,9 +51,13 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-function harness() {
+function harness(paneShell: string | Error = 'zsh') {
   const commands: string[] = [];
   const sendPromptKeys = vi.fn(async (_request: BridgeSpawnPromptKeysRequest) => {});
+  const readPaneCommand = vi.fn(async (_paneId: string) => {
+    if (paneShell instanceof Error) throw paneShell;
+    return paneShell;
+  });
   const deps: BridgeSpawnDeps = {
     tmuxSessionExists: () => true,
     createTmuxPane: () => `%${nextMockPaneId++}`,
@@ -61,10 +66,12 @@ function harness() {
       commands.push(command);
     },
     sendPromptKeys,
+    readPaneCommand,
   };
   return {
     commands,
     sendPromptKeys,
+    readPaneCommand,
     deps,
   };
 }
@@ -110,6 +117,53 @@ async function waitForSlugAllocationWaiter(): Promise<void> {
   }
   throw new Error('daemon did not wait for the shared pane slug allocation lock');
 }
+
+describe('spawnBridgePane prompt bootstrap follows the pane shell (#508)', () => {
+  const savedShell = process.env.SHELL;
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(LogService.getInstance(), 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    process.env.SHELL = savedShell;
+    warn.mockRestore();
+  });
+
+  it('uses POSIX syntax in a zsh pane even when $SHELL is fish', async () => {
+    process.env.SHELL = '/opt/homebrew/bin/fish';
+    const h = await spawn('opencode', 'Fix it', harness('zsh'));
+    expect(h.readPaneCommand).toHaveBeenCalledWith('%9');
+    expect(h.commands[0]).toMatch(/^PSYCHE_PROMPT_FILE='[^']+'; PSYCHE_PROMPT_CONTENT=/u);
+    expect(h.commands[0]).not.toContain('Fix it');
+  });
+
+  it('uses fish syntax in a fish pane even when $SHELL is zsh', async () => {
+    process.env.SHELL = '/bin/zsh';
+    const h = await spawn('opencode', 'Fix it', harness('fish'));
+    expect(h.commands[0]).toMatch(/^set PSYCHE_PROMPT_FILE '[^']+'; set PSYCHE_PROMPT_CONTENT /u);
+    expect(h.commands[0]).not.toContain('PSYCHE_PROMPT_FILE=');
+  });
+
+  it.each([
+    ['an unknown shell', 'nu'],
+    ['a read error', new Error('no pane')],
+  ] as const)('launches bare with no prompt file and warns for %s', async (_label, paneShell) => {
+    const h = await spawn('opencode', 'Fix it', harness(paneShell));
+    expect(h.commands[0]).toBe('opencode');
+    expect(promptFiles()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('without its initial prompt');
+    expect(warn.mock.calls[0][0]).not.toContain('Fix it');
+  });
+
+  it('treats a missing pane-shell reader as unreadable', async () => {
+    const h = harness();
+    delete (h.deps as { readPaneCommand?: unknown }).readPaneCommand;
+    const result = await spawn('claude', 'Fix it', h);
+    expect(result.commands[0]).toBe('claude');
+    expect(promptFiles()).toEqual([]);
+  });
+});
 
 describe('spawnBridgePane prompt transports', () => {
   // Regression: buildLaunchCommand ran every agent through

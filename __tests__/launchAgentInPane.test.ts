@@ -1,8 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { LogService } from '../src/services/LogService.js';
 import {
   AGENT_IDS,
+  buildAgentCommand,
   getPromptTransport,
   launchAgentInPane,
   type LaunchAgentInPaneOptions,
@@ -311,4 +314,155 @@ describe('launchAgentInPane', () => {
       expect(tmux.result.exitRecorderArmed).toBe(true);
     });
   });
+});
+
+/** Absolute path of a shell on this host, or null when it is not installed. */
+function findShell(name: string): string | null {
+  for (const dir of ['/bin', '/usr/bin', '/usr/local/bin', '/opt/homebrew/bin']) {
+    const candidate = path.join(dir, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Parses (never runs) a typed line with a real shell when the host has it:
+ * `-n` / `--no-execute` checks syntax only, so no agent CLI is launched.
+ */
+function assertParses(shellName: string, line: string): void {
+  const shell = findShell(shellName);
+  if (!shell) return;
+  const args = shellName === 'fish' ? ['--no-execute', '-c', line] : ['-n', '-c', line];
+  execFileSync(shell, args, { stdio: 'pipe' });
+}
+
+function promptFilesIn(root: string): string[] {
+  const dir = path.join(root, '.psyche', 'prompts');
+  return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+}
+
+describe('prompt bootstrap follows the pane shell (#508)', () => {
+  const savedShell = process.env.SHELL;
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(LogService.getInstance(), 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    process.env.SHELL = savedShell;
+    warn.mockRestore();
+  });
+
+  it('uses POSIX syntax in a zsh pane even when $SHELL is fish', async () => {
+    process.env.SHELL = '/opt/homebrew/bin/fish';
+    const tmux = await launch('opencode', 'Fix it', {}, 'zsh');
+    const line = tmux.shellCommands[0];
+    expect(line).toMatch(/^PSYCHE_PROMPT_FILE='[^']+'; PSYCHE_PROMPT_CONTENT="\$\(cat /u);
+    expect(line).not.toMatch(/(^|; )set /u);
+    expect(line).not.toContain('Fix it');
+    assertParses('zsh', line);
+  });
+
+  it('uses fish syntax in a fish pane even when $SHELL is zsh', async () => {
+    process.env.SHELL = '/bin/zsh';
+    const tmux = await launch('opencode', 'Fix it', {}, 'fish');
+    const line = tmux.shellCommands[0];
+    expect(line).toMatch(/^set PSYCHE_PROMPT_FILE '[^']+'; set PSYCHE_PROMPT_CONTENT /u);
+    expect(line).not.toContain('PSYCHE_PROMPT_FILE=');
+    expect(line).not.toContain('Fix it');
+    assertParses('fish', line);
+  });
+
+  it.each(['nu', 'tcsh', 'xonsh', ''])(
+    'launches bare, writes no prompt file, and warns in a %j pane',
+    async (paneCommand) => {
+      const tmux = await launch('opencode', 'Fix "it" $now', {}, paneCommand);
+      expect(tmux.shellCommands[0]).toBe(buildAgentCommand('opencode', undefined));
+      expect(promptFilesIn(projectRoot)).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [message, source, paneId] = warn.mock.calls[0] as [string, string, string];
+      expect(message).toContain('without its initial prompt');
+      expect(message).not.toContain('Fix');
+      expect(message).not.toContain(projectRoot);
+      expect(source).toBe('agentLaunch');
+      expect(paneId).toBe('%1');
+    },
+  );
+
+  it('launches bare and warns when the pane shell cannot be read', async () => {
+    const tmux = createTmux();
+    tmux.getPaneCurrentCommand.mockRejectedValueOnce(new Error('tmux busy'));
+    await launchAgentInPane({
+      paneId: '%1',
+      agent: 'claude',
+      prompt: 'Fix it',
+      slug: 'fix-tests',
+      projectRoot,
+      tmuxService: tmux as never,
+    });
+    expect(tmux.shellCommands[0]).toBe('claude');
+    expect(promptFilesIn(projectRoot)).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('could not be read');
+  });
+
+  it('does not inline the prompt for an unknown shell even when the prompt file cannot be written', async () => {
+    const tmux = await launch('claude', 'say "hi" $x', {
+      projectRoot: '/nonexistent-root-for-prompt-file',
+    }, 'nu');
+    expect(tmux.shellCommands[0]).toBe('claude');
+  });
+
+  it('does not warn when the agent takes no command-line prompt', async () => {
+    await launch('cline', 'Fix it', {}, 'nu');
+    await launch('coven-code', 'Fix it', {}, 'nu');
+    await launch('opencode', '', {}, 'nu');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // Every agent and transport, in every pane shell: the typed line must be one
+  // that shell parses, must keep the prompt off the line, and must leave no
+  // prompt file behind when it cannot be read back.
+  const PANE_SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh', '-zsh', 'fish', 'nu', 'tcsh', 'xonsh', '<unreadable>'];
+  const PROMPT = 'Fix "the" $tests `now`; it\'s #1 & done';
+  it.each(AGENT_IDS.flatMap((agent) => PANE_SHELLS.map((shell) => [agent, getPromptTransport(agent), shell] as const)))(
+    '%s (%s) in a %s pane types a line valid for that shell',
+    async (agent, transport, paneShell) => {
+      const tmux = createTmux(paneShell);
+      if (paneShell === '<unreadable>') {
+        tmux.getPaneCurrentCommand.mockRejectedValue(new Error('no pane'));
+      }
+      await launchAgentInPane({
+        paneId: '%1',
+        agent,
+        prompt: PROMPT,
+        slug: 'table',
+        projectRoot,
+        psychePaneId: 'psyche-1',
+        tmuxService: tmux as never,
+      });
+      const line = tmux.shellCommands[0];
+      expect(line).toBeTruthy();
+      // The prompt itself is never typed into the shell.
+      expect(line).not.toContain('the" $tests');
+      expect(line).not.toContain('Fix');
+
+      const name = paneShell.replace(/^-/u, '');
+      const takesCommandLinePrompt = transport === 'positional' || transport === 'option' || transport === 'stdin';
+      if (['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(name)) {
+        if (takesCommandLinePrompt) expect(line).toMatch(/(^|; )PSYCHE_PROMPT_FILE='/u);
+        expect(line).not.toMatch(/(^|; )set PSYCHE_/u);
+        assertParses(name, line);
+      } else if (name === 'fish') {
+        if (takesCommandLinePrompt) expect(line).toMatch(/(^|; )set PSYCHE_PROMPT_FILE '/u);
+        expect(line).not.toContain('PSYCHE_PROMPT_FILE=');
+        assertParses('fish', line);
+      } else {
+        // No dialect: nothing shell-specific about the prompt, and no file.
+        expect(line).not.toContain('PSYCHE_PROMPT');
+        expect(promptFilesIn(projectRoot)).toEqual([]);
+        if (agent !== 'codex') expect(line).toBe(buildAgentCommand(agent, undefined));
+        if (name === 'tcsh') assertParses('tcsh', line);
+      }
+    },
+  );
 });

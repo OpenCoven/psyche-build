@@ -6,6 +6,7 @@
 
 import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
+import { LogService } from '../services/LogService.js';
 import {
   tearDownGenerationBoundPane,
 } from './TmuxGenerationGuard.js';
@@ -27,6 +28,7 @@ import {
   writePromptFile,
 } from './promptStore.js';
 import { ensureGeminiFolderTrusted } from './geminiTrust.js';
+import { describePromptBootstrapSkipped, resolvePaneShell } from './paneShellDialect.js';
 import {
   buildAgentCommand,
   buildInitialPromptCommand,
@@ -216,9 +218,16 @@ async function createConflictResolutionPaneWithReservation(
     const promptTransport = getPromptTransport(agent);
     const shouldSendPromptViaTmux = promptTransport === 'send-keys';
     const omitsPromptDelivery = promptTransport === 'launch-only';
+    const takesCommandLinePrompt = !shouldSendPromptViaTmux && !omitsPromptDelivery;
+
+    // The pane's current command is its shell (the merge commands above have
+    // returned). It is the send-keys baseline and decides the dialect of the
+    // prompt bootstrap: never Psyche's own $SHELL (#508).
+    const paneShell = await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneInfo));
+    const baselineCommand = shouldSendPromptViaTmux ? paneShell.paneCommand : undefined;
 
     let promptFilePath: string | null = null;
-    if (!shouldSendPromptViaTmux && !omitsPromptDelivery) {
+    if (takesCommandLinePrompt && paneShell.dialect) {
       try {
         promptFilePath = await writePromptFile(targetRepoPath, slug, prompt);
       } catch {
@@ -230,18 +239,18 @@ async function createConflictResolutionPaneWithReservation(
       ensureGeminiFolderTrusted(targetRepoPath);
     }
 
-    let baselineCommand: string | undefined;
-    if (shouldSendPromptViaTmux) {
-      try {
-        baselineCommand = await tmuxService.getPaneCurrentCommand(paneInfo);
-      } catch {
-        baselineCommand = undefined;
-      }
-    }
-
     let launchCommand: string;
-    if (promptFilePath && !shouldSendPromptViaTmux) {
-      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
+    if (takesCommandLinePrompt && paneShell.dialect === null) {
+      // No known dialect: the bootstrap and the inline-escaped prompt are both
+      // shell-specific, and a rejected line would stop the agent from starting.
+      LogService.getInstance().warn(
+        describePromptBootstrapSkipped(agent, paneShell.reason),
+        'conflictResolutionPane',
+        paneInfo,
+      );
+      launchCommand = buildAgentCommand(agent, settings.permissionMode);
+    } else if (promptFilePath && paneShell.dialect && !shouldSendPromptViaTmux) {
+      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath, paneShell.dialect);
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
         '"$PSYCHE_PROMPT_CONTENT"',
