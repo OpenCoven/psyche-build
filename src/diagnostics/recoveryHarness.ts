@@ -34,6 +34,11 @@ import {
   observeApplicationRestart,
   RecoveryRestartUnavailableError,
 } from './recoveryApplicationRestart.js';
+import {
+  observeCrashMidTransition,
+  observeLiveAgentRestart,
+  RecoveryAgentConfinementError,
+} from './recoveryApplicationRestartLive.js';
 
 import { CapabilityLeaseStore } from '../control/capabilityLeases.js';
 import { ControlJournal, exactCommandOutcomeDigest } from '../control/journal.js';
@@ -76,7 +81,9 @@ export type RecoveryScenarioId =
   | 'git-mutation-partial-write'
   | 'agent-launch-failure'
   | 'upgrade-recovery'
-  | 'application-restart';
+  | 'application-restart'
+  | 'application-crash-mid-transition'
+  | 'application-restart-live-agent';
 
 export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
@@ -92,7 +99,9 @@ export type RecoveryInjectionId =
   | 'git-worktree-remove-fails-after-deleting-part-of-tree'
   | 'agent-cli-exits-at-launch-inside-live-shell'
   | 'pane-config-aged-across-schema-versions'
-  | 'application-quit-and-relaunched';
+  | 'application-quit-and-relaunched'
+  | 'cockpit-killed-between-pane-split-and-persist'
+  | 'application-relaunched-around-live-agent-pane';
 
 export type RecoveryClassification =
   | 'config_corrupt'
@@ -112,6 +121,9 @@ export type RecoveryClassification =
   | 'tmux_unavailable'
   | 'workspace_restored'
   | 'restart_unavailable'
+  | 'recovery_required'
+  | 'transition_completed'
+  | 'transition_rolled_back'
   | 'unexpected_success'
   | 'unexpected_error';
 
@@ -177,7 +189,17 @@ export type RecoveryInvariantId =
   | 'newer-schema-config-preserved'
   | 'unversioned-config-adopted-by-named-migration'
   | 'pre-migration-snapshot-retained'
-  | 'adopted-config-carries-current-schema';
+  | 'adopted-config-carries-current-schema'
+  | 'transition-in-flight-at-kill'
+  | 'crash-ended-cockpit'
+  | 'crash-config-not-silently-overwritten'
+  | 'crash-transition-settled'
+  | 'agent-pane-confined'
+  | 'agent-running-before-quit'
+  | 'agent-pane-survived-quit'
+  | 'agent-pane-rebound'
+  | 'agent-not-duplicated'
+  | 'agent-not-orphaned';
 
 /** Closed set of digest keys, so digest maps cannot carry derived names. */
 export type RecoveryDigestId =
@@ -1289,8 +1311,8 @@ async function runUpgradeRecovery(): Promise<RecoveryScenarioEvidence> {
  * surface no required check should carry. Run it with `pnpm recovery:restart`.
  *
  * Scope: it observes quit and relaunch of a workspace with no panes running
- * agents. It does not observe a crash mid-transition, a restart with live
- * agent panes, or the packaged application bundle.
+ * agents. A crash mid-transition and a restart with a live agent pane are the
+ * two scenarios that follow; none of them observes the packaged bundle.
  */
 async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
   const startedAt = Date.now();
@@ -1375,6 +1397,125 @@ async function runApplicationRestart(): Promise<RecoveryScenarioEvidence> {
   }
 }
 
+/**
+ * #475 gate 3, first half: the cockpit is SIGKILLed between splitting a
+ * terminal pane and persisting its record (see `recoveryApplicationRestartLive`
+ * for the injection point). The relaunch must keep the config readable, create
+ * no duplicate panes or worktrees, and settle the half-done creation as
+ * completed, rolled back, or `recovery_required`. Opt-in, like the clean
+ * restart: `pnpm recovery:restart`.
+ */
+async function runApplicationCrashMidTransition(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    let observed: Awaited<ReturnType<typeof observeCrashMidTransition>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observeCrashMidTransition(workspace.projectRoot);
+      classification = !observed.transitionInFlightAtKill
+        ? 'injection_ineffective'
+        : CRASH_OUTCOME_CLASSIFICATION[observed.transitionOutcome];
+    } catch (error) {
+      classification = restartFailureClassification(error);
+    }
+    return evidence(
+      'application-crash-mid-transition',
+      'cockpit-killed-between-pane-split-and-persist',
+      classification,
+      [
+        { id: 'first-run-reached-workspace', held: observed?.firstRunReachedWorkspace === true },
+        { id: 'transition-in-flight-at-kill', held: observed?.transitionInFlightAtKill === true },
+        { id: 'crash-ended-cockpit', held: observed?.crashEndedCockpit === true },
+        { id: 'restart-restored-workspace', held: observed?.restartRestoredWorkspace === true },
+        {
+          id: 'crash-config-not-silently-overwritten',
+          held: observed?.configNotSilentlyOverwritten === true,
+        },
+        { id: 'restart-did-not-duplicate-panes', held: observed?.noDuplicatePanes === true },
+        { id: 'restart-did-not-duplicate-worktrees', held: observed?.noDuplicateWorktrees === true },
+        { id: 'restart-did-not-duplicate-sessions', held: observed?.noDuplicateSessions === true },
+        { id: 'restart-did-not-duplicate-live-panes', held: observed?.noDuplicateCockpits === true },
+        {
+          id: 'crash-transition-settled',
+          held: observed !== undefined && observed.transitionOutcome !== 'unsettled',
+        },
+        { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
+      ],
+      {},
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
+const CRASH_OUTCOME_CLASSIFICATION: Readonly<Record<
+  Awaited<ReturnType<typeof observeCrashMidTransition>>['transitionOutcome'],
+  RecoveryClassification
+>> = {
+  completed: 'transition_completed',
+  rolled_back: 'transition_rolled_back',
+  recovery_required: 'recovery_required',
+  unsettled: 'unexpected_error',
+};
+
+/**
+ * #475 gate 3, second half: a pane the cockpit created runs a fake agent
+ * confined to a disposable PATH; the cockpit quits and relaunches, and the
+ * pane and its process must be rebound rather than recreated, duplicated, or
+ * orphaned. Confinement is proven in the pane's own shell before anything is
+ * typed into it, or the scenario reports `injection_ineffective` and launches
+ * nothing. Opt-in: `pnpm recovery:restart`.
+ */
+async function runApplicationRestartLiveAgent(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  try {
+    let observed: Awaited<ReturnType<typeof observeLiveAgentRestart>> | undefined;
+    let classification: RecoveryClassification = 'unexpected_error';
+    try {
+      observed = await observeLiveAgentRestart(workspace.projectRoot);
+      classification = observed.firstRunReachedWorkspace
+        ? 'workspace_restored'
+        : 'restart_unavailable';
+    } catch (error) {
+      classification = restartFailureClassification(error);
+    }
+    return evidence(
+      'application-restart-live-agent',
+      'application-relaunched-around-live-agent-pane',
+      classification,
+      [
+        { id: 'first-run-reached-workspace', held: observed?.firstRunReachedWorkspace === true },
+        { id: 'pane-created-before-quit', held: observed?.paneCreatedBeforeQuit === true },
+        { id: 'agent-pane-confined', held: observed?.agentPaneConfined === true },
+        { id: 'agent-running-before-quit', held: observed?.agentRunningBeforeQuit === true },
+        { id: 'normal-quit-ended-cockpit', held: observed?.quitEndedCockpitProcess === true },
+        { id: 'agent-pane-survived-quit', held: observed?.agentSurvivedQuit === true },
+        { id: 'restart-restored-workspace', held: observed?.restartRestoredWorkspace === true },
+        { id: 'agent-pane-rebound', held: observed?.agentPaneRebound === true },
+        { id: 'agent-not-duplicated', held: observed?.agentNotDuplicated === true },
+        { id: 'agent-not-orphaned', held: observed?.agentNotOrphaned === true },
+        { id: 'restart-did-not-duplicate-worktrees', held: observed?.noDuplicateWorktrees === true },
+        { id: 'restart-did-not-duplicate-sessions', held: observed?.noDuplicateSessions === true },
+        { id: 'restart-did-not-duplicate-live-panes', held: observed?.noDuplicateCockpits === true },
+        { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
+      ],
+      {},
+      startedAt,
+    );
+  } finally {
+    await workspace.dispose();
+  }
+}
+
+function restartFailureClassification(error: unknown): RecoveryClassification {
+  if (error instanceof RecoveryAgentConfinementError) return 'injection_ineffective';
+  if (error instanceof RecoveryRestartUnavailableError) return 'restart_unavailable';
+  return 'unexpected_error';
+}
+
 const SCENARIOS: Readonly<
   Record<RecoveryScenarioId, () => Promise<RecoveryScenarioEvidence>>
 > = {
@@ -1392,6 +1533,8 @@ const SCENARIOS: Readonly<
   'agent-launch-failure': runAgentLaunchFailure,
   'upgrade-recovery': runUpgradeRecovery,
   'application-restart': runApplicationRestart,
+  'application-crash-mid-transition': runApplicationCrashMidTransition,
+  'application-restart-live-agent': runApplicationRestartLiveAgent,
 };
 
 /**
@@ -1399,7 +1542,11 @@ const SCENARIOS: Readonly<
  * they cost seconds and depend on interface text. They are run deliberately —
  * `pnpm recovery:restart` — never as part of a required check.
  */
-const OPT_IN_SCENARIOS: ReadonlySet<RecoveryScenarioId> = new Set(['application-restart']);
+const OPT_IN_SCENARIOS: ReadonlySet<RecoveryScenarioId> = new Set([
+  'application-restart',
+  'application-crash-mid-transition',
+  'application-restart-live-agent',
+]);
 
 /** The opt-in scenarios, for a runner that wants them by name. */
 export function optInRecoveryScenarioIds(): readonly RecoveryScenarioId[] {

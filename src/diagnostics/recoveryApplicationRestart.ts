@@ -38,23 +38,23 @@ export class RecoveryRestartUnavailableError extends Error {
 }
 
 const POLL_INTERVAL_MS = 250;
-const STARTUP_TIMEOUT_MS = 90_000;
+export const STARTUP_TIMEOUT_MS = 90_000;
 /**
  * The cockpit confirms on one Ctrl+C and exits on the next, but the interface
  * can consume a press, so the quit retries within a bound instead of assuming
  * a fixed count. The window stays under the cockpit's three-second confirm
  * timeout so consecutive presses land in the same confirmation.
  */
-const QUIT_PRESS_LIMIT = 5;
-const QUIT_CONFIRM_WINDOW_MS = 2_000;
+export const QUIT_PRESS_LIMIT = 5;
+export const QUIT_CONFIRM_WINDOW_MS = 2_000;
 const TMUX_TIMEOUT_MS = 5_000;
 /** A managed worktree seeded before the first launch, for the restart to find. */
-const SEEDED_WORKTREE_BRANCH = 'seeded';
+export const SEEDED_WORKTREE_BRANCH = 'seeded';
 /** Bounded wait for the cockpit to finish creating its terminal pane. */
 /** Teardown must outlive the cockpit, or disposal races its last writes. */
 const RESTORE_SETTLE_TIMEOUT_MS = 30_000;
-const TEARDOWN_TIMEOUT_MS = 10_000;
-const TEARDOWN_SETTLE_MS = 500;
+export const TEARDOWN_TIMEOUT_MS = 10_000;
+export const TEARDOWN_SETTLE_MS = 500;
 
 export interface ApplicationRestartObservation {
   /** Setup control: the first launch reached a persisted workspace. */
@@ -333,7 +333,7 @@ function unobserved(firstRunReachedWorkspace: boolean): ApplicationRestartObserv
  * cleanup supervisor resolves its child. A clean checkout that has not run
  * `pnpm build` still observes a restart.
  */
-function resolveCockpitEntry(checkoutRoot: string): { argv: string[] } {
+export function resolveCockpitEntry(checkoutRoot: string): { argv: string[] } {
   const compiled = path.join(checkoutRoot, 'dist', 'index.js');
   if (existsSync(compiled)) {
     return { argv: [process.execPath, compiled] };
@@ -346,7 +346,7 @@ function resolveCockpitEntry(checkoutRoot: string): { argv: string[] } {
   return { argv: [process.execPath, '--import', loader, source] };
 }
 
-function buildDisposableRepository(projectRoot: string): void {
+export function buildDisposableRepository(projectRoot: string): void {
   const git = (...args: string[]): void => {
     try {
       execFileSync('git', args, {
@@ -372,7 +372,7 @@ function buildDisposableRepository(projectRoot: string): void {
   );
 }
 
-function launchCockpit(options: {
+export function launchCockpit(options: {
   socketPath: string;
   session: string;
   projectRoot: string;
@@ -412,7 +412,7 @@ function launchCockpit(options: {
  * offers to write one and then to configure a provider. Declining keeps this
  * an observation of startup and restart rather than of configuration writing.
  */
-async function driveFirstRun(
+export async function driveFirstRun(
   socketPath: string,
   session: string,
   configPath: string,
@@ -436,7 +436,7 @@ async function driveFirstRun(
   );
 }
 
-async function readPersistedWorkspace(
+export async function readPersistedWorkspace(
   configPath: string,
 ): Promise<PersistedWorkspace | undefined> {
   try {
@@ -459,7 +459,7 @@ async function readPersistedWorkspace(
 }
 
 /** Managed worktree directory names, as a stable comparable summary. */
-function listManagedWorktrees(projectRoot: string): string {
+export function listManagedWorktrees(projectRoot: string): string {
   try {
     return execFileSync('git', ['worktree', 'list', '--porcelain'], {
       cwd: projectRoot,
@@ -485,7 +485,7 @@ function listManagedWorktrees(projectRoot: string): string {
  * current window's panes, and a cockpit relaunched into its own window is
  * invisible — which reads as a restart that never came back.
  */
-function cockpitPane(socketPath: string, session: string): string | undefined {
+export function cockpitPane(socketPath: string, session: string): string | undefined {
   try {
     return tmux(socketPath, 'list-panes', '-s', '-t', session, '-F', '#{pane_id} #{pane_current_command}')
       .split('\n')
@@ -497,7 +497,7 @@ function cockpitPane(socketPath: string, session: string): string | undefined {
 }
 
 /** Sends one quit keystroke, tolerating a pane that has already closed. */
-function sendQuit(socketPath: string, session: string): void {
+export function sendQuit(socketPath: string, session: string): void {
   try {
     tmux(socketPath, 'send-keys', '-t', cockpitPane(socketPath, session) ?? session, 'C-c');
   } catch {
@@ -505,7 +505,7 @@ function sendQuit(socketPath: string, session: string): void {
   }
 }
 
-async function readFileOrUndefined(filePath: string): Promise<string | undefined> {
+export async function readFileOrUndefined(filePath: string): Promise<string | undefined> {
   try {
     return await readFile(filePath, 'utf8');
   } catch {
@@ -544,7 +544,7 @@ async function seedWorktreePaneRecord(
 }
 
 /** How many cockpit processes are running in the session. */
-function countCockpitPanes(socketPath: string, session: string): number {
+export function countCockpitPanes(socketPath: string, session: string): number {
   try {
     return tmux(socketPath, 'list-panes', '-s', '-t', session, '-F', '#{pane_id} #{pane_current_command}')
       .split('\n')
@@ -571,7 +571,7 @@ function countPanes(socketPath: string, session: string): number {
  * what relaunching it against the same project does. A second `new-session`
  * would fail on the duplicate name and prove nothing about restoration.
  */
-function relaunchCockpit(options: {
+export function relaunchCockpit(options: {
   socketPath: string;
   session: string;
   projectRoot: string;
@@ -583,7 +583,12 @@ function relaunchCockpit(options: {
       'tmux',
       [
         '-S', options.socketPath,
-        'new-window', '-d',
+        // Not detached: the relaunched cockpit resolves its own pane with an
+        // untargeted `display-message`, which answers with the session's
+        // current window. A detached window leaves an older pane current, and
+        // the cockpit then binds that pane as its control pane — an artifact a
+        // person relaunching in a focused terminal never sees.
+        'new-window',
         '-t', `${options.session}:`,
         '-c', options.projectRoot,
         ...options.entry.argv,
@@ -600,7 +605,7 @@ function relaunchCockpit(options: {
   }
 }
 
-function sessionExists(socketPath: string, session: string): boolean {
+export function sessionExists(socketPath: string, session: string): boolean {
   try {
     tmux(socketPath, 'has-session', '-t', session);
     return true;
@@ -609,7 +614,7 @@ function sessionExists(socketPath: string, session: string): boolean {
   }
 }
 
-function countSessions(socketPath: string, session: string): number {
+export function countSessions(socketPath: string, session: string): number {
   try {
     return tmux(socketPath, 'list-sessions', '-F', '#{session_name}')
       .split('\n')
@@ -628,7 +633,7 @@ function capturePane(socketPath: string, session: string): string {
   }
 }
 
-function tmux(socketPath: string, ...args: string[]): string {
+export function tmux(socketPath: string, ...args: string[]): string {
   return execFileSync('tmux', ['-S', socketPath, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -636,7 +641,7 @@ function tmux(socketPath: string, ...args: string[]): string {
   }).trim();
 }
 
-async function waitFor(
+export async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs: number,
 ): Promise<boolean> {
