@@ -36,6 +36,14 @@
  *     one stamped implausibly far in the future (clock skew), so a clock step
  *     cannot defer adoption indefinitely.
  *
+ * Finally, after the listing, the persisted pane config is re-read and any
+ * candidate it now holds is dropped. Detection read the config before the
+ * listing; a creator that saved its pane and then settled (or was reconciled)
+ * in between leaves no ownership record, and only this re-read sees the save.
+ * It is sufficient because every path that removes the ownership record of a
+ * saved pane removes it after the save: a listing without the record implies
+ * the save is already visible to a read that starts afterwards.
+ *
  * A record bound on a known tmux server generation only matches a pane on
  * that same generation, so a reused pane ID on a later server is not hidden.
  * Quarantine records written before the generation was carried have none;
@@ -81,6 +89,7 @@ export const IN_FLIGHT_PANE_CREATION_TTL_MS = 5 * 60_000;
 export const IN_FLIGHT_PANE_CREATION_FUTURE_TOLERANCE_MS = 5_000;
 
 export type UntrackedPaneExclusionReason =
+  | 'already-saved'
   | 'recovery-quarantined'
   | 'recovery-pending'
   | 'creation-in-flight';
@@ -88,7 +97,8 @@ export type UntrackedPaneExclusionReason =
 export interface UntrackedPaneExclusion {
   paneId: string;
   reason: UntrackedPaneExclusionReason;
-  recoveryId: string;
+  /** The ownership record that accounts for the pane; absent for 'already-saved'. */
+  recoveryId?: string;
 }
 
 export interface UntrackedPaneAdoptionDecision<T extends { paneId: string }> {
@@ -114,6 +124,12 @@ export interface UntrackedPaneAdoptionOptions {
   serverIdentityOf?: (paneId: string) => TmuxServerIdentity | undefined;
   /** Injectable for tests. */
   reconcile?: typeof reconcileStalePaneSlugReservations;
+  /**
+   * Reads the tmux pane IDs held by the persisted pane config. Called after
+   * the ownership listing; it should resolve to [] when no config exists and
+   * throw when the config cannot be read, which fails the cycle closed.
+   */
+  readSavedPaneIds?: () => Promise<readonly string[]>;
 }
 
 export async function gateUntrackedPaneAdoption<T extends { paneId: string }>(
@@ -148,10 +164,21 @@ export async function gateUntrackedPaneAdoption<T extends { paneId: string }>(
     });
     listing = await readPaneSlugOwnershipRecords(sessionProjectRoot);
   }
-  return {
-    ...decideUntrackedPaneAdoption(panes, listing.records, options),
-    reconciled: needsReconciliation,
-  };
+  const decision = decideUntrackedPaneAdoption(panes, listing.records, options);
+  if (options.readSavedPaneIds && decision.adoptable.length > 0) {
+    // Must run after the listing above; see the module comment.
+    const saved = new Set(await options.readSavedPaneIds());
+    const adoptable: T[] = [];
+    for (const pane of decision.adoptable) {
+      if (saved.has(pane.paneId)) {
+        decision.excluded.push({ paneId: pane.paneId, reason: 'already-saved' });
+      } else {
+        adoptable.push(pane);
+      }
+    }
+    decision.adoptable = adoptable;
+  }
+  return { ...decision, reconciled: needsReconciliation };
 }
 
 export function decideUntrackedPaneAdoption<T extends { paneId: string }>(

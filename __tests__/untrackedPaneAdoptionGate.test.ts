@@ -20,6 +20,10 @@ import {
   gateUntrackedPaneAdoption,
 } from '../src/services/UntrackedPaneAdoptionGate.js';
 import type { TmuxServerIdentity } from '../src/services/TmuxServerIdentity.js';
+import {
+  mutateProjectPaneConfig,
+  readProjectPaneConfigUnderLock,
+} from '../src/services/ProjectPaneConfig.js';
 
 const LIVE_PID = 424_242;
 const DEAD_PID = 999_991;
@@ -368,5 +372,82 @@ describe('untracked pane adoption gate', () => {
     );
     expect(skewed.deferred).toBeUndefined();
     expect(skewed.adoptable).toEqual([shell('%9')]);
+  });
+
+  // Copilot review on #520: detection reads the config, then the creator saves
+  // its pane and its ownership record disappears, then the gate lists. The
+  // listing is empty, so only a config re-read after it can see the save.
+  describe('save/settlement half of the creation race (#517)', () => {
+    const savedPaneIds = (root: string) => async () => {
+      const config = await readProjectPaneConfigUnderLock(root);
+      return (config.panes ?? []).flatMap((pane) => (
+        typeof pane.paneId === 'string' ? [pane.paneId] : []
+      ));
+    };
+
+    async function savePane(root: string, record: { paneId: string; slug: string }, paneId: string) {
+      await mutateProjectPaneConfig(root, (config) => {
+        config.panes = [...(config.panes ?? []), { id: record.paneId, slug: record.slug, paneId }];
+      });
+    }
+
+    it('drops a pane the creator saved and settled after detection read the config', async () => {
+      const root = project('.psyche-adoption-gate-settled-');
+      const creation = await reserve(root, { pid: LIVE_PID, slug: 'shell-1' });
+      await creation.recordPaneEffect('%9', SERVER);
+      // 1. Detection has read the config: %9 is not saved yet.
+      const detected = [shell('%9')];
+      expect(await savedPaneIds(root)()).toEqual([]);
+      // 2. The creator saves its pane and settles its ownership record.
+      await savePane(root, creation, '%9');
+      await creation.completeAfterPanePersisted({ id: creation.paneId, paneId: '%9', slug: creation.slug });
+      expect(await listPaneSlugOwnershipRecords(root)).toEqual([]);
+      // 3. The gate lists ownership (now empty) and decides.
+      const withoutReread = await gateUntrackedPaneAdoption(root, detected, gateOptions());
+      expect(withoutReread.adoptable).toEqual(detected);
+
+      const decision = await gateUntrackedPaneAdoption(root, detected, {
+        ...gateOptions(),
+        readSavedPaneIds: savedPaneIds(root),
+      });
+
+      expect(decision.adoptable).toEqual([]);
+      expect(decision.excluded).toEqual([{ paneId: '%9', reason: 'already-saved' }]);
+      expect(await listWorktreeRecoveryMarkers(root)).toEqual([]);
+    });
+
+    it('drops a pane whose record the gate\'s own reconciliation cleared because it was saved', async () => {
+      const root = project('.psyche-adoption-gate-reconciled-save-');
+      const creation = await reserve(root, { pid: DEAD_PID, slug: 'shell-1' });
+      await creation.recordPaneEffect('%9', SERVER);
+      const detected = [shell('%9')];
+      // The creator saved its pane, then its process ended before settling.
+      await savePane(root, creation, '%9');
+      const reconcile = vi.fn(reconcileStalePaneSlugReservations);
+
+      const decision = await gateUntrackedPaneAdoption(root, detected, {
+        ...gateOptions({ reconcile }),
+        readSavedPaneIds: savedPaneIds(root),
+      });
+
+      // Reconciliation found the exact durable pane and removed the record.
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(await listPaneSlugOwnershipRecords(root)).toEqual([]);
+      expect(decision.adoptable).toEqual([]);
+      expect(decision.excluded).toEqual([{ paneId: '%9', reason: 'already-saved' }]);
+    });
+
+    it('re-reads the config only after the ownership listing, and fails closed when it cannot', async () => {
+      const root = project('.psyche-adoption-gate-reread-fails-');
+      const readSavedPaneIds = vi.fn(async () => {
+        throw new Error('config unreadable');
+      });
+
+      await expect(gateUntrackedPaneAdoption(root, [shell('%9')], {
+        ...gateOptions(),
+        readSavedPaneIds,
+      })).rejects.toThrow('config unreadable');
+      expect(readSavedPaneIds).toHaveBeenCalledTimes(1);
+    });
   });
 });

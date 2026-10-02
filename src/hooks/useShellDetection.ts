@@ -98,6 +98,10 @@ export async function detectAndAddShellPanes(
     // and recovery marker for the same pane on every polling cycle.
     const adoption = await gateUntrackedPaneAdoption(projectRoot, detectedPanes, {
       serverIdentityOf: (paneId) => TmuxService.getInstance().getServerIdentity?.(paneId),
+      // Detection and pane saves are not serialized: a creation can save its
+      // pane and drop its ownership record after the read above. The gate
+      // re-reads the config after its ownership listing to catch that.
+      readSavedPaneIds: () => readSavedTmuxPaneIds(panesFile),
     });
     if (adoption.deferred) {
       LogService.getInstance().debug(
@@ -280,6 +284,19 @@ export async function detectAndAddShellPanes(
   //     );
     return { updatedPanes: activePanes, shellPanesAdded: false };
   }
+}
+
+async function readSavedTmuxPaneIds(panesFile: string): Promise<string[]> {
+  let content: string;
+  try {
+    content = await fs.readFile(panesFile, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+  return savedTmuxPaneIds((JSON.parse(content) as { panes?: unknown }).panes);
 }
 
 function savedTmuxPaneIds(panes: unknown): string[] {
