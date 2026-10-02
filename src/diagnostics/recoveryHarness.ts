@@ -59,6 +59,7 @@ import {
   readProjectPaneConfig,
   readProjectPaneConfigWithSchema,
 } from '../services/ProjectPaneConfig.js';
+import { setAtomicWriteFaultForRecoveryHarness, type AtomicWriteFault } from '../utils/atomicWrite.js';
 import { createCovenClient } from '../daemon/bridge.js';
 import {
   AgenticCapabilityRouter,
@@ -73,6 +74,7 @@ export type RecoveryScenarioId =
   | 'corrupt-pane-config'
   | 'stale-pane-config-lock'
   | 'unwritable-state-storage'
+  | 'full-state-storage'
   | 'duplicate-command-retry'
   | 'stale-owner-epoch'
   | 'interrupted-cleanup-recovery-marker'
@@ -91,6 +93,7 @@ export type RecoveryInjectionId =
   | 'pane-config-replaced-with-invalid-json'
   | 'pane-config-lock-held-by-dead-owner'
   | 'state-directory-made-read-only'
+  | 'state-write-fails-with-enospc-after-partial-bytes'
   | 'command-replayed-after-journal-restart'
   | 'lease-asserted-with-pre-restart-owner-epoch'
   | 'cleanup-abandoned-after-marker-publication'
@@ -110,6 +113,7 @@ export type RecoveryClassification =
   | 'config_newer_schema'
   | 'config_snapshot_failed'
   | 'config_unreadable'
+  | 'config_write_failed'
   | 'lock_taken_over'
   | 'persistence_failed'
   | 'injection_ineffective'
@@ -139,6 +143,7 @@ export type RecoveryInvariantId =
   | 'persisted-config-unchanged'
   | 'persisted-config-readable'
   | 'persistence-failure-surfaced'
+  | 'no-partial-write-left-behind'
   | 'effect-executed-exactly-once'
   | 'retry-reconciles-canonical-outcome'
   | 'reconciliation-survives-restart'
@@ -431,6 +436,88 @@ async function runStalePaneConfigLock(): Promise<RecoveryScenarioEvidence> {
       startedAt,
     );
   } finally {
+    await workspace.dispose();
+  }
+}
+
+/**
+ * #475 gate 4: full state storage never reports success and never discards
+ * prior state. A full volume cannot be produced portably, so this is
+ * **source-level injection**: the atomic writer puts the first bytes of the new
+ * config into its temporary file for real and then fails with ENOSPC, as a
+ * volume that fills mid-write does. It does not observe a real full
+ * filesystem, a fault reported only at writeback, or the packaged application.
+ *
+ * The fault counts its own firings. A run where it never fired proved nothing
+ * and is classified `injection_ineffective`, never as the product succeeding.
+ */
+async function runFullStateStorage(): Promise<RecoveryScenarioEvidence> {
+  const startedAt = Date.now();
+  const workspace = await createDisposableWorkspace();
+  const configPath = projectPaneConfigPath(workspace.projectRoot);
+  const fault: AtomicWriteFault = {
+    code: 'ENOSPC',
+    afterBytes: 32,
+    matches: (targetPath) => targetPath === configPath,
+    landed: 0,
+  };
+  try {
+    const configBefore = digest(await readFile(configPath));
+    const workBefore = digest(await readFile(workspace.workPath));
+
+    let surfacedAsWriteFailure = false;
+    let resolved = false;
+    setAtomicWriteFaultForRecoveryHarness(fault);
+    try {
+      await mutateProjectPaneConfig(
+        workspace.projectRoot,
+        (config) => {
+          config.panes = [];
+        },
+        { timeoutMs: 2_000, pollIntervalMs: 25 },
+      );
+      resolved = true;
+    } catch (error) {
+      surfacedAsWriteFailure = error instanceof ProjectPaneConfigError
+        && error.code === 'config_write_failed';
+    } finally {
+      setAtomicWriteFaultForRecoveryHarness(undefined);
+    }
+
+    const classification: RecoveryClassification = fault.landed === 0
+      ? 'injection_ineffective'
+      : resolved
+        ? 'unexpected_success'
+        : surfacedAsWriteFailure ? 'persistence_failed' : 'unexpected_error';
+
+    const configAfter = digest(await readFile(configPath));
+    const workAfter = digest(await readFile(workspace.workPath));
+    let configReadable = false;
+    try {
+      await readProjectPaneConfig(workspace.projectRoot);
+      configReadable = true;
+    } catch {
+      configReadable = false;
+    }
+    const leftovers = (await readdir(path.dirname(configPath)))
+      .filter((entry) => entry.endsWith('.tmp'));
+
+    return evidence(
+      'full-state-storage',
+      'state-write-fails-with-enospc-after-partial-bytes',
+      classification,
+      [
+        { id: 'persistence-failure-surfaced', held: classification === 'persistence_failed' },
+        { id: 'persisted-config-unchanged', held: configAfter === configBefore },
+        { id: 'persisted-config-readable', held: configReadable },
+        { id: 'no-partial-write-left-behind', held: leftovers.length === 0 },
+        { id: 'uncommitted-work-untouched', held: workAfter === workBefore },
+      ],
+      { configBefore, configAfter, workAfter },
+      startedAt,
+    );
+  } finally {
+    setAtomicWriteFaultForRecoveryHarness(undefined);
     await workspace.dispose();
   }
 }
@@ -1517,6 +1604,7 @@ const SCENARIOS: Readonly<
   'corrupt-pane-config': runCorruptPaneConfig,
   'stale-pane-config-lock': runStalePaneConfigLock,
   'unwritable-state-storage': runUnwritableStateStorage,
+  'full-state-storage': runFullStateStorage,
   'duplicate-command-retry': runDuplicateCommandRetry,
   'stale-owner-epoch': runStaleOwnerEpoch,
   'interrupted-cleanup-recovery-marker': runInterruptedCleanupRecoveryMarker,

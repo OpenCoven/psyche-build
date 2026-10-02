@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 
 interface OwnerRecord {
   pid: number;
@@ -131,9 +132,10 @@ async function nextEpoch(epochPath: string): Promise<number> {
     epoch = 0;
   }
   const next = epoch + 1;
-  const temporary = `${epochPath}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ epoch: next })}\n`, 'utf8');
-  await rename(temporary, epochPath);
+  // Synced before it replaces the previous epoch, and the previous epoch is
+  // never truncated: an epoch file lost to a full disk would read back as 0
+  // and hand a restarted owner an epoch an earlier owner already used.
+  await atomicWriteFile(epochPath, `${JSON.stringify({ epoch: next })}\n`);
   return next;
 }
 

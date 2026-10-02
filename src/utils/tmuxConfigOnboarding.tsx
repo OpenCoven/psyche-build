@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { atomicWriteFile } from './atomicWrite.js';
 import React, { useState } from 'react';
 import { Box, Text, render, useApp, useInput } from 'ink';
 import { LogService } from '../services/LogService.js';
@@ -100,7 +101,7 @@ async function writeOnboardingState(
   };
 
   await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf-8');
+  await atomicWriteFile(statePath, JSON.stringify(nextState, null, 2), { followSymlinks: true });
 }
 
 function sourceTmuxConfig(configPath: string): void {

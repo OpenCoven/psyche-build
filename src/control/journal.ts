@@ -1,5 +1,5 @@
 import { constants, type BigIntStats } from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, rmdir, truncate, type FileHandle, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rmdir, stat, truncate, type FileHandle, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_CONTROL_LIMITS } from './limits.js';
@@ -398,6 +398,8 @@ export class ControlJournal {
   private readonly listeners = new Set<EventListener>();
   private readonly outcomePublicationTails = new Map<string, Promise<void>>();
   private appendTail: Promise<void> = Promise.resolve();
+  /** Committed journal length still to restore after a failed append's rollback failed. */
+  private unrolledAppendLength: number | undefined;
 
   private constructor(
     runtimeDirectoryPath: string,
@@ -466,6 +468,17 @@ export class ControlJournal {
       segments.pop();
     }
 
+    // Every committed append writes a whole line ending in "\n" before its
+    // fsync, and compaction rewrites end in "\n" too. A final segment without
+    // that newline is therefore never committed, even when it happens to parse
+    // as JSON (a full disk can stop right after the closing brace). It was a
+    // rejected append whose rollback did not land before a restart, so it is
+    // cut back to the last newline rather than replayed as an event.
+    if (!endsWithNewline && segments.length > 0) {
+      const uncommittedTail = segments.pop()!;
+      await truncate(journalPath, raw.length - uncommittedTail.length);
+    }
+
     // A journal written before compaction existed has no header and starts at
     // sequence 1; anything else must say where it starts.
     let firstSequence = 1;
@@ -487,16 +500,11 @@ export class ControlJournal {
     const events: ControlEvent[] = [];
     let expectedSequence = firstSequence;
     for (let index = firstEventLine; index < segments.length; index += 1) {
-      const isLastLine = index === segments.length - 1;
       const lineBuffer = segments[index];
       let parsed: ControlEvent;
       try {
         parsed = JSON.parse(lineBuffer.toString('utf8')) as ControlEvent;
-      } catch (error) {
-        if (isLastLine && !endsWithNewline) {
-          await truncate(journalPath, raw.length - lineBuffer.length);
-          break;
-        }
+      } catch {
         throw new Error(`journal corruption at line ${index + 1}`);
       }
       if (parsed.sequence !== expectedSequence) {
@@ -506,6 +514,35 @@ export class ControlJournal {
       expectedSequence += 1;
     }
     return { events, firstSequence };
+  }
+
+  /**
+   * Finishes a rollback that failed during an earlier append. It only ever
+   * cuts bytes past the remembered committed length: a file that is already
+   * that length needs nothing, and a shorter one means the file changed under
+   * us, so appending is refused rather than extending it (truncate would pad
+   * with NULs) or cutting committed records.
+   */
+  private async repairUnrolledAppend(): Promise<void> {
+    const committedLength = this.unrolledAppendLength;
+    if (committedLength === undefined) return;
+    let currentLength: number;
+    try {
+      currentLength = (await stat(this.path)).size;
+    } catch (error) {
+      throw unrolledAppendError(error);
+    }
+    if (currentLength < committedLength) {
+      throw unrolledAppendError(new Error('journal is shorter than its last committed length'));
+    }
+    if (currentLength > committedLength) {
+      try {
+        await truncate(this.path, committedLength);
+      } catch (error) {
+        throw unrolledAppendError(error);
+      }
+    }
+    this.unrolledAppendLength = undefined;
   }
 
   get sequence(): number {
@@ -525,11 +562,40 @@ export class ControlJournal {
       rejectEvent = reject;
     });
     this.appendTail = this.appendTail.then(async () => {
+      await this.repairUnrolledAppend();
       const event = this.buildNextEvent(kind, payload);
       const handle = await open(this.path, 'a');
+      let committedLength: number | undefined;
       try {
+        committedLength = (await handle.stat()).size;
         await handle.writeFile(`${JSON.stringify(event)}\n`, 'utf8');
         await handle.sync();
+      } catch (error) {
+        // A volume that fills mid-append (or reports it at fsync) can leave a
+        // torn fragment of this line. Left in place, the next append would
+        // bury it mid-file and the whole journal would fail to replay. Cut it
+        // back to the last committed line; if even that fails, remember the
+        // length so no later append lands after the fragment.
+        //
+        // A fragment that never reached its newline cannot survive a restart
+        // either: replay discards any newline-less tail as uncommitted.
+        //
+        // Known residual case: if the line was written whole, newline
+        // included, and both the fsync and the rollback fail, then the process
+        // crashes before the next append repairs it, the unacknowledged event
+        // is indistinguishable from a committed one and is replayed on reopen.
+        // The caller was told the append failed, so that event's effect may be
+        // retried; idempotency keys, not this rollback, are what make such a
+        // retry safe.
+        if (committedLength !== undefined) {
+          try {
+            await handle.truncate(committedLength);
+            await handle.sync();
+          } catch {
+            this.unrolledAppendLength = committedLength;
+          }
+        }
+        throw error;
       } finally {
         await handle.close();
       }
@@ -861,6 +927,9 @@ export class ControlJournal {
       const dropped = this.events.findIndex((event) => event.sequence > coveredSequence);
       const keepFrom = dropped === -1 ? this.events.length : dropped;
       if (keepFrom === 0) {
+        // Nothing is rewritten, so a torn tail from a failed rollback is still
+        // on disk and its remembered length still applies: the next append
+        // repairs it, or refuses. A no-op compaction is not a recovery.
         resolveDone();
         return;
       }
@@ -901,6 +970,10 @@ export class ControlJournal {
 
       this.events.splice(0, keepFrom);
       this.firstRetainedSequence = firstSequence;
+      // The rewrite came from committed in-memory events, so any torn tail an
+      // earlier failed append left behind is gone, and its remembered length
+      // no longer describes this file.
+      this.unrolledAppendLength = undefined;
       for (const [key, event] of this.idempotencyIndex) {
         if (event.sequence < firstSequence) this.idempotencyIndex.delete(key);
       }
@@ -1569,6 +1642,13 @@ function runtimeDirectorySyncUnsupportedDuringCompaction(): Error {
 
 function parentDirectorySyncUnsupportedDuringCreation(): Error {
   return new Error('parent directory fsync is unsupported during runtime directory creation');
+}
+
+function unrolledAppendError(cause: unknown): Error {
+  return new Error(
+    'control journal holds a torn partial append that could not be rolled back; refusing to append after it',
+    { cause },
+  );
 }
 
 function snapshotDurableOutcomeFile(stats: BigIntStats): DurableOutcomeFileSnapshot {

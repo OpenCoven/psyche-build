@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Settings are persisted through the atomic writer, which uses `node:fs`
+// directly. These tests exercise defaults, not persistence, so writes stay
+// off disk exactly as the mocked `writeFileSync` kept them before.
+vi.mock('../src/utils/atomicWrite.js', () => ({
+  atomicWriteFile: vi.fn(),
+  atomicWriteFileSync: vi.fn(),
+  atomicWriteJson: vi.fn(),
+  atomicWriteJsonSync: vi.fn(),
+}));
+
 describe('SettingsManager defaults', () => {
   beforeEach(() => {
     vi.resetModules();

@@ -17,6 +17,7 @@ const INVARIANT_IDS: readonly RecoveryInvariantId[] = [
   'persisted-config-unchanged',
   'persisted-config-readable',
   'persistence-failure-surfaced',
+  'no-partial-write-left-behind',
   'effect-executed-exactly-once',
   'retry-reconciles-canonical-outcome',
   'reconciliation-survives-restart',
@@ -133,6 +134,21 @@ describe('disposable recovery harness', () => {
     expect(scenario.classification).not.toBe('injection_ineffective');
     expect(scenario.classification).toBe('persistence_failed');
     expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+  });
+
+  it('reports full state storage as a failed persist and keeps the prior config', async () => {
+    const report = await runRecoveryHarness(['full-state-storage']);
+    const [scenario] = report.scenarios;
+
+    // Source-level injection: `injection_ineffective` means the fault never
+    // fired, which proves nothing and must not read as the product succeeding.
+    expect(scenario.classification).not.toBe('injection_ineffective');
+    expect(scenario.classification).toBe('persistence_failed');
+    expect(scenario.digests.configAfter).toBe(scenario.digests.configBefore);
+    const byId = new Map(scenario.invariants.map((i) => [i.id, i.held]));
+    expect(byId.get('no-partial-write-left-behind')).toBe(true);
+    expect(byId.get('persisted-config-readable')).toBe(true);
+    expect(scenario.outcome).toBe('passed');
   });
 
   it('reconciles a duplicate retry instead of repeating the effect', async () => {

@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { atomicWriteFile } from './atomicWrite.js';
 
 export type StartupPrimerOutcome = 'dismissed' | 'completed-first-action';
 
@@ -52,5 +53,5 @@ export async function writeStartupPrimerState(
   };
 
   await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf-8');
+  await atomicWriteFile(statePath, JSON.stringify(nextState, null, 2), { followSymlinks: true });
 }

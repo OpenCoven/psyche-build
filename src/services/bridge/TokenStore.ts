@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { tokensPath, bridgeDir } from "./paths.js";
 import { randomBytes } from "node:crypto";
+import { atomicWriteFile } from "../../utils/atomicWrite.js";
 
 export interface DeviceRecord {
   token: string;
@@ -87,9 +88,9 @@ export class TokenStore {
 
   private async write(file: TokensFile) {
     await fs.mkdir(bridgeDir, { recursive: true, mode: 0o700 });
-    const tmp = tokensPath + ".tmp";
-    await fs.writeFile(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });
-    await fs.rename(tmp, tokensPath);
+    // Synced temp-plus-rename: a full disk keeps the previous device list and
+    // removes the partial temporary file, which would otherwise hold tokens.
+    await atomicWriteFile(tokensPath, JSON.stringify(file, null, 2), { mode: 0o600 });
     this.cache = file;
   }
 }

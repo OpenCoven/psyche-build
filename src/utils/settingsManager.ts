@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import type { PsycheSettings, SettingsScope, EffectiveSettingsScope, SettingDefinition } from '../types.js';
@@ -297,6 +298,7 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
 
 export class SettingsManager {
   private globalPath: string;
+  private projectRoot: string;
   private projectPath: string;
   private teamDefaultsPath: string;
   private globalSettings: PsycheSettings = {};
@@ -306,6 +308,7 @@ export class SettingsManager {
   constructor(projectRoot?: string) {
     const root = projectRoot || process.cwd();
     this.globalPath = GLOBAL_SETTINGS_PATH;
+    this.projectRoot = root;
     this.projectPath = join(root, '.psyche', 'settings.json');
     this.teamDefaultsPath = join(root, TEAM_DEFAULTS_FILENAME);
     this.loadSettings();
@@ -631,7 +634,7 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(this.globalPath, JSON.stringify(this.globalSettings, null, 2));
+      atomicWriteFileSync(this.globalPath, JSON.stringify(this.globalSettings, null, 2), { followSymlinks: true });
     } catch (error) {
       console.error('Failed to save global settings:', error);
       throw error;
@@ -644,7 +647,9 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2));
+      atomicWriteFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2), {
+        followSymlinks: { within: this.projectRoot },
+      });
     } catch (error) {
       console.error('Failed to save project settings:', error);
       throw error;
