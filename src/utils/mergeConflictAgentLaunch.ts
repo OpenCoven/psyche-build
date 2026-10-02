@@ -62,7 +62,7 @@ export interface MergeConflictAgentLaunchOptions {
 export interface MergeConflictAgentLaunchResult {
   /** The agent that exited cleanly, or null when every candidate failed. */
   readonly launchedAgent: AgentName | null;
-  /** Why the prompt was not delivered, or null when it was. */
+  /** Why the launched agent got no prompt; null when it got one or none launched. */
   readonly initialPromptSkipped: PromptBootstrapSkipReason | null;
 }
 
@@ -71,14 +71,13 @@ async function defaultReportSkipped(
   reason: PromptBootstrapSkipReason,
 ): Promise<void> {
   await reportPromptBootstrapSkipped(agent, reason, 'mergePane', 'merge');
-  // The TUI clears the screen and hands the terminal to the agent, so a toast
-  // may never render; the same bounded message goes to stderr as well.
-  try {
-    process.stderr.write(`${describePromptBootstrapSkipped(agent, reason)}\n`);
-  } catch {
-    // Best effort.
-  }
 }
+
+/**
+ * Agent-neutral stand-in for the skip warning, written before an attempt
+ * starts: which candidate will actually run is not known until it does.
+ */
+const NEUTRAL_AGENT_LABEL = 'The merge-conflict agent';
 
 export async function launchMergeConflictAgent(
   options: MergeConflictAgentLaunchOptions,
@@ -103,14 +102,12 @@ export async function launchMergeConflictAgent(
   // no polling is the whole answer.
   const shell = await resolvePaneShell(async () => shellPath, { timeoutMs: 0 });
 
-  let initialPromptSkipped: PromptBootstrapSkipReason | null = null;
-  const noteSkipped = async (agent: AgentName, reason: PromptBootstrapSkipReason): Promise<void> => {
-    if (initialPromptSkipped) return;
-    initialPromptSkipped = reason;
+  const writeStderr = deps.writeStderr ?? ((text: string) => process.stderr.write(text));
+  const writeNotice = (text: string): void => {
     try {
-      await reportSkipped(agent, reason);
+      writeStderr(`${text}\n`);
     } catch {
-      // Reporting must never stop the launch.
+      // Best effort.
     }
   };
 
@@ -118,9 +115,12 @@ export async function launchMergeConflictAgent(
   for (const agent of MERGE_CONFLICT_AGENTS) {
     let promptPath: string | null = null;
     let line = buildAgentCommand(agent, permissionMode);
+    // Per attempt: a skip belongs to the attempt that hit it, and is reported
+    // for an agent only once that agent has actually run.
+    let attemptSkipped: PromptBootstrapSkipReason | null = null;
 
     if (hasPrompt && shell.dialect === null) {
-      await noteSkipped(agent, shell.reason);
+      attemptSkipped = shell.reason;
     } else if (hasPrompt && shell.dialect) {
       try {
         promptPath = await writePromptFile(cwd, slug, prompt);
@@ -134,13 +134,20 @@ export async function launchMergeConflictAgent(
           permissionMode,
         )}`;
       } else {
-        await noteSkipped(agent, 'prompt_file_unwritable');
+        attemptSkipped = 'prompt_file_unwritable';
       }
     }
 
+    // The TUI has cleared the screen and a toast would never render, so the
+    // operator is told here, before the agent takes the terminal.
+    if (attemptSkipped) {
+      writeNotice(describePromptBootstrapSkipped(NEUTRAL_AGENT_LABEL, attemptSkipped));
+    }
+
+    let launched = false;
     try {
       execFileSync(shellPath, ['-c', line], { cwd, stdio: 'inherit' });
-      return { launchedAgent: agent, initialPromptSkipped };
+      launched = true;
     } catch {
       // Not installed or exited non-zero: try the next agent.
     } finally {
@@ -148,16 +155,23 @@ export async function launchMergeConflictAgent(
       // got that far.
       if (promptPath) await deletePromptFile(promptPath);
     }
+
+    if (launched) {
+      if (attemptSkipped) {
+        try {
+          await reportSkipped(agent, attemptSkipped);
+        } catch {
+          // Reporting must never disturb the outcome.
+        }
+      }
+      return { launchedAgent: agent, initialPromptSkipped: attemptSkipped };
+    }
   }
 
   // Nothing started (no agent installed, every attempt failed, or no
   // /bin/sh on this platform): say so, since the TUI is about to exit.
-  try {
-    (deps.writeStderr ?? ((text: string) => process.stderr.write(text)))(
-      `No merge-conflict agent could be started (tried ${MERGE_CONFLICT_AGENTS.join(', ')}). Resolve the conflicts manually.\n`,
-    );
-  } catch {
-    // Best effort.
-  }
-  return { launchedAgent: null, initialPromptSkipped };
+  writeNotice(
+    `No merge-conflict agent could be started (tried ${MERGE_CONFLICT_AGENTS.join(', ')}). Resolve the conflicts manually.`,
+  );
+  return { launchedAgent: null, initialPromptSkipped: null };
 }

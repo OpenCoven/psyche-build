@@ -132,6 +132,63 @@ describe('launchMergeConflictAgent', () => {
     expect(reportSkipped).toHaveBeenCalledWith('claude', 'prompt_file_unwritable');
   });
 
+  // The skip warning must name the agent that actually launched, not the
+  // first candidate tried.
+  it('names opencode in the skip warning when claude is unavailable and the file is unwritable', async () => {
+    const cwd = await tempRoot();
+    const { calls, execFileSync } = recordingExec(new Set(['claude']));
+    const reportSkipped = vi.fn();
+    const writeStderr = vi.fn();
+
+    const result = await launchMergeConflictAgent({
+      prompt: PROMPT,
+      cwd,
+      slug: 'feature-x-merge',
+      deps: {
+        execFileSync,
+        reportSkipped,
+        writeStderr,
+        writePromptFile: async () => {
+          throw new Error('EACCES');
+        },
+      },
+    });
+
+    expect(result).toEqual({ launchedAgent: 'opencode', initialPromptSkipped: 'prompt_file_unwritable' });
+    expectPromptNeverInArgv(execFileSync);
+    expect(calls.map((call) => call.args[1])).toEqual(['claude', 'opencode']);
+    expect(reportSkipped).toHaveBeenCalledTimes(1);
+    expect(reportSkipped).toHaveBeenCalledWith('opencode', 'prompt_file_unwritable');
+    // The notice shown before each attempt names no candidate.
+    for (const [text] of writeStderr.mock.calls) {
+      expect(text).not.toMatch(/\bclaude\b|\bopencode\b/u);
+      expect(text).not.toContain('SENTINEL-PROMPT-7f3a');
+    }
+  });
+
+  it('reports no skip warning for an agent when none launched', async () => {
+    const cwd = await tempRoot();
+    const { execFileSync } = recordingExec(new Set(['claude', 'opencode']));
+    const reportSkipped = vi.fn();
+
+    const result = await launchMergeConflictAgent({
+      prompt: PROMPT,
+      cwd,
+      slug: 'feature-x-merge',
+      deps: {
+        execFileSync,
+        reportSkipped,
+        writeStderr: vi.fn(),
+        writePromptFile: async () => {
+          throw new Error('EACCES');
+        },
+      },
+    });
+
+    expect(result).toEqual({ launchedAgent: null, initialPromptSkipped: null });
+    expect(reportSkipped).not.toHaveBeenCalled();
+  });
+
   it('writes no prompt file and launches bare when the shell has no known dialect', async () => {
     const cwd = await tempRoot();
     const { calls, execFileSync } = recordingExec();
