@@ -63,19 +63,51 @@ export interface PaneShellProbeOptions {
   /** Total time to keep re-reading while the shell is unknown. */
   readonly timeoutMs?: number;
   readonly intervalMs?: number;
+  /**
+   * Budget for one read. A read still outstanding when it runs out counts as
+   * unreadable, so a hung reader cannot hold the probe past
+   * `timeoutMs + readTimeoutMs` (#519).
+   */
+  readonly readTimeoutMs?: number;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
 export const PANE_SHELL_PROBE_TIMEOUT_MS = 3_000;
 export const PANE_SHELL_PROBE_INTERVAL_MS = 200;
+/** Matches the tmux read's own timeout; the probe enforces it regardless of the reader. */
+export const PANE_SHELL_READ_TIMEOUT_MS = 1_000;
+
+const READ_TIMED_OUT = Symbol('read-timed-out');
+
+/** Settles with the read, or with READ_TIMED_OUT once the budget runs out. */
+function withReadBudget(
+  read: Promise<string | undefined>,
+  budgetMs: number,
+): Promise<string | undefined | typeof READ_TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof READ_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(READ_TIMED_OUT), Math.max(0, budgetMs));
+    timer.unref?.();
+  });
+  // An abandoned read that later rejects must not surface as unhandled.
+  read.catch(() => undefined);
+  return Promise.race([read, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 async function readOnce(
   readPaneCommand: () => Promise<string | undefined>,
+  readTimeoutMs: number,
 ): Promise<PaneShellResolution> {
   let paneCommand: string | undefined;
   try {
-    paneCommand = await readPaneCommand();
+    const answer = await withReadBudget(Promise.resolve().then(readPaneCommand), readTimeoutMs);
+    if (answer === READ_TIMED_OUT) {
+      return { dialect: null, paneCommand: undefined, reason: 'unreadable_shell' };
+    }
+    paneCommand = answer;
   } catch {
     return { dialect: null, paneCommand: undefined, reason: 'unreadable_shell' };
   }
@@ -94,8 +126,10 @@ async function readOnce(
  * Reads the pane's current command through the injected reader and resolves
  * its dialect. While the answer is transient (an rc file's foreground program,
  * a shell still starting, a failed read) it re-reads at a short
- * interval for a bounded time, stopping at the first recognized shell. Never
- * throws: a failed or missing reader is an unreadable shell.
+ * interval for a bounded time, stopping at the first recognized shell. Each
+ * read has its own budget, so the whole probe takes at most about
+ * `timeoutMs + readTimeoutMs` even when the reader hangs. Never throws: a
+ * failed, hung or missing reader is an unreadable shell.
  */
 export async function resolvePaneShell(
   readPaneCommand: (() => Promise<string | undefined>) | undefined,
@@ -107,6 +141,7 @@ export async function resolvePaneShell(
   const {
     timeoutMs = PANE_SHELL_PROBE_TIMEOUT_MS,
     intervalMs = PANE_SHELL_PROBE_INTERVAL_MS,
+    readTimeoutMs = PANE_SHELL_READ_TIMEOUT_MS,
     now = Date.now,
     sleep = unrefSleep,
   } = options;
@@ -114,7 +149,7 @@ export async function resolvePaneShell(
   // The attempt cap bounds the probe even when the clock is frozen or stalled;
   // the deadline bounds it when reads themselves are slow.
   const maxSleeps = Math.max(0, Math.floor(timeoutMs / Math.max(1, intervalMs)));
-  let result = await readOnce(readPaneCommand);
+  let result = await readOnce(readPaneCommand, readTimeoutMs);
   // A recognized-but-unsupported shell (nu, tcsh) will not change; only a
   // transient answer (a foreground program, an empty or failed read) is
   // worth waiting out.
@@ -127,7 +162,7 @@ export async function resolvePaneShell(
     sleeps += 1
   ) {
     await sleep(intervalMs);
-    result = await readOnce(readPaneCommand);
+    result = await readOnce(readPaneCommand, readTimeoutMs);
   }
   return result;
 }

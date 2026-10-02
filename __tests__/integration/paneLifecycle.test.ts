@@ -30,8 +30,20 @@ const runGitProcessMock = vi.hoisted(() => vi.fn());
 
 // Mock child_process
 const mockExecSync = createMockExecSync({});
+// The pane-shell probe reads `#{pane_current_command}` through async
+// `execFile` (#519); a fresh pane's foreground command is its shell.
+const mockExecFile = vi.fn((
+  _file: string,
+  args: readonly string[],
+  _options: unknown,
+  callback: (error: Error | null, stdout: string, stderr: string) => void,
+) => {
+  const answer = args.includes('#{pane_current_command}') ? 'zsh\n' : '';
+  queueMicrotask(() => callback(null, answer, ''));
+});
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
+  execFile: mockExecFile,
 }));
 
 vi.mock('../../src/utils/gitProcess.js', () => ({

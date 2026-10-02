@@ -135,6 +135,46 @@ describe('resolvePaneShell', () => {
     await expect(resolvePaneShell(read, clock)).resolves.toMatchObject({ dialect: 'posix' });
   });
 
+  // A hung or slow tmux read must neither stall the probe past its bound nor
+  // block the event loop while it waits (#519).
+  it('bounds a hung read and lets other work run while it waits', async () => {
+    const read = vi.fn(() => new Promise<string>(() => {}));
+    const started = Date.now();
+    let timerFiredDuringRead = false;
+    let settled = false;
+    setTimeout(() => {
+      timerFiredDuringRead = !settled;
+    }, 10);
+    const result = await resolvePaneShell(read, {
+      timeoutMs: 300,
+      intervalMs: 50,
+      readTimeoutMs: 100,
+    });
+    settled = true;
+    const elapsed = Date.now() - started;
+    expect(result).toMatchObject({ dialect: null, reason: 'unreadable_shell' });
+    expect(timerFiredDuringRead).toBe(true);
+    // Total bound: probe window plus at most one read's budget.
+    expect(elapsed).toBeLessThan(300 + 100 + 250);
+    expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('abandons a slow read at its budget and resolves from the next one', async () => {
+    const read = vi.fn<() => Promise<string>>()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        setTimeout(() => resolve('vim'), 5_000).unref?.();
+      }))
+      .mockResolvedValue('zsh');
+    const started = Date.now();
+    await expect(resolvePaneShell(read, {
+      timeoutMs: 1_000,
+      intervalMs: 20,
+      readTimeoutMs: 50,
+    })).resolves.toEqual({ dialect: 'posix', paneCommand: 'zsh' });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it('reports a missing reader as unreadable', async () => {
     await expect(resolvePaneShell(undefined)).resolves.toMatchObject({
       dialect: null,

@@ -4,7 +4,8 @@ import { execSync, exec } from 'child_process';
 import CleanTextInput from '../inputs/CleanTextInput.js';
 import chalk from 'chalk';
 import { SettingsManager } from '../../utils/settingsManager.js';
-import { getPermissionFlags } from '../../utils/agentLaunch.js';
+import type { PermissionMode } from '../../utils/agentLaunch.js';
+import { launchMergeConflictAgent } from '../../utils/mergeConflictAgentLaunch.js';
 import { COLORS } from '../../theme/colors.js';
 
 interface MergePaneProps {
@@ -211,36 +212,28 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
 
     // Exit the app and launch agent with conflict resolution prompt
     const fullPrompt = agentPrompt || `Fix the merge conflicts in the following files: ${conflictFiles.join(', ')}. Resolve them appropriately based on the changes from branch ${pane.slug} (${pane.prompt}) and ensure the code remains functional.`;
-    const escapedPrompt = fullPrompt
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/`/g, '\\`')
-      .replace(/\$/g, '\\$');
 
     // Clear screen and exit
     process.stdout.write('\x1b[2J\x1b[H');
 
-    // Launch Claude to resolve conflicts in the main repository
+    // Launch an agent to resolve conflicts in the main repository. The prompt
+    // goes through a read-and-delete prompt file, never argv or a typed line
+    // (#518).
+    const cwd = mainRepoPath || process.cwd();
+    let permissionMode: PermissionMode | undefined;
     try {
-      const settings = new SettingsManager(mainRepoPath || process.cwd()).getSettings();
-      const permissionFlags = getPermissionFlags('claude', settings.permissionMode);
-      const permissionSuffix = permissionFlags ? ` ${permissionFlags}` : '';
-
-      execSync(`claude "${escapedPrompt}"${permissionSuffix}`, {
-        stdio: 'inherit',
-        cwd: mainRepoPath || process.cwd()
-      });
+      permissionMode = new SettingsManager(cwd).getSettings().permissionMode;
     } catch {
-      // Try opencode as fallback
-      try {
-        execSync(`opencode --prompt "${escapedPrompt}"`, {
-          stdio: 'inherit',
-          cwd: mainRepoPath || process.cwd()
-        });
-      } catch {}
+      permissionMode = undefined;
     }
-
-    exit();
+    void launchMergeConflictAgent({
+      prompt: fullPrompt,
+      cwd,
+      slug: `${pane.slug}-merge`,
+      permissionMode,
+    })
+      .catch(() => undefined)
+      .finally(() => exit());
   };
 
   const handleManualResolution = () => {
