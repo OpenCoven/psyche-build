@@ -11,6 +11,10 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    // Every run gets a throwaway home so no test can write a developer's real
+    // settings, credentials, or dotfiles (see __tests__/setup/sandboxHome.global.ts).
+    globalSetup: ['./__tests__/setup/sandboxHome.global.ts'],
+    setupFiles: ['./__tests__/setup/sandboxHome.worker.ts'],
     include: ['__tests__/psyche.smoke.test.ts'],
     // Starting a cockpit, waiting for it to write config, and waiting for it to
     // exit is slower than any unit test; the test sets its own 30s budget.
