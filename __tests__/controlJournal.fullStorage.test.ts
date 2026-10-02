@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -103,5 +103,30 @@ describe('control journal append on full storage', () => {
     expect(after.length).toBe(10);
     expect(after.includes(0)).toBe(false);
     expect(committed.length).toBeGreaterThan(10);
+  });
+
+  it('a newline-less tail of valid JSON is uncommitted: not replayed, and truncated on open', async () => {
+    // A full disk can stop an append right after the closing brace. If the
+    // rollback then also fails and the process restarts, the in-memory
+    // rollback position is gone; replay alone must keep the rejected event out.
+    const root = await newRoot();
+    const journal = await ControlJournal.open(root, 1);
+    await journal.append('first', { n: 1 });
+    await journal.append('second', { n: 2 });
+    const journalPath = journalPathOf(root);
+    const committed = await readFile(journalPath);
+
+    const rejected = { sequence: 3, kind: 'rejected', payload: { n: 3 } };
+    await appendFile(journalPath, JSON.stringify(rejected), 'utf8');
+
+    const reopened = await ControlJournal.open(root, 2);
+    expect(reopened.read(0).map((event) => event.kind)).toEqual(['first', 'second']);
+    expect(reopened.sequence).toBe(2);
+    expect(await readFile(journalPath)).toEqual(committed);
+
+    const next = await reopened.append('third', { n: 3 });
+    expect(next.sequence).toBe(3);
+    const again = await ControlJournal.open(root, 3);
+    expect(again.read(0).map((event) => event.kind)).toEqual(['first', 'second', 'third']);
   });
 });

@@ -468,6 +468,17 @@ export class ControlJournal {
       segments.pop();
     }
 
+    // Every committed append writes a whole line ending in "\n" before its
+    // fsync, and compaction rewrites end in "\n" too. A final segment without
+    // that newline is therefore never committed, even when it happens to parse
+    // as JSON (a full disk can stop right after the closing brace). It was a
+    // rejected append whose rollback did not land before a restart, so it is
+    // cut back to the last newline rather than replayed as an event.
+    if (!endsWithNewline && segments.length > 0) {
+      const uncommittedTail = segments.pop()!;
+      await truncate(journalPath, raw.length - uncommittedTail.length);
+    }
+
     // A journal written before compaction existed has no header and starts at
     // sequence 1; anything else must say where it starts.
     let firstSequence = 1;
@@ -489,16 +500,11 @@ export class ControlJournal {
     const events: ControlEvent[] = [];
     let expectedSequence = firstSequence;
     for (let index = firstEventLine; index < segments.length; index += 1) {
-      const isLastLine = index === segments.length - 1;
       const lineBuffer = segments[index];
       let parsed: ControlEvent;
       try {
         parsed = JSON.parse(lineBuffer.toString('utf8')) as ControlEvent;
-      } catch (error) {
-        if (isLastLine && !endsWithNewline) {
-          await truncate(journalPath, raw.length - lineBuffer.length);
-          break;
-        }
+      } catch {
         throw new Error(`journal corruption at line ${index + 1}`);
       }
       if (parsed.sequence !== expectedSequence) {
@@ -571,12 +577,16 @@ export class ControlJournal {
         // back to the last committed line; if even that fails, remember the
         // length so no later append lands after the fragment.
         //
-        // Known residual case: if the line was written whole and both the
-        // fsync and the rollback fail, then the process crashes before the
-        // next append repairs it, the unacknowledged event can survive on
-        // disk and be replayed on reopen. The caller was told the append
-        // failed, so that event's effect may be retried; idempotency keys,
-        // not this rollback, are what make such a retry safe.
+        // A fragment that never reached its newline cannot survive a restart
+        // either: replay discards any newline-less tail as uncommitted.
+        //
+        // Known residual case: if the line was written whole, newline
+        // included, and both the fsync and the rollback fail, then the process
+        // crashes before the next append repairs it, the unacknowledged event
+        // is indistinguishable from a committed one and is replayed on reopen.
+        // The caller was told the append failed, so that event's effect may be
+        // retried; idempotency keys, not this rollback, are what make such a
+        // retry safe.
         if (committedLength !== undefined) {
           try {
             await handle.truncate(committedLength);
