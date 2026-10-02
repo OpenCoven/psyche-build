@@ -7,6 +7,7 @@ import path from 'path';
 import {
   buildPromptReadAndDeleteSnippet,
   cleanupPromptFilesForSlug,
+  createPromptFileExclusive,
   getPromptsDir,
   shellQuote,
   writePromptFile,
@@ -120,5 +121,62 @@ describe('buildPromptReadAndDeleteSnippet dialects (#508)', () => {
     });
     expect(output).toBe(prompt);
     expect(existsSync(promptPath)).toBe(false);
+  });
+});
+
+describe('promptStore exclusive creation', () => {
+  it('creates the prompt file 0600 inside a 0700 prompts directory', async () => {
+    const projectRoot = await makeTempProjectRoot();
+    const promptPath = await writePromptFile(projectRoot, 'feature/mode', 'secret');
+    expect((await fs.stat(promptPath)).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(getPromptsDir(projectRoot))).mode & 0o777).toBe(0o700);
+    expect(path.basename(promptPath)).toMatch(/^feature-mode--\d+-[0-9a-f]{12}\.txt$/u);
+  });
+
+  it('refuses a pre-placed symlink at the target instead of following it', async () => {
+    const projectRoot = await makeTempProjectRoot();
+    const promptsDir = getPromptsDir(projectRoot);
+    await fs.mkdir(promptsDir, { recursive: true });
+    const victim = path.join(projectRoot, 'victim.txt');
+    await fs.writeFile(victim, 'untouched');
+    const target = path.join(promptsDir, 'planted.txt');
+    await fs.symlink(victim, target);
+
+    await expect(createPromptFileExclusive(target, 'secret')).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await fs.readFile(victim, 'utf-8')).toBe('untouched');
+    expect((await fs.lstat(target)).isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses a dangling symlink at the target instead of creating through it', async () => {
+    const projectRoot = await makeTempProjectRoot();
+    const promptsDir = getPromptsDir(projectRoot);
+    await fs.mkdir(promptsDir, { recursive: true });
+    const victim = path.join(projectRoot, 'created-through-link.txt');
+    const target = path.join(promptsDir, 'dangling.txt');
+    await fs.symlink(victim, target);
+
+    await expect(createPromptFileExclusive(target, 'secret')).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(existsSync(victim)).toBe(false);
+  });
+
+  it('refuses an existing file at the target and leaves it unchanged', async () => {
+    const projectRoot = await makeTempProjectRoot();
+    const promptsDir = getPromptsDir(projectRoot);
+    await fs.mkdir(promptsDir, { recursive: true });
+    const target = path.join(promptsDir, 'existing.txt');
+    await fs.writeFile(target, 'original', { mode: 0o644 });
+
+    await expect(createPromptFileExclusive(target, 'secret')).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await fs.readFile(target, 'utf-8')).toBe('original');
+  });
+
+  it('creates a fresh target with mode 0600', async () => {
+    const projectRoot = await makeTempProjectRoot();
+    const promptsDir = getPromptsDir(projectRoot);
+    await fs.mkdir(promptsDir, { recursive: true });
+    const target = path.join(promptsDir, 'fresh.txt');
+    await createPromptFileExclusive(target, 'secret');
+    expect(await fs.readFile(target, 'utf-8')).toBe('secret');
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
   });
 });

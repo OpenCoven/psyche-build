@@ -45,6 +45,7 @@ export interface MergeConflictAgentLaunchDeps {
   readonly writePromptFile?: (projectRoot: string, slug: string, prompt: string) => Promise<string>;
   readonly deletePromptFile?: (promptPath: string) => Promise<void>;
   readonly reportSkipped?: (agent: AgentName, reason: PromptBootstrapSkipReason) => void | Promise<void>;
+  readonly writeStderr?: (text: string) => unknown;
 }
 
 export interface MergeConflictAgentLaunchOptions {
@@ -149,5 +150,14 @@ export async function launchMergeConflictAgent(
     }
   }
 
+  // Nothing started (no agent installed, every attempt failed, or no
+  // /bin/sh on this platform): say so, since the TUI is about to exit.
+  try {
+    (deps.writeStderr ?? ((text: string) => process.stderr.write(text)))(
+      `No merge-conflict agent could be started (tried ${MERGE_CONFLICT_AGENTS.join(', ')}). Resolve the conflicts manually.\n`,
+    );
+  } catch {
+    // Best effort.
+  }
   return { launchedAgent: null, initialPromptSkipped };
 }

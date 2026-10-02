@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import { execSync, exec } from 'child_process';
 import CleanTextInput from '../inputs/CleanTextInput.js';
@@ -54,6 +54,9 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
   const [showAgentPromptInput, setShowAgentPromptInput] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
   const [showCommitInput, setShowCommitInput] = useState(false);
+  // Set synchronously on submit, before React re-renders with the new status,
+  // so no keypress during the launch can cancel the pane under the agent.
+  const agentLaunchStartedRef = useRef(false);
 
   const addCommandOutput = (command: string, output: string, error?: string) => {
     setCommandHistory(prev => [...prev, {
@@ -204,6 +207,8 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
   };
 
   const submitAgentResolution = () => {
+    if (agentLaunchStartedRef.current) return;
+    agentLaunchStartedRef.current = true;
     setShowAgentPromptInput(false);
     setStatus('resolving-with-agent');
 
@@ -251,6 +256,11 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
   }, []);
 
   useInput((input, key) => {
+    // The agent launch owns the terminal from submit until the app exits.
+    if (agentLaunchStartedRef.current || status === 'resolving-with-agent') {
+      return;
+    }
+
     if (key.escape) {
       onCancel();
       return;

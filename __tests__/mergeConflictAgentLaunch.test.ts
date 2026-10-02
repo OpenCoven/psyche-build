@@ -156,15 +156,19 @@ describe('launchMergeConflictAgent', () => {
   it('reports no launch when every agent fails, and leaves no prompt file behind', async () => {
     const cwd = await tempRoot();
     const { execFileSync } = recordingExec(new Set(['claude', 'opencode']));
+    const writeStderr = vi.fn();
 
     const result = await launchMergeConflictAgent({
       prompt: PROMPT,
       cwd,
       slug: 'feature-x-merge',
-      deps: { execFileSync, reportSkipped: vi.fn() },
+      deps: { execFileSync, reportSkipped: vi.fn(), writeStderr },
     });
 
     expect(result.launchedAgent).toBeNull();
+    expect(writeStderr).toHaveBeenCalledTimes(1);
+    expect(writeStderr.mock.calls[0][0]).toMatch(/^No merge-conflict agent could be started \(tried claude, opencode\)/u);
+    expect(writeStderr.mock.calls[0][0]).not.toContain('SENTINEL-PROMPT-7f3a');
     expectPromptNeverInArgv(execFileSync);
     expect(await fs.readdir(getPromptsDir(cwd))).toEqual([]);
   });

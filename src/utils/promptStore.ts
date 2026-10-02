@@ -1,5 +1,6 @@
 import * as fs from 'fs/promises';
 import type { Dirent } from 'fs';
+import { randomBytes } from 'crypto';
 import path from 'path';
 import type { PaneShellDialect } from './paneShellDialect.js';
 
@@ -21,8 +22,9 @@ function sanitizeSlugForFilename(slug: string): string {
   return normalized.slice(0, MAX_SLUG_PREFIX_LENGTH);
 }
 
+/** Unpredictable, so a planted file cannot anticipate the next prompt path. */
 function randomSuffix(): string {
-  return Math.random().toString(36).slice(2, 8);
+  return randomBytes(6).toString('hex');
 }
 
 export function shellQuote(value: string): string {
@@ -42,22 +44,35 @@ export function getPromptsDir(projectRoot: string): string {
   return path.join(projectRoot, '.psyche', PROMPTS_SUBDIR);
 }
 
+/**
+ * Creates `promptPath` exclusively with mode 0600 and writes the prompt.
+ * `wx` (O_CREAT | O_EXCL) refuses anything already at the path, including a
+ * symlink, dangling or not, so a planted link can never redirect the prompt.
+ */
+export async function createPromptFileExclusive(
+  promptPath: string,
+  prompt: string,
+): Promise<void> {
+  await fs.writeFile(promptPath, prompt, {
+    encoding: 'utf-8',
+    mode: 0o600,
+    flag: 'wx',
+  });
+}
+
 export async function writePromptFile(
   projectRoot: string,
   slug: string,
   prompt: string
 ): Promise<string> {
   const promptsDir = getPromptsDir(projectRoot);
-  await fs.mkdir(promptsDir, { recursive: true });
+  await fs.mkdir(promptsDir, { recursive: true, mode: 0o700 });
 
   const safeSlug = sanitizeSlugForFilename(slug);
   const filename = `${safeSlug}--${Date.now()}-${randomSuffix()}${PROMPT_FILE_EXTENSION}`;
   const promptPath = path.join(promptsDir, filename);
 
-  await fs.writeFile(promptPath, prompt, {
-    encoding: 'utf-8',
-    mode: 0o600,
-  });
+  await createPromptFileExclusive(promptPath, prompt);
 
   return promptPath;
 }
