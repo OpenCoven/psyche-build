@@ -485,7 +485,33 @@ async function waitForPaths(paths: readonly string[]): Promise<void> {
   throw new Error(`Timed out waiting for paths: ${paths.join(', ')}`);
 }
 
+/**
+ * Reads a child PID that another process is still writing. An empty or partial
+ * file parses as 0 or NaN, and `process.kill(0, …)` signals this whole process
+ * group, which would take down the test runner and the shell that started it.
+ */
+async function readPositivePid(pidPath: string): Promise<number> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    // Accept only a complete, newline-terminated decimal record: a partial
+    // write such as "12" of "12345" must never be signalled.
+    const record = /^([1-9][0-9]*)\n$/.exec(readFileSync(pidPath, 'utf8'));
+    if (record) {
+      return Number(record[1]);
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  throw new Error(`Timed out waiting for a valid PID in ${pidPath}`);
+}
+
+function assertSignalablePid(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`refusing to signal non-positive pid ${pid}`);
+  }
+}
+
 function processIsAlive(pid: number): boolean {
+  assertSignalablePid(pid);
   try {
     process.kill(pid, 0);
     return true;
@@ -932,6 +958,9 @@ describe('macOS build channels', () => {
         createScratchDirectory('run-command-process-group'),
         'child.pid',
       );
+      // Scratch directory names are deterministic, so a crashed earlier run can
+      // leave a stale (even empty) PID file that would satisfy waitForPaths.
+      rmSync(childPidPath, { force: true });
       const command = runCommand(
         process.execPath,
         [
@@ -939,13 +968,16 @@ describe('macOS build channels', () => {
           `Promise.all([
             import("node:child_process"),
             import("node:fs"),
-          ]).then(([{ spawn }, { writeFileSync }]) => {
+          ]).then(([{ spawn }, { renameSync, writeFileSync }]) => {
             const child = spawn(
               process.execPath,
               ["-e", "setInterval(() => {}, 1000)"],
               { stdio: "ignore" },
             );
-            writeFileSync(process.argv[1], String(child.pid));
+            // Publish the PID atomically and newline-terminated so the reader can
+            // never observe a partial number.
+            writeFileSync(process.argv[1] + ".tmp", String(child.pid) + "\\n");
+            renameSync(process.argv[1] + ".tmp", process.argv[1]);
             setInterval(() => {}, 1000);
           })`,
           childPidPath,
@@ -957,7 +989,7 @@ describe('macOS build channels', () => {
         },
       );
       await waitForPaths([childPidPath]);
-      const childPid = Number(readFileSync(childPidPath, 'utf8'));
+      const childPid = await readPositivePid(childPidPath);
 
       try {
         controller.abort(new Error('test requested process-group cancellation'));
@@ -965,6 +997,7 @@ describe('macOS build channels', () => {
         await waitForProcessToStop(childPid);
       } finally {
         if (processIsAlive(childPid)) {
+          assertSignalablePid(childPid);
           process.kill(childPid, 'SIGKILL');
         }
       }
