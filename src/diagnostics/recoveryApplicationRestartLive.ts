@@ -79,10 +79,17 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { readPaneSlugOwnershipRecords } from '../services/PaneSlugRegistry.js';
+import {
+  readPaneSlugOwnershipRecords,
+  type PaneSlugOwnershipRecord,
+} from '../services/PaneSlugRegistry.js';
 import type { RecoveryClassification } from './recoveryHarness.js';
 import { AGENT_REGISTRY } from '../utils/agentLaunch.js';
-import { readWorktreeRecoveryMarkers } from '../services/WorktreeRecoveryMarker.js';
+import {
+  readWorktreeRecoveryMarkers,
+  type WorktreeRecoveryMarker,
+} from '../services/WorktreeRecoveryMarker.js';
+import { PANE_POLLING_INTERVAL } from '../constants/timing.js';
 import {
   assertDisposableRoot,
   buildDisposableRepository,
@@ -150,6 +157,12 @@ const LAYOUT_SETTLE_MS = 3_000;
  * polling interval lets a wrong recreation happen where it can be observed.
  */
 const POST_RESTORE_OBSERVATION_MS = 8_000;
+/**
+ * After the crashed creation settles, keep watching for three more polling
+ * cycles: untracked-pane detection runs on each, and #516 stacked another
+ * marker and quarantine for the same orphan every time it did.
+ */
+const ORPHAN_REPORT_OBSERVATION_MS = 3 * PANE_POLLING_INTERVAL + 2_000;
 /** Bounds the fake agent and the shim's wait, so nothing outlives a run. */
 const FAKE_AGENT_LIFETIME_S = 300;
 const SHIM_WAIT_LIMIT_TENTHS = 600;
@@ -633,6 +646,12 @@ export interface CrashMidTransitionObservation {
   readonly workPreserved: boolean;
   /** How the restart settled the half-done pane creation. */
   readonly transitionOutcome: CrashTransitionOutcome;
+  /**
+   * After several polling cycles the orphaned pane is reported exactly once —
+   * one recovery marker and one quarantine record naming it — when the outcome
+   * is `recovery_required`, and not at all otherwise (#516).
+   */
+  readonly orphanReportedOnce: boolean;
 }
 
 /**
@@ -733,9 +752,20 @@ export async function observeCrashMidTransition(
     const settle = async (): Promise<CrashTransitionOutcome> => settleOutcome(host!, inFlight);
     if (restartRestoredWorkspace) {
       await waitFor(async () => (await settle()) !== 'unsettled', SETTLE_TIMEOUT_MS);
-      await delay(POST_RESTORE_OBSERVATION_MS);
+      await delay(Math.max(POST_RESTORE_OBSERVATION_MS, ORPHAN_REPORT_OBSERVATION_MS));
     }
     const transitionOutcome = inFlight ? await settle() : 'unsettled';
+    const markersAfter = await readWorktreeRecoveryMarkers(host.projectRoot).catch(() => undefined);
+    const reservationsAfter = await readPaneSlugOwnershipRecords(host.projectRoot).catch(() => undefined);
+    const orphanReportedOnce = orphanPaneId !== undefined
+      && markersAfter !== undefined
+      && reservationsAfter !== undefined
+      && orphanReportedExactlyOnce(
+        orphanPaneId,
+        transitionOutcome,
+        markersAfter.markers,
+        reservationsAfter.records,
+      );
 
     const configAfter = await readFileOrUndefined(host.configPath);
     const after = await readPersistedWorkspace(host.configPath);
@@ -768,6 +798,7 @@ export async function observeCrashMidTransition(
       noDuplicateCockpits: countCockpitPanes(host.socketPath, host.session) === 1,
       workPreserved: await readFileOrUndefined(host.workPath) === host.workBefore,
       transitionOutcome,
+      orphanReportedOnce,
     };
   } finally {
     await teardown(host);
@@ -806,6 +837,30 @@ async function settleOutcome(
   return 'unsettled';
 }
 
+/**
+ * A `recovery_required` orphan must be named by exactly one recovery marker and
+ * one quarantine record however many polling cycles have seen it; a completed
+ * or rolled-back creation must leave none. Any other ownership record still
+ * naming the pane counts against it.
+ */
+export function orphanReportedExactlyOnce(
+  orphanPaneId: string,
+  outcome: CrashTransitionOutcome,
+  markers: readonly Pick<WorktreeRecoveryMarker, 'pane'>[],
+  records: readonly Pick<PaneSlugOwnershipRecord, 'state' | 'pane'>[],
+): boolean {
+  const naming = markers.filter((marker) => marker.pane.paneId === orphanPaneId).length;
+  const owning = records.filter((record) => record.pane.paneId === orphanPaneId);
+  const quarantined = owning.filter((record) => record.state === 'quarantined').length;
+  if (outcome === 'recovery_required') {
+    return naming === 1 && quarantined === 1 && owning.length === 1;
+  }
+  if (outcome === 'completed' || outcome === 'rolled_back') {
+    return naming === 0 && owning.length === 0;
+  }
+  return false;
+}
+
 function crashUnobserved(
   partial: Partial<CrashMidTransitionObservation>,
 ): CrashMidTransitionObservation {
@@ -822,6 +877,7 @@ function crashUnobserved(
     noDuplicateCockpits: false,
     workPreserved: false,
     transitionOutcome: 'unsettled',
+    orphanReportedOnce: false,
     ...partial,
   };
 }

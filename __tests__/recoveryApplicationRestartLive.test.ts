@@ -25,6 +25,7 @@ import {
   decideRelaunch,
   fakeAgentScript,
   FAKE_AGENT_MARKER,
+  orphanReportedExactlyOnce,
   probeShowsConfinement,
   startAgain,
   tmuxShimScript,
@@ -277,6 +278,7 @@ describe('restart scenarios with a crash or a live agent', () => {
       noDuplicateCockpits: true,
       workPreserved: true,
       transitionOutcome: 'recovery_required' as const,
+      orphanReportedOnce: true,
     };
     const live = {
       firstRunReachedWorkspace: true,
@@ -311,6 +313,50 @@ describe('restart scenarios with a crash or a live agent', () => {
       expect(classifyLiveAgentRestart({ ...live, paneCreatedBeforeQuit: false })).toBe('injection_ineffective');
       expect(classifyLiveAgentRestart({ ...live, agentRunningBeforeQuit: false })).toBe('injection_ineffective');
       expect(classifyLiveAgentRestart({ ...live, firstRunReachedWorkspace: false })).toBe('restart_unavailable');
+    });
+  });
+
+  // #516: the relaunch re-adopted the orphan on every polling cycle and
+  // stacked a marker and a quarantine record each time.
+  describe('orphan reported once', () => {
+    const marker = (paneId: string) => ({ pane: { id: 'r', paneId, slug: 'shell-2' } });
+    const quarantine = (paneId: string) => ({
+      state: 'quarantined' as const,
+      pane: { id: 'r', paneId },
+    });
+
+    it('holds for one marker and one quarantine naming the orphan', () => {
+      expect(orphanReportedExactlyOnce(
+        '%7',
+        'recovery_required',
+        [marker('%7'), marker('%1')],
+        [quarantine('%7')],
+      )).toBe(true);
+    });
+
+    it('fails when repeated adoption stacked more reports for the same pane', () => {
+      expect(orphanReportedExactlyOnce(
+        '%7',
+        'recovery_required',
+        [marker('%7'), marker('%7'), marker('%7')],
+        [quarantine('%7'), quarantine('%7'), quarantine('%7')],
+      )).toBe(false);
+      expect(orphanReportedExactlyOnce(
+        '%7',
+        'recovery_required',
+        [marker('%7')],
+        [quarantine('%7'), { state: 'provisional', pane: { id: 'x', paneId: '%7' } }],
+      )).toBe(false);
+    });
+
+    it('fails when a required recovery was never reported', () => {
+      expect(orphanReportedExactlyOnce('%7', 'recovery_required', [], [])).toBe(false);
+    });
+
+    it('requires a settled creation to leave no report, and never holds unsettled', () => {
+      expect(orphanReportedExactlyOnce('%7', 'completed', [], [])).toBe(true);
+      expect(orphanReportedExactlyOnce('%7', 'rolled_back', [marker('%7')], [])).toBe(false);
+      expect(orphanReportedExactlyOnce('%7', 'unsettled', [], [])).toBe(false);
     });
   });
 

@@ -20,6 +20,7 @@ import {
   reserveCrashSafePaneSlug,
   settlePaneSlugReservationAfterFailure,
 } from '../services/PaneSlugReservation.js';
+import { gateUntrackedPaneAdoption } from '../services/UntrackedPaneAdoptionGate.js';
 import {
   attachDurableEffectWarning,
   type DurableEffectWarning,
@@ -55,6 +56,7 @@ export async function detectAndAddShellPanes(
     let paneLayoutControlPaneId: string | undefined;
     let projectRoot = path.dirname(path.dirname(panesFile));
     let sidebarProjects: import('../types.js').SidebarProject[] = [];
+    let savedPaneIds: string[] = [];
 
     try {
       const configContent = await fs.readFile(panesFile, 'utf-8');
@@ -63,6 +65,7 @@ export async function detectAndAddShellPanes(
       paneLayoutControlPaneId = config.controlPaneId;
       welcomePaneId = config.welcomePaneId;
       sidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
+      savedPaneIds = savedTmuxPaneIds(config.panes);
     } catch (error) {
       // Config not available (expected on first run), continue without filtering
   //       LogService.getInstance().debug(
@@ -71,14 +74,32 @@ export async function detectAndAddShellPanes(
   //       );
     }
 
-    const trackedPaneIds = activePanes.map(p => p.paneId);
+    // The caller's pane snapshot can predate a record another code path has
+    // just saved (#517), so a pane already on disk counts as tracked too.
+    const trackedPaneIds = [...new Set([
+      ...activePanes.map(p => p.paneId),
+      ...savedPaneIds,
+    ])];
   //     LogService.getInstance().debug(
   //       `Checking for untracked panes. Tracked: [${trackedPaneIds.join(', ')}], Control: ${controlPaneId}, Welcome: ${welcomePaneId}`,
   //       'shellDetection'
   //     );
 
     const sessionName = ''; // Empty string will make tmux use current session
-    const untrackedPanes = await getUntrackedPanes(sessionName, trackedPaneIds, controlPaneId, welcomePaneId);
+    const detectedPanes = await getUntrackedPanes(sessionName, trackedPaneIds, controlPaneId, welcomePaneId);
+
+    if (detectedPanes.length === 0) {
+      return { updatedPanes: activePanes, shellPanesAdded: false };
+    }
+
+    // Skip panes another transaction already accounts for: a creation still
+    // in flight (#517), or an earlier failure that is already quarantined and
+    // reported (#516). Re-adopting those would stack a new quarantine record
+    // and recovery marker for the same pane on every polling cycle.
+    const adoption = await gateUntrackedPaneAdoption(projectRoot, detectedPanes, {
+      serverIdentityOf: (paneId) => TmuxService.getInstance().getServerIdentity?.(paneId),
+    });
+    const untrackedPanes = adoption.adoptable;
 
     if (untrackedPanes.length === 0) {
       return { updatedPanes: activePanes, shellPanesAdded: false };
@@ -239,6 +260,19 @@ export async function detectAndAddShellPanes(
   //     );
     return { updatedPanes: activePanes, shellPanesAdded: false };
   }
+}
+
+function savedTmuxPaneIds(panes: unknown): string[] {
+  if (!Array.isArray(panes)) {
+    return [];
+  }
+  return panes.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object') {
+      return [];
+    }
+    const paneId = (candidate as { paneId?: unknown }).paneId;
+    return typeof paneId === 'string' && paneId.length > 0 ? [paneId] : [];
+  });
 }
 
 async function captureShellPaneInsertion(options: {

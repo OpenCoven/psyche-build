@@ -202,6 +202,7 @@ export type RecoveryInvariantId =
   | 'crash-ended-cockpit'
   | 'crash-config-not-silently-overwritten'
   | 'crash-transition-settled'
+  | 'crash-orphan-reported-once'
   | 'agent-pane-confined'
   | 'agent-running-before-quit'
   | 'agent-pane-survived-quit'
@@ -1531,6 +1532,7 @@ async function runApplicationCrashMidTransition(): Promise<RecoveryScenarioEvide
           id: 'crash-transition-settled',
           held: observed !== undefined && observed.transitionOutcome !== 'unsettled',
         },
+        { id: 'crash-orphan-reported-once', held: observed?.orphanReportedOnce === true },
         { id: 'uncommitted-work-untouched', held: observed?.workPreserved === true },
       ],
       {},

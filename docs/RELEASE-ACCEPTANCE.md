@@ -502,6 +502,13 @@ which `psyche recover` lists). The classification names which. Observed on
 macOS with tmux 3.7c: `recovery_required` — the relaunch reconciles the stale
 reservation when it next reserves a slug, finds the pane still present, and
 quarantines it with a marker rather than guessing.
+`crash-orphan-reported-once` then watches three more polling cycles and requires
+a `recovery_required` orphan to be named by exactly one recovery marker and one
+quarantine record (none for a completed or rolled-back creation). Untracked-pane
+detection reconciles stale reservations before it adopts anything and skips a
+pane that a quarantine record or a live creation already accounts for, so the
+relaunch no longer stacks a new marker on every cycle (#516) or quarantines a
+pane its own `[t]` creation is still saving (#517).
 
 #### `application-restart-live-agent`
 
