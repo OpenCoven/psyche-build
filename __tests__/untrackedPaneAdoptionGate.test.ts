@@ -1,15 +1,21 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acknowledgeWorktreeRecoveryMarker,
   listWorktreeRecoveryMarkers,
 } from '../src/services/WorktreeRecoveryMarker.js';
 import {
   listPaneSlugOwnershipRecords,
+  quarantinePaneSlugOwnershipRecord,
   reservePaneSlug,
 } from '../src/services/PaneSlugRegistry.js';
 import {
+  reconcileStalePaneSlugReservations,
+  settlePaneSlugReservationAfterFailure,
+} from '../src/services/PaneSlugReservation.js';
+import {
+  IN_FLIGHT_PANE_CREATION_FUTURE_TOLERANCE_MS,
   IN_FLIGHT_PANE_CREATION_TTL_MS,
   gateUntrackedPaneAdoption,
 } from '../src/services/UntrackedPaneAdoptionGate.js';
@@ -54,6 +60,7 @@ describe('untracked pane adoption gate', () => {
   function gateOptions(overrides: {
     now?: () => number;
     serverIdentityOf?: (paneId: string) => TmuxServerIdentity | undefined;
+    reconcile?: typeof reconcileStalePaneSlugReservations;
   } = {}) {
     return {
       ownerProbe: {
@@ -64,18 +71,6 @@ describe('untracked pane adoption gate', () => {
       serverIdentityOf: () => SERVER,
       ...overrides,
     };
-  }
-
-  /**
-   * A live reservation carries one provisional cleanup blocker (the creation
-   * publishes it; reconciliation restores it if missing). The gate must add
-   * nothing beside it: no adoption-failure marker, no quarantine.
-   */
-  async function onlyLiveCleanupBlockers(root: string, recoveryId: string) {
-    const markers = await listWorktreeRecoveryMarkers(root);
-    return markers.length === 1
-      && markers[0]!.recoveryId === recoveryId
-      && markers[0]!.paneOwnershipState === 'provisional';
   }
 
   const shell = (paneId: string) => ({ paneId, title: 'zsh', command: 'zsh' });
@@ -151,7 +146,8 @@ describe('untracked pane adoption gate', () => {
       reason: 'creation-in-flight',
       recoveryId: creation.recoveryId,
     });
-    expect(await onlyLiveCleanupBlockers(root, creation.recoveryId)).toBe(true);
+    // The gate writes nothing for a live creation: no marker, no quarantine.
+    expect(await listWorktreeRecoveryMarkers(root)).toEqual([]);
     expect(await listPaneSlugOwnershipRecords(root)).toEqual([
       expect.objectContaining({ state: 'provisional', recoveryId: creation.recoveryId }),
     ]);
@@ -177,7 +173,8 @@ describe('untracked pane adoption gate', () => {
         recoveryId: creation.recoveryId,
       }),
     ]);
-    expect(await onlyLiveCleanupBlockers(root, creation.recoveryId)).toBe(true);
+    // The gate writes nothing for a live creation: no marker, no quarantine.
+    expect(await listWorktreeRecoveryMarkers(root)).toEqual([]);
   });
 
   it('stops honouring a live reservation once it has outlived the in-flight window', async () => {
@@ -239,5 +236,137 @@ describe('untracked pane adoption gate', () => {
 
     expect(decision.adoptable).toEqual([shell('%9')]);
     expect(decision.excluded).toEqual([]);
+  });
+
+  it('carries the tmux generation into the quarantine so a reused pane ID on a new server is adoptable', async () => {
+    const root = project('.psyche-adoption-gate-reused-');
+    const crashed = await reserve(root, { pid: DEAD_PID, slug: 'shell-1' });
+    await crashed.recordPaneEffect('%7', SERVER);
+    await gateUntrackedPaneAdoption(root, [shell('%7')], gateOptions());
+
+    const [record] = await listPaneSlugOwnershipRecords(root);
+    expect(record).toMatchObject({
+      state: 'quarantined',
+      pane: { paneId: '%7', tmuxServerIdentity: SERVER },
+    });
+
+    const sameServer = await gateUntrackedPaneAdoption(root, [shell('%7')], gateOptions());
+    expect(sameServer.adoptable).toEqual([]);
+
+    const newServer = await gateUntrackedPaneAdoption(
+      root,
+      [shell('%7')],
+      gateOptions({ serverIdentityOf: () => OTHER_SERVER }),
+    );
+    expect(newServer.adoptable).toEqual([shell('%7')]);
+    expect(newServer.excluded).toEqual([]);
+    // The quarantine itself stays until acknowledged; only adoption is freed.
+    expect(await listWorktreeRecoveryMarkers(root)).toHaveLength(1);
+  });
+
+  it('carries the tmux generation into an adoption-failure quarantine', async () => {
+    const root = project('.psyche-adoption-gate-failure-identity-');
+    const adoption = await reserve(root, { pid: LIVE_PID, slug: 'shell-1' });
+    await adoption.recordPaneEffect('%7', SERVER);
+
+    const settlement = await settlePaneSlugReservationAfterFailure(adoption, {
+      operation: 'shell-pane-adoption-failure',
+      reason: 'Pane layout has no visible insertion target',
+    });
+
+    expect(settlement.quarantined).toBe(true);
+    expect(await listPaneSlugOwnershipRecords(root)).toEqual([
+      expect.objectContaining({
+        state: 'quarantined',
+        pane: expect.objectContaining({ paneId: '%7', tmuxServerIdentity: SERVER }),
+      }),
+    ]);
+    const [marker] = await listWorktreeRecoveryMarkers(root);
+    // The target marker format is unchanged: no generation is written there.
+    expect(marker!.pane).toEqual({ id: adoption.paneId, paneId: '%7', slug: 'shell-1' });
+  });
+
+  it('honours a legacy quarantine without a generation until it is acknowledged', async () => {
+    const root = project('.psyche-adoption-gate-legacy-');
+    const legacy = await reserve(root, { pid: LIVE_PID, slug: 'shell-1' });
+    await quarantinePaneSlugOwnershipRecord({
+      sessionProjectRoot: root,
+      recoveryId: legacy.recoveryId,
+      projectRoot: root,
+      worktreePath: root,
+      slug: legacy.slug,
+      pane: { id: legacy.paneId, paneId: '%7' },
+      operation: 'shell-pane-adoption-failure',
+      reason: 'written before the generation was carried',
+      targetMarkerId: 'b'.repeat(64),
+    });
+
+    const decision = await gateUntrackedPaneAdoption(
+      root,
+      [shell('%7')],
+      gateOptions({ serverIdentityOf: () => OTHER_SERVER }),
+    );
+
+    expect(decision.adoptable).toEqual([]);
+    expect(decision.excluded).toEqual([
+      expect.objectContaining({ paneId: '%7', reason: 'recovery-quarantined' }),
+    ]);
+  });
+
+  it('does no reconciliation or lock-taking work in the steady state of a reported orphan', async () => {
+    const root = project('.psyche-adoption-gate-steady-');
+    const crashed = await reserve(root, { pid: DEAD_PID, slug: 'shell-1' });
+    await crashed.recordPaneEffect('%7', SERVER);
+    await reserve(root, { pid: LIVE_PID, slug: 'shell-2' }).then(
+      (live) => live.recordPaneEffect('%8', SERVER),
+    );
+    const reconcile = vi.fn(reconcileStalePaneSlugReservations);
+
+    const first = await gateUntrackedPaneAdoption(
+      root,
+      [shell('%7')],
+      gateOptions({ reconcile }),
+    );
+    expect(first.reconciled).toBe(true);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    const markersAfterFirst = JSON.stringify(await listWorktreeRecoveryMarkers(root));
+    const recordsAfterFirst = JSON.stringify(await listPaneSlugOwnershipRecords(root));
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const steady = await gateUntrackedPaneAdoption(
+        root,
+        [shell('%7')],
+        gateOptions({ reconcile }),
+      );
+      expect(steady.reconciled).toBe(false);
+      expect(steady.adoptable).toEqual([]);
+    }
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(await listWorktreeRecoveryMarkers(root))).toBe(markersAfterFirst);
+    expect(JSON.stringify(await listPaneSlugOwnershipRecords(root))).toBe(recordsAfterFirst);
+  });
+
+  it('does not let a reservation stamped in the future defer adoption indefinitely', async () => {
+    const root = project('.psyche-adoption-gate-future-');
+    const stamped = new Date('2026-10-01T00:00:00.000Z');
+    const creation = await reserve(root, { pid: LIVE_PID, slug: 'shell-1', now: stamped });
+
+    const nudgedBack = await gateUntrackedPaneAdoption(
+      root,
+      [shell('%9')],
+      gateOptions({ now: () => stamped.getTime() - 1_000 }),
+    );
+    expect(nudgedBack.deferred?.recoveryId).toBe(creation.recoveryId);
+
+    const skewed = await gateUntrackedPaneAdoption(
+      root,
+      [shell('%9')],
+      gateOptions({
+        now: () => stamped.getTime() - IN_FLIGHT_PANE_CREATION_FUTURE_TOLERANCE_MS - 1,
+      }),
+    );
+    expect(skewed.deferred).toBeUndefined();
+    expect(skewed.adoptable).toEqual([shell('%9')]);
   });
 });

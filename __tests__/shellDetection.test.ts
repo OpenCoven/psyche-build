@@ -11,6 +11,7 @@ const reserveCrashSafePaneSlugMock = vi.hoisted(() => vi.fn());
 const settlePaneSlugReservationAfterFailureMock = vi.hoisted(() => vi.fn());
 const createPsychePaneIdMock = vi.hoisted(() => vi.fn());
 const gateUntrackedPaneAdoptionMock = vi.hoisted(() => vi.fn());
+const logServiceMock = vi.hoisted(() => ({ error: vi.fn(), debug: vi.fn() }));
 const tmuxServiceMock = vi.hoisted(() => ({
   getAllPaneIds: vi.fn(),
   getServerIdentity: vi.fn(),
@@ -71,7 +72,7 @@ vi.mock('../src/services/TmuxService.js', () => ({
 
 vi.mock('../src/services/LogService.js', () => ({
   LogService: {
-    getInstance: () => ({ error: vi.fn() }),
+    getInstance: () => logServiceMock,
   },
 }));
 
@@ -89,6 +90,7 @@ describe('detectAndAddShellPanes', () => {
     gateUntrackedPaneAdoptionMock.mockImplementation(async (_root, panes) => ({
       adoptable: panes,
       excluded: [],
+      reconciled: false,
     }));
     tmuxServiceMock.getServerIdentity.mockReturnValue({
       pid: 42,
@@ -332,6 +334,7 @@ describe('detectAndAddShellPanes', () => {
     gateUntrackedPaneAdoptionMock.mockResolvedValue({
       adoptable: [],
       excluded: [{ paneId: '%2', reason: 'recovery-quarantined', recoveryId: 'r-1' }],
+      reconciled: false,
     });
 
     for (let cycle = 0; cycle < 3; cycle += 1) {
@@ -360,6 +363,7 @@ describe('detectAndAddShellPanes', () => {
       adoptable: [],
       excluded: [],
       deferred: { reason: 'creation-in-flight', recoveryId: 'r-2' },
+      reconciled: false,
     });
 
     const result = await detectAndAddShellPanes(
@@ -371,6 +375,10 @@ describe('detectAndAddShellPanes', () => {
     expect(result).toEqual({ updatedPanes: [focused], shellPanesAdded: false });
     expect(reserveCrashSafePaneSlugMock).not.toHaveBeenCalled();
     expect(settlePaneSlugReservationAfterFailureMock).not.toHaveBeenCalled();
+    expect(logServiceMock.debug).toHaveBeenCalledWith(
+      expect.stringContaining('r-2 is in flight'),
+      'shellDetection',
+    );
   });
 
   it('adopts only the panes the gate allows', async () => {
@@ -383,6 +391,7 @@ describe('detectAndAddShellPanes', () => {
     gateUntrackedPaneAdoptionMock.mockResolvedValue({
       adoptable: [{ paneId: '%3', title: 'bash' }],
       excluded: [{ paneId: '%2', reason: 'creation-in-flight', recoveryId: 'r-3' }],
+      reconciled: true,
     });
 
     const result = await detectAndAddShellPanes(
@@ -392,6 +401,15 @@ describe('detectAndAddShellPanes', () => {
     );
 
     expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledTimes(1);
+    // The gate already reconciled this cycle, so the reservation does not.
+    expect(reserveCrashSafePaneSlugMock).toHaveBeenCalledWith(
+      expect.objectContaining({ skipStaleReconciliation: true }),
+    );
+    expect(logServiceMock.debug).toHaveBeenCalledWith(
+      expect.stringContaining('Not adopting pane %2'),
+      'shellDetection',
+      '%2',
+    );
     expect(result.updatedPanes.map((candidate) => candidate.paneId)).toEqual(['%1', '%3']);
   });
 

@@ -15,13 +15,15 @@
  *
  * The pane-slug ownership namespace already holds the durable answer to "is
  * someone accounting for this pane?", so the gate reads it rather than adding
- * new state. It reconciles stale reservations first, so a crashed creation's
- * reservation becomes its one quarantine and recovery marker before any
- * adoption decision. Then:
+ * new state. When a provisional record's owner has ended, it reconciles stale
+ * reservations first, so a crashed creation's reservation becomes its one
+ * quarantine and recovery marker before any adoption decision. In the steady
+ * state (no stale owner) it takes no lock and writes nothing: one directory
+ * read per poll. Then:
  *
- *   - a pane named by a quarantined record has been reported; it is not
- *     adopted again until an operator acknowledges that record (which removes
- *     it) and a later cycle decides afresh;
+ *   - a pane named by a quarantined record on the same tmux server has been
+ *     reported; it is not adopted again until an operator acknowledges that
+ *     record (which removes it) and a later cycle decides afresh;
  *   - a pane named by a stale provisional record that reconciliation could
  *     not settle stays excluded, because reconciliation keeps rewriting that
  *     record's single deterministic marker;
@@ -30,10 +32,26 @@
  *   - a live owner's provisional record with no pane bound yet may be between
  *     its split and binding the pane ID, so the whole cycle is deferred;
  *   - a live owner's record older than {@link IN_FLIGHT_PANE_CREATION_TTL_MS}
- *     is treated as abandoned and no longer excludes or defers anything.
+ *     is treated as abandoned and no longer excludes or defers anything; so is
+ *     one stamped implausibly far in the future (clock skew), so a clock step
+ *     cannot defer adoption indefinitely.
  *
- * The gate never writes a marker itself and never hides a pane permanently:
- * everything it excludes is either already reported or bounded by the TTL.
+ * A record bound on a known tmux server generation only matches a pane on
+ * that same generation, so a reused pane ID on a later server is not hidden.
+ * Quarantine records written before the generation was carried have none;
+ * they are honoured by pane ID until acknowledged, which errs towards not
+ * adopting a pane over re-reporting one.
+ *
+ * The gate never writes a marker itself. Everything it excludes is already
+ * reported (and released by acknowledgement), bounded by the TTL, or bound to
+ * a server generation that ends with that server.
+ *
+ * Known race, accepted: once the TTL has passed, a creator that is still alive
+ * but hung may later resume and save the pane that detection has meanwhile
+ * adopted, leaving two records for one tmux pane. A pane creation takes
+ * seconds, so the TTL bounds a leak rather than a timing window, and the
+ * creator cannot safely refuse at that point: its failure path compensates by
+ * tearing down the pane, which would destroy the adopted one.
  */
 
 import {
@@ -56,6 +74,11 @@ import type { TmuxPanePresence } from '../utils/paneTeardown.js';
  * hung or leaked, and must not hide its pane indefinitely.
  */
 export const IN_FLIGHT_PANE_CREATION_TTL_MS = 5 * 60_000;
+/**
+ * A reservation stamped further in the future than this was not written by a
+ * creation running now against this clock; it is treated as abandoned.
+ */
+export const IN_FLIGHT_PANE_CREATION_FUTURE_TOLERANCE_MS = 5_000;
 
 export type UntrackedPaneExclusionReason =
   | 'recovery-quarantined'
@@ -73,6 +96,11 @@ export interface UntrackedPaneAdoptionDecision<T extends { paneId: string }> {
   excluded: UntrackedPaneExclusion[];
   /** Set when a live creation may own any pane, so none is adopted this cycle. */
   deferred?: { reason: 'creation-in-flight'; recoveryId: string };
+  /**
+   * True when this decision ran stale-reservation reconciliation, so the
+   * adoption reservation that follows in the same cycle need not run it again.
+   */
+  reconciled: boolean;
 }
 
 export interface UntrackedPaneAdoptionOptions {
@@ -84,6 +112,8 @@ export interface UntrackedPaneAdoptionOptions {
   inFlightTtlMs?: number;
   /** The current tmux server generation for a pane, when it can be read. */
   serverIdentityOf?: (paneId: string) => TmuxServerIdentity | undefined;
+  /** Injectable for tests. */
+  reconcile?: typeof reconcileStalePaneSlugReservations;
 }
 
 export async function gateUntrackedPaneAdoption<T extends { paneId: string }>(
@@ -92,26 +122,43 @@ export async function gateUntrackedPaneAdoption<T extends { paneId: string }>(
   options: UntrackedPaneAdoptionOptions = {},
 ): Promise<UntrackedPaneAdoptionDecision<T>> {
   if (panes.length === 0) {
-    return { adoptable: [], excluded: [] };
+    return { adoptable: [], excluded: [], reconciled: false };
   }
-  // Throws on an ownership record this version cannot read, exactly as the
-  // adoption reservation would: adoption fails closed rather than allocating
-  // against a partial view.
-  await reconcileStalePaneSlugReservations({
-    sessionProjectRoot,
-    probePane: options.probePane,
-    ownerProbe: options.ownerProbe,
-    lockOptions: options.lockOptions,
-  });
-  const listing = await readPaneSlugOwnershipRecords(sessionProjectRoot);
-  return decideUntrackedPaneAdoption(panes, listing.records, options);
+  let listing = await readPaneSlugOwnershipRecords(sessionProjectRoot);
+  // An ownership record this version cannot read fails closed, exactly as the
+  // adoption reservation would, rather than deciding against a partial view.
+  const [unreadable] = listing.quarantined;
+  if (unreadable) {
+    throw new Error(
+      `Invalid pane slug ownership record: ${unreadable.path} (${unreadable.reason})`,
+    );
+  }
+  // Reconciliation takes locks and rewrites markers, so it runs only when it
+  // has something to settle: a provisional record whose owner has ended.
+  const needsReconciliation = listing.records.some((record) => (
+    record.state === 'provisional'
+    && isPaneSlugOwnerStale(record, options.ownerProbe)
+  ));
+  if (needsReconciliation) {
+    await (options.reconcile ?? reconcileStalePaneSlugReservations)({
+      sessionProjectRoot,
+      probePane: options.probePane,
+      ownerProbe: options.ownerProbe,
+      lockOptions: options.lockOptions,
+    });
+    listing = await readPaneSlugOwnershipRecords(sessionProjectRoot);
+  }
+  return {
+    ...decideUntrackedPaneAdoption(panes, listing.records, options),
+    reconciled: needsReconciliation,
+  };
 }
 
 export function decideUntrackedPaneAdoption<T extends { paneId: string }>(
   panes: readonly T[],
   records: readonly PaneSlugOwnershipRecord[],
   options: UntrackedPaneAdoptionOptions = {},
-): UntrackedPaneAdoptionDecision<T> {
+): Omit<UntrackedPaneAdoptionDecision<T>, 'reconciled'> {
   const now = (options.now ?? Date.now)();
   const ttl = options.inFlightTtlMs ?? IN_FLIGHT_PANE_CREATION_TTL_MS;
   const claims = new Map<string, Array<{
@@ -119,6 +166,7 @@ export function decideUntrackedPaneAdoption<T extends { paneId: string }>(
     reason: UntrackedPaneExclusionReason;
   }>>();
   let deferred: UntrackedPaneAdoptionDecision<T>['deferred'];
+  const futureTolerance = IN_FLIGHT_PANE_CREATION_FUTURE_TOLERANCE_MS;
 
   for (const record of records) {
     let reason: UntrackedPaneExclusionReason;
@@ -128,7 +176,11 @@ export function decideUntrackedPaneAdoption<T extends { paneId: string }>(
       reason = 'recovery-pending';
     } else {
       const started = Date.parse(record.createdAt);
-      if (!Number.isFinite(started) || now - started >= ttl) {
+      const age = now - started;
+      // Unparseable, expired, or stamped implausibly far ahead of this clock:
+      // abandoned. A small negative age (a clock nudged back after the stamp)
+      // still counts as in flight.
+      if (!Number.isFinite(started) || age >= ttl || age < -futureTolerance) {
         continue;
       }
       reason = 'creation-in-flight';

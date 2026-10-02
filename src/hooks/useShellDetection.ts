@@ -99,6 +99,21 @@ export async function detectAndAddShellPanes(
     const adoption = await gateUntrackedPaneAdoption(projectRoot, detectedPanes, {
       serverIdentityOf: (paneId) => TmuxService.getInstance().getServerIdentity?.(paneId),
     });
+    if (adoption.deferred) {
+      LogService.getInstance().debug(
+        `Deferring untracked-pane adoption: pane creation ${adoption.deferred.recoveryId} is in flight`,
+        'shellDetection',
+      );
+    }
+    for (const exclusion of adoption.excluded) {
+      if (exclusion.reason === 'creation-in-flight') {
+        LogService.getInstance().debug(
+          `Not adopting pane ${exclusion.paneId}: creation ${exclusion.recoveryId} is in flight`,
+          'shellDetection',
+          exclusion.paneId,
+        );
+      }
+    }
     const untrackedPanes = adoption.adoptable;
 
     if (untrackedPanes.length === 0) {
@@ -113,6 +128,9 @@ export async function detectAndAddShellPanes(
     // Create shell pane objects for each untracked pane
     const newShellPanes: PsychePane[] = [];
     const reservations: Array<Awaited<ReturnType<typeof reserveCrashSafePaneSlug>>> = [];
+    // The gate has just reconciled when it had anything stale to settle; the
+    // first reservation of this cycle need not repeat it.
+    let skipStaleReconciliation = adoption.reconciled;
     const completedRecoveryIds = new Set<string>();
     let nextId = getNextPsycheId(activePanes);
 
@@ -126,12 +144,14 @@ export async function detectAndAddShellPanes(
           projectRoot: targetProjectRoot,
           paneId: paneRecordId,
           operation: 'shell-pane-adoption',
+          skipStaleReconciliation,
           allocate: async ({ occupiedSlugs }) => ({
             slug: await allocateUniquePaneSlug(`shell-${nextId}`, occupiedSlugs),
             worktreePath: paneProjectInfo.cwdReference || targetProjectRoot,
           }),
         });
         reservations.push(reservation);
+        skipStaleReconciliation = false;
         const tmuxServerIdentity = TmuxService.getInstance().getServerIdentity?.(
           paneInfo.paneId,
         );

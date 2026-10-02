@@ -765,6 +765,7 @@ export async function observeCrashMidTransition(
         transitionOutcome,
         markersAfter.markers,
         reservationsAfter.records,
+        paneRecords(await readFileOrUndefined(host.configPath)).map((record) => record.paneId),
       );
 
     const configAfter = await readFileOrUndefined(host.configPath);
@@ -839,8 +840,9 @@ async function settleOutcome(
 
 /**
  * A `recovery_required` orphan must be named by exactly one recovery marker and
- * one quarantine record however many polling cycles have seen it; a completed
- * or rolled-back creation must leave none. Any other ownership record still
+ * one quarantine record however many polling cycles have seen it, and must not
+ * have been adopted into the pane config behind that report; a completed or
+ * rolled-back creation must leave none. Any other ownership record still
  * naming the pane counts against it.
  */
 export function orphanReportedExactlyOnce(
@@ -848,12 +850,16 @@ export function orphanReportedExactlyOnce(
   outcome: CrashTransitionOutcome,
   markers: readonly Pick<WorktreeRecoveryMarker, 'pane'>[],
   records: readonly Pick<PaneSlugOwnershipRecord, 'state' | 'pane'>[],
+  configPaneIds: readonly unknown[],
 ): boolean {
   const naming = markers.filter((marker) => marker.pane.paneId === orphanPaneId).length;
   const owning = records.filter((record) => record.pane.paneId === orphanPaneId);
   const quarantined = owning.filter((record) => record.state === 'quarantined').length;
   if (outcome === 'recovery_required') {
-    return naming === 1 && quarantined === 1 && owning.length === 1;
+    return naming === 1
+      && quarantined === 1
+      && owning.length === 1
+      && !configPaneIds.includes(orphanPaneId);
   }
   if (outcome === 'completed' || outcome === 'rolled_back') {
     return naming === 0 && owning.length === 0;

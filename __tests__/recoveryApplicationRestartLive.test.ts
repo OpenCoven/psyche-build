@@ -331,6 +331,7 @@ describe('restart scenarios with a crash or a live agent', () => {
         'recovery_required',
         [marker('%7'), marker('%1')],
         [quarantine('%7')],
+        ['%1'],
       )).toBe(true);
     });
 
@@ -340,23 +341,35 @@ describe('restart scenarios with a crash or a live agent', () => {
         'recovery_required',
         [marker('%7'), marker('%7'), marker('%7')],
         [quarantine('%7'), quarantine('%7'), quarantine('%7')],
+        [],
       )).toBe(false);
       expect(orphanReportedExactlyOnce(
         '%7',
         'recovery_required',
         [marker('%7')],
         [quarantine('%7'), { state: 'provisional', pane: { id: 'x', paneId: '%7' } }],
+        [],
+      )).toBe(false);
+    });
+
+    it('fails when the reported orphan was also adopted into the pane config', () => {
+      expect(orphanReportedExactlyOnce(
+        '%7',
+        'recovery_required',
+        [marker('%7')],
+        [quarantine('%7')],
+        ['%1', '%7'],
       )).toBe(false);
     });
 
     it('fails when a required recovery was never reported', () => {
-      expect(orphanReportedExactlyOnce('%7', 'recovery_required', [], [])).toBe(false);
+      expect(orphanReportedExactlyOnce('%7', 'recovery_required', [], [], [])).toBe(false);
     });
 
     it('requires a settled creation to leave no report, and never holds unsettled', () => {
-      expect(orphanReportedExactlyOnce('%7', 'completed', [], [])).toBe(true);
-      expect(orphanReportedExactlyOnce('%7', 'rolled_back', [marker('%7')], [])).toBe(false);
-      expect(orphanReportedExactlyOnce('%7', 'unsettled', [], [])).toBe(false);
+      expect(orphanReportedExactlyOnce('%7', 'completed', [], [], ['%7'])).toBe(true);
+      expect(orphanReportedExactlyOnce('%7', 'rolled_back', [marker('%7')], [], [])).toBe(false);
+      expect(orphanReportedExactlyOnce('%7', 'unsettled', [], [], [])).toBe(false);
     });
   });
 

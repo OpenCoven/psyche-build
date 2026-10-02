@@ -28,6 +28,7 @@ import {
   type RecoveryListingBounds,
 } from './QuarantinedRecoveryFile.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
+import type { TmuxServerIdentity } from './TmuxServerIdentity.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
 const RECOVERY_MARKER_VERSION = 5;
@@ -69,6 +70,12 @@ export interface WorktreeRecoveryMarkerRequest {
     id: string;
     paneId: string;
     slug?: string;
+    /**
+     * The tmux server generation the pane ID belongs to. Carried into the
+     * session quarantine record only (the target marker format is unchanged),
+     * so a reused pane ID on a later server is not mistaken for this pane.
+     */
+    tmuxServerIdentity?: TmuxServerIdentity;
   };
   allowWorktreeReuse?: boolean;
   operation: string;
@@ -240,6 +247,9 @@ async function writeWorktreeRecoveryMarkerInternal(
             pane: {
               id: request.pane.id,
               paneId: request.pane.paneId,
+              ...(request.pane.tmuxServerIdentity
+                ? { tmuxServerIdentity: request.pane.tmuxServerIdentity }
+                : {}),
             },
             operation: request.operation,
             reason: request.reason,
