@@ -5,6 +5,10 @@ export default defineConfig({
     // Vitest 4's fork pool can lose its IPC channel when this suite exercises
     // real child-process and signal behavior. Threads avoid the EPIPE failure,
     // while a bounded worker count keeps the process-heavy tests deterministic.
+    // Every run gets a throwaway home so no test can write a developer's real
+    // settings, credentials, or dotfiles (see __tests__/setup/sandboxHome.global.ts).
+    globalSetup: ['./__tests__/setup/sandboxHome.global.ts'],
+    setupFiles: ['./__tests__/setup/sandboxHome.worker.ts'],
     pool: 'threads',
     maxWorkers: 4,
     // The smoke test needs tmux and a production build, so it is not part of
