@@ -13,6 +13,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getPaneBranchName, isValidBranchName } from '../src/utils/git.js';
 
+// Settings are persisted through the atomic writer, which uses `node:fs`
+// directly, so the `fs` mock below no longer intercepts them. Keep these
+// validation tests off disk — a global-scope write would otherwise land in the
+// real home directory.
+vi.mock('../src/utils/atomicWrite.js', () => ({
+  atomicWriteFile: vi.fn(),
+  atomicWriteFileSync: vi.fn(),
+  atomicWriteJson: vi.fn(),
+  atomicWriteJsonSync: vi.fn(),
+}));
+
 vi.mock('../src/services/LiveTmuxWorktreeGuard.js', () => ({
   inspectLiveTmuxWorktreeConsumers: vi.fn(() => ({ state: 'safe' })),
   describeLiveTmuxWorktreeGuard: vi.fn(() => 'no live tmux pane is using the worktree'),

@@ -71,10 +71,11 @@ describe('project owner lock', () => {
     roots.push(root);
     const runtimeDir = path.join(root, '.psyche', 'runtime');
     await mkdir(runtimeDir, { recursive: true });
-    // Occupy nextEpoch's temp path with a directory so the epoch write fails
-    // after the fence has already been claimed.
-    const epochTemp = path.join(runtimeDir, `owner-epoch.json.${process.pid}.tmp`);
-    await mkdir(epochTemp, { recursive: true });
+    // Occupy the epoch file's path with a directory so publishing the epoch
+    // fails after the fence has already been claimed. (The epoch's temporary
+    // name is random now, so the destination is what can be occupied.)
+    const epochTemp = path.join(runtimeDir, 'owner-epoch.json');
+    await mkdir(path.join(epochTemp, 'occupied'), { recursive: true });
     await expect(acquireOwnerLock(root, { pid: process.pid, isProcessAlive: () => true }))
       .rejects.toThrow();
     // Clear the transient condition; the same still-alive pid must not be self-locked.

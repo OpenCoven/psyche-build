@@ -398,6 +398,8 @@ export class ControlJournal {
   private readonly listeners = new Set<EventListener>();
   private readonly outcomePublicationTails = new Map<string, Promise<void>>();
   private appendTail: Promise<void> = Promise.resolve();
+  /** Committed journal length still to restore after a failed append's rollback failed. */
+  private unrolledAppendLength: number | undefined;
 
   private constructor(
     runtimeDirectoryPath: string,
@@ -508,6 +510,19 @@ export class ControlJournal {
     return { events, firstSequence };
   }
 
+  private async repairUnrolledAppend(): Promise<void> {
+    if (this.unrolledAppendLength === undefined) return;
+    try {
+      await truncate(this.path, this.unrolledAppendLength);
+    } catch (error) {
+      throw new Error(
+        'control journal holds a torn partial append that could not be rolled back; refusing to append after it',
+        { cause: error },
+      );
+    }
+    this.unrolledAppendLength = undefined;
+  }
+
   get sequence(): number {
     return this.currentSequence;
   }
@@ -525,11 +540,29 @@ export class ControlJournal {
       rejectEvent = reject;
     });
     this.appendTail = this.appendTail.then(async () => {
+      await this.repairUnrolledAppend();
       const event = this.buildNextEvent(kind, payload);
       const handle = await open(this.path, 'a');
+      let committedLength: number | undefined;
       try {
+        committedLength = (await handle.stat()).size;
         await handle.writeFile(`${JSON.stringify(event)}\n`, 'utf8');
         await handle.sync();
+      } catch (error) {
+        // A volume that fills mid-append (or reports it at fsync) can leave a
+        // torn fragment of this line. Left in place, the next append would
+        // bury it mid-file and the whole journal would fail to replay. Cut it
+        // back to the last committed line; if even that fails, remember the
+        // length so no later append lands after the fragment.
+        if (committedLength !== undefined) {
+          try {
+            await handle.truncate(committedLength);
+            await handle.sync();
+          } catch {
+            this.unrolledAppendLength = committedLength;
+          }
+        }
+        throw error;
       } finally {
         await handle.close();
       }

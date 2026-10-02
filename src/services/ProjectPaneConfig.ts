@@ -6,7 +6,8 @@ import {
   realpath,
   rename,
   rm,
-  writeFile,
+  unlink,
+  type FileHandle,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
@@ -148,7 +149,12 @@ export type ProjectPaneConfigErrorCode =
   /** Written by a newer Psyche; this version refuses rather than dropping fields. */
   | 'config_newer_schema'
   /** The pre-migration snapshot could not be written, so nothing was migrated. */
-  | 'config_snapshot_failed';
+  | 'config_snapshot_failed'
+  /**
+   * The config could not be written (a full or unwritable volume, for
+   * instance). The write is atomic, so the previous config is still in place.
+   */
+  | 'config_write_failed';
 
 export class ProjectPaneConfigError extends Error {
   readonly code: ProjectPaneConfigErrorCode;
@@ -1076,10 +1082,17 @@ async function writeProjectPaneConfig(
   const configPath = projectPaneConfigPath(canonicalProjectRoot);
   await mkdir(path.dirname(configPath), { recursive: true });
   await snapshotSupersededProjectConfig(canonicalProjectRoot, configPath);
-  await atomicWriteJson(configPath, {
-    ...config,
-    schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
-  });
+  try {
+    await atomicWriteJson(configPath, {
+      ...config,
+      schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
+    });
+  } catch (error) {
+    throw new ProjectPaneConfigError(
+      'config_write_failed',
+      `could not write ${configPath}: ${errorMessage(error)}. The previous config was left in place.`,
+    );
+  }
 }
 
 export function projectConfigSnapshotDirectory(canonicalProjectRoot: string): string {
@@ -1139,19 +1152,33 @@ async function snapshotSupersededProjectConfig(
   // a file already at that path, and must not follow a symlink planted there.
   // Anything already occupying the name is worked around rather than trusted,
   // because this version cannot tell its own earlier snapshot from a plant.
+  //
+  // The snapshot is synced before the config is replaced, and a snapshot that
+  // could not be written whole — a volume that fills mid-write, or reports the
+  // shortage only at fsync — is removed. A truncated file under a snapshot name
+  // would otherwise pose as a recovery point. Exclusive creation proves the
+  // file being removed is the one this call created.
   for (const suffix of ['', `-${randomUUID().slice(0, 8)}`]) {
+    const snapshotPath = path.join(directory, `${base}${suffix}.json`);
+    let handle: FileHandle | undefined;
     try {
-      await writeFile(
-        path.join(directory, `${base}${suffix}.json`),
-        existing,
-        { encoding: 'utf8', mode: 0o600, flag: 'wx' },
-      );
-      return;
+      handle = await open(snapshotPath, 'wx', 0o600);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        fail(error);
-      }
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      fail(error);
     }
+    try {
+      await handle!.writeFile(existing, 'utf8');
+      await handle!.sync();
+      const opened = handle!;
+      handle = undefined;
+      await opened.close();
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await unlink(snapshotPath).catch(() => undefined);
+      fail(error);
+    }
+    return;
   }
   fail(new Error(`a file already occupies every candidate snapshot name for ${base}`));
 }

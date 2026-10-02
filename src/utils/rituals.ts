@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import type { SidebarProject, PsychePane } from '../types.js';
 import {
   isAgentName,
@@ -379,7 +380,7 @@ export function saveProjectRitual(projectRoot: string, ritual: RitualDefinition)
   const dir = getProjectRitualsDir(projectRoot);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `${normalized.id}.json`);
-  fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf-8');
+  atomicWriteFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`);
   return normalized;
 }
 
@@ -1099,7 +1100,7 @@ export function setProjectDefaultRitualId(projectRoot: string, ritualId?: string
   };
   const manifestPath = getProjectRitualManifestPath(projectRoot);
   fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  atomicWriteFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
 

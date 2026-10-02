@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import type { PsycheSettings, SettingsScope, EffectiveSettingsScope, SettingDefinition } from '../types.js';
@@ -631,7 +632,7 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(this.globalPath, JSON.stringify(this.globalSettings, null, 2));
+      atomicWriteFileSync(this.globalPath, JSON.stringify(this.globalSettings, null, 2));
     } catch (error) {
       console.error('Failed to save global settings:', error);
       throw error;
@@ -644,7 +645,7 @@ export class SettingsManager {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2));
+      atomicWriteFileSync(this.projectPath, JSON.stringify(this.projectSettings, null, 2));
     } catch (error) {
       console.error('Failed to save project settings:', error);
       throw error;
