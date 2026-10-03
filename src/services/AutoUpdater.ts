@@ -1,5 +1,5 @@
 import { execSync } from 'child_process';
-import { readFileSync } from 'fs';
+import { readFileSync, realpathSync } from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -39,6 +39,34 @@ const { packageJson, packageJsonPath: PACKAGE_JSON_PATH } = findPackageJson();
  * reflects an install that happened after this process started. Returns null
  * when the file is missing, unreadable, or has no string version.
  */
+export type InstallVerification = 'verified' | 'mismatch' | 'unverified';
+
+type PackageManager = 'npm' | 'pnpm' | 'yarn';
+
+const GLOBAL_ROOT_COMMANDS: Record<PackageManager, { command: string; suffix?: string }> = {
+  npm: { command: 'npm root -g' },
+  pnpm: { command: 'pnpm root -g' },
+  yarn: { command: 'yarn global dir', suffix: 'node_modules' },
+};
+
+/**
+ * Whether `packageJsonPath`, after resolving symlinks, sits strictly inside
+ * `globalRoot` (also resolved). A source checkout exposed through
+ * `npm link`/`pnpm link` resolves outside the global root and does not count.
+ */
+export function isInsideGlobalPackageRoot(packageJsonPath: string, globalRoot: string): boolean {
+  try {
+    const realPackageJson = realpathSync(packageJsonPath);
+    const realRoot = realpathSync(globalRoot);
+    const relative = path.relative(realRoot, realPackageJson);
+    return relative !== ''
+      && !relative.startsWith('..')
+      && !path.isAbsolute(relative);
+  } catch {
+    return false;
+  }
+}
+
 export function readInstalledPackageVersion(packageJsonPath: string): string | null {
   try {
     const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
@@ -377,7 +405,8 @@ export class AutoUpdater {
 
       // Verify against the freshly installed manifest. The running process
       // keeps the old version until the user restarts it.
-      return this.verifyInstalledVersion(updateInfo.latestVersion);
+      const globalRoot = this.detectGlobalPackageRoot(updateInfo.packageManager);
+      return this.verifyInstalledVersion(updateInfo.latestVersion, globalRoot) === 'verified';
     } catch (error) {
       this.logger.error('Update failed', 'AutoUpdater', undefined, error as Error);
       return false;
@@ -388,8 +417,42 @@ export class AutoUpdater {
    * Whether the package installed on disk now reports `expectedVersion`.
    * Reads the manifest freshly; never consults the running build's version.
    */
-  verifyInstalledVersion(expectedVersion: string, packageJsonPath: string = PACKAGE_JSON_PATH): boolean {
-    return readInstalledPackageVersion(packageJsonPath) === expectedVersion;
+  verifyInstalledVersion(
+    expectedVersion: string,
+    globalRoot: string | null,
+    packageJsonPath: string = PACKAGE_JSON_PATH,
+  ): InstallVerification {
+    // A global update replaces the package under the package manager's global
+    // root. If this build's manifest lives anywhere else (a source checkout,
+    // a linked package, a local install), reading it says nothing about what
+    // the update installed.
+    if (!globalRoot || !isInsideGlobalPackageRoot(packageJsonPath, globalRoot)) {
+      return 'unverified';
+    }
+    return readInstalledPackageVersion(packageJsonPath) === expectedVersion
+      ? 'verified'
+      : 'mismatch';
+  }
+
+  /** The package manager's global package root, or null when it cannot be determined. */
+  detectGlobalPackageRoot(packageManager: PackageManager): string | null {
+    const entry = GLOBAL_ROOT_COMMANDS[packageManager];
+    if (!entry) {
+      return null;
+    }
+    try {
+      const output = execSync(entry.command, {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: 10000,
+      }).trim();
+      if (!output || !path.isAbsolute(output)) {
+        return null;
+      }
+      return entry.suffix ? path.join(output, entry.suffix) : output;
+    } catch {
+      return null;
+    }
   }
 
   async skipVersion(version: string): Promise<void> {

@@ -29,7 +29,7 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { TmuxPanePresence } from '../utils/paneTeardown.js';
 import type { DurableEffectWarning } from '../utils/durableEffectWarnings.js';
 
-const PANE_SLUG_RECORD_VERSION = 1;
+export const PANE_SLUG_RECORD_VERSION = 1;
 const PANE_SLUG_DIRECTORY_NAME = 'pane-slug-ownership';
 
 export type PaneSlugOwnershipState = 'provisional' | 'quarantined';

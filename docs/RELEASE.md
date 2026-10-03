@@ -120,33 +120,43 @@ points limit on that final localization after provenance is appended.
 
 ## Project-config rollback floor
 
-A rollback reinstalls an older release over projects the newer build already
-touched. The oldest release you may roll back to is the rollback floor. It is
-pinned in `release/rollback-floor.json`, together with the
-`PROJECT_CONFIG_SCHEMA_VERSION` that release can safely read.
+A rollback reinstalls an older release over projects and state the newer build
+already wrote. The oldest release you may roll back to is the rollback floor.
+`release/rollback-floor.json` pins it, together with every persisted-format
+version that release can read. CI runs `pnpm release:rollback-floor` in the
+Quality job. The check fails when any pinned constant differs from its floor
+value, and it fails closed when the floor file is missing or malformed.
 
-The current floor is `v0.0.2`. It predates the versioned project-config gate
-(#464), so it cannot refuse a newer-schema `.psyche/psyche.config.json`. It
-would read the file and could later overwrite fields it does not understand.
-For that reason `PROJECT_CONFIG_SCHEMA_VERSION` in
-`src/services/ProjectPaneConfig.ts` must equal the pinned value. CI runs
-`pnpm release:rollback-floor` in the Quality job and fails on any difference,
-including a missing or malformed floor file.
+The current floor is `v0.0.2`. Each value below is what `v0.0.2` reads
+(`git show v0.0.2:<source>`):
 
-To raise the floor, so a later release can bump the schema:
+| Constant | Source | Floor | What `v0.0.2` does with a newer version |
+|---|---|---|---|
+| `PROJECT_CONFIG_SCHEMA_VERSION` | `src/services/ProjectPaneConfig.ts` | 1 | Predates the #464 gate, so it reads the file anyway and can overwrite fields it does not understand. |
+| `RECOVERY_MARKER_VERSION` | `src/services/WorktreeRecoveryMarker.ts` | 5 | Rejects the marker. Listing throws and cleanup is blocked, which strands recovery. |
+| `PANE_SLUG_RECORD_VERSION` | `src/services/PaneSlugRegistry.ts` | 1 | Treats the slug-ownership record as invalid. |
+| `PSYCHE_TMUX_CONFIG_VERSION` | `src/utils/tmuxManagedConfig.ts` | 1 | Replaces the managed tmux block with its own version-1 block. |
+| `RITUAL_VERSION` | `src/utils/rituals.ts` | 1 | Drops the ritual: `normalizeRitual` returns null. |
+| `PANE_LAYOUT_VERSION` | `src/layout/PaneLayoutTree.ts` | 1 | Ignores the saved layout. `v0.0.2` used a literal `1`. |
 
-1. Ship a release that understands the gate (refuses a newer schema with
-   `config_newer_schema`) without bumping the schema. Publish it and confirm
-   it as the supported rollback target.
+To raise the floor for one constant, so a later release can bump it:
+
+1. Ship a release that reads the newer version of that format, or refuses it
+   safely (for the project config, refuses it with `config_newer_schema`),
+   without bumping the constant. Publish it and confirm it as the supported
+   rollback target.
 2. In a dedicated pull request, edit `release/rollback-floor.json`: set
-   `release` to that tag and update `reason`. Keep
-   `projectConfigSchemaVersion` at the value that release reads.
-3. Only in a later pull request, bump `PROJECT_CONFIG_SCHEMA_VERSION` and
-   `projectConfigSchemaVersion` together. This is safe only because the new
-   floor refuses the newer file instead of overwriting it. That release must
-   give the operator
-   a pre-launch path: restore the `config-schema-snapshots` copy written on
-   the first superseding write, or quarantine the project.
+   `release` to that tag and update `reason`. Keep every value in
+   `persistedFormatVersions` at what that release reads.
+3. Only in a later pull request, bump the constant and its
+   `persistedFormatVersions` entry together. This is safe only because the
+   new floor reads or refuses the newer file instead of breaking on it. For
+   the project config, that release must give the operator a pre-launch path:
+   restore the `config-schema-snapshots` copy written on the first superseding
+   write, or quarantine the project.
+
+A new persisted format with a version constant goes into both `PINNED_FORMATS`
+in `scripts/release-rollback-floor.mjs` and the floor file in the same change.
 
 Treat a floor change as R4: it changes what a rollback can recover. Never edit
 the floor file only to make CI pass.

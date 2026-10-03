@@ -31,7 +31,7 @@ import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import type { TmuxServerIdentity } from './TmuxServerIdentity.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
-const RECOVERY_MARKER_VERSION = 5;
+export const RECOVERY_MARKER_VERSION = 5;
 
 export interface WorktreeRecoveryMarker {
   version: number;

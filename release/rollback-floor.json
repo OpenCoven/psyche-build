@@ -1,5 +1,12 @@
 {
   "release": "v0.0.2",
-  "projectConfigSchemaVersion": 1,
-  "reason": "v0.0.2 predates the versioned project-config gate (#464). It cannot refuse a newer-schema .psyche/psyche.config.json and could overwrite fields it does not understand, so PROJECT_CONFIG_SCHEMA_VERSION must stay at the value v0.0.2 can safely read until a release that understands the gate ships and becomes the rollback floor. See docs/RELEASE.md, Project-config rollback floor."
+  "reason": "v0.0.2 is the rollback target. It predates the versioned project-config gate (#464), so it cannot refuse a newer-schema project config, and it rejects worktree-recovery markers with an unknown version (listing throws and cleanup is blocked). Every persisted-format version below is the value v0.0.2 reads, and must stay equal until a release that understands the newer format ships and becomes the rollback floor. See docs/RELEASE.md, Project-config rollback floor.",
+  "persistedFormatVersions": {
+    "PROJECT_CONFIG_SCHEMA_VERSION": 1,
+    "RECOVERY_MARKER_VERSION": 5,
+    "PANE_SLUG_RECORD_VERSION": 1,
+    "PSYCHE_TMUX_CONFIG_VERSION": 1,
+    "RITUAL_VERSION": 1,
+    "PANE_LAYOUT_VERSION": 1
+  }
 }
