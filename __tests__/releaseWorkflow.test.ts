@@ -275,7 +275,7 @@ describe('macOS release workflow contract', () => {
   it('isolates iOS distribution credentials to the upload job skipped by desktop-only mode', () => {
     const workflow = workflowSource();
     const uploadJob = workflowJobSource(workflow, 'upload-ios');
-    const nonUploadJobs = ['verify', 'build-macos', 'publish', 'notify-homebrew']
+    const nonUploadJobs = ['verify', 'build-macos', 'publish', 'homebrew-tap-pr']
       .map((jobName) => workflowJobSource(workflow, jobName))
       .join('\n');
     const iosSecrets = [
@@ -398,12 +398,11 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('gh release create "$RELEASE_TAG"');
     expect(workflow).toContain('gh release download "$RELEASE_TAG"');
     expect(workflow).toContain('Published release assets and notes match the verified build output');
-    expect(workflow).toContain('notify-homebrew:');
+    expect(workflow).toContain('homebrew-tap-pr:');
     expect(workflow).toContain('needs: publish');
-    expect(workflowJobSource(workflow, 'notify-homebrew')).toMatch(
+    expect(workflowJobSource(workflow, 'homebrew-tap-pr')).toMatch(
       /if:\s*always\(\)\s*&&\s*needs\.publish\.result\s*==\s*['"]success['"]/,
     );
-    expect(workflow).toContain('event_type: "psyche-build-release"');
     expect(workflow).toContain('secrets.HOMEBREW_TAP_TOKEN');
     expect(workflow).toContain('Missing required release environment secret HOMEBREW_TAP_TOKEN');
   });
@@ -671,19 +670,21 @@ describe('macOS release workflow contract', () => {
     }
   });
 
-  it('bounds every release job and gives the PAT-only notification no token permissions', () => {
+  it('bounds every release job and gives the Homebrew tap job a read-only workflow token', () => {
     const workflow = workflowSource();
     const expectedTimeouts = new Map([
       ['verify', 60],
       ['build-macos', 60],
       ['upload-ios', 60],
       ['publish', 20],
-      ['notify-homebrew', 5],
+      ['homebrew-tap-pr', 10],
     ]);
     for (const [jobName, timeout] of expectedTimeouts) {
       expect(workflowJobSource(workflow, jobName)).toContain(`timeout-minutes: ${timeout}`);
     }
-    expect(workflowJobSource(workflow, 'notify-homebrew')).toContain('permissions: {}');
+    expect(workflowJobSource(workflow, 'homebrew-tap-pr')).toMatch(
+      /^    permissions:\n      contents: read\n    steps:/m,
+    );
   });
 
   it('pins the Rust compiler consistently for local and release builds', () => {
@@ -1090,5 +1091,81 @@ esac
       expect(script).not.toMatch(/update-manifest[^\s)]*\*/);
       expect(script).not.toMatch(/"3"|three assets/);
     });
+  });
+});
+
+describe('Homebrew tap pull request job contract', () => {
+  const job = () => workflowJobSource(workflowSource(), 'homebrew-tap-pr');
+  const stepNames = (source: string) =>
+    [...source.matchAll(/^      - name: (.+)$/gm)].map(([, name]) => name);
+
+  it('replaces the fire-and-forget repository_dispatch with a pull request and a verification', () => {
+    const workflow = workflowSource();
+    expect(workflow).not.toContain('notify-homebrew');
+    expect(workflow).not.toContain('/dispatches');
+    expect(workflow).not.toContain('psyche-build-release');
+    expect(stepNames(job())).toEqual([
+      'Read published SHA256SUMS',
+      'Open Homebrew tap pull request',
+      'Verify tap pull request against SHA256SUMS',
+    ]);
+  });
+
+  it('runs only after a successful publish, in the protected environment, with a read-only token', () => {
+    const source = job();
+    expect(source).toContain('    needs: publish\n');
+    expect(source).toContain("    if: always() && needs.publish.result == 'success'\n");
+    expect(source).toContain('    environment: release\n');
+    expect(source).toMatch(/^    permissions:\n      contents: read\n    steps:/m);
+    expect(source).not.toMatch(/:\s*write\b/);
+    expect(source).toContain('persist-credentials: false');
+    expect(source).toContain('ref: ${{ github.sha }}');
+  });
+
+  it('exposes HOMEBREW_TAP_TOKEN only to the single API step that opens the PR', () => {
+    const workflow = workflowSource();
+    const source = job();
+    expect(workflow.match(/secrets\.HOMEBREW_TAP_TOKEN/g)).toHaveLength(1);
+    const openStep = workflowNamedStepSource(source, 'Open Homebrew tap pull request');
+    expect(openStep).toContain('HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}');
+    for (const name of ['Read published SHA256SUMS', 'Verify tap pull request against SHA256SUMS']) {
+      const step = workflowNamedStepSource(source, name);
+      expect(step).not.toContain('HOMEBREW_TAP_TOKEN');
+      expect(step).toContain('GH_TOKEN: ${{ github.token }}');
+    }
+    // No job-level env and no credential reaches argv, a remote URL, or a log line.
+    expect(source).not.toMatch(/^    env:/m);
+    expect(source).not.toMatch(/\bgit (push|clone|remote)\b/);
+    expect(source).not.toMatch(/echo[^\n]*\$\{?HOMEBREW_TAP_TOKEN/);
+    expect(source).not.toMatch(/https:\/\/[^\s"]*@github\.com/);
+    expect(source).not.toMatch(/--token|set -x/);
+    expect(workflowStepScript(source, 'Open Homebrew tap pull request')).toContain(
+      'node scripts/homebrew-tap-pr.mjs open --tag "$RELEASE_TAG" --sums "$SHA256SUMS_PATH"',
+    );
+  });
+
+  it('reads SHA256SUMS from the published (non-draft) release only', () => {
+    const script = workflowStepScript(job(), 'Read published SHA256SUMS');
+    expect(script).toContain('--json isDraft --jq .isDraft');
+    expect(script).toContain('if [ "$IS_DRAFT" != "false" ]; then');
+    expect(script).toContain('--pattern SHA256SUMS');
+    expect(script).toContain('^v[0-9]+\\.[0-9]+\\.[0-9]+$');
+  });
+
+  it('verifies by reading the tap with the open step outputs and never merges', () => {
+    const source = job();
+    const verify = workflowNamedStepSource(source, 'Verify tap pull request against SHA256SUMS');
+    expect(verify).toContain('TAP_RESULT: ${{ steps.tap_pr.outputs.result }}');
+    expect(verify).toContain('TAP_PR_NUMBER: ${{ steps.tap_pr.outputs.pr_number }}');
+    expect(verify).toContain(
+      'node scripts/homebrew-tap-pr.mjs "${args[@]}"',
+    );
+    expect(source).not.toMatch(/continue-on-error|if:\s*failure\(\)/);
+    expect(source).not.toMatch(/gh pr merge|\/merge\b|auto-merge|enablePullRequestAutoMerge/i);
+
+    const script = readFileSync(path.resolve('scripts/homebrew-tap-pr.mjs'), 'utf8');
+    expect(script).not.toMatch(/\/merge\b|auto_merge|enablePullRequestAutoMerge|\/dispatches/);
+    expect(script).toContain("process.env.HOMEBREW_TAP_TOKEN");
+    expect(script.match(/process\.env\.HOMEBREW_TAP_TOKEN/g)).toHaveLength(1);
   });
 });

@@ -551,6 +551,7 @@ describe('release candidate workflow contract', () => {
     expect(workflow).not.toContain('upload-ios');
     expect(workflow).not.toContain('publish:');
     expect(workflow).not.toContain('notify-homebrew');
+    expect(workflow).not.toContain('homebrew-tap');
   });
 
   it('names artifacts by candidate identity and bounds their retention', () => {
@@ -732,7 +733,7 @@ describe('release candidate workflow contract', () => {
     const release = releaseSource();
 
     expect(release).not.toMatch(/CANDIDATE|release-candidate|\brc-(?:\$|[0-9a-f])/);
-    expect(jobNames(release)).toEqual(['verify', 'build-macos', 'upload-ios', 'publish', 'notify-homebrew']);
+    expect(jobNames(release)).toEqual(['verify', 'build-macos', 'upload-ios', 'publish', 'homebrew-tap-pr']);
     expect(release).not.toContain('workflow_call');
   });
 });

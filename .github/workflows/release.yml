@@ -1036,18 +1036,59 @@ jobs:
           echo "Draft release assets match the verified build output"
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
-  notify-homebrew:
-    name: Notify OpenCoven Homebrew tap
+
+  homebrew-tap-pr:
+    # Proposes the Cask bump as a pull request on OpenCoven/homebrew-tap and
+    # then proves it by reading the tap back. HOMEBREW_TAP_TOKEN is exposed to
+    # the single API step that writes the tap; every read uses this run's
+    # read-only token. The job never merges: tap CI and a maintainer do.
+    name: Propose and verify Homebrew Cask bump
     needs: publish
     if: always() && needs.publish.result == 'success'
     environment: release
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - name: Notify OpenCoven Homebrew tap
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Read published SHA256SUMS
         env:
-          RELEASE_TAG: ${{ needs.publish.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          RAW_RELEASE_TAG: ${{ needs.publish.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="$RAW_RELEASE_TAG"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use stable vMAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          IS_DRAFT="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" != "false" ]; then
+            echo "::error::$RELEASE_TAG is not a published release"
+            exit 1
+          fi
+          SUMS_DIR="$RUNNER_TEMP/published-sha256sums"
+          mkdir -p "$SUMS_DIR"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS --dir "$SUMS_DIR"
+          test -s "$SUMS_DIR/SHA256SUMS"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "SHA256SUMS_PATH=$SUMS_DIR/SHA256SUMS" >> "$GITHUB_ENV"
+
+      - name: Open Homebrew tap pull request
+        id: tap_pr
+        env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
         run: |
@@ -1056,12 +1097,22 @@ jobs:
             echo "::error::Missing required release environment secret HOMEBREW_TAP_TOKEN"
             exit 1
           fi
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $HOMEBREW_TAP_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/OpenCoven/homebrew-tap/dispatches \
-            --data "$(jq -n \
-              --arg tag "$RELEASE_TAG" \
-              '{event_type: "psyche-build-release", client_payload: {tag: $tag}}')"
+          node scripts/homebrew-tap-pr.mjs open --tag "$RELEASE_TAG" --sums "$SHA256SUMS_PATH"
+
+      - name: Verify tap pull request against SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_RESULT: ${{ steps.tap_pr.outputs.result }}
+          TAP_PR_NUMBER: ${{ steps.tap_pr.outputs.pr_number }}
+          TAP_PR_URL: ${{ steps.tap_pr.outputs.pr_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(verify --tag "$RELEASE_TAG" --sums "$SHA256SUMS_PATH" --result "$TAP_RESULT")
+          if [ -n "$TAP_PR_NUMBER" ]; then
+            args+=(--pr "$TAP_PR_NUMBER")
+          fi
+          node scripts/homebrew-tap-pr.mjs "${args[@]}"
+          if [ -n "$TAP_PR_URL" ]; then
+            echo "::notice::Homebrew Cask bump verified and awaiting tap CI and review: $TAP_PR_URL"
+          fi
