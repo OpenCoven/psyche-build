@@ -1992,6 +1992,8 @@ fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String
                   shortcut = "agent-pane";
                 } else if (primary && key === "f") {
                   shortcut = "composer";
+                } else if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === "k") {
+                  shortcut = "composer-toggle";
                 } else {
                   return;
                 }
@@ -2025,6 +2027,7 @@ fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static 
         "terminal-pane" => Ok("browser:shortcut-terminal-pane"),
         "agent-pane" => Ok("browser:shortcut-agent-pane"),
         "composer" => Ok("browser:shortcut-composer"),
+        "composer-toggle" => Ok("browser:shortcut-composer-toggle"),
         _ => Err(format!("unknown browser app shortcut: {shortcut}")),
     }
 }
@@ -5012,6 +5015,10 @@ mod browser_app_shortcut_tests {
         assert_eq!(
             resolve_browser_app_shortcut(label, "composer").unwrap(),
             "browser:shortcut-composer"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "composer-toggle").unwrap(),
+            "browser:shortcut-composer-toggle"
         );
     }
 

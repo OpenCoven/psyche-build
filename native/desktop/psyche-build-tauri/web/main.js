@@ -12128,6 +12128,80 @@
     }
   }
 
+  // The composer row stays collapsed until it is summoned with ⌘K (or any
+  // path that focuses the input, such as ⌘F or the "/" palette). Collapsing
+  // keeps the input in layout at zero height rather than display:none, so a
+  // programmatic focus() still lands and the focusin below reveals the row.
+  // An active voice call keeps it open because the call bar lives inside it.
+  var composerEl = document.getElementById("composer");
+  var footerStackEl = document.getElementById("footer-stack");
+  function composerIsOpen() {
+    return !!footerStackEl && footerStackEl.classList.contains("composer-open");
+  }
+  function setComposerOpen(open) {
+    if (!footerStackEl) return;
+    var next = !!open || callState.active;
+    if (next === composerIsOpen()) return;
+    footerStackEl.classList.toggle("composer-open", next);
+    if (!next) hidePalette();
+    scheduleTerminalPaneFits();
+  }
+  // Collapsing must not leave keyboard focus inside the hidden row: typing
+  // would land in an invisible input, and a later focus() on the already
+  // focused input fires no focusin to reveal it again.
+  function releaseComposerFocus() {
+    if (composerEl && composerEl.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
+  }
+  // Returns false when an active call keeps the row open, so callers can let
+  // the event continue to the call-ending cascade.
+  function dismissComposer() {
+    setComposerOpen(false);
+    if (composerIsOpen()) return false;
+    releaseComposerFocus();
+    if (filesPaneHasCanvasFocus()) {
+      restoreFileEditorFocus();
+    } else if (state.activeThreadId) {
+      focusThread(state.activeThreadId).catch(function () {});
+    }
+    return true;
+  }
+  function toggleComposer() {
+    if (composerIsOpen() && composerEl && composerEl.contains(document.activeElement)) {
+      dismissComposer();
+      return;
+    }
+    setComposerOpen(true);
+    commandInput.focus();
+  }
+  if (composerEl) {
+    composerEl.addEventListener("focusin", function () { setComposerOpen(true); });
+    // Keyboard focus moving elsewhere names its destination; a pointer press
+    // on a non-focusable surface does not, so that case is handled below.
+    composerEl.addEventListener("focusout", function (event) {
+      var to = event.relatedTarget;
+      if (to && !composerEl.contains(to)) setComposerOpen(false);
+    });
+    // Some targets (pane dividers) cancel pointerdown, which also cancels the
+    // focus transfer, so focus is released explicitly after collapsing.
+    document.addEventListener("pointerdown", function (event) {
+      if (!composerIsOpen() || composerEl.contains(event.target)) return;
+      setComposerOpen(false);
+      if (!composerIsOpen()) releaseComposerFocus();
+    }, true);
+    // Escape from any composer control (mic, call, send), not only the input.
+    // The input's own handler runs first and consumes the palette and
+    // dismissal cases; anything left is handled here.
+    composerEl.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (dismissComposer()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    });
+  }
+
   if (composerSendEl) {
     composerSendEl.addEventListener("click", function () {
       var line = commandInput.value;
@@ -12570,6 +12644,13 @@
         e.preventDefault();
         return;
       }
+    }
+    if (e.key === "Escape") {
+      if (dismissComposer()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
     }
     if (e.key === "Enter") {
       var line = commandInput.value;
@@ -13944,6 +14025,9 @@
     }
     var adopted = adoptBrowserDocumentEvent(context);
     markActiveSurface("browser");
+    // Presses inside the native preview never reach this document, so the
+    // composer's outside-press close cannot see them.
+    setComposerOpen(false);
     if (state.activeThreadId !== context.pane.id) focusThread(context.pane.id);
     if (typeof publishBrowserControlResource === "function") {
       publishBrowserControlResource(context.pair).catch(function () {});
@@ -14163,6 +14247,9 @@
   listen("browser:shortcut-composer", function () {
     commandInput.focus();
     openPalette("/", true);
+  }).catch(function () {});
+  listen("browser:shortcut-composer-toggle", function () {
+    toggleComposer();
   }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
@@ -14754,6 +14841,13 @@
       if (state.activeProjectId) await removeProject(state.activeProjectId);
       return;
     }
+    // ⌘K summons (or dismisses) the composer. Meta only: ⌃K stays the
+    // terminal's kill-line.
+    if (e.metaKey && !e.ctrlKey && e.code === "KeyK" && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      toggleComposer();
+      return;
+    }
     if (String(e.key).toLowerCase() === "f" && !e.altKey && !e.shiftKey) {
       commandInput.focus();
       openPalette("/", true);
@@ -15111,6 +15205,7 @@
 
   // ---- Keyboard shortcuts overlay ----
   var HELP_ROWS = [
+    ["Show or hide the composer", "⌘K"],
     ["Open the composer", "⌘F"],
     ["Toggle the sessions sidebar", "⌘B"],
     ["Focus a pane on the canvas", "⌃1–9"],

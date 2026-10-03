@@ -182,7 +182,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
 
-  it('lets embedded browser webviews forward exact T/D/F app shortcuts', () => {
+  it('lets embedded browser webviews forward exact T/D/F and meta-only K app shortcuts', () => {
     const injection = browserShortcutInjectionSource();
     const invokeCapture = injection.indexOf('var invoke = core.invoke;');
     const promiseCapture = injection.indexOf('var promiseThen = Promise.prototype.then;');
@@ -210,6 +210,10 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(injection).toContain('shortcut = "terminal-pane"');
     expect(injection).toContain('shortcut = "agent-pane"');
     expect(injection).toContain('shortcut = "composer"');
+    expect(injection).toContain(
+      'event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === "k"',
+    );
+    expect(injection).toContain('shortcut = "composer-toggle"');
     expect(injection).toContain('url: location.href');
     expect(injection).toContain('secret: secret');
     expect(injection).toContain('reflectApply(promiseThen, pending, [');
@@ -235,7 +239,8 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(injection).toContain('else if (primary && key === "d") {');
     expect(injection).toContain('else if (primary && key === "f") {');
     expect(injection).not.toContain('key === "p"');
-    expect(injection).not.toContain('key === "k"');
+    // ⌘K is meta-only so ⌃K stays the page's own shortcut.
+    expect(injection).not.toContain('(primary && key === "k")');
     expect(injection).toContain('function(initialSecret)');
     expect(tauriLib).toMatch(/\.initialization_script\(shortcut_script\)/);
     const ensureBrowserStart = tauriLib.indexOf('fn ensure_browser(');
@@ -259,6 +264,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(/"terminal-pane"\s*=>\s*Ok\("browser:shortcut-terminal-pane"\)/);
     expect(tauriLib).toMatch(/"agent-pane"\s*=>\s*Ok\("browser:shortcut-agent-pane"\)/);
     expect(tauriLib).toMatch(/"composer"\s*=>\s*Ok\("browser:shortcut-composer"\)/);
+    expect(tauriLib).toMatch(/"composer-toggle"\s*=>\s*Ok\("browser:shortcut-composer-toggle"\)/);
     expect(tauriLib).toMatch(/unknown browser app shortcut/);
 
     const commandStart = tauriLib.indexOf('fn browser_app_shortcut(');
