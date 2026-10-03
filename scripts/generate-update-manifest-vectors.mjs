@@ -25,7 +25,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   canonicalFileText,
-  keyIdForPublicKey,
   parseKeysFile,
   publicKeyEntryFromPrivatePem,
   signManifest,
@@ -177,24 +176,11 @@ export function buildVectors() {
     { name: 'signature_s_out_of_range', now: NOW, manifest: valid, signature: Buffer.from(envelope(current.entry.keyId, Buffer.concat([rawSig.subarray(0, 32), sPlusL]))), intended: 'signature_invalid' },
   );
 
-  // INTENTIONAL DIVERGENCE: a trusted key that is the small-order identity
-  // point. (R = B, s = 1) satisfies the cofactorless equation for every
-  // message, so the Node/OpenSSL reference accepts it; the Rust verifier uses
-  // verify_strict, which refuses small-order keys and R values. Only a keys
-  // file that trusts a degenerate key can reach this.
-  const identityKey = Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]);
-  const identityEntry = { keyId: keyIdForPublicKey(identityKey), publicKey: identityKey.toString('base64') };
-  const basePoint = Buffer.from(`58${'66'.repeat(31)}`, 'hex');
-  const scalarOne = Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]);
-  cases.push({
-    name: 'small_order_key_accepted_by_reference_only',
-    now: NOW,
-    manifest: valid,
-    signature: Buffer.from(envelope(identityEntry.keyId, Buffer.concat([basePoint, scalarOne]))),
-    keysFile: { schema: 1, current: identityEntry, next: null },
-    intended: 'ok',
-    rust: { outcome: 'signature_invalid', reason: 'verify_strict refuses a small-order public key' },
-  });
+  // No small-order-key vector: whether Node accepts a trusted small-order
+  // (identity) key depends on the Node/OpenSSL build (v24.18.1 accepts it,
+  // v24.20.0 refuses it), so its outcome is not reproducible here. The Rust
+  // verifier always refuses it (verify_strict); update_manifest.rs tests that
+  // directly.
 
   // INTENTIONAL DIVERGENCE: the Rust reader caps nesting at 32 levels and
   // reports a deeper document as manifest_malformed before the canonical

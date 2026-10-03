@@ -44,6 +44,6 @@ describe('update manifest cross-implementation vectors', () => {
     const divergent = (vectors.cases as { name: string; rust_expect?: unknown }[])
       .filter((entry) => entry.rust_expect !== undefined)
       .map((entry) => entry.name);
-    expect(divergent).toEqual(['small_order_key_accepted_by_reference_only', 'deep_non_canonical_document']);
+    expect(divergent).toEqual(['deep_non_canonical_document']);
   });
 });

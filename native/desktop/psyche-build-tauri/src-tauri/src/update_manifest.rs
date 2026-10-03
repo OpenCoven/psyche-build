@@ -19,15 +19,15 @@
 //! numbers are IEEE doubles, a duplicate key keeps its last value, and keys
 //! sort by UTF-16 code unit.
 //!
-//! Two differences are intentional, and each is pinned by a vector carrying
-//! `rust_expect`:
+//! Two differences are intentional:
 //!
 //! - **Small-order points.** Signatures are checked with `verify_strict`,
-//!   which also refuses a small-order public key or `R`. OpenSSL (the Node
-//!   reference) accepts a degenerate key such as the identity point. An honest
-//!   key and signature never contain one, so both accept exactly the same
-//!   signatures from a real signer; only a keys file that trusts a degenerate
-//!   key can tell them apart, and then Rust fails closed (`signature_invalid`).
+//!   which also refuses a small-order public key or `R`. Whether Node accepts
+//!   a degenerate trusted key such as the identity point depends on its
+//!   OpenSSL build (Node v24.18.1 accepts it, v24.20.0 refuses it), so there
+//!   is no cross-implementation vector for it; `small_order_key_is_refused`
+//!   pins the Rust behaviour instead. An honest key and signature never
+//!   contain a small-order point, so a real signer is unaffected.
 //! - **Nesting depth.** The reader refuses documents nested deeper than
 //!   32 levels (a stack bound). A signed, non-canonical document that deep is
 //!   `manifest_malformed` here and `manifest_not_canonical` in the reference.
@@ -818,7 +818,7 @@ mod tests {
         let all = vectors();
         let default_keys = keys_from(&all["keys"]);
         let cases = all["cases"].as_array().unwrap();
-        assert!(cases.len() >= 45, "vector set shrank");
+        assert!(cases.len() >= 44, "vector set shrank");
         let mut divergences = Vec::new();
         for case in cases {
             let name = case["name"].as_str().unwrap();
@@ -857,12 +857,34 @@ mod tests {
                 }
             }
         }
+        assert_eq!(divergences, ["deep_non_canonical_document"]);
+    }
+
+    #[test]
+    fn small_order_key_is_refused() {
+        // The identity point as a trusted key: (R = B, s = 1) satisfies the
+        // cofactorless equation for every message. verify_strict refuses it.
+        let identity: [u8; 32] = std::array::from_fn(|i| u8::from(i == 0));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(identity);
+        let keys = serde_json::json!({
+            "schema": 1,
+            "current": { "keyId": key_id_for_public_key(&identity), "publicKey": encoded },
+            "next": null,
+        });
+        let keys = keys_from(&keys);
+        let mut signature = vec![0x58];
+        signature.extend([0x66; 31]);
+        signature.push(1);
+        signature.extend([0; 31]);
+        let envelope = format!(
+            "{{\"algorithm\":\"ed25519\",\"key_id\":\"{}\",\"schema\":1,\"signature\":\"{}\"}}\n",
+            key_id_for_public_key(&identity),
+            base64::engine::general_purpose::STANDARD.encode(&signature)
+        );
+        let (manifest, _, now) = valid_case();
         assert_eq!(
-            divergences,
-            [
-                "small_order_key_accepted_by_reference_only",
-                "deep_non_canonical_document"
-            ]
+            verify_manifest(&manifest, envelope.as_bytes(), &keys, now).unwrap_err(),
+            Reason::SignatureInvalid
         );
     }
 

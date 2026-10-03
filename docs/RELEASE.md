@@ -986,16 +986,17 @@ Every check ends in exactly one state, and nothing else happens:
 | `available` | Verified and newer. The app may show the notice. |
 
 **Cross-implementation vectors.** `pnpm generate:update-manifest-vectors`
-signs about 45 cases with the Node reference and records the reference's
+signs about 44 cases with the Node reference and records the reference's
 outcome for each in
 `native/desktop/psyche-build-tauri/src-tauri/test-fixtures/update-manifest/vectors.json`.
-The Rust tests require the same outcome for every case except two
-intentional differences, each marked `rust_expect` in the file. Rust uses
-`verify_strict`, which refuses a small-order key that OpenSSL accepts. Rust
-also caps JSON nesting at 32 levels, so it reports a deeper signed document
-as `manifest_malformed` where Node reports `manifest_not_canonical`. Both
-differences only make Rust stricter on inputs that no honest signer
-produces. A vitest test fails
+The Rust tests require the same outcome for every case except one
+intentional difference, marked `rust_expect` in the file. Rust caps JSON
+nesting at 32 levels, so it reports a deeper signed document as
+`manifest_malformed` where Node reports `manifest_not_canonical`. Rust also
+uses `verify_strict`, which always refuses a small-order trusted key. Whether
+Node accepts such a key depends on its OpenSSL build, so that case is a
+Rust-only test, not a vector. Both differences only make Rust stricter on
+inputs that no honest signer produces. A vitest test fails
 when the checked-in file differs from a fresh run. The vector keys are
 derived from public labels, so anyone can recompute them. The generator and
 the test both refuse to run if `release/update-manifest-keys.json` trusts one
