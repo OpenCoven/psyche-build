@@ -9,6 +9,11 @@
  * shell's dialect is unknown or the file cannot be written, the agent starts
  * without its prompt and the bounded `initial_prompt_skipped` warning is
  * reported instead.
+ *
+ * Residual exposure (#523): claude and opencode take the prompt as a
+ * positional argument / `--prompt`, so the shell expands it into the AGENT's
+ * argv for its lifetime. This launch has no tmux pane, so the argv-free paste
+ * transport cannot apply; see docs/AGENT-PROMPT-TRANSPORT.md.
  */
 
 import { execFileSync as nodeExecFileSync } from 'child_process';

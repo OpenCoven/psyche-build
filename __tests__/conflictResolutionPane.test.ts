@@ -35,7 +35,9 @@ const buildPromptReadAndDeleteSnippetMock = vi.hoisted(() => vi.fn(() => 'read-p
 const writePromptFileMock = vi.hoisted(() => vi.fn(async (): Promise<string> => {
   throw new Error('use inline prompt');
 }));
-const sendPromptViaTmuxMock = vi.hoisted(() => vi.fn(async () => {}));
+const sendPromptViaTmuxMock = vi.hoisted(() => vi.fn(async (): Promise<
+  { delivered: true } | { delivered: false; reason: 'agent_not_ready' | 'prompt_paste_failed' }
+> => ({ delivered: true })));
 
 vi.mock('../src/services/TmuxService.js', () => ({
   TmuxService: { getInstance: () => tmuxService },
@@ -75,7 +77,8 @@ vi.mock('../src/utils/promptStore.js', () => ({
   deletePromptFile: vi.fn(async () => {}),
   writePromptFile: writePromptFileMock,
 }));
-vi.mock('../src/utils/agentPromptDispatch.js', () => ({
+vi.mock('../src/utils/agentPromptDispatch.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/utils/agentPromptDispatch.js')>(),
   sendPromptViaTmux: sendPromptViaTmuxMock,
 }));
 vi.mock('../src/utils/paneColors.js', () => ({
@@ -398,6 +401,50 @@ describe('conflict resolution pane transaction', () => {
       expect(report.logWarn.mock.calls[0][1]).toBe('conflictResolutionPane');
       expect(report.showToast).toHaveBeenCalledTimes(1);
       expect(report.showToast.mock.calls[0][0]).toContain('without its initial prompt');
+    });
+
+    // #523: a send-keys agent that never took the foreground is not pasted
+    // into blindly; the skip is reported like any other withheld prompt.
+    it('reports a send-keys paste that was not delivered', async () => {
+      tmuxService.getPaneCurrentCommand.mockResolvedValue('zsh');
+      getPromptTransportMock.mockReturnValue('send-keys');
+      sendPromptViaTmuxMock.mockResolvedValueOnce({ delivered: false, reason: 'agent_not_ready' });
+      await createPane();
+      expect(sendPromptViaTmuxMock).toHaveBeenCalledTimes(1);
+      expect(report.logWarn).toHaveBeenCalledTimes(1);
+      expect(report.logWarn.mock.calls[0][0]).toContain('[initial_prompt_skipped:agent_not_ready]');
+      expect(report.logWarn.mock.calls[0][0]).not.toContain('conflicts merging');
+      expect(report.showToast).toHaveBeenCalledTimes(1);
+    });
+
+    // #523 delta review: a merge or post-merge hook still running is a
+    // non-shell foreground that would pass paste readiness. The paste waits
+    // for the pane to return to its shell before the launch line; if it never
+    // does, the prompt is withheld rather than queued for the shell.
+    it.each(['git', 'node'])(
+      'does not paste while the merge phase holds the foreground (%s)',
+      async (mergeForeground) => {
+        let reads = 0;
+        tmuxService.getPaneCurrentCommand.mockImplementation(async () => (reads++ === 0 ? 'zsh' : mergeForeground));
+        getPromptTransportMock.mockReturnValue('send-keys');
+        const line = await createPane();
+        expect(sendPromptViaTmuxMock).not.toHaveBeenCalled();
+        // The agent is still launched, bare.
+        expect(line).toBe('opencode');
+        expect(report.logWarn).toHaveBeenCalledTimes(1);
+        expect(report.logWarn.mock.calls[0][0]).toContain('[initial_prompt_skipped:agent_not_ready]');
+        expect(report.showToast).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('pastes once the merge has handed the pane back to its shell', async () => {
+      const sequence = ['zsh', 'git', 'git', 'zsh'];
+      let reads = 0;
+      tmuxService.getPaneCurrentCommand.mockImplementation(async () => sequence[Math.min(reads++, sequence.length - 1)]);
+      getPromptTransportMock.mockReturnValue('send-keys');
+      await createPane();
+      expect(sendPromptViaTmuxMock).toHaveBeenCalledTimes(1);
+      expect(report.logWarn).not.toHaveBeenCalled();
     });
 
     // AGENTS.md: the prompt is never inlined into the typed line or argv.

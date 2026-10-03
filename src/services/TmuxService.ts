@@ -125,6 +125,8 @@ function isPermanentError(error: unknown): boolean {
  * - Type-safe tmux operations
  */
 const PANE_CURRENT_COMMAND_TIMEOUT_MS = 1_000;
+/** Bound for one argv-only tmux buffer command (load, paste, delete). */
+const TMUX_FILE_COMMAND_TIMEOUT_MS = 5_000;
 /** A command name is tiny; anything larger is not an answer worth buffering. */
 const PANE_CURRENT_COMMAND_MAX_BYTES = 4 * 1024;
 
@@ -838,6 +840,33 @@ export class TmuxService {
   }
 
   /**
+   * Whether the program in the pane has enabled bracketed paste mode
+   * (`#{bracket_paste_flag}`). Anything but an explicit `1`, including an
+   * older tmux without the format, is reported as false.
+   */
+  async getPaneBracketPasteFlag(paneId: string): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      execFile(
+        'tmux',
+        ['display-message', '-t', paneId, '-p', '#{bracket_paste_flag}'],
+        {
+          encoding: 'utf8',
+          timeout: PANE_CURRENT_COMMAND_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          maxBuffer: PANE_CURRENT_COMMAND_MAX_BYTES,
+        },
+        (error, stdout) => {
+          if (error) {
+            reject(new Error('tmux display-message failed'));
+            return;
+          }
+          resolve(String(stdout).trim() === '1');
+        },
+      );
+    });
+  }
+
+  /**
    * Set global tmux option
    */
   async setOption(option: string, value: string): Promise<void> {
@@ -927,18 +956,61 @@ export class TmuxService {
   }
 
   /**
-   * Set a tmux buffer with content
+   * Load `content` into the named tmux buffer through tmux's stdin
+   * (`load-buffer -b <name> -`). No shell runs, and the content is in no argv
+   * and no logged command line, so it is safe for an agent prompt (#523).
    */
-  async setBuffer(bufferName: string, content: string): Promise<void> {
-    await this.executeWithRetry(
-      () => {
-        // Single-quoted shell args preserve backslashes/newlines as-is.
-        const escaped = content.replace(/'/g, "'\\''");
-        this.execute(`tmux set-buffer -b '${bufferName}' -- '${escaped}'`);
-      },
-      RetryStrategy.FAST,
-      `setBuffer(${bufferName})`
-    );
+  async loadBufferFromStdin(bufferName: string, content: string): Promise<void> {
+    await this.execTmuxFile(['load-buffer', '-b', bufferName, '-'], content);
+  }
+
+  /**
+   * Paste the named buffer into a pane and delete it in the same tmux command
+   * (`-d`). `-p` wraps the paste in bracketed-paste markers when the program
+   * in the pane has asked for them, so a multi-line prompt arrives as one
+   * paste rather than as a line-by-line submission.
+   */
+  async pasteBufferAndDelete(bufferName: string, paneId: string): Promise<void> {
+    await this.execTmuxFile(['paste-buffer', '-d', '-p', '-b', bufferName, '-t', paneId]);
+  }
+
+  /**
+   * Runs tmux without a shell. Only the argv (never `input`) appears in an
+   * error message, so a failure cannot echo stdin content.
+   */
+  private execTmuxFile(args: string[], input?: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const failure = `tmux ${args[0] ?? ''} failed`;
+      let stdinFailed = false;
+      const child = execFile(
+        'tmux',
+        args,
+        {
+          encoding: 'utf8',
+          timeout: TMUX_FILE_COMMAND_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        },
+        (error) => {
+          if (error || stdinFailed) {
+            this.logger.debug(failure, 'error');
+            reject(new Error(failure));
+            return;
+          }
+          resolve();
+        },
+      );
+      // tmux can exit before reading all of stdin (EPIPE). Without a listener
+      // that error is thrown as uncaught and takes the process down; with it,
+      // the failure is reported through the callback above.
+      child?.stdin?.on('error', () => {
+        stdinFailed = true;
+      });
+      try {
+        child?.stdin?.end(input);
+      } catch {
+        stdinFailed = true;
+      }
+    });
   }
 
   /**
@@ -973,13 +1045,7 @@ export class TmuxService {
    * Delete a tmux buffer
    */
   async deleteBuffer(bufferName: string): Promise<void> {
-    await this.executeWithRetry(
-      () => {
-        this.execute(`tmux delete-buffer -b '${bufferName}'`);
-      },
-      RetryStrategy.FAST,
-      `deleteBuffer(${bufferName})`
-    );
+    await this.execTmuxFile(['delete-buffer', '-b', bufferName]);
   }
 
   /**

@@ -120,6 +120,13 @@ export interface BridgeSpawnPromptKeysRequest {
   paneId: string;
   prompt: string;
   agent: AgentName;
+  /**
+   * The pane's foreground command read BEFORE the launch line was sent: its
+   * shell. Read afterwards it could already be the agent, and an agent that
+   * then crashed back to the shell would look "changed" and receive the
+   * paste (#523 review).
+   */
+  baselineCommand?: string;
 }
 
 export interface BridgeSpawnDeps {
@@ -146,7 +153,9 @@ export interface BridgeSpawnDeps {
    * __tests__ is outside tsconfig's `include`, so a required field here would
    * not be a compile error for callers in tests, just a runtime TypeError.
    */
-  sendPromptKeys?: (request: BridgeSpawnPromptKeysRequest) => Promise<void>;
+  sendPromptKeys?: (
+    request: BridgeSpawnPromptKeysRequest,
+  ) => Promise<PromptBootstrapSkipReason | null | void>;
   /**
    * Reads the pane's `#{pane_current_command}` — its shell, before anything is
    * typed — so the prompt bootstrap uses the pane's dialect rather than the
@@ -1904,7 +1913,17 @@ export async function spawnBridgePane(
         const prompt = request.prompt;
         if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
           const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
-          await sendPromptKeys({ paneId: persistedPaneId, prompt, agent });
+          const pasteSkipped = await sendPromptKeys({
+            paneId: persistedPaneId,
+            prompt,
+            agent,
+            baselineCommand: launch.pasteBaselineCommand,
+          });
+          if (pasteSkipped) {
+            // No blind paste (#523): the agent never took the foreground, or
+            // tmux could not paste. The pane and agent are fine.
+            warnings.push(initialPromptSkippedWarning(agent, pasteSkipped, persistedPaneId));
+          }
         }
       } catch (error) {
         warnings.push(effectUnknownWarning(
@@ -2341,17 +2360,11 @@ export function sendTmuxCommand(paneId: string, command: string): void {
 
 export async function sendPromptKeysToPane(
   request: BridgeSpawnPromptKeysRequest,
-): Promise<void> {
-  const { paneId, prompt, agent } = request;
+): Promise<PromptBootstrapSkipReason | null> {
+  const { paneId, prompt, agent, baselineCommand } = request;
   const tmuxService = TmuxService.getInstance();
-  let baselineCommand: string | undefined;
-  try {
-    baselineCommand = await tmuxService.getPaneCurrentCommand(paneId);
-  } catch {
-    baselineCommand = undefined;
-  }
 
-  await sendPromptViaTmux({
+  const pasted = await sendPromptViaTmux({
     paneId,
     prompt,
     tmuxService,
@@ -2362,6 +2375,7 @@ export async function sendPromptKeysToPane(
     postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
     readyDelayMs: getSendKeysReadyDelayMs(agent),
   });
+  return pasted.delivered ? null : pasted.reason;
 }
 
 export const defaultSpawnDeps: BridgeSpawnDeps = {
@@ -2680,6 +2694,8 @@ function assertGeneratedWorktreePath(projectRoot: string, worktreePath: string):
 interface BridgeLaunchCommand {
   command: string;
   initialPromptSkipped: PromptBootstrapSkipReason | null;
+  /** send-keys only: the pane's shell, read before the launch line is sent. */
+  pasteBaselineCommand?: string;
 }
 
 /**
@@ -2707,13 +2723,19 @@ async function buildLaunchCommand(
   // their TUI after launch. Writing a prompt file here would read it into a
   // variable, delete the file, and then run a bare command, destroying the
   // prompt with no trace. launch-only agents likewise must launch bare.
-  if (
-    !prompt
-    || !prompt.trim()
-    || promptTransport === 'send-keys'
-    || promptTransport === 'launch-only'
-  ) {
+  if (!prompt || !prompt.trim() || promptTransport === 'launch-only') {
     return bare(null);
+  }
+
+  if (promptTransport === 'send-keys') {
+    // The paste's readiness baseline must be the shell, so it is read now,
+    // before the launch line reaches the pane.
+    const { readPaneCommand } = deps;
+    const paneShell = await resolvePaneShell(
+      readPaneCommand ? () => readPaneCommand(paneId) : undefined,
+      deps.paneShellProbe,
+    );
+    return { ...bare(null), pasteBaselineCommand: paneShell.paneCommand };
   }
 
   // The bootstrap is shell syntax, so it must match the pane's own shell. With
