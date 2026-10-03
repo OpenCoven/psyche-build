@@ -177,6 +177,34 @@ describe('release documentation contract', () => {
     expect(runbook).toMatch(/secret audit[\s\S]*public[\s\S]*tag/i);
   });
 
+  it('documents update manifest signing, provisioning, rotation, revocation, and the empty-keys default', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const section = runbook.slice(
+      runbook.indexOf('## Update manifest signing'),
+      runbook.indexOf('## Homebrew publication and recovery'),
+    );
+
+    expect(section.length).toBeGreaterThan(0);
+    for (const heading of [
+      '### Format',
+      '### Activation and fail-closed rules',
+      '### Provision the key (owner only)',
+      '### Rotate with the next slot',
+      '### Revoke a key',
+    ]) {
+      expect(section).toContain(heading);
+    }
+    expect(section).toContain('node scripts/generate-update-signing-key.mjs');
+    expect(section).toContain('gh secret set UPDATE_MANIFEST_SIGNING_KEY');
+    expect(section).toContain('--env release');
+    expect(section).toMatch(/< ~\/\.psyche-build-keys\/update-manifest-signing-key\.pem/);
+    expect(section).not.toContain('--body');
+    expect(section).toMatch(/`current` is `null`[\s\S]*notice\s+annotation/);
+    expect(section).toContain('signing_key_not_current');
+    expect(section).toMatch(/only notifies/);
+    expect(runbook).toContain('`update-manifest.json` and `update-manifest.json.sig`');
+  });
+
   it('creates the release environment only after publication and permits immutable-tag recovery', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
     const publicIndex = runbook.indexOf('-f visibility=public');

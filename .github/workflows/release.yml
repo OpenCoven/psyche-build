@@ -2,7 +2,8 @@ name: Release
 
 # Publishes only signed and notarized macOS artifacts. The workflow builds the
 # exact release tag, verifies both native architectures independently, and keeps
-# the GitHub Release in draft state until both DMGs and SHA256SUMS are attached.
+# the GitHub Release in draft state until both DMGs and SHA256SUMS (plus the
+# signed update manifest, once a current key is provisioned) are attached.
 
 on:
   push:
@@ -799,6 +800,86 @@ jobs:
             shasum -a 256 -c SHA256SUMS
           )
 
+      # The signed update manifest is published only once the owner commits a
+      # current public key to release/update-manifest-keys.json. Until then the
+      # release proceeds without it and says so. Once a current key exists, a
+      # missing secret or a failed self-verification blocks publication.
+      - name: Resolve update manifest signing
+        id: update-manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="$(node scripts/update-manifest.mjs status --keys release/update-manifest-keys.json)"
+          case "$STATUS" in
+            active=false)
+              echo "active=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Update manifest not published::release/update-manifest-keys.json has no current key, so this release publishes no update-manifest.json. See docs/RELEASE.md, Update manifest signing."
+              ;;
+            active=true$'\n'current_key_id=*)
+              echo "active=true" >> "$GITHUB_OUTPUT"
+              echo "Update manifest signing is active for key ${STATUS##*=}"
+              ;;
+            *)
+              echo "::error::Unrecognized update manifest key status"
+              exit 1
+              ;;
+          esac
+
+      - name: Build update manifest
+        if: steps.update-manifest.outputs.active == 'true'
+        env:
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The signed tag's tagger date makes a retried run reproduce the same
+          # manifest bytes, so an already-published release can be byte-compared.
+          PUBLISHED_AT="$(git for-each-ref --format='%(taggerdate:iso-strict)' "refs/tags/$RELEASE_TAG")"
+          if [ -z "$PUBLISHED_AT" ]; then
+            echo "::error::Release tag $RELEASE_TAG has no tagger date for the update manifest"
+            exit 1
+          fi
+          node scripts/update-manifest.mjs build \
+            --version "${RELEASE_VERSION}" \
+            --tag "$RELEASE_TAG" \
+            --source-sha "$RELEASE_SHA" \
+            --sha256sums artifacts/SHA256SUMS \
+            --published-at "$PUBLISHED_AT" \
+            --expires-in-days 30 \
+            --out artifacts/update-manifest.json
+
+      - name: Sign update manifest
+        if: steps.update-manifest.outputs.active == 'true'
+        env:
+          UPDATE_MANIFEST_SIGNING_KEY: ${{ secrets.UPDATE_MANIFEST_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$UPDATE_MANIFEST_SIGNING_KEY" ]; then
+            echo "::error::Missing required release environment secret UPDATE_MANIFEST_SIGNING_KEY while release/update-manifest-keys.json names a current key"
+            exit 1
+          fi
+          node scripts/update-manifest.mjs sign \
+            --manifest artifacts/update-manifest.json \
+            --keys release/update-manifest-keys.json \
+            --key-env UPDATE_MANIFEST_SIGNING_KEY \
+            --out artifacts/update-manifest.json.sig
+
+      - name: Verify signed update manifest
+        if: steps.update-manifest.outputs.active == 'true'
+        env:
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/update-manifest.mjs verify \
+            --manifest artifacts/update-manifest.json \
+            --signature artifacts/update-manifest.json.sig \
+            --keys release/update-manifest-keys.json \
+            --expect-tag "$RELEASE_TAG" \
+            --expect-source-sha "$RELEASE_SHA" \
+            --sha256sums artifacts/SHA256SUMS
+
       - name: Generate curated GitHub release notes
         shell: bash
         run: |
@@ -811,23 +892,40 @@ jobs:
       - name: Publish complete stable release
         env:
           GH_TOKEN: ${{ github.token }}
+          UPDATE_MANIFEST_ACTIVE: ${{ steps.update-manifest.outputs.active }}
         shell: bash
         run: |
           set -euo pipefail
+          # The exact public asset set: both DMGs and SHA256SUMS, plus the
+          # signed update manifest and its signature only when signing is active.
+          RELEASE_ASSETS=(
+            "Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg"
+            "Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg"
+            SHA256SUMS
+          )
+          case "$UPDATE_MANIFEST_ACTIVE" in
+            true)
+              RELEASE_ASSETS+=(update-manifest.json update-manifest.json.sig)
+              ;;
+            false)
+              ;;
+            *)
+              echo "::error::Update manifest activation is unresolved"
+              exit 1
+              ;;
+          esac
+          EXPECTED_ASSET_COUNT="${#RELEASE_ASSETS[@]}"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
             if [ "$IS_DRAFT" != "true" ]; then
               mkdir -p published-assets
               gh release download "$RELEASE_TAG" --dir published-assets
               PUBLISHED_COUNT="$(find published-assets -maxdepth 1 -type f | wc -l | tr -d ' ')"
-              if [ "$PUBLISHED_COUNT" != "3" ]; then
-                echo "::error::Published release must contain exactly three assets; found $PUBLISHED_COUNT"
+              if [ "$PUBLISHED_COUNT" != "$EXPECTED_ASSET_COUNT" ]; then
+                echo "::error::Published release must contain exactly $EXPECTED_ASSET_COUNT assets; found $PUBLISHED_COUNT"
                 exit 1
               fi
-              for asset in \
-                Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
-                Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
-                SHA256SUMS
+              for asset in "${RELEASE_ASSETS[@]}"
               do
                 test -f "published-assets/$asset"
                 cmp "artifacts/$asset" "published-assets/$asset"
@@ -859,10 +957,7 @@ jobs:
               --title "Psyche Build $RELEASE_TAG" \
               --notes-file "$RELEASE_NOTES_PATH"
           fi
-          gh release upload "$RELEASE_TAG" --clobber \
-            artifacts/Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
-            artifacts/Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
-            artifacts/SHA256SUMS
+          gh release upload "$RELEASE_TAG" --clobber "${RELEASE_ASSETS[@]/#/artifacts/}"
 
           IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
           if [ "$IS_DRAFT" != "true" ]; then
@@ -871,15 +966,12 @@ jobs:
           fi
           EXPECTED_DRAFT_ASSETS="$RUNNER_TEMP/expected-draft-assets.txt"
           ACTUAL_DRAFT_ASSETS="$RUNNER_TEMP/actual-draft-assets.txt"
-          printf '%s\n' \
-            "Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg" \
-            "Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg" \
-            SHA256SUMS \
+          printf '%s\n' "${RELEASE_ASSETS[@]}" \
             | LC_ALL=C sort > "$EXPECTED_DRAFT_ASSETS"
           gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
             | LC_ALL=C sort > "$ACTUAL_DRAFT_ASSETS"
           if ! cmp "$EXPECTED_DRAFT_ASSETS" "$ACTUAL_DRAFT_ASSETS"; then
-            echo "::error::Draft release must contain exactly the two DMGs and SHA256SUMS"
+            echo "::error::Draft release must contain exactly the expected release assets: ${RELEASE_ASSETS[*]}"
             exit 1
           fi
 
@@ -887,14 +979,11 @@ jobs:
           mkdir -p "$DRAFT_ASSET_DIR"
           gh release download "$RELEASE_TAG" --dir "$DRAFT_ASSET_DIR"
           DRAFT_ASSET_COUNT="$(find "$DRAFT_ASSET_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
-          if [ "$DRAFT_ASSET_COUNT" != "3" ]; then
-            echo "::error::Draft release must contain exactly three assets; found $DRAFT_ASSET_COUNT"
+          if [ "$DRAFT_ASSET_COUNT" != "$EXPECTED_ASSET_COUNT" ]; then
+            echo "::error::Draft release must contain exactly $EXPECTED_ASSET_COUNT assets; found $DRAFT_ASSET_COUNT"
             exit 1
           fi
-          for asset in \
-            Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
-            Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
-            SHA256SUMS
+          for asset in "${RELEASE_ASSETS[@]}"
           do
             cmp "artifacts/$asset" "$DRAFT_ASSET_DIR/$asset"
           done
