@@ -189,7 +189,8 @@ describe('update banner rendering', () => {
     expect(banner < detail || banner > detailEnd).toBe(true);
     // ...but directly before the footer, as a top-level child of .app.
     const between = app.slice(app.indexOf('></section>', banner) + '></section>'.length, footer);
-    expect(between.replace(/<!--[\s\S]*?-->/g, '').trim()).toBe('');
+    // Only whitespace and complete HTML comments may sit between the two.
+    expect(between).toMatch(/^(?:\s|<!--(?:(?!-->)[\s\S])*-->)*$/);
     expect(app.slice(0, banner)).toContain('id="browser-surface-staging"');
     const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
     expect(stylesCss).toMatch(/\.app \{[^}]*grid-template-rows: var\(--titlebar-h\) minmax\(0, 1fr\) auto auto;/s);
