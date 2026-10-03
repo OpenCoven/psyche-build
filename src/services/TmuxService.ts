@@ -840,9 +840,6 @@ export class TmuxService {
   }
 
   /**
-   * Set global tmux option
-   */
-  /**
    * Whether the program in the pane has enabled bracketed paste mode
    * (`#{bracket_paste_flag}`). Anything but an explicit `1`, including an
    * older tmux without the format, is reported as false.
@@ -869,6 +866,9 @@ export class TmuxService {
     });
   }
 
+  /**
+   * Set global tmux option
+   */
   async setOption(option: string, value: string): Promise<void> {
     await this.executeWithRetry(
       () => {

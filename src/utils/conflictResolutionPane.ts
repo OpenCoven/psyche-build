@@ -45,7 +45,7 @@ import {
   getSendKeysSubmit,
   type AgentName,
 } from './agentLaunch.js';
-import { sendPromptViaTmux } from './agentPromptDispatch.js';
+import { sendPromptViaTmux, waitForShellForeground } from './agentPromptDispatch.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 import { createPsychePaneId } from './paneIdentity.js';
 import {
@@ -67,6 +67,9 @@ import {
   type PaneRecoveryPersistenceResult,
 } from './paneLifecycleRecovery.js';
 import { createTransactionalPane } from './transactionalPaneCreation.js';
+
+/** Bound on waiting for the conflict merge to hand the pane back to its shell. */
+const MERGE_SETTLE_TIMEOUT_MS = 15_000;
 
 export interface ConflictResolutionPaneOptions {
   sourceBranch: string;      // Branch being merged (the worktree branch)
@@ -235,9 +238,32 @@ async function createConflictResolutionPaneWithReservation(
     await new Promise((resolve) => setTimeout(resolve, TMUX_LAYOUT_APPLY_DELAY));
 
     const promptTransport = getPromptTransport(agent);
-    const shouldSendPromptViaTmux = promptTransport === 'send-keys';
+    let shouldSendPromptViaTmux = promptTransport === 'send-keys';
+    let pasteSkipped: PromptBootstrapSkipReason | null = null;
+    if (shouldSendPromptViaTmux) {
+      // The merge above may still be running (git, a post-merge hook's node
+      // or npm). That foreground differs from the baseline shell and would
+      // pass paste readiness, and the paste would then queue behind the
+      // launch line for the shell to run if the agent fails. Only paste once
+      // the pane is back at its own shell before the launch line is typed,
+      // so the next foreground change is the agent's (#523 review).
+      const shellBack = paneShell.paneCommand !== undefined && await waitForShellForeground({
+        paneId: paneInfo,
+        tmuxService,
+        shellCommand: paneShell.paneCommand,
+        timeoutMs: MERGE_SETTLE_TIMEOUT_MS,
+        now: options.paneShellProbe?.now,
+        sleep: options.paneShellProbe?.sleep,
+      });
+      if (!shellBack) {
+        shouldSendPromptViaTmux = false;
+        pasteSkipped = 'agent_not_ready';
+      }
+    }
     const omitsPromptDelivery = promptTransport === 'launch-only';
-    const takesCommandLinePrompt = !shouldSendPromptViaTmux && !omitsPromptDelivery;
+    // From the transport, not the paste decision: a withheld paste must never
+    // fall back to a command-line prompt.
+    const takesCommandLinePrompt = promptTransport !== 'send-keys' && !omitsPromptDelivery;
     const baselineCommand = shouldSendPromptViaTmux ? paneShell.paneCommand : undefined;
 
     // The prompt travels only through a file read by the pane's own shell; it
@@ -279,6 +305,16 @@ async function createConflictResolutionPaneWithReservation(
 
     await tmuxService.sendShellCommand(paneInfo, launchCommand);
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
+
+    if (pasteSkipped) {
+      await reportPromptBootstrapSkipped(
+        agent,
+        pasteSkipped,
+        'conflictResolutionPane',
+        paneInfo,
+        options.promptSkipReport,
+      );
+    }
 
     if (initialPromptSkipped) {
       await reportPromptBootstrapSkipped(

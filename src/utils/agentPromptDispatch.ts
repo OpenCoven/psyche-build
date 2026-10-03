@@ -105,6 +105,47 @@ export async function waitForForegroundCommand(
   }
 }
 
+interface WaitForShellForegroundOptions extends PromptPasteClock {
+  paneId: string;
+  tmuxService: Pick<TmuxService, 'getPaneCurrentCommand'>;
+  /** The pane's own shell, read before anything was typed into it. */
+  shellCommand: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
+/**
+ * Wait, within `timeoutMs`, until the pane's foreground is its own shell
+ * again. A caller that typed earlier commands into the pane (the conflict
+ * pane's `git merge`) must see this before typing an agent launch line it
+ * will paste into: otherwise a still-running merge or hook is a non-shell
+ * foreground that passes paste readiness, and the paste would queue behind
+ * the launch line for the shell to run if the agent fails to start.
+ */
+export async function waitForShellForeground(
+  options: WaitForShellForegroundOptions,
+): Promise<boolean> {
+  const {
+    paneId,
+    tmuxService,
+    shellCommand,
+    timeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
+    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+    now = Date.now,
+    sleep: wait = sleep,
+  } = options;
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    if ((await readForeground(tmuxService, paneId)) === shellCommand) {
+      return true;
+    }
+    if (now() + pollIntervalMs > deadline) {
+      return false;
+    }
+    await wait(pollIntervalMs);
+  }
+}
+
 /** Why a pasted prompt was not delivered. Closed, so it can be logged safely. */
 export type PromptPasteSkipReason =
   | 'agent_not_ready'
@@ -205,19 +246,19 @@ export async function sendPromptViaTmux(
   // The agent left the foreground mid-sequence: whatever reached the line is
   // now in front of a shell. Clear it and never submit it.
   const abandon = async (): Promise<PromptPasteResult> => {
+    // In a confirmed shell, C-c discards the whole edit buffer, including a
+    // bracketed multi-line paste that zsh's line editor holds as one buffer
+    // (C-u would clear only the current line). Elsewhere C-c could interrupt
+    // a program, so only the line is cleared.
+    const foreground = await readForeground(tmuxService, paneId);
     try {
-      await tmuxService.sendTmuxKeys(paneId, 'C-u');
+      await tmuxService.sendTmuxKeys(paneId, isShellCommandName(foreground) ? 'C-c' : 'C-u');
     } catch {
       // Best effort.
     }
     await discardBuffer();
     return { delivered: false, reason: 'agent_not_ready' };
   };
-
-  for (const prePromptKey of prePromptKeys) {
-    await tmuxService.sendTmuxKeys(paneId, prePromptKey);
-    await wait(interKeyDelayMs);
-  }
 
   // Without bracketed paste, tmux sends each LF as CR, so every line of a
   // multi-line prompt would be submitted separately. `-p` only brackets the
@@ -232,6 +273,12 @@ export async function sendPromptViaTmux(
     if (!bracketed) {
       return { delivered: false, reason: 'prompt_paste_unsafe_multiline' };
     }
+  }
+
+  // After the multi-line check, so a withheld prompt sends the agent nothing.
+  for (const prePromptKey of prePromptKeys) {
+    await tmuxService.sendTmuxKeys(paneId, prePromptKey);
+    await wait(interKeyDelayMs);
   }
 
   try {
