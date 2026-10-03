@@ -437,7 +437,7 @@ jobs:
           echo "CANDIDATE_ARTIFACT_DIR=$CANDIDATE_DIR" >> "$GITHUB_ENV"
 
       - name: Upload candidate DMG
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: psyche-build-${{ env.CANDIDATE_ID }}-${{ matrix.arch }}
           path: ${{ env.CANDIDATE_ARTIFACT_DIR }}
@@ -570,7 +570,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload candidate artifacts and provenance
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: psyche-build-${{ env.CANDIDATE_ID }}
           path: candidate
