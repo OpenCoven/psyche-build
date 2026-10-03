@@ -59,6 +59,10 @@ const APP_COMMANDS: &[&str] = &[
     "control_state",
     "runtime_diagnostics",
     "runtime_process_metrics",
+    "update_status",
+    "update_skip_version",
+    "update_dismiss",
+    "update_set_checks_enabled",
     "diagnostics_spawn_fixture",
     "diagnostics_cycle_window",
 ];

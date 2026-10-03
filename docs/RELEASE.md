@@ -932,6 +932,101 @@ an attacker holding the exposed key can sign a misleading manifest. Because
 the app only notifies, the worst outcomes are a false or suppressed update
 notice. Homebrew and the DMG checksums still guard what gets installed.
 
+### Desktop update check
+
+The macOS app checks the manifest itself and only ever notifies. It never
+downloads a DMG, runs an installer or restarts. The code is
+`native/desktop/psyche-build-tauri/src-tauri/src/update_manifest.rs` (the
+verifier) and `update_check.rs` (fetching, state and commands).
+
+**Inert until a key exists.** The app embeds
+`release/update-manifest-keys.json` at build time. While `current` is `null`,
+as it is today, the app makes no network request and constructs no HTTP
+client, and the state is `disabled`. A build trusts exactly the keys it was
+built with, so provisioning a key activates checks only in releases built
+after that pull request merges. Checks are also `disabled` on Windows and
+Linux, where no update is published, and in the acceptance profile.
+
+**What a check does.** Shortly after launch, and then at most once every 24
+hours, the app fetches the two assets of the latest release over HTTPS:
+
+- `https://github.com/OpenCoven/psyche-build/releases/latest/download/update-manifest.json`
+- `https://github.com/OpenCoven/psyche-build/releases/latest/download/update-manifest.json.sig`
+
+Each response is capped at 64 KiB, with a 10-second connect timeout and a
+20-second total timeout. The verifier follows `scripts/update-manifest.mjs`
+byte for byte. It checks the signature over the raw bytes before parsing,
+then canonical re-serialization, then the schema and the tag, then the
+validity window with 300 seconds of clock skew. Finally it requires a version
+strictly newer than the running app. After a failed check, the next check
+waits twice as long, up to a week. A failed check does not withdraw an update
+this session already verified, or forget its dismissal, until that manifest
+expires; `last_outcome` still records the failure.
+
+Each running app instance keeps its own schedule and checks independently.
+Two instances can check close together and both write `update-check.json`;
+the atomic rename means the last writer wins, with no torn file.
+
+Every check ends in exactly one state, and nothing else happens:
+
+| State | Meaning |
+|---|---|
+| `disabled` | No current key in this build, unsupported platform, or acceptance profile. No request was made. |
+| `off` | The user turned update checks off. |
+| `unavailable` | The app data directory could not be resolved. Nothing is stored, and no check runs. |
+| `idle` / `checking` | No check has finished in this session yet, or one is running. |
+| `unreachable` | Network failure, timeout, or a non-success HTTP status. |
+| `oversize` | An asset was larger than 64 KiB. |
+| `invalid_signature` | The `.sig` envelope is malformed, or the signature does not verify. |
+| `unknown_key` | The envelope names a key that is not in this build's current or next slot. |
+| `non_canonical` | The signed bytes are not canonical JSON. |
+| `malformed` | The manifest fails the schema, for example the tag differs from `v<version>`. |
+| `not_yet_valid` / `expired` | Outside `published_at` minus 300 seconds to `expires_at`. |
+| `not_newer` | Verified, but not newer than the running version. |
+| `available` | Verified and newer. The app may show the notice. |
+
+**Cross-implementation vectors.** `pnpm generate:update-manifest-vectors`
+signs about 44 cases with the Node reference and records the reference's
+outcome for each in
+`native/desktop/psyche-build-tauri/src-tauri/test-fixtures/update-manifest/vectors.json`.
+The Rust tests require the same outcome for every case except one
+intentional difference, marked `rust_expect` in the file. Rust caps JSON
+nesting at 32 levels, so it reports a deeper signed document as
+`manifest_malformed` where Node reports `manifest_not_canonical`. Rust also
+uses `verify_strict`, which always refuses a small-order trusted key. Whether
+Node accepts such a key depends on its OpenSSL build, so that case is a
+Rust-only test, not a vector. Both differences only make Rust stricter on
+inputs that no honest signer produces. A vitest test fails
+when the checked-in file differs from a fresh run. The vector keys are
+derived from public labels, so anyone can recompute them. The generator and
+the test both refuse to run if `release/update-manifest-keys.json` trusts one
+of them.
+
+**App-scoped state.** `update-check.json` in the app data directory
+(`~/Library/Application Support/dev.opencoven.psyche`) holds `checks_enabled`,
+`last_check`, `last_outcome`, `skipped_version`, `last_seen_version` and the
+failure count. It is written through a temporary file and an atomic rename,
+and it is read field by field: an unreadable or oversized file loads as
+defaults, and one invalid or unknown field never discards the others, so a
+checks-off setting survives a downgrade. A file without a `schema` (or with
+`1`) loads as version 1. A file whose `schema` is newer was written by a later
+release: it is read, but never rewritten, so downgrading cannot destroy it.
+In that case, `update_status` reports `storage: "newer_schema"` and
+preference changes are refused. Check results stay in memory only. Project configs are
+never touched. On the first launch of a new version, the app records it as
+`last_seen_version`. When that is a move to a strictly newer version, it
+reports the previous value as `upgraded_from`; a downgrade reports nothing.
+Reconciling open project configs through the #464 gate is not implemented.
+
+**Commands.** Only the `main` webview may call `update_status`,
+`update_skip_version` (only for the version on offer), `update_dismiss`
+(lasts for this session) and `update_set_checks_enabled`. The
+`main-update-check` capability grants them. A command that changes a saved
+preference returns a bounded error when the save fails, for example
+`update preference not saved: PermissionDenied`. The in-memory choice is then
+left unchanged, so the UI never reports a choice that was not saved. Failed
+saves of background check results are only logged.
+
 ## Homebrew publication and recovery
 
 The application is a Cask, not a Formula. After publication, the release

@@ -37,6 +37,9 @@ base64 = "0.22"
 unicode-normalization = "0.1"
 getrandom = "0.2"
 tempfile = "3"
+# Verifies the signed release update manifest (src/update_manifest.rs). Pure
+# Rust, verify-only; the reference signer is Node's built-in Ed25519.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }
@@ -47,6 +50,10 @@ portable-pty = { path = "vendor/portable-pty", version = "=0.8.1" }
 # distributed as notarized DMGs/Homebrew, not through the Mac App Store.
 tauri-plugin-macos-fps = "0.1.0"
 window-vibrancy = "0.6"
+# Fetches the two update-manifest release assets over HTTPS (src/update_check.rs).
+# macOS-only because only macOS DMGs are published; native-tls uses the system
+# Security framework and trust store, so no TLS stack is bundled.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSBitmapImageRep", "NSClickGestureRecognizer", "NSGestureRecognizer", "NSImage", "NSImageRep", "NSResponder", "NSView"] }
