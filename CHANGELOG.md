@@ -19,8 +19,14 @@
   (#467, #483), and have a production CLI with persistence (#462).
 - The persisted project config is versioned and its read path is gated (#464).
 
+- The desktop composer row is hidden until summoned with ⌘K (or any path that
+  focuses it, such as ⌘F); Escape or ⌘K again dismisses it (#535).
+
 ### Fixed
 
+- Terminal apps that query the terminal background (OSC 11), such as Claude
+  Code's prompt and Codex's text shading, now receive the pane's visible colour
+  instead of black (#536).
 - The CLI updater no longer consults a package registry the CLI is not
   published to (#502, #525).
 - Agent prompts are pasted through argv-free tmux send-keys; the pane shell
