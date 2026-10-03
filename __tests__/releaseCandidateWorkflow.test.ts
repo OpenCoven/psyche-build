@@ -59,6 +59,14 @@ function stepScript(job: string, stepName: string): string {
   return step.slice(start + marker.length).replace(/^ {10}/gm, '');
 }
 
+// Ordered step labels, including unnamed `uses:` steps, so a new step of
+// either kind changes the list.
+function stepLabels(job: string): string[] {
+  return [...job.matchAll(/^      - (?:name: (.+)|uses: ([^@\s]+)@.*)$/gm)].map(
+    ([, name, action]) => name ?? `uses: ${action}`,
+  );
+}
+
 function stepNames(job: string): string[] {
   return [...job.matchAll(/^      - name: (.+)$/gm)].map(([, name]) => name);
 }
@@ -85,6 +93,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 const SHARED_VERIFY_STEPS = [
+  'Install locked dependencies',
   'Require pinned Xcode',
   'Verify shared TypeScript, protocol, and package surfaces',
   'Verify Rust and Tauri surfaces',
@@ -98,6 +107,114 @@ const SHARED_BUILD_STEPS = [
   'Verify Gatekeeper and notarization',
   'Remove ephemeral macOS signing material',
 ] as const;
+
+// Unnamed setup steps. Their pins must match release.yml (checked separately);
+// checkout differs only in the ref it resolves.
+const SETUP_STEPS = [
+  'uses: actions/checkout',
+  'uses: pnpm/action-setup',
+  'uses: actions/setup-node',
+  'uses: dtolnay/rust-toolchain',
+] as const;
+
+// Every release.yml step in the jobs the candidate mirrors is either shared
+// (byte-identical in the candidate) or excluded here with its reason. A step
+// added to release.yml in neither list fails the ordered-list test, so it
+// forces an explicit share-or-exclude decision.
+const RELEASE_ONLY_STEPS: Record<string, string> = {
+  'Require a public release source':
+    'Guards public Homebrew publication; a candidate publishes nothing.',
+  'Resolve and verify release tag':
+    'Resolves an existing tag; the candidate verifies an exact SHA on origin/main instead.',
+  'Require a verified signed tag':
+    'The tag is created only after acceptance, so it cannot exist for a candidate.',
+  'Set up XcodeGen for iOS verification':
+    'iOS verification is outside the macOS candidate; the tag run still performs it.',
+  'Require matching release versions':
+    'Replaced by release:coherence plus release:check against the requested final version.',
+  'Require iOS 26.2 iPhone 16 Pro simulator':
+    'iOS verification is outside the macOS candidate; the tag run still performs it.',
+  'Verify generated iOS project, Core, app, and UI tests':
+    'iOS verification is outside the macOS candidate; the tag run still performs it.',
+  'Set release metadata':
+    'Validates tag metadata; the candidate validates SHA, identity and version instead.',
+  'Upload verified DMG':
+    'Release artifact naming; the candidate uploads under its rc identity with a build record.',
+};
+
+const RELEASE_VERIFY_ORDER = [
+  'uses: actions/checkout',
+  'Require a public release source',
+  'Resolve and verify release tag',
+  'Require a verified signed tag',
+  'uses: pnpm/action-setup',
+  'uses: actions/setup-node',
+  'uses: dtolnay/rust-toolchain',
+  'Install locked dependencies',
+  'Require pinned Xcode',
+  'Set up XcodeGen for iOS verification',
+  'Require matching release versions',
+  'Verify shared TypeScript, protocol, and package surfaces',
+  'Verify Rust and Tauri surfaces',
+  'Require iOS 26.2 iPhone 16 Pro simulator',
+  'Verify generated iOS project, Core, app, and UI tests',
+];
+
+const CANDIDATE_VERIFY_ORDER = [
+  'Validate candidate inputs',
+  'uses: actions/checkout',
+  'Require the candidate commit on origin/main',
+  'uses: pnpm/action-setup',
+  'uses: actions/setup-node',
+  'uses: dtolnay/rust-toolchain',
+  'Install locked dependencies',
+  'Require pinned Xcode',
+  'Require coherent release versions',
+  'Require the final release version',
+  'Verify shared TypeScript, protocol, and package surfaces',
+  'Verify Rust and Tauri surfaces',
+];
+
+const RELEASE_BUILD_ORDER = [
+  'uses: actions/checkout',
+  'Set release metadata',
+  'uses: pnpm/action-setup',
+  'uses: actions/setup-node',
+  'uses: dtolnay/rust-toolchain',
+  'Install locked dependencies and Rust target',
+  'Require signing and notarization credentials',
+  'Import Developer ID certificate',
+  'Build signed and notarized DMG',
+  'Verify Gatekeeper and notarization',
+  'Upload verified DMG',
+  'Remove ephemeral macOS signing material',
+];
+
+const CANDIDATE_BUILD_ORDER = [
+  'uses: actions/checkout',
+  'Set candidate metadata',
+  'uses: pnpm/action-setup',
+  'uses: actions/setup-node',
+  'uses: dtolnay/rust-toolchain',
+  'Install locked dependencies and Rust target',
+  'Require signing and notarization credentials',
+  'Import Developer ID certificate',
+  'Build signed and notarized DMG',
+  'Verify Gatekeeper and notarization',
+  'Record candidate DMG identity',
+  'Upload candidate DMG',
+  'Remove ephemeral macOS signing material',
+];
+
+const CANDIDATE_ONLY_STEPS = new Set([
+  'Validate candidate inputs',
+  'Require the candidate commit on origin/main',
+  'Require coherent release versions',
+  'Require the final release version',
+  'Set candidate metadata',
+  'Record candidate DMG identity',
+  'Upload candidate DMG',
+]);
 
 const MACOS_SIGNING_SECRETS = [
   'APPLE_CERTIFICATE',
@@ -261,6 +378,33 @@ describe('release candidate workflow contract', () => {
       names.indexOf('Verify shared TypeScript, protocol, and package surfaces'),
     );
     expect(candidateSource()).not.toMatch(/continue-on-error/);
+  });
+
+  it('forces an explicit share-or-exclude decision for every mirrored release.yml step', () => {
+    const candidate = candidateSource();
+    const release = releaseSource();
+    const shared = new Set<string>([...SHARED_VERIFY_STEPS, ...SHARED_BUILD_STEPS, ...SETUP_STEPS]);
+
+    expect(stepLabels(jobSource(release, 'verify'))).toEqual(RELEASE_VERIFY_ORDER);
+    expect(stepLabels(jobSource(release, 'build-macos'))).toEqual(RELEASE_BUILD_ORDER);
+    expect(stepLabels(jobSource(candidate, 'verify'))).toEqual(CANDIDATE_VERIFY_ORDER);
+    expect(stepLabels(jobSource(candidate, 'build-macos'))).toEqual(CANDIDATE_BUILD_ORDER);
+
+    for (const step of [...RELEASE_VERIFY_ORDER, ...RELEASE_BUILD_ORDER]) {
+      const isShared = shared.has(step);
+      const reason = RELEASE_ONLY_STEPS[step];
+      expect(isShared !== Boolean(reason), `${step} must be shared xor excluded with a reason`).toBe(true);
+    }
+    for (const step of Object.keys(RELEASE_ONLY_STEPS)) {
+      expect([...RELEASE_VERIFY_ORDER, ...RELEASE_BUILD_ORDER], step).toContain(step);
+    }
+    for (const step of [...CANDIDATE_VERIFY_ORDER, ...CANDIDATE_BUILD_ORDER]) {
+      expect(shared.has(step) !== CANDIDATE_ONLY_STEPS.has(step), step).toBe(true);
+    }
+    // Shared steps keep their relative order on both sides.
+    const sharedOrder = (order: string[]) => order.filter((step) => shared.has(step));
+    expect(sharedOrder(CANDIDATE_VERIFY_ORDER)).toEqual(sharedOrder(RELEASE_VERIFY_ORDER));
+    expect(sharedOrder(CANDIDATE_BUILD_ORDER)).toEqual(sharedOrder(RELEASE_BUILD_ORDER));
   });
 
   it('keeps the verification and signing steps byte-identical to release.yml', () => {

@@ -25,6 +25,10 @@ on:
         required: true
         type: string
 
+# One run per candidate SHA: a duplicate dispatch of the same commit queues
+# behind the first instead of racing it for notarization, while candidates for
+# different SHAs stay independent. The group never collides with release.yml's
+# release-<tag> groups, and nothing is cancelled mid-signing.
 concurrency:
   group: release-candidate-${{ github.event.inputs.sha }}
   cancel-in-progress: false
