@@ -1,0 +1,5 @@
+{
+  "release": "v0.0.2",
+  "projectConfigSchemaVersion": 1,
+  "reason": "v0.0.2 predates the versioned project-config gate (#464). It cannot refuse a newer-schema .psyche/psyche.config.json and could overwrite fields it does not understand, so PROJECT_CONFIG_SCHEMA_VERSION must stay at the value v0.0.2 can safely read until a release that understands the gate ships and becomes the rollback floor. See docs/RELEASE.md, Project-config rollback floor."
+}

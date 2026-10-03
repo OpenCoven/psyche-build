@@ -118,6 +118,39 @@ trims the curated text, and appends exactly one
 `Source commit: <40-hex release SHA>` line. It enforces the 4,000 Unicode code
 points limit on that final localization after provenance is appended.
 
+## Project-config rollback floor
+
+A rollback reinstalls an older release over projects the newer build already
+touched. The oldest release you may roll back to is the rollback floor. It is
+pinned in `release/rollback-floor.json`, together with the
+`PROJECT_CONFIG_SCHEMA_VERSION` that release can safely read.
+
+The current floor is `v0.0.2`. It predates the versioned project-config gate
+(#464), so it cannot refuse a newer-schema `.psyche/psyche.config.json`. It
+would read the file and could later overwrite fields it does not understand.
+For that reason `PROJECT_CONFIG_SCHEMA_VERSION` in
+`src/services/ProjectPaneConfig.ts` must equal the pinned value. CI runs
+`pnpm release:rollback-floor` in the Quality job and fails on any difference,
+including a missing or malformed floor file.
+
+To raise the floor, so a later release can bump the schema:
+
+1. Ship a release that understands the gate (refuses a newer schema with
+   `config_newer_schema`) without bumping the schema. Publish it and confirm
+   it as the supported rollback target.
+2. In a dedicated pull request, edit `release/rollback-floor.json`: set
+   `release` to that tag and update `reason`. Keep
+   `projectConfigSchemaVersion` at the value that release reads.
+3. Only in a later pull request, bump `PROJECT_CONFIG_SCHEMA_VERSION` and
+   `projectConfigSchemaVersion` together. This is safe only because the new
+   floor refuses the newer file instead of overwriting it. That release must
+   give the operator
+   a pre-launch path: restore the `config-schema-snapshots` copy written on
+   the first superseding write, or quarantine the project.
+
+Treat a floor change as R4: it changes what a rollback can recover. Never edit
+the floor file only to make CI pass.
+
 ## Final audit, visibility, and signed tag
 
 Keep the repository private through the final release-commit, secret audit, and
