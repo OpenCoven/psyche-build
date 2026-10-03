@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { readFileSync, realpathSync } from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -27,7 +28,61 @@ function findPackageJson(): any {
   throw new Error('Could not find package.json');
 }
 
+// `packageJson` is the running build's manifest and is require-cached for the
+// life of the process. Post-install verification must not use it, nor the
+// running module's path: replacing the installed package changes neither.
 const packageJson = findPackageJson();
+
+const PACKAGE_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+
+/**
+ * Read the version of the package currently installed at `packageJsonPath`,
+ * straight from disk on every call (bypassing the require cache), so it
+ * reflects an install that happened after this process started. Returns null
+ * when the file is missing, unreadable, or has no string version.
+ */
+export type InstallVerification = 'verified' | 'mismatch' | 'unverified';
+
+type PackageManager = 'npm' | 'pnpm' | 'yarn';
+
+const GLOBAL_ROOT_COMMANDS: Record<PackageManager, { command: string; suffix?: string }> = {
+  npm: { command: 'npm root -g' },
+  pnpm: { command: 'pnpm root -g' },
+  yarn: { command: 'yarn global dir', suffix: 'node_modules' },
+};
+
+/**
+ * Whether `packageJsonPath`, after resolving symlinks, sits strictly inside
+ * `globalRoot` (also resolved). A source checkout exposed through
+ * `npm link`/`pnpm link` resolves outside the global root and does not count.
+ */
+export function isInsideGlobalPackageRoot(packageJsonPath: string, globalRoot: string): boolean {
+  try {
+    const realPackageJson = realpathSync(packageJsonPath);
+    const realRoot = realpathSync(globalRoot);
+    const relative = path.relative(realRoot, realPackageJson);
+    return relative !== ''
+      && !relative.startsWith('..')
+      && !path.isAbsolute(relative);
+  } catch {
+    return false;
+  }
+}
+
+export function readInstalledPackageVersion(packageJsonPath: string): string | null {
+  return readInstalledManifest(packageJsonPath)?.version ?? null;
+}
+
+function readInstalledManifest(packageJsonPath: string): { name: unknown; version: string } | null {
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    return parsed && typeof parsed.version === 'string'
+      ? { name: parsed.name, version: parsed.version }
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Whether the CLI may consult a package registry for updates or install from it.
@@ -356,12 +411,63 @@ export class AutoUpdater {
         timeout: 60000 // 1 minute timeout
       });
 
-      // Verify the update was successful
-      const newUpdateInfo = await this.checkForUpdates();
-      return newUpdateInfo.currentVersion === updateInfo.latestVersion;
+      // Verify against the freshly installed manifest. The running process
+      // keeps the old version until the user restarts it.
+      const globalRoot = this.detectGlobalPackageRoot(updateInfo.packageManager);
+      return this.verifyInstalledVersion(updateInfo.latestVersion, globalRoot) === 'verified';
     } catch (error) {
       this.logger.error('Update failed', 'AutoUpdater', undefined, error as Error);
       return false;
+    }
+  }
+
+  /**
+   * Whether the package manager's current global install now reports
+   * `expectedVersion`. Resolves `<globalRoot>/<packageName>/package.json`
+   * freshly instead of the running module's own path: pnpm loads the running
+   * module from its physical store directory and points the global link at a
+   * new store directory on update, so the running path keeps the old manifest.
+   */
+  verifyInstalledVersion(
+    expectedVersion: string,
+    globalRoot: string | null,
+    packageName: string = packageJson.name,
+  ): InstallVerification {
+    if (!globalRoot || typeof packageName !== 'string' || !PACKAGE_NAME.test(packageName)) {
+      return 'unverified';
+    }
+    const installedManifest = path.join(globalRoot, packageName, 'package.json');
+    // The install must physically live under the global root. A source
+    // checkout exposed through `npm link`/`pnpm link` resolves outside it and
+    // says nothing about what the update installed.
+    if (!isInsideGlobalPackageRoot(installedManifest, globalRoot)) {
+      return 'unverified';
+    }
+    const manifest = readInstalledManifest(installedManifest);
+    if (!manifest || manifest.name !== packageName) {
+      return 'unverified';
+    }
+    return manifest.version === expectedVersion ? 'verified' : 'mismatch';
+  }
+
+  /** The package manager's global package root, or null when it cannot be determined. */
+  detectGlobalPackageRoot(packageManager: PackageManager): string | null {
+    const entry = GLOBAL_ROOT_COMMANDS[packageManager];
+    if (!entry) {
+      return null;
+    }
+    try {
+      const output = execSync(entry.command, {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: 10000,
+      }).trim();
+      if (!output || !path.isAbsolute(output)) {
+        return null;
+      }
+      return entry.suffix ? path.join(output, entry.suffix) : output;
+    } catch {
+      return null;
     }
   }
 

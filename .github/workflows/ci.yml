@@ -62,6 +62,11 @@ jobs:
       - name: Require coherent release versions
         run: pnpm release:coherence
 
+      # A rollback to the floor release must not meet a project config it
+      # cannot read. See "Project-config rollback floor" in docs/RELEASE.md.
+      - name: Require the project-config schema to match the rollback floor
+        run: pnpm release:rollback-floor
+
       - name: Run repository tests
         run: pnpm test
 

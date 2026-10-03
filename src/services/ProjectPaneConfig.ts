@@ -13,7 +13,11 @@ import path from 'node:path';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { PsychePane } from '../types.js';
 import type { PaneLayout } from '../types.js';
-import { reconcilePaneLayout, seedPaneLayout } from '../layout/PaneLayoutTree.js';
+import {
+  PANE_LAYOUT_VERSION,
+  reconcilePaneLayout,
+  seedPaneLayout,
+} from '../layout/PaneLayoutTree.js';
 import { buildManagedPaneTitle } from '../utils/paneTitle.js';
 import {
   getProcessStartIdentity,
@@ -435,7 +439,7 @@ export async function transactProjectPaneConfig<T>(
         return;
       }
       const candidate = paneLayout as PaneLayout;
-      if (candidate.version !== 1 || !('root' in candidate)) {
+      if (candidate.version !== PANE_LAYOUT_VERSION || !('root' in candidate)) {
         return;
       }
       config.paneLayout = reconcilePaneLayout(candidate, paneIds);

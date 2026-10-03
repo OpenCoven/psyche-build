@@ -1,5 +1,9 @@
 import type { PaneLayout, PaneLayoutNode, PaneSplitDirection } from '../types.js';
 
+// Persisted in .psyche/psyche.config.json as paneLayout.version. Pinned by the
+// rollback floor (release/rollback-floor.json); see docs/RELEASE.md.
+export const PANE_LAYOUT_VERSION = 1;
+
 function isLeaf(node: PaneLayoutNode): node is { kind: 'leaf'; paneId: string } {
   return node.kind === 'leaf';
 }
@@ -74,7 +78,7 @@ function pruneNode(
 
 export function seedPaneLayout(paneIds: string[]): PaneLayout {
   if (paneIds.length === 0) {
-    return { version: 1, root: null };
+    return { version: PANE_LAYOUT_VERSION, root: null };
   }
 
   const seenPaneIds = new Set<string>();
@@ -91,7 +95,7 @@ export function seedPaneLayout(paneIds: string[]): PaneLayout {
     root = splitNode({ kind: 'leaf', paneId: paneIds[index] }, root, 'horizontal');
   }
 
-  return { version: 1, root };
+  return { version: PANE_LAYOUT_VERSION, root };
 }
 
 export function listLeafPaneIds(node: PaneLayoutNode | null): string[] {

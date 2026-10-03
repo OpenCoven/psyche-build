@@ -262,6 +262,21 @@ describe('pull request CI workflow contract', () => {
       qualityJob.indexOf('pnpm test'),
     );
     expect(qualityJob).not.toMatch(/release:coherence[\s\S]{0,80}continue-on-error/);
+    // A project-config schema bump past the rollback floor must fail every
+    // change, before tests, so a rollback to the floor stays safe (#477).
+    expect(qualityJob).toMatch(
+      /- name: Require the project-config schema to match the rollback floor\n\s+run: pnpm release:rollback-floor\n/,
+    );
+    expect(qualityJob.indexOf('pnpm release:rollback-floor')).toBeGreaterThan(
+      qualityJob.indexOf('pnpm release:coherence'),
+    );
+    expect(qualityJob.indexOf('pnpm release:rollback-floor')).toBeLessThan(
+      qualityJob.indexOf('pnpm test'),
+    );
+    expect(qualityJob).not.toMatch(/release:rollback-floor[\s\S]{0,80}continue-on-error/);
+    expect(qualityJob).not.toMatch(
+      /Require the project-config schema to match the rollback floor\n\s+if:/,
+    );
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
       'pnpm docs:focus:check',

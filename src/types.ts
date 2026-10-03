@@ -3,6 +3,7 @@ import type { NotificationSoundId } from './utils/notificationSounds.js';
 import type { OrchestrationLaneMode } from './orchestration/types.js';
 import type { TmuxServerIdentity } from './services/TmuxServerIdentity.js';
 import type { DurableEffectWarning } from './utils/durableEffectWarnings.js';
+import type { PANE_LAYOUT_VERSION } from './layout/PaneLayoutTree.js';
 
 export type PsycheThemeName =
   | 'red'
@@ -253,7 +254,7 @@ export interface PaneLayoutSplit {
 export type PaneLayoutNode = PaneLayoutLeaf | PaneLayoutSplit;
 
 export interface PaneLayout {
-  version: 1;
+  version: typeof PANE_LAYOUT_VERSION;
   root: PaneLayoutNode | null;
 }
 

@@ -83,6 +83,7 @@
     "release:version": "node scripts/release-version.mjs --set",
     "release:check": "node scripts/release-version.mjs --check",
     "release:coherence": "node scripts/release-version.mjs --coherence",
+    "release:rollback-floor": "node scripts/release-rollback-floor.mjs",
     "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
