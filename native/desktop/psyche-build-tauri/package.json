@@ -1,7 +1,7 @@
 {
   "name": "psyche-build-tauri",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
     "build:web:debug": "node scripts/build-web.mjs --debug",
