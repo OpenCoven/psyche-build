@@ -2305,9 +2305,46 @@
   var legacyWorkspaceMigration = { projectsPreserved: false };
   var saveWorkspaceTimer = 0;
 
+  // The canvas background stays fully transparent (alpha 0) so the pane's CSS
+  // tint shows through, but its RGB channels carry the colour the pane really
+  // looks like. xterm answers an OSC 11 background query with those channels,
+  // and TUIs such as Claude Code and Codex derive their prompt and text
+  // shading from the answer; a bare transparent black made them shade for a
+  // black terminal. The visible colour is the stack of translucent CSS
+  // backgrounds behind the terminal host composited over the window material,
+  // which WebKit cannot report, so it is approximated by the dark HUD tone.
+  var VIBRANCY_BASE_RGB = [30, 30, 32];
+  function parseCssRgba(value) {
+    var match = /rgba?\(([^)]*)\)/.exec(String(value || ""));
+    if (!match) return null;
+    var parts = match[1].split(/[\s,\/]+/).filter(Boolean).map(Number);
+    if (parts.length < 3 || parts.some(function (n) { return !Number.isFinite(n); })) return null;
+    return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
+  }
+  function terminalSurfaceRgb() {
+    var host = document.getElementById("terminal-host");
+    var layers = [];
+    for (var node = host; node && node.nodeType === 1; node = node.parentElement) {
+      var colour = parseCssRgba(window.getComputedStyle(node).backgroundColor);
+      if (!colour || colour.a <= 0) continue;
+      layers.push(colour);
+      if (colour.a >= 1) break;
+    }
+    var rgb = VIBRANCY_BASE_RGB.slice();
+    for (var i = layers.length - 1; i >= 0; i -= 1) {
+      var layer = layers[i];
+      var alpha = Math.min(1, layer.a);
+      rgb = rgb.map(function (channel, k) {
+        return channel * (1 - alpha) + layer.rgb[k] * alpha;
+      });
+    }
+    return rgb.map(function (channel) {
+      return Math.max(0, Math.min(255, Math.round(channel)));
+    });
+  }
   function terminalTheme() {
     return {
-      background: "rgba(0, 0, 0, 0)",
+      background: "rgba(" + terminalSurfaceRgb().join(", ") + ", 0)",
       foreground: "#ece9f5",
       cursor: "#a78bfa",
       selectionBackground: "rgba(167,139,250,0.30)",
@@ -2406,10 +2443,16 @@
     settings.theme = t;
     document.documentElement.setAttribute("data-theme", t);
     if (themeSelectEl && themeSelectEl.value !== t) themeSelectEl.value = t;
-    state.threads.forEach(function (thread) {
-      if (thread.terminalController) thread.terminalController.setTheme(terminalTheme());
-    });
+    refreshTerminalThemes();
     if (!opts || opts.persist !== false) saveSettings();
+  }
+  // Re-run whenever anything that changes the pane's visible colour changes,
+  // so the colour reported to TUIs follows the theme, solid mode and opacity.
+  function refreshTerminalThemes() {
+    var theme = terminalTheme();
+    state.threads.forEach(function (thread) {
+      if (thread.terminalController) thread.terminalController.setTheme(theme);
+    });
   }
   function applySolidBg(on, opts) {
     var v = on === true;
@@ -2420,6 +2463,7 @@
     if (solidBgEl && solidBgEl.checked !== v) solidBgEl.checked = v;
     // The opacity slider only bites against the vibrancy material.
     if (bgOpacityInput) bgOpacityInput.disabled = v;
+    refreshTerminalThemes();
     if (!opts || opts.persist !== false) saveSettings();
   }
   function applyBgOpacity(value, opts) {
@@ -2430,6 +2474,7 @@
       "--bg-opacity", String(settings.solidBg ? SOLID_BG_MULTIPLIER : v));
     if (bgOpacityInput && bgOpacityInput.value !== String(v)) bgOpacityInput.value = String(v);
     if (bgOpacityValueEl) bgOpacityValueEl.textContent = Math.round(v * 100) + "%";
+    refreshTerminalThemes();
     if (!opts || opts.persist !== false) saveSettings();
   }
 
