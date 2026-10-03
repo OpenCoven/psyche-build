@@ -741,6 +741,59 @@ describe('update manifest release contract', () => {
     expect(verify).toContain('--keys release/update-manifest-keys.json');
   });
 
+  it('reads the tagger date only from the exact signed tag object the verify job checked', () => {
+    const workflow = workflowSource();
+    const verifyJob = workflowJobSource(workflow, 'verify');
+    expect(verifyJob).toContain('release_tag_object_sha: ${{ steps.signed-tag.outputs.tag_object_sha }}');
+    const signedTag = workflowNamedStepSource(verifyJob, 'Require a verified signed tag');
+    expect(signedTag).toContain('id: signed-tag');
+    const signedTagScript = workflowStepScript(workflow, 'Require a verified signed tag');
+    expect(signedTagScript.indexOf('echo "tag_object_sha=$TAG_OBJECT_SHA" >> "$GITHUB_OUTPUT"')).toBeGreaterThan(
+      signedTagScript.indexOf('if [ "$SIGNATURE_VERIFIED" != "true" ]; then'),
+    );
+
+    const build = workflowNamedStepSource(publishJob(), 'Build update manifest');
+    expect(build).toContain('VERIFIED_TAG_OBJECT_SHA: ${{ needs.verify.outputs.release_tag_object_sha }}');
+    const script = workflowStepScript(workflow, 'Build update manifest');
+    expect(script.indexOf('git rev-parse --verify "$RELEASE_TAG^{tag}"')).toBeLessThan(
+      script.indexOf('%(taggerdate:iso-strict)'),
+    );
+
+    const root = mkdtempSync(path.join(tmpdir(), 'psyche-tag-object-'));
+    try {
+      const gitEnv = {
+        PATH: process.env.PATH ?? '',
+        HOME: root,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+      };
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: root, env: gitEnv, encoding: 'utf8' }).trim();
+      git('init', '-q');
+      git('commit', '-q', '--allow-empty', '--no-gpg-sign', '-m', 'release');
+      git('tag', '-a', '--no-sign', '-m', 'release', 'v1.2.3');
+      const tagObject = git('rev-parse', 'v1.2.3^{tag}');
+      const run = (verified: string) =>
+        spawnSync('/bin/bash', ['-c', script], {
+          cwd: root,
+          env: { ...gitEnv, RELEASE_TAG: 'v1.2.3', RELEASE_VERSION: '1.2.3', RELEASE_SHA: git('rev-parse', 'HEAD'), VERIFIED_TAG_OBJECT_SHA: verified },
+          encoding: 'utf8',
+        });
+      for (const verified of ['', 'f'.repeat(40), git('rev-parse', 'HEAD')]) {
+        const result = run(verified);
+        expect(result.status).toBe(1);
+        expect(result.stdout).toMatch(/::error::(The verify job did not report|Release tag object does not match)/);
+      }
+      // With the matching object the check passes and the step proceeds to the
+      // builder, which is absent from this scratch repository.
+      const matching = run(tagObject);
+      expect(matching.stdout).not.toContain('::error::');
+      expect(matching.stderr).toContain('update-manifest.mjs');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('scopes the signing secret to the single sign step and fails closed when it is empty', () => {
     const workflow = workflowSource();
     expect(workflow.match(/secrets\.UPDATE_MANIFEST_SIGNING_KEY/g)).toHaveLength(1);

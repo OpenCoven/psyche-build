@@ -794,6 +794,27 @@ exactly one bounded reason: `keys_malformed`, `no_trusted_keys`,
 `manifest_malformed`, `manifest_not_canonical`, `manifest_not_yet_valid`,
 `manifest_expired` or `manifest_mismatch`.
 
+### Differences from the design record
+
+The [design record](superpowers/specs/2026-10-01-update-channel-design.md)
+proposed minisign, a `update-manifest.json.minisig` signature and a
+password-protected key. Following the owner's 2026-10-03 decision, the
+implementation differs in three ways. The dated record is left as it was.
+
+- **Signer.** Node's built-in Ed25519 replaces minisign, so the release job
+  needs no third-party tool.
+- **Signature asset.** The signature is the `update-manifest.json.sig` JSON
+  envelope described above, not a `.minisig` file.
+- **Key custody.** The private key is an unencrypted PKCS#8 PEM, held only as
+  the `UPDATE_MANIFEST_SIGNING_KEY` secret in the protected `release`
+  environment, plus the owner's offline recovery copy. There is no key
+  password. Protection comes from the environment's reviewers and from the
+  secret being scoped to the single sign step.
+
+The desktop verifier must fetch exactly these two release assets:
+`update-manifest.json` and `update-manifest.json.sig`. It must accept only the
+`ed25519` algorithm and the key ids in its embedded current and next slots.
+
 ### Activation and fail-closed rules
 
 The `publish` job reads `release/update-manifest-keys.json` after it writes
@@ -809,8 +830,24 @@ The `publish` job reads `release/update-manifest-keys.json` after it writes
   current key, a failed verification, or a malformed keys file stops the job
   before the release is created or changed.
 
-A retry more than 30 days after the tag fails closed, because its manifest
-would already be expired. Re-signing an existing release is not implemented.
+Before building, the job checks that the local tag object is the exact signed
+object the `verify` job checked against GitHub. It reads the tagger date only
+from that object.
+
+Time limits follow from using the tagger date as `published_at`:
+
+- **Tagger clock skew.** Verifiers allow 5 minutes of clock difference. If the
+  tagger's clock ran more than 5 minutes fast, the build refuses with
+  `published_at_in_future`; a manifest that got past it would fail
+  self-verification with `manifest_not_yet_valid`. Fix the clock and create a
+  new tag. Never move an existing one.
+- **Early tags.** The 30-day window starts when the tag is created, not when it
+  is pushed or published. A tag created 10 days before its release run leaves
+  about 20 days before the manifest expires. Create the tag just before
+  pushing it.
+- **Late retries.** A retry more than 30 days after the tag fails closed,
+  because its manifest would already be expired. Re-signing an existing
+  release is not implemented.
 
 ### Provision the key (owner only)
 

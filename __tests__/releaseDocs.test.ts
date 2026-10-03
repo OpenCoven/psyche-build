@@ -203,6 +203,13 @@ describe('release documentation contract', () => {
     expect(section).toContain('signing_key_not_current');
     expect(section).toMatch(/only notifies/);
     expect(runbook).toContain('`update-manifest.json` and `update-manifest.json.sig`');
+    expect(section).toContain('### Differences from the design record');
+    expect(section).toMatch(/minisign[\s\S]*\.minisig[\s\S]*password-protected/);
+    expect(section).toContain('2026-10-03');
+    expect(section).toMatch(/unencrypted PKCS#8 PEM/);
+    expect(section).toContain('published_at_in_future');
+    expect(section).toContain('manifest_not_yet_valid');
+    expect(section).toMatch(/30-day window starts when the tag is created/);
   });
 
   it('creates the release environment only after publication and permits immutable-tag recovery', async () => {

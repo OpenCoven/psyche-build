@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createPrivateKey, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { generateSigningKey, main as generateMain } from '../scripts/generate-update-signing-key.mjs';
 import {
+  CLOCK_SKEW_SECONDS,
   VERIFY_REASONS,
   buildManifest,
   canonicalFileText,
@@ -162,6 +163,33 @@ describe('manifest build', () => {
     expect(() => manifestBytes({ publishedAt: 'yesterday' })).toThrow(/Timestamp/);
     const exact = JSON.parse(manifestBytes({ expiresInDays: undefined, expiresAt: '2026-10-31T12:00:00Z' }).toString());
     expect(exact.expires_at).toBe('2026-10-31T12:00:00Z');
+  });
+
+  it('refuses a publication time beyond the clock-skew allowance in the future', () => {
+    expect(CLOCK_SKEW_SECONDS).toBe(300);
+    expect(() => manifestBytes({ publishedAt: '2026-10-02T00:05:01Z' })).toThrow(
+      expect.objectContaining({ reason: 'published_at_in_future' }),
+    );
+    // Exactly at the allowance is accepted, and verifies at that same instant.
+    const key = ephemeralKey();
+    const keys = parseKeysFile(keysText(key));
+    const atLimit = manifestBytes({ publishedAt: '2026-10-02T00:05:00Z' });
+    const signature = signManifest(atLimit, key.pem, keys);
+    expect(verifyManifest({ manifestBytes: atLimit, signatureBytes: signature, keys, now: NOW })).toMatchObject({ ok: true });
+
+    const root = temporaryRoot();
+    writeFileSync(path.join(root, 'SHA256SUMS'), SUMS);
+    const captured = { stdout: '', stderr: '' };
+    const status = main(
+      [
+        'build', '--version', VERSION, '--tag', TAG, '--source-sha', SHA,
+        '--sha256sums', path.join(root, 'SHA256SUMS'), '--published-at', '2026-10-03T00:00:00Z',
+        '--expires-in-days', '30', '--now', NOW, '--out', path.join(root, 'm.json'),
+      ],
+      { io: { stdout: (t: string) => void (captured.stdout += t), stderr: (t: string) => void (captured.stderr += t) } },
+    );
+    expect(status).toBe(1);
+    expect(captured.stderr).toContain('reason=published_at_in_future');
   });
 
   it('normalizes publication time to whole UTC seconds', () => {
@@ -525,6 +553,79 @@ describe('generate-update-signing-key', () => {
     ).toBe(1);
     expect(again.stderr).toContain('EEXIST');
     expect(readFileSync(out, 'utf8')).toBe(pem);
+  });
+
+  function gitInit(directory: string) {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
+    const result = spawnSync('git', ['init', '-q', directory], { env, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+  }
+
+  function fakeGitBin(script: string): string {
+    const bin = path.join(temporaryRoot(), 'bin');
+    mkdirSync(bin);
+    writeFileSync(path.join(bin, 'git'), `#!/bin/sh\n${script}\n`);
+    chmodSync(path.join(bin, 'git'), 0o755);
+    return bin;
+  }
+
+  function expectRefused(target: string, env: Record<string, string | undefined>, message: RegExp) {
+    expect(() => generateSigningKey(target, { env })).toThrow(message);
+    expect(readdirSync(path.dirname(target))).not.toContain(path.basename(target));
+  }
+
+  it('fails closed when Git environment variables try to redirect the checkout test', () => {
+    const repo = temporaryRoot();
+    gitInit(repo);
+    const target = path.join(repo, 'k.pem');
+    const base = { PATH: process.env.PATH };
+    expectRefused(target, { ...base, GIT_DIR: '/nonexistent' }, /Git working tree/);
+    expectRefused(target, { ...base, GIT_CEILING_DIRECTORIES: path.dirname(repo) }, /Git working tree/);
+    expectRefused(target, { ...base, GIT_WORK_TREE: '/nonexistent', GIT_DIR: path.join(temporaryRoot(), 'x') }, /Git working tree/);
+  });
+
+  it('refuses targets inside a .git directory', () => {
+    const repo = temporaryRoot();
+    gitInit(repo);
+    expectRefused(path.join(repo, '.git', 'k.pem'), { PATH: process.env.PATH }, /\.git directory/);
+    // A directory literally named .git outside any repository is refused too.
+    const loose = path.join(temporaryRoot(), '.git');
+    mkdirSync(loose);
+    expectRefused(path.join(loose, 'k.pem'), { PATH: process.env.PATH }, /\.git directory/);
+  });
+
+  it('fails closed when Git is missing from PATH, even outside any checkout', () => {
+    const emptyBin = path.join(temporaryRoot(), 'empty-bin');
+    mkdirSync(emptyBin);
+    expectRefused(path.join(temporaryRoot(), 'k.pem'), { PATH: emptyBin }, /Git is unavailable/);
+  });
+
+  it('accepts only Git\'s own "not a git repository" verdict as outside', () => {
+    const outside = () => path.join(temporaryRoot(), 'k.pem');
+    const dubious = fakeGitBin(
+      "echo \"fatal: detected dubious ownership in repository at '/x'\" >&2; exit 128",
+    );
+    expectRefused(outside(), { PATH: dubious }, /could not confirm/);
+    const unexpected = fakeGitBin('echo boom >&2; exit 1');
+    expectRefused(outside(), { PATH: unexpected }, /could not confirm/);
+    const insideGitDir = fakeGitBin('echo false; exit 0');
+    expectRefused(outside(), { PATH: insideGitDir }, /Git working tree or Git directory/);
+    const notRepo = fakeGitBin("echo 'fatal: not a git repository (or any of the parent directories): .git' >&2; exit 128");
+    const ok = outside();
+    expect(generateSigningKey(ok, { env: { PATH: notRepo } }).keyId).toMatch(/^[0-9a-f]{16}$/);
+    expect((statSync(ok).mode & 0o777).toString(8)).toBe('600');
+  });
+
+  it('refuses a checkout by its .git marker even when Git claims otherwise', () => {
+    const repo = temporaryRoot();
+    gitInit(repo);
+    mkdirSync(path.join(repo, 'nested'));
+    const lying = fakeGitBin("echo 'fatal: not a git repository' >&2; exit 128");
+    expectRefused(path.join(repo, 'nested', 'k.pem'), { PATH: lying }, /Git working tree/);
+    // A worktree-style .git file is a marker as well.
+    const worktree = temporaryRoot();
+    writeFileSync(path.join(worktree, '.git'), 'gitdir: /elsewhere\n');
+    expectRefused(path.join(worktree, 'k.pem'), { PATH: lying }, /Git working tree/);
   });
 
   it('refuses to write inside a Git working tree and requires an explicit --out', () => {

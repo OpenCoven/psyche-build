@@ -49,6 +49,9 @@ export const VERIFY_REASONS = Object.freeze([
 ]);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Allowed clock difference between the tagger and a verifier, in both directions. */
+export const CLOCK_SKEW_SECONDS = 300;
+const CLOCK_SKEW_MS = CLOCK_SKEW_SECONDS * 1000;
 const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SOURCE_SHA = /^[0-9a-f]{40}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -270,6 +273,14 @@ export function buildManifest({
   }
   const nowMillis = typeof now === 'number' ? now : Date.parse(String(now));
   if (!Number.isFinite(nowMillis)) fail('invalid_timestamp', 'now is not a valid instant');
+  // A tagger clock running ahead would produce a manifest every verifier
+  // rejects as manifest_not_yet_valid; refuse it here with a clear reason.
+  if (published - nowMillis > CLOCK_SKEW_MS) {
+    fail(
+      'published_at_in_future',
+      `publishedAt is more than ${CLOCK_SKEW_SECONDS} seconds in the future; check the tagger's clock`,
+    );
+  }
   if (expires <= nowMillis) fail('invalid_expiry', 'Manifest would already be expired');
 
   const manifest = {
@@ -459,7 +470,7 @@ export function verifyManifest({ manifestBytes, signatureBytes, keys, now = Date
 
   const nowMillis = typeof now === 'number' ? now : Date.parse(String(now));
   if (!Number.isFinite(nowMillis)) return reject('manifest_malformed');
-  if (nowMillis < parseTimestamp(manifest.published_at) - 5 * 60 * 1000) {
+  if (nowMillis < parseTimestamp(manifest.published_at) - CLOCK_SKEW_MS) {
     return reject('manifest_not_yet_valid');
   }
   if (nowMillis >= parseTimestamp(manifest.expires_at)) return reject('manifest_expired');

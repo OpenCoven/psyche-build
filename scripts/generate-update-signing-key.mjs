@@ -9,9 +9,18 @@
 // never printed. Only the public key entry for release/update-manifest-keys.json
 // is printed.
 
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { closeSync, existsSync, fchmodSync, fstatSync, openSync, realpathSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  openSync,
+  realpathSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -21,42 +30,83 @@ const USAGE = `usage: generate-update-signing-key.mjs --out <path-outside-any-gi
 
 class UsageError extends Error {}
 
-function insideGitWorkTree(directory) {
-  try {
-    const output = execFileSync('git', ['-C', directory, 'rev-parse', '--is-inside-work-tree'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return output.trim() === 'true';
-  } catch {
-    return false;
+function hasGitSegment(filePath) {
+  return filePath.split(path.sep).includes('.git');
+}
+
+// Git-independent backstop: any ancestor holding a `.git` file or directory
+// means the target is inside (or beside the metadata of) a checkout.
+function ancestorHasGitMarker(directory) {
+  let current = directory;
+  for (;;) {
+    if (existsSync(path.join(current, '.git'))) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
   }
+}
+
+// Asks Git itself, with every GIT_* variable removed so GIT_DIR,
+// GIT_CEILING_DIRECTORIES, GIT_WORK_TREE and friends cannot redirect the
+// answer. Only Git's own "not a git repository" verdict counts as outside;
+// every other outcome (Git missing, dubious ownership, a .git directory, any
+// unexpected status) fails closed.
+function assertGitSaysOutside(directory, env) {
+  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith('GIT_')));
+  const result = spawnSync('git', ['-C', directory, 'rev-parse', '--is-inside-work-tree'], {
+    encoding: 'utf8',
+    env: childEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error) {
+    throw new UsageError('Git is unavailable, so the output location cannot be proven to be outside a Git checkout');
+  }
+  if (result.status === 128 && /not a git repository/i.test(result.stderr ?? '')) return;
+  if (result.status === 0) {
+    throw new UsageError('Refusing to write a private key inside a Git working tree or Git directory');
+  }
+  throw new UsageError('Git could not confirm the output location is outside a Git checkout; refusing');
+}
+
+function assertOutsideGit(target, directory, env) {
+  if (hasGitSegment(target) || hasGitSegment(directory)) {
+    throw new UsageError('Refusing to write a private key inside a .git directory');
+  }
+  if (ancestorHasGitMarker(directory)) {
+    throw new UsageError('Refusing to write a private key inside a Git working tree');
+  }
+  assertGitSaysOutside(directory, env);
 }
 
 /**
  * Generates a key pair, writes the private PEM to `outPath` with mode 0600,
  * and returns only the public entry `{ keyId, publicKey }`.
  */
-export function generateSigningKey(outPath) {
+export function generateSigningKey(outPath, { env = process.env } = {}) {
   const target = path.resolve(outPath);
   const directory = path.dirname(target);
   if (!existsSync(directory)) throw new UsageError('The output directory does not exist');
-  if (insideGitWorkTree(realpathSync(directory))) {
-    throw new UsageError('Refusing to write a private key inside a Git working tree');
-  }
+  const realDirectory = realpathSync(directory);
+  assertOutsideGit(path.join(realDirectory, path.basename(target)), realDirectory, env);
   const { privateKey } = generateKeyPairSync('ed25519');
   const pem = privateKey.export({ format: 'pem', type: 'pkcs8' });
   // 'wx' refuses to follow or replace an existing path, and the mode applies
   // at creation so the key is never readable by anyone else, even briefly.
   const descriptor = openSync(target, 'wx', 0o600);
+  let complete = false;
   try {
     fchmodSync(descriptor, 0o600);
-    writeSync(descriptor, pem);
+    const bytes = Buffer.from(pem, 'utf8');
+    const written = writeSync(descriptor, bytes);
+    if (written !== bytes.length) throw new Error('Private key was only partially written');
     if ((fstatSync(descriptor).mode & 0o777) !== 0o600) {
       throw new Error('Private key file mode is not 0600');
     }
+    complete = true;
   } finally {
     closeSync(descriptor);
+    // Never leave a truncated key behind for someone to upload by mistake.
+    if (!complete) unlinkSync(target);
   }
   return publicKeyEntryFromPrivatePem(pem);
 }

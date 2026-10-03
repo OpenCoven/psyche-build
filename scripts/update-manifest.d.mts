@@ -2,6 +2,7 @@ export const MANIFEST_SCHEMA: 1;
 export const SIGNATURE_SCHEMA: 1;
 export const KEYS_SCHEMA: 1;
 export const MAX_VALIDITY_DAYS: 30;
+export const CLOCK_SKEW_SECONDS: 300;
 export const MANIFEST_FILE: 'update-manifest.json';
 export const SIGNATURE_FILE: 'update-manifest.json.sig';
 export const ARCHITECTURES: readonly ['aarch64', 'x86_64'];
