@@ -65,6 +65,13 @@ const mainRuntimeDiagnosticsCapabilityPath = join(
 const mainRuntimeDiagnosticsCapability = existsSync(mainRuntimeDiagnosticsCapabilityPath)
   ? JSON.parse(readFileSync(mainRuntimeDiagnosticsCapabilityPath, 'utf8'))
   : null;
+const mainUpdateCheckCapabilityPath = join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/src-tauri/capabilities/main-update-check.json',
+);
+const mainUpdateCheckCapability = existsSync(mainUpdateCheckCapabilityPath)
+  ? JSON.parse(readFileSync(mainUpdateCheckCapabilityPath, 'utf8'))
+  : null;
 const debugRuntimeStressCapabilityPath = join(
   repoRoot,
   'native/desktop/psyche-build-tauri/src-tauri/capabilities/debug/main-runtime-render-stress.json',
@@ -338,6 +345,25 @@ describe('Tauri desktop tab shortcuts', () => {
     });
     expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(2);
     expect(mainRuntimeDiagnosticsCapability.windows).toBeUndefined();
+
+    // The notify-only update status is readable only by the main webview,
+    // never by an embedded browser, and never through the default capability.
+    expect(mainUpdateCheckCapability).toMatchObject({
+      identifier: 'main-update-check',
+      local: true,
+      webviews: ['main'],
+      permissions: [
+        'allow-update-status',
+        'allow-update-skip-version',
+        'allow-update-dismiss',
+        'allow-update-set-checks-enabled',
+      ],
+    });
+    expect(mainUpdateCheckCapability.windows).toBeUndefined();
+    expect(mainUpdateCheckCapability.remote).toBeUndefined();
+    for (const permission of mainUpdateCheckCapability.permissions) {
+      expect(defaultCapability.permissions).not.toContain(permission);
+    }
     expect(JSON.stringify(mainRuntimeDiagnosticsCapability)).not.toContain('psyche-browser-*');
 
     expect(debugRuntimeStressCapability).toEqual({
@@ -358,6 +384,7 @@ describe('Tauri desktop tab shortcuts', () => {
     const mainAppPermissions = [
       ...mainWindowPermissions,
       ...mainRuntimeDiagnosticsCapability.permissions,
+      ...mainUpdateCheckCapability.permissions,
       ...debugRuntimeStressCapability.permissions,
     ];
     expect([...mainAppPermissions].sort()).toEqual([...generatedPermissions].sort());

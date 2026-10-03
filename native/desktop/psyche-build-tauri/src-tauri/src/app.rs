@@ -75,6 +75,7 @@ pub fn run() {
     builder
         .manage(runtime_diagnostics_state)
         .manage(native_project_authority)
+        .manage(UpdateCheck::from_startup())
         .manage(MetricsState::default())
         .manage(ControlProviderState::default())
         .manage(BrowserShortcutAuthorizations::default())
@@ -146,6 +147,10 @@ pub fn run() {
                 control_state,
                 runtime_diagnostics,
                 runtime_process_metrics,
+                update_status,
+                update_skip_version,
+                update_dismiss,
+                update_set_checks_enabled,
                 #[cfg(debug_assertions)]
                 diagnostics_spawn_fixture,
                 #[cfg(debug_assertions)]
@@ -161,6 +166,15 @@ pub fn run() {
                         .data_store_identifier(profile.main_store)
                         .incognito(false)
                         .build()?;
+                }
+            }
+            // App-scoped update state lives under the app data directory
+            // (`~/Library/Application Support/dev.opencoven.psyche` on macOS),
+            // never in a project config. The acceptance profile keeps none.
+            if !acceptance::active() {
+                if let Ok(directory) = app.path().app_data_dir() {
+                    app.state::<UpdateCheck>().initialize(directory);
+                    update_check::spawn_scheduler(app.handle().clone());
                 }
             }
             if let Err(error) = platform::configure_window(app) {
