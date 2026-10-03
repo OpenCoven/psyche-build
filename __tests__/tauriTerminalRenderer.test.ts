@@ -1029,7 +1029,7 @@ describe('Tauri terminal controller integration', () => {
     expect(mainSource).not.toMatch(/new window\.Terminal|new window\.FitAddon|new window\.WebglAddon/);
     expect(mainSource).not.toContain('ptyRuntime.routePtyBatch(payload)');
     expect(mainSource).toContain('thread.terminalController.receive(payload)');
-    expect(mainSource).toContain('thread.terminalController.setTheme(terminalTheme())');
+    expect(mainSource).toContain('thread.terminalController.setTheme(terminalTheme(thread.host));');
   });
 
   it('ships the WebGL recovery and cooldown state machine in the runtime bundle', () => {
