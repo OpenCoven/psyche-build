@@ -53,18 +53,38 @@ function button(doc, label, action, onClick) {
   return node;
 }
 
+const renderState = new WeakMap();
+
+function modelKey(model) {
+  return model ? JSON.stringify(model) : '';
+}
+
 /**
- * Renders `model` into `container`. The container itself is the polite live
- * region (`role="status"`), so assistive technology announces the notice once
- * without moving focus.
+ * Renders `model` into `container`. Only the title line is a polite live
+ * region (`role="status"`), and it is the same element across renders, so a
+ * screen reader announces the version once without moving focus and never
+ * re-reads the command or SHA-256. Rendering the same model again is a no-op.
  */
 export function renderUpdateBanner(container, model, handlers, doc = container.ownerDocument) {
+  let state = renderState.get(container);
+  if (!state) {
+    const title = element(doc, 'p', 'update-banner-title');
+    title.setAttribute('role', 'status');
+    title.setAttribute('aria-live', 'polite');
+    state = { key: null, title };
+    renderState.set(container, state);
+  }
+  const key = modelKey(model);
+  if (key === state.key) return false;
+  state.key = key;
   if (!model) {
+    state.title.textContent = '';
     container.replaceChildren();
     container.hidden = true;
-    return;
+    return true;
   }
-  const title = element(doc, 'p', 'update-banner-title', `Psyche Build ${model.version} is available.`);
+  const title = state.title;
+  title.textContent = `Psyche Build ${model.version} is available.`;
   const note = element(
     doc,
     'p',
@@ -104,6 +124,7 @@ export function renderUpdateBanner(container, model, handlers, doc = container.o
   );
   container.replaceChildren(title, note, steps, actions);
   container.hidden = false;
+  return true;
 }
 
 /**
@@ -119,20 +140,46 @@ export function createUpdateBannerController({
   writeText = null,
   openUrl = null,
   announce = () => {},
+  restoreFocus = () => {},
 }) {
   let status = null;
   let disposed = false;
   let unlisten = null;
+  // The element that had focus before focus entered the banner, so hiding
+  // the banner (Skip, Dismiss, Escape) can hand focus back instead of
+  // dropping it on <body>.
+  let focusOrigin = null;
+  const doc = container.ownerDocument;
+
+  const focusInside = () => {
+    const active = doc && doc.activeElement;
+    return Boolean(active && container.contains(active));
+  };
+
+  function returnFocus() {
+    const origin = focusOrigin;
+    focusOrigin = null;
+    if (origin && origin.isConnected !== false && typeof origin.focus === 'function' && !container.contains(origin)) {
+      origin.focus();
+    } else {
+      restoreFocus();
+    }
+  }
+
+  function syncToggle() {
+    if (!checksToggle) return;
+    const supported = Boolean(status && status.checks_supported);
+    if (checksRow) checksRow.hidden = !supported;
+    checksToggle.disabled = !supported;
+    checksToggle.checked = supported && Boolean(status.checks_enabled);
+  }
 
   function apply(next) {
     status = next && typeof next === 'object' ? next : null;
+    const hadFocus = focusInside();
     renderUpdateBanner(container, bannerModel(status), handlers);
-    if (checksToggle) {
-      const supported = Boolean(status && status.checks_supported);
-      if (checksRow) checksRow.hidden = !supported;
-      checksToggle.disabled = !supported;
-      checksToggle.checked = supported && Boolean(status.checks_enabled);
-    }
+    if (hadFocus && container.hidden) returnFocus();
+    syncToggle();
     return status;
   }
 
@@ -143,6 +190,8 @@ export function createUpdateBannerController({
       // A refused or failed command leaves the banner as it was; it never
       // falls back to some other action.
       console.warn(`[update] ${command} failed`, error);
+      // Put the checkbox back to the last known native setting.
+      syncToggle();
       return status;
     }
   }
@@ -169,6 +218,15 @@ export function createUpdateBannerController({
     dismiss: () => call('update_dismiss'),
   };
 
+  function onFocusin(event) {
+    const from = event.relatedTarget;
+    if (from && !container.contains(from)) focusOrigin = from;
+  }
+  container.addEventListener('focusin', onFocusin);
+
+  // Escape dismisses only while focus is inside the banner. That is
+  // intentional: Escape elsewhere belongs to the terminal and other panels,
+  // and the banner never steals focus to receive it.
   function onKeydown(event) {
     if (event.key === 'Escape' && !container.hidden) {
       event.preventDefault();
@@ -202,6 +260,7 @@ export function createUpdateBannerController({
     dispose() {
       disposed = true;
       container.removeEventListener('keydown', onKeydown);
+      container.removeEventListener('focusin', onFocusin);
       if (checksToggle) checksToggle.removeEventListener('change', onToggle);
       if (typeof unlisten === 'function') unlisten();
     },

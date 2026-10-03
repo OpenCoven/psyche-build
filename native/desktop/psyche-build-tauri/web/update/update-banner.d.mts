@@ -48,7 +48,7 @@ export function renderUpdateBanner(
   model: UpdateBannerModel | null,
   handlers: UpdateBannerHandlers,
   doc?: any,
-): void;
+): boolean;
 export function createUpdateBannerController(options: {
   invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   listen?: ((event: string, callback: () => void) => unknown) | null;
@@ -58,6 +58,7 @@ export function createUpdateBannerController(options: {
   writeText?: ((text: string) => Promise<unknown>) | null;
   openUrl?: ((url: string) => Promise<unknown>) | null;
   announce?: (message: string) => void;
+  restoreFocus?: () => void;
 }): {
   refresh(): Promise<UpdateStatus | null>;
   handlers: UpdateBannerHandlers;

@@ -1019,8 +1019,10 @@ reports the previous value as `upgraded_from`; a downgrade reports nothing.
 Reconciling open project configs through the #464 gate is not implemented.
 
 **What users see.** Only the `available` state shows anything: a banner at
-the top right of the workspace. It is a polite live region (`role="status"`),
-so a screen reader announces it without moving focus. The banner shows the
+the top right of the workspace. Only its title line is a polite live region
+(`role="status"`), so a screen reader announces the new version once, without
+moving focus, and does not re-read the command or the SHA-256. Refreshing the
+same status re-renders nothing. The banner shows the
 new version, the running version, and a note that Psyche Build never installs
 updates or restarts by itself. The instructions depend on the install source:
 
@@ -1034,7 +1036,12 @@ updates or restarts by itself. The instructions depend on the install source:
 
 The banner's only buttons are **Skip this version**, which persists, and
 **Dismiss**, which lasts until the next launch or a different version. Escape
-also dismisses. There is no install button. The
+also dismisses, but only while focus is inside the banner. This is
+intentional: Escape elsewhere belongs to the terminal and other panels, and
+the banner never takes focus. When the banner hides while it has focus, focus
+returns to the element focused before it, or to the active terminal. If
+turning checks off fails, the checkbox returns to the saved setting. There is
+no install button. The
 **Check for updates** checkbox under Appearance turns checks off and on. It
 appears only in builds that have a provisioned key.
 

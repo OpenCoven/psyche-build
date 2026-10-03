@@ -2940,6 +2940,13 @@
         : null,
       openUrl: openUrl,
       announce: function (message) { toast(message); },
+      // Used when the element focused before the banner is gone.
+      restoreFocus: function () {
+        var thread = state.threads.find(function (candidate) {
+          return candidate.id === state.activeThreadId;
+        });
+        if (thread && thread.terminalController) thread.terminalController.focus();
+      },
     });
     controller.refresh();
     return controller;

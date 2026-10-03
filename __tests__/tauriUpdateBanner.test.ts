@@ -51,6 +51,8 @@ class FakeElement {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
     return event;
   }
+  contains(node: unknown): boolean { return node === this || this.descendants().includes(node as FakeElement); }
+  focus() { this.ownerDocument.activeElement = this; }
   descendants(): FakeElement[] { return this.children.flatMap((child) => [child, ...child.descendants()]); }
   buttons() { return this.descendants().filter((node) => node.tagName === 'BUTTON'); }
   button(label: string) {
@@ -61,6 +63,7 @@ class FakeElement {
 }
 
 class FakeDocument {
+  activeElement: FakeElement | null = null;
   createElement(tag: string) { return new FakeElement(this, tag); }
 }
 
@@ -173,6 +176,26 @@ describe('update banner rendering', () => {
     expect(h.openRelease).toHaveBeenCalledWith('https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.3');
   });
 
+  it('makes only the title a polite live region and keeps it across renders', () => {
+    const doc = new FakeDocument();
+    const container = doc.createElement('section');
+    const h = handlers();
+    expect(renderUpdateBanner(container as never, bannerModel(available({ install_source: 'unknown' })), h, doc as never)).toBe(true);
+    const live = container.descendants().filter((node) => node.getAttribute('aria-live') === 'polite');
+    expect(live).toHaveLength(1);
+    expect(live[0].getAttribute('role')).toBe('status');
+    expect(live[0].textContent).toBe('Psyche Build 0.0.3 is available.');
+    expect(live[0].textContent).not.toContain(SHA);
+    expect(live[0].textContent).not.toContain(CASK_UPGRADE_COMMAND);
+    const children = container.children;
+    // The same model again changes nothing, so nothing is re-announced.
+    expect(renderUpdateBanner(container as never, bannerModel(available({ install_source: 'unknown' })), h, doc as never)).toBe(false);
+    expect(container.children).toBe(children);
+    // A different model reuses the same live element.
+    renderUpdateBanner(container as never, bannerModel(available({ install_source: 'dmg' })), h, doc as never);
+    expect(container.children[0]).toBe(live[0]);
+  });
+
   it('hides and empties itself when there is nothing to show', () => {
     const doc = new FakeDocument();
     const container = doc.createElement('section');
@@ -182,10 +205,10 @@ describe('update banner rendering', () => {
     expect(container.children).toHaveLength(0);
   });
 
-  it('is a polite live region in the page markup, hidden until needed', () => {
+  it('is a labelled region in the page markup, hidden until needed, with no live region of its own', () => {
     const banner = indexHtml.match(/<section\s+class="update-banner"[\s\S]*?><\/section>/)?.[0] ?? '';
-    expect(banner).toContain('role="status"');
-    expect(banner).toContain('aria-live="polite"');
+    expect(banner).not.toContain('role="status"');
+    expect(banner).not.toContain('aria-live');
     expect(banner).toContain('aria-label="Psyche Build update"');
     expect(banner).toMatch(/\shidden\s/);
     expect(indexHtml).toContain('<script src="./update.bundle.js" defer></script>');
@@ -265,6 +288,56 @@ describe('update banner controller', () => {
     await flush();
     warn.mockRestore();
     expect(container.hidden).toBe(false);
+  });
+
+  it('puts the checkbox back when turning checks off is refused', async () => {
+    const { controller, checksToggle, native } = setup();
+    await controller.refresh();
+    native.invoke.mockRejectedValueOnce(new Error('refused'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    checksToggle.checked = false;
+    checksToggle.dispatch('change');
+    await flush();
+    warn.mockRestore();
+    expect(checksToggle.checked).toBe(true);
+  });
+
+  it('returns focus to where it came from when the banner hides under focus', async () => {
+    const { controller, container } = setup();
+    await controller.refresh();
+    const doc = container.ownerDocument;
+    const terminal = doc.createElement('div');
+    terminal.focus();
+    const dismiss = container.button('Dismiss');
+    dismiss.focus();
+    container.dispatch('focusin', { relatedTarget: terminal });
+    dismiss.dispatch('click');
+    await flush();
+    expect(container.hidden).toBe(true);
+    expect(doc.activeElement).toBe(terminal);
+  });
+
+  it('falls back to restoreFocus when the previous element is gone', async () => {
+    const doc = new FakeDocument();
+    const container = doc.createElement('section');
+    const native = nativeMock(available());
+    const restoreFocus = vi.fn();
+    const controller = createUpdateBannerController({ invoke: native.invoke, container: container as never, restoreFocus });
+    await controller.refresh();
+    const skip = container.button('Skip this version');
+    skip.focus();
+    container.dispatch('keydown', { key: 'Escape' });
+    await flush();
+    expect(container.hidden).toBe(true);
+    expect(restoreFocus).toHaveBeenCalledTimes(1);
+    // Hiding while focus is elsewhere never moves focus.
+    const other = setup();
+    await other.controller.refresh();
+    const outside = other.container.ownerDocument.createElement('div');
+    outside.focus();
+    other.container.button('Dismiss').dispatch('click');
+    await flush();
+    expect(other.container.ownerDocument.activeElement).toBe(outside);
   });
 
   it('shows the checks setting only when supported, and turns checks off', async () => {
