@@ -959,7 +959,13 @@ byte for byte. It checks the signature over the raw bytes before parsing,
 then canonical re-serialization, then the schema and the tag, then the
 validity window with 300 seconds of clock skew. Finally it requires a version
 strictly newer than the running app. After a failed check, the next check
-waits twice as long, up to a week.
+waits twice as long, up to a week. A failed check does not withdraw an update
+this session already verified, or forget its dismissal, until that manifest
+expires; `last_outcome` still records the failure.
+
+Each running app instance keeps its own schedule and checks independently.
+Two instances can check close together and both write `update-check.json`;
+the atomic rename means the last writer wins, with no torn file.
 
 Every check ends in exactly one state, and nothing else happens:
 
@@ -979,10 +985,16 @@ Every check ends in exactly one state, and nothing else happens:
 | `available` | Verified and newer. The app may show the notice. |
 
 **Cross-implementation vectors.** `pnpm generate:update-manifest-vectors`
-signs about 40 cases with the Node reference and records the reference's
+signs about 45 cases with the Node reference and records the reference's
 outcome for each in
 `native/desktop/psyche-build-tauri/src-tauri/test-fixtures/update-manifest/vectors.json`.
-The Rust tests require the same outcome for every case. A vitest test fails
+The Rust tests require the same outcome for every case except two
+intentional differences, each marked `rust_expect` in the file. Rust uses
+`verify_strict`, which refuses a small-order key that OpenSSL accepts. Rust
+also caps JSON nesting at 32 levels, so it reports a deeper signed document
+as `manifest_malformed` where Node reports `manifest_not_canonical`. Both
+differences only make Rust stricter on inputs that no honest signer
+produces. A vitest test fails
 when the checked-in file differs from a fresh run. The vector keys are
 derived from public labels, so anyone can recompute them. The generator and
 the test both refuse to run if `release/update-manifest-keys.json` trusts one
@@ -992,9 +1004,12 @@ of them.
 (`~/Library/Application Support/dev.opencoven.psyche`) holds `checks_enabled`,
 `last_check`, `last_outcome`, `skipped_version`, `last_seen_version` and the
 failure count. It is written through a temporary file and an atomic rename,
-and an unreadable or oversized file loads as defaults. Project configs are
+and it is read field by field: an unreadable or oversized file loads as
+defaults, and one invalid or unknown field never discards the others, so a
+checks-off setting survives a downgrade. Project configs are
 never touched. On the first launch of a new version, the app records it as
-`last_seen_version` and reports the previous value as `upgraded_from`.
+`last_seen_version`. When that is a move to a strictly newer version, it
+reports the previous value as `upgraded_from`; a downgrade reports nothing.
 Reconciling open project configs through the #464 gate is not implemented.
 
 **Commands.** Only the `main` webview may call `update_status`,

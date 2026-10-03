@@ -40,5 +40,10 @@ describe('update manifest cross-implementation vectors', () => {
       expect(outcomes.has(outcome)).toBe(true);
     }
     expect(vectors.cases.some((entry) => entry.expect.slot === 'next')).toBe(true);
+    // Intentional Rust differences are explicit and few (see update_manifest.rs).
+    const divergent = (vectors.cases as { name: string; rust_expect?: unknown }[])
+      .filter((entry) => entry.rust_expect !== undefined)
+      .map((entry) => entry.name);
+    expect(divergent).toEqual(['small_order_key_accepted_by_reference_only', 'deep_non_canonical_document']);
   });
 });

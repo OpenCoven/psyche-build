@@ -18,6 +18,20 @@
 //! exactly: strings are UTF-16 code-unit sequences (lone surrogates allowed),
 //! numbers are IEEE doubles, a duplicate key keeps its last value, and keys
 //! sort by UTF-16 code unit.
+//!
+//! Two differences are intentional, and each is pinned by a vector carrying
+//! `rust_expect`:
+//!
+//! - **Small-order points.** Signatures are checked with `verify_strict`,
+//!   which also refuses a small-order public key or `R`. OpenSSL (the Node
+//!   reference) accepts a degenerate key such as the identity point. An honest
+//!   key and signature never contain one, so both accept exactly the same
+//!   signatures from a real signer; only a keys file that trusts a degenerate
+//!   key can tell them apart, and then Rust fails closed (`signature_invalid`).
+//! - **Nesting depth.** The reader refuses documents nested deeper than
+//!   32 levels (a stack bound). A signed, non-canonical document that deep is
+//!   `manifest_malformed` here and `manifest_not_canonical` in the reference.
+//!   Both refuse it; a valid manifest nests three levels deep.
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -802,18 +816,31 @@ mod tests {
     #[test]
     fn every_reference_vector_gets_the_reference_outcome() {
         let all = vectors();
-        let keys = keys_from(&all["keys"]);
+        let default_keys = keys_from(&all["keys"]);
         let cases = all["cases"].as_array().unwrap();
-        assert!(cases.len() >= 40, "vector set shrank");
+        assert!(cases.len() >= 45, "vector set shrank");
+        let mut divergences = Vec::new();
         for case in cases {
             let name = case["name"].as_str().unwrap();
+            let keys = if case["keys"].is_null() {
+                default_keys.clone()
+            } else {
+                keys_from(&case["keys"])
+            };
             let result = verify_manifest(
                 &decode(&case["manifest_base64"]),
                 &decode(&case["signature_base64"]),
                 &keys,
                 now_ms(&case["now"]),
             );
-            let expect = &case["expect"];
+            // `rust_expect` marks a documented, intentional difference from
+            // the reference (see the module docs); everything else must match.
+            let expect = if case["rust_expect"].is_null() {
+                &case["expect"]
+            } else {
+                divergences.push(name);
+                &case["rust_expect"]
+            };
             match result {
                 Ok(verified) => {
                     assert_eq!(expect["outcome"], "ok", "{name}: Rust accepted");
@@ -830,6 +857,13 @@ mod tests {
                 }
             }
         }
+        assert_eq!(
+            divergences,
+            [
+                "small_order_key_accepted_by_reference_only",
+                "deep_non_canonical_document"
+            ]
+        );
     }
 
     #[test]

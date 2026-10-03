@@ -168,26 +168,42 @@ where
     }
 }
 
-/// Persisted app-scoped state. Unknown or invalid fields are dropped on load.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Persisted app-scoped state. It is read field by field (see
+/// [`Persisted::from_json`]), so one invalid or future field never discards
+/// the others, in particular a user's `checks_enabled: false`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Persisted {
-    #[serde(default)]
     pub schema: u32,
-    #[serde(default)]
     pub checks_enabled: Option<bool>,
-    #[serde(default)]
     pub last_check: Option<String>,
-    #[serde(default)]
     pub last_outcome: Option<CheckState>,
-    #[serde(default)]
     pub skipped_version: Option<String>,
-    #[serde(default)]
     pub last_seen_version: Option<String>,
-    #[serde(default)]
     pub consecutive_failures: u32,
 }
 
 impl Persisted {
+    /// Lenient per-field reader: each field that is missing, mistyped, out of
+    /// range, or an unknown enum value (for example a state written by a newer
+    /// build before a downgrade) falls back to its own default.
+    fn from_json(value: &serde_json::Value) -> Self {
+        let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        Self {
+            schema: STATE_SCHEMA,
+            checks_enabled: value.get("checks_enabled").and_then(|v| v.as_bool()),
+            last_check: text("last_check"),
+            last_outcome: value
+                .get("last_outcome")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            skipped_version: text("skipped_version"),
+            last_seen_version: text("last_seen_version"),
+            consecutive_failures: value
+                .get("consecutive_failures")
+                .and_then(|v| v.as_u64())
+                .map_or(0, |count| count.min(16) as u32),
+        }
+    }
+
     fn sanitized(mut self) -> Self {
         self.schema = STATE_SCHEMA;
         if self
@@ -226,7 +242,9 @@ pub fn load_state(path: &Path) -> Persisted {
         if file.metadata().ok()?.len() > MAX_STATE_FILE_BYTES {
             return None;
         }
-        serde_json::from_reader(std::io::Read::take(file, MAX_STATE_FILE_BYTES)).ok()
+        let value: serde_json::Value =
+            serde_json::from_reader(std::io::Read::take(file, MAX_STATE_FILE_BYTES)).ok()?;
+        value.is_object().then(|| Persisted::from_json(&value))
     };
     read().unwrap_or_default().sanitized()
 }
@@ -330,6 +348,9 @@ pub struct UpdateStatusView {
     pub checks_supported: bool,
     pub checks_enabled: bool,
     pub last_check: Option<String>,
+    /// The result of the most recent check, which can differ from `state`
+    /// when a later check failed after an update was verified.
+    pub last_outcome: Option<CheckState>,
     pub install_source: InstallSource,
     pub skipped: bool,
     pub dismissed: bool,
@@ -416,8 +437,12 @@ impl UpdateCheck {
     pub fn initialize(&self, directory: PathBuf) {
         let path = directory.join(STATE_FILE);
         let mut persisted = load_state(&path);
-        let previous = persisted.last_seen_version.clone();
-        let upgraded_from = previous.filter(|seen| *seen != self.running_version);
+        // Only a move to a strictly newer version is an upgrade; a downgrade
+        // or a reinstall of the same version reports nothing. A prerelease
+        // running build is never reported as an upgrade.
+        let upgraded_from = persisted.last_seen_version.clone().filter(|seen| {
+            update_manifest::is_newer_version(&self.running_version, seen) == Some(true)
+        });
         let first_launch_of_version =
             persisted.last_seen_version.as_deref() != Some(&self.running_version);
         if first_launch_of_version {
@@ -475,6 +500,7 @@ impl UpdateCheck {
             checks_supported: self.supported,
             checks_enabled: self.checks_enabled(&inner.persisted),
             last_check: inner.persisted.last_check.clone(),
+            last_outcome: inner.persisted.last_outcome,
             install_source: self.install_source,
             skipped: available.as_ref().is_some_and(|view| {
                 inner.persisted.skipped_version.as_deref() == Some(view.version.as_str())
@@ -515,17 +541,36 @@ impl UpdateCheck {
                 .saturating_add(1)
                 .min(16)
         };
-        // A newly offered version is shown again even if a previous one was dismissed.
-        if outcome.manifest.as_ref().map(|m| &m.version) != previous_version.as_ref() {
-            inner.dismissed = false;
+        if outcome.state.is_success() {
+            // A newly offered version is shown again even if a previous one
+            // was dismissed.
+            if outcome.manifest.as_ref().map(|m| &m.version) != previous_version.as_ref() {
+                inner.dismissed = false;
+            }
+            inner.available = outcome.manifest;
+        } else {
+            // A failed check (offline, refused manifest, ...) neither withdraws
+            // an update this session already verified nor forgets its
+            // dismissal, unless that manifest has since expired.
+            let still_valid = inner.available.as_ref().is_some_and(|manifest| {
+                update_manifest::parse_timestamp(&manifest.expires_at)
+                    .is_some_and(|expires| now_seconds < expires)
+            });
+            if !still_valid {
+                inner.available = None;
+            }
         }
+        let shown = if inner.available.is_some() {
+            CheckState::Available
+        } else {
+            outcome.state
+        };
         // Turning checks off while one ran keeps the user's choice visible.
         inner.state = if self.checks_enabled(&inner.persisted) {
-            outcome.state
+            shown
         } else {
             CheckState::Off
         };
-        inner.available = outcome.manifest;
         let persisted = inner.persisted.clone();
         drop(inner);
         self.save(&persisted);
@@ -1131,6 +1176,107 @@ mod tests {
         assert_eq!(loaded.consecutive_failures, 16);
         std::fs::write(&path, vec![b' '; (MAX_STATE_FILE_BYTES + 1) as usize]).unwrap();
         assert_eq!(load_state(&path), Persisted::default().sanitized());
+    }
+
+    #[test]
+    fn one_invalid_field_never_discards_a_valid_checks_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let load = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load_state(&path)
+        };
+        let future = load(r#"{"checks_enabled":false,"last_outcome":"future_state"}"#);
+        assert_eq!(future.checks_enabled, Some(false));
+        assert_eq!(future.last_outcome, None);
+        let negative = load(
+            r#"{"checks_enabled":false,"consecutive_failures":-1,"last_seen_version":"0.0.2"}"#,
+        );
+        assert_eq!(negative.checks_enabled, Some(false));
+        assert_eq!(negative.consecutive_failures, 0);
+        assert_eq!(negative.last_seen_version.as_deref(), Some("0.0.2"));
+        let mistyped = load(
+            r#"{"checks_enabled":"no","skipped_version":"1.2.3","schema":"x","last_check":7}"#,
+        );
+        assert_eq!(mistyped.checks_enabled, None);
+        assert_eq!(mistyped.skipped_version.as_deref(), Some("1.2.3"));
+        assert_eq!(mistyped.last_check, None);
+        let known =
+            load(r#"{"checks_enabled":false,"last_outcome":"not_newer","future_field":{"a":1}}"#);
+        assert_eq!(known.checks_enabled, Some(false));
+        assert_eq!(known.last_outcome, Some(CheckState::NotNewer));
+        assert_eq!(load("[]"), Persisted::default().sanitized());
+        // The setting survives into the running state too.
+        load(r#"{"checks_enabled":false,"last_outcome":"future_state"}"#);
+        let check = UpdateCheck::new(vectors().keys, true, "0.0.2".into(), InstallSource::Unknown);
+        check.initialize(dir.path().to_path_buf());
+        assert_eq!(check.status().state, CheckState::Off);
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_keeps_a_verified_update_and_its_dismissal() {
+        let v = vectors();
+        let (manifest, signature, now) = v.case("valid_current_key");
+        let dir = tempfile::tempdir().unwrap();
+        let check = UpdateCheck::new(v.keys.clone(), true, "0.0.2".into(), InstallSource::Dmg);
+        check.initialize(dir.path().to_path_buf());
+        let fake = Fake::serving(manifest, signature);
+        assert!(check.run_if_due(now, || Ok::<_, FetchError>(&fake)).await);
+        check.dismiss();
+        let offline = Fake {
+            manifest: Err(FetchError::Unreachable),
+            signature: Err(FetchError::Unreachable),
+            calls: AtomicUsize::new(0),
+        };
+        let day_ms = CHECK_INTERVAL_SECONDS * 1000;
+        assert!(
+            check
+                .run_if_due(now + day_ms, || Ok::<_, FetchError>(&offline))
+                .await
+        );
+        let status = check.status();
+        assert_eq!(status.state, CheckState::Available);
+        assert_eq!(status.last_outcome, Some(CheckState::Unreachable));
+        assert!(status.dismissed, "the dismissal survives a failed check");
+        assert_eq!(status.available.unwrap().version, "9.8.7");
+        // Once the retained manifest has expired, a failure withdraws it.
+        let after_expiry = update_manifest::parse_timestamp("2026-10-02T00:00:00Z").unwrap() * 1000;
+        assert!(
+            check
+                .run_if_due(after_expiry, || Ok::<_, FetchError>(&offline))
+                .await
+        );
+        assert_eq!(check.status().state, CheckState::Unreachable);
+        assert!(check.status().available.is_none());
+    }
+
+    #[test]
+    fn a_downgrade_is_not_reported_as_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+        save_state(
+            &path,
+            &Persisted {
+                last_seen_version: Some("0.0.3".into()),
+                ..Persisted::default()
+            },
+        )
+        .unwrap();
+        let check = UpdateCheck::new(
+            TrustedKeys {
+                current: None,
+                next: None,
+            },
+            false,
+            "0.0.2".into(),
+            InstallSource::Unknown,
+        );
+        check.initialize(dir.path().to_path_buf());
+        assert_eq!(check.status().upgraded_from, None);
+        assert_eq!(
+            load_state(&path).last_seen_version.as_deref(),
+            Some("0.0.2")
+        );
     }
 
     #[test]

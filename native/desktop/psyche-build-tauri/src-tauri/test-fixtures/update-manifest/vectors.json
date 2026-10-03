@@ -396,6 +396,61 @@
         "key_id": "2e4a3c1840a618e3",
         "version": "9.8.7"
       }
+    },
+    {
+      "name": "signature_base64_trailing_bits",
+      "now": "2026-09-10T00:00:00Z",
+      "manifest_base64": "eyJhcnRpZmFjdHMiOnsiYWFyY2g2NCI6eyJmaWxlIjoiUHN5Y2hlLUJ1aWxkLXY5LjguNy1hYXJjaDY0LmRtZyIsInNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifSwieDg2XzY0Ijp7ImZpbGUiOiJQc3ljaGUtQnVpbGQtdjkuOC43LXg4Nl82NC5kbWciLCJzaGEyNTYiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIn19LCJleHBpcmVzX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJwdWJsaXNoZWRfYXQiOiIyMDI2LTA5LTAxVDAwOjAwOjAwWiIsInNjaGVtYSI6MSwic291cmNlX3NoYSI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1NjciLCJ0YWciOiJ2OS44LjciLCJ2ZXJzaW9uIjoiOS44LjcifQo=",
+      "signature_base64": "eyJhbGdvcml0aG0iOiJlZDI1NTE5Iiwia2V5X2lkIjoiMmU0YTNjMTg0MGE2MThlMyIsInNjaGVtYSI6MSwic2lnbmF0dXJlIjoibXlkZXhTU2NLN2kyMHhXc05IditzNFFMekM3R3AwRWVuM1Q5Tnp5NU1TZ2tTV1pIZ0pCcmNydGdUUWFvdjJJMzVrYlR6VjEwMVdnRlBwY2tCaE43QVI9PSJ9Cg==",
+      "expect": {
+        "outcome": "signature_malformed"
+      }
+    },
+    {
+      "name": "signature_s_out_of_range",
+      "now": "2026-09-10T00:00:00Z",
+      "manifest_base64": "eyJhcnRpZmFjdHMiOnsiYWFyY2g2NCI6eyJmaWxlIjoiUHN5Y2hlLUJ1aWxkLXY5LjguNy1hYXJjaDY0LmRtZyIsInNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifSwieDg2XzY0Ijp7ImZpbGUiOiJQc3ljaGUtQnVpbGQtdjkuOC43LXg4Nl82NC5kbWciLCJzaGEyNTYiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIn19LCJleHBpcmVzX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJwdWJsaXNoZWRfYXQiOiIyMDI2LTA5LTAxVDAwOjAwOjAwWiIsInNjaGVtYSI6MSwic291cmNlX3NoYSI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1NjciLCJ0YWciOiJ2OS44LjciLCJ2ZXJzaW9uIjoiOS44LjcifQo=",
+      "signature_base64": "eyJhbGdvcml0aG0iOiJlZDI1NTE5Iiwia2V5X2lkIjoiMmU0YTNjMTg0MGE2MThlMyIsInNjaGVtYSI6MSwic2lnbmF0dXJlIjoibXlkZXhTU2NLN2kyMHhXc05IditzNFFMekM3R3AwRWVuM1Q5Tnp5NU1TZ1JIVnlrbXZOOXlwSDlSS21HdVVGTTVrYlR6VjEwMVdnRlBwY2tCaE43RVE9PSJ9Cg==",
+      "expect": {
+        "outcome": "signature_invalid"
+      }
+    },
+    {
+      "name": "small_order_key_accepted_by_reference_only",
+      "now": "2026-09-10T00:00:00Z",
+      "manifest_base64": "eyJhcnRpZmFjdHMiOnsiYWFyY2g2NCI6eyJmaWxlIjoiUHN5Y2hlLUJ1aWxkLXY5LjguNy1hYXJjaDY0LmRtZyIsInNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifSwieDg2XzY0Ijp7ImZpbGUiOiJQc3ljaGUtQnVpbGQtdjkuOC43LXg4Nl82NC5kbWciLCJzaGEyNTYiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIn19LCJleHBpcmVzX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJwdWJsaXNoZWRfYXQiOiIyMDI2LTA5LTAxVDAwOjAwOjAwWiIsInNjaGVtYSI6MSwic291cmNlX3NoYSI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1NjciLCJ0YWciOiJ2OS44LjciLCJ2ZXJzaW9uIjoiOS44LjcifQo=",
+      "signature_base64": "eyJhbGdvcml0aG0iOiJlZDI1NTE5Iiwia2V5X2lkIjoiMDFkMGZhYmQyNTFmY2JiZSIsInNjaGVtYSI6MSwic2lnbmF0dXJlIjoiV0dabVptWm1abVptWm1abVptWm1abVptWm1abVptWm1abVptWm1abVptWUJBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE9PSJ9Cg==",
+      "expect": {
+        "outcome": "ok",
+        "slot": "current",
+        "key_id": "01d0fabd251fcbbe",
+        "version": "9.8.7"
+      },
+      "keys": {
+        "schema": 1,
+        "current": {
+          "keyId": "01d0fabd251fcbbe",
+          "publicKey": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "next": null
+      },
+      "rust_expect": {
+        "outcome": "signature_invalid",
+        "reason": "verify_strict refuses a small-order public key"
+      }
+    },
+    {
+      "name": "deep_non_canonical_document",
+      "now": "2026-09-10T00:00:00Z",
+      "manifest_base64": "eyAiYSI6IFtbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tdXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dIH0K",
+      "signature_base64": "eyJhbGdvcml0aG0iOiJlZDI1NTE5Iiwia2V5X2lkIjoiMmU0YTNjMTg0MGE2MThlMyIsInNjaGVtYSI6MSwic2lnbmF0dXJlIjoia0Rxc1d5K25tUlM2Q1l1U09Id0poQzk3SUo5d1NzWkQ0MEE2Q0tVa1p6OVFyVm92OVZRV2xCYWEybGptcExFZ3pJbkcwcHlQZ3p3Y05kbVFGSnYvQnc9PSJ9Cg==",
+      "expect": {
+        "outcome": "manifest_not_canonical"
+      },
+      "rust_expect": {
+        "outcome": "manifest_malformed",
+        "reason": "the Rust JSON reader caps nesting at 32"
+      }
     }
   ]
 }

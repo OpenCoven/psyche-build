@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   canonicalFileText,
+  keyIdForPublicKey,
   parseKeysFile,
   publicKeyEntryFromPrivatePem,
   signManifest,
@@ -38,6 +39,8 @@ export const VECTORS_PATH = path.join(
 );
 
 // RFC 8410 PKCS#8 prefix for a raw 32-byte Ed25519 seed.
+// Order of the Ed25519 base point.
+const ED25519_L = 2n ** 252n + 27742317777372353535851937790883648493n;
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 
 function testKey(label) {
@@ -157,11 +160,59 @@ export function buildVectors() {
     { name: 'valid_at_skew_boundary', now: '2026-08-31T23:55:00Z', manifest: valid, signature: validSig, intended: 'ok' },
   );
 
+  // Signature encodings that decode to the same or an equivalent value.
+  const sigBase64 = sigEnvelope.signature;
+  // 64 bytes end in one byte plus `==`; the last data character carries four
+  // unused bits. Setting one keeps the decoded bytes but breaks re-encoding.
+  const lastChar = sigBase64[sigBase64.length - 3];
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const trailingBits = `${sigBase64.slice(0, -3)}${alphabet[alphabet.indexOf(lastChar) | 1]}==`;
+  const trailingEnvelope = canonicalFileText({ ...sigEnvelope, signature: trailingBits });
+  // s + L is the same scalar mod L but outside [0, L); both verifiers must refuse it.
+  const rawSig = Buffer.from(sigBase64, 'base64');
+  const s = BigInt(`0x${Buffer.from(rawSig.subarray(32)).reverse().toString('hex')}`) + ED25519_L;
+  const sPlusL = Buffer.from(s.toString(16).padStart(64, '0'), 'hex').reverse();
+  cases.push(
+    { name: 'signature_base64_trailing_bits', now: NOW, manifest: valid, signature: Buffer.from(trailingEnvelope), intended: 'signature_malformed' },
+    { name: 'signature_s_out_of_range', now: NOW, manifest: valid, signature: Buffer.from(envelope(current.entry.keyId, Buffer.concat([rawSig.subarray(0, 32), sPlusL]))), intended: 'signature_invalid' },
+  );
+
+  // INTENTIONAL DIVERGENCE: a trusted key that is the small-order identity
+  // point. (R = B, s = 1) satisfies the cofactorless equation for every
+  // message, so the Node/OpenSSL reference accepts it; the Rust verifier uses
+  // verify_strict, which refuses small-order keys and R values. Only a keys
+  // file that trusts a degenerate key can reach this.
+  const identityKey = Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]);
+  const identityEntry = { keyId: keyIdForPublicKey(identityKey), publicKey: identityKey.toString('base64') };
+  const basePoint = Buffer.from(`58${'66'.repeat(31)}`, 'hex');
+  const scalarOne = Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]);
+  cases.push({
+    name: 'small_order_key_accepted_by_reference_only',
+    now: NOW,
+    manifest: valid,
+    signature: Buffer.from(envelope(identityEntry.keyId, Buffer.concat([basePoint, scalarOne]))),
+    keysFile: { schema: 1, current: identityEntry, next: null },
+    intended: 'ok',
+    rust: { outcome: 'signature_invalid', reason: 'verify_strict refuses a small-order public key' },
+  });
+
+  // INTENTIONAL DIVERGENCE: the Rust reader caps nesting at 32 levels and
+  // reports a deeper document as manifest_malformed before the canonical
+  // check; the reference parses it and reports manifest_not_canonical. Both
+  // refuse it, and no valid manifest nests deeper than 3.
+  cases.push({
+    name: 'deep_non_canonical_document',
+    now: NOW,
+    ...signedBy(`{ "a": ${'['.repeat(40)}${']'.repeat(40)} }\n`),
+    intended: 'manifest_not_canonical',
+    rust: { outcome: 'manifest_malformed', reason: 'the Rust JSON reader caps nesting at 32' },
+  });
+
   const records = cases.map((entry) => {
     const result = verifyManifest({
       manifestBytes: entry.manifest,
       signatureBytes: entry.signature,
-      keys,
+      keys: entry.keysFile ? parseKeysFile(JSON.stringify(entry.keysFile)) : keys,
       now: entry.now,
     });
     const outcome = result.ok ? 'ok' : result.reason;
@@ -176,6 +227,9 @@ export function buildVectors() {
       expect: result.ok
         ? { outcome: 'ok', slot: result.slot, key_id: result.keyId, version: result.manifest.version }
         : { outcome: result.reason },
+      ...(entry.keysFile ? { keys: entry.keysFile } : {}),
+      // Present only where the Rust verifier intentionally differs.
+      ...(entry.rust ? { rust_expect: entry.rust } : {}),
     };
   });
 
