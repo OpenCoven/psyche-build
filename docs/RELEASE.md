@@ -66,6 +66,10 @@ Do not stage these values in files or create repository-level fallback secrets.
 There is no repository-secret fallback, scheduled no-secret fallback, or
 optional secret for this release.
 
+One more secret, `UPDATE_MANIFEST_SIGNING_KEY`, also lives only in the `release`
+environment. It is required only once `release/update-manifest-keys.json`
+names a current key; see [Update manifest signing](#update-manifest-signing).
+
 Protect `main` and `v*` tags before tagging. Two separate active tag rulesets
 must restrict creation to approved release managers and block tag
 update/deletion without giving those managers an immutability bypass.
@@ -691,8 +695,9 @@ fail-closed:
   multiple localizations for an existing build, or a provenance mismatch. These
   states must never fall through to upload or build 2.
 
-A published GitHub Release is reused only when its three artifacts and curated
-notes byte-match the verified output; a draft may have its assets replaced
+A published GitHub Release is reused only when its exact asset set (three
+artifacts, or five once update manifest signing is active) and curated notes
+byte-match the verified output; a draft may have its assets replaced
 before it is reverified and published.
 
 App Store Connect processing has a hard 45-minute bound. The
@@ -728,6 +733,10 @@ The complete public asset set is exactly:
 - `Psyche-Build-v0.0.1-x86_64.dmg`
 - `SHA256SUMS`
 
+Once update manifest signing is active, the set is exactly those three plus
+`update-manifest.json` and `update-manifest.json.sig`, and the file count
+below is `5`.
+
 Verify all three files and both checksums:
 
 ```sh
@@ -744,6 +753,175 @@ gh release view v0.0.1 --repo OpenCoven/psyche-build \
 
 Require a public/latest/stable release whose body exactly matches the curated
 changelog entry. Require both DMG URLs to return HTTP 200 before Homebrew work.
+
+## Update manifest signing
+
+Each release can publish a signed `update-manifest.json`. A later desktop
+release reads it to tell the user that a newer version exists. The app only
+notifies: it never downloads or installs anything, and the Homebrew Cask is
+unchanged. The design is
+[the update channel record](superpowers/specs/2026-10-01-update-channel-design.md).
+
+### Format
+
+`scripts/update-manifest.mjs` builds, signs and verifies the manifest with
+Node's built-in Ed25519. It needs no third-party tool.
+
+- **`update-manifest.json`** holds `schema` (`1`), `version`, `tag`,
+  `source_sha` (the 40-character release commit), `artifacts.aarch64` and
+  `artifacts.x86_64` (each a DMG `file` name and its `sha256`, identical to
+  `SHA256SUMS`), `published_at` and `expires_at`. `published_at` is the signed
+  release tag's tagger time, so a retried run reproduces the same bytes.
+  `expires_at` is 30 days later, the maximum the tooling accepts.
+- **Canonical bytes.** The file is canonical JSON: keys sorted, no
+  insignificant whitespace, strings escaped as `JSON.stringify` escapes them,
+  integers only, UTF-8 without a byte-order mark, and exactly one trailing LF.
+  The signature covers exactly the file bytes. A verifier rejects any file
+  that does not re-serialize to identical bytes.
+- **`update-manifest.json.sig`** is a canonical JSON envelope:
+  `{"algorithm":"ed25519","key_id":"<16 hex>","schema":1,"signature":"<base64>"}`
+  plus a trailing LF. `signature` is the padded base64 of the 64-byte Ed25519
+  signature over the manifest bytes.
+- **Key id.** The lowercase hex of the first 8 bytes of SHA-256 over the raw
+  32-byte public key. A verifier picks the current or next key by this id.
+- **`release/update-manifest-keys.json`** is
+  `{"schema":1,"current":{"keyId","publicKey"}|null,"next":...|null}`, where
+  `publicKey` is the base64 raw public key. Only public keys are committed.
+
+`verify` checks the signature before it parses the manifest, and fails with
+exactly one bounded reason: `keys_malformed`, `no_trusted_keys`,
+`signature_malformed`, `unknown_key_id`, `signature_invalid`,
+`manifest_malformed`, `manifest_not_canonical`, `manifest_not_yet_valid`,
+`manifest_expired` or `manifest_mismatch`.
+
+### Differences from the design record
+
+The [design record](superpowers/specs/2026-10-01-update-channel-design.md)
+proposed minisign, a `update-manifest.json.minisig` signature and a
+password-protected key. Following the owner's 2026-10-03 decision, the
+implementation differs in three ways. The dated record is left as it was.
+
+- **Signer.** Node's built-in Ed25519 replaces minisign, so the release job
+  needs no third-party tool.
+- **Signature asset.** The signature is the `update-manifest.json.sig` JSON
+  envelope described above, not a `.minisig` file.
+- **Key custody.** The private key is an unencrypted PKCS#8 PEM, held only as
+  the `UPDATE_MANIFEST_SIGNING_KEY` secret in the protected `release`
+  environment, plus the owner's offline recovery copy. There is no key
+  password. Protection comes from the environment's reviewers and from the
+  secret being scoped to the single sign step.
+
+The desktop verifier must fetch exactly these two release assets:
+`update-manifest.json` and `update-manifest.json.sig`. It must accept only the
+`ed25519` algorithm and the key ids in its embedded current and next slots.
+
+### Activation and fail-closed rules
+
+The `publish` job reads `release/update-manifest-keys.json` after it writes
+`SHA256SUMS`:
+
+- **`current` is `null` (the checked-in default).** The job writes a notice
+  annotation, publishes no manifest, and publishes exactly the two DMGs and
+  `SHA256SUMS`, as before. No secret is needed.
+- **`current` names a key.** The job builds the manifest, signs it in a step
+  that alone receives `UPDATE_MANIFEST_SIGNING_KEY`, verifies the result
+  against the keys file, the tag, the release commit and `SHA256SUMS`, and
+  publishes exactly five assets. A missing secret, a secret that is not the
+  current key, a failed verification, or a malformed keys file stops the job
+  before the release is created or changed.
+
+Manual recovery runs the workflow from `main` against the requested tag's
+source. A tag with no `release/update-manifest-keys.json`, such as `v0.0.1` or
+`v0.0.2`, predates this feature. The job treats it as a legacy tag: it posts a
+notice and publishes the three-asset set. The keys file and the script were
+added together, so every later tag has the keys file and cannot silently drop
+signing. If such a tag lacks `scripts/update-manifest.mjs`, the job uses the
+workflow revision's copy, and fails if it cannot read that copy.
+
+Before building, the job checks that the local tag object is the exact signed
+object the `verify` job checked against GitHub. It reads the tagger date only
+from that object.
+
+Time limits follow from using the tagger date as `published_at`:
+
+- **Tagger clock skew.** Verifiers allow 5 minutes of clock difference. If the
+  tagger's clock ran more than 5 minutes fast, the build refuses with
+  `published_at_in_future`; a manifest that got past it would fail
+  self-verification with `manifest_not_yet_valid`. Fix the clock and create a
+  new tag. Never move an existing one.
+- **Early tags.** The 30-day window starts when the tag is created, not when it
+  is pushed or published. A tag created 10 days before its release run leaves
+  about 20 days before the manifest expires. Create the tag just before
+  pushing it.
+- **Late retries.** A retry more than 30 days after the tag fails closed,
+  because its manifest would already be expired. Re-signing an existing
+  release is not implemented.
+
+### Provision the key (owner only)
+
+Run these steps yourself, on a trusted machine. CI never generates keys, and no
+key should ever pass through an issue, pull request, chat or log.
+
+1. From a clean checkout of `main`, create the key pair outside every Git
+   checkout:
+
+   ```sh
+   mkdir -p ~/.psyche-build-keys
+   chmod 700 ~/.psyche-build-keys
+   node scripts/generate-update-signing-key.mjs \
+     --out ~/.psyche-build-keys/update-manifest-signing-key.pem
+   ```
+
+   The script writes the private PKCS#8 PEM with mode `0600`, refuses to
+   overwrite a file or write inside a Git working tree, and never prints the
+   private key. It prints the public `{ "keyId", "publicKey" }` entry and the
+   key id.
+2. Upload the private key as the environment secret. `gh` reads it from
+   standard input, so the value never appears on a command line:
+
+   ```sh
+   gh secret set UPDATE_MANIFEST_SIGNING_KEY \
+     --repo OpenCoven/psyche-build --env release \
+     < ~/.psyche-build-keys/update-manifest-signing-key.pem
+   gh secret list --repo OpenCoven/psyche-build --env release
+   ```
+
+   Confirm that the list shows `UPDATE_MANIFEST_SIGNING_KEY`. Never create a
+   repository-level copy.
+3. Store the recovery copy offline, for example in the owner's password
+   manager or on an encrypted volume. Then delete the plaintext file.
+4. Open a pull request that sets `current` in
+   `release/update-manifest-keys.json` to the printed entry. Merge it only
+   after step 2. From the next release on, the manifest is required.
+
+### Rotate with the next slot
+
+1. Generate a new key pair as in step 1, under a new file name. Commit its
+   entry as `next`, and leave `current` and the secret unchanged. Releases
+   still sign with the current key. Desktop builds made from then on trust
+   both keys.
+2. Once the installed apps that matter trust the new key, open one pull request
+   that moves the new entry to `current` and sets `next` to `null` (or to a
+   further key). When it merges, replace `UPDATE_MANIFEST_SIGNING_KEY` with the
+   new private key, using step 2. A release that runs between the merge and the
+   secret update fails closed with `signing_key_not_current`. Re-run it after
+   the update.
+3. Move the old private key's recovery copy to retired storage, or destroy it.
+
+### Revoke a key
+
+If a private key is exposed, remove its entry from both slots at once:
+
+- If `next` holds an uncompromised key, promote it to `current` and replace the
+  secret with that key.
+- Otherwise set `current` to `null`, and delete the secret:
+  `gh secret delete UPDATE_MANIFEST_SIGNING_KEY --repo OpenCoven/psyche-build --env release`.
+  Releases then publish without a manifest until a new key is provisioned.
+
+Installed apps keep trusting the keys they shipped with. Until they update,
+an attacker holding the exposed key can sign a misleading manifest. Because
+the app only notifies, the worst outcomes are a false or suppressed update
+notice. Homebrew and the DMG checksums still guard what gets installed.
 
 ## Homebrew publication and recovery
 

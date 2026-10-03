@@ -177,6 +177,42 @@ describe('release documentation contract', () => {
     expect(runbook).toMatch(/secret audit[\s\S]*public[\s\S]*tag/i);
   });
 
+  it('documents update manifest signing, provisioning, rotation, revocation, and the empty-keys default', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const section = runbook.slice(
+      runbook.indexOf('## Update manifest signing'),
+      runbook.indexOf('## Homebrew publication and recovery'),
+    );
+
+    expect(section.length).toBeGreaterThan(0);
+    for (const heading of [
+      '### Format',
+      '### Activation and fail-closed rules',
+      '### Provision the key (owner only)',
+      '### Rotate with the next slot',
+      '### Revoke a key',
+    ]) {
+      expect(section).toContain(heading);
+    }
+    expect(section).toContain('node scripts/generate-update-signing-key.mjs');
+    expect(section).toContain('gh secret set UPDATE_MANIFEST_SIGNING_KEY');
+    expect(section).toContain('--env release');
+    expect(section).toMatch(/< ~\/\.psyche-build-keys\/update-manifest-signing-key\.pem/);
+    expect(section).not.toContain('--body');
+    expect(section).toMatch(/`current` is `null`[\s\S]*notice\s+annotation/);
+    expect(section).toContain('signing_key_not_current');
+    expect(section).toMatch(/only notifies/);
+    expect(runbook).toContain('`update-manifest.json` and `update-manifest.json.sig`');
+    expect(section).toContain('### Differences from the design record');
+    expect(section).toMatch(/minisign[\s\S]*\.minisig[\s\S]*password-protected/);
+    expect(section).toContain('2026-10-03');
+    expect(section).toMatch(/unencrypted PKCS#8 PEM/);
+    expect(section).toContain('published_at_in_future');
+    expect(section).toContain('manifest_not_yet_valid');
+    expect(section).toMatch(/30-day window starts when the tag is created/);
+    expect(section).toMatch(/legacy tag[\s\S]*three-asset set/);
+  });
+
   it('creates the release environment only after publication and permits immutable-tag recovery', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
     const publicIndex = runbook.indexOf('-f visibility=public');

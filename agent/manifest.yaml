@@ -90,6 +90,15 @@ protected_paths:
   - path: scripts/app-store-connect.mjs
     risk: R4
     evidence: credential-boundary review and distribution acceptance
+  - path: scripts/update-manifest.mjs
+    risk: R4
+    evidence: canonicalization, signature, rotation, and negative verification tests
+  - path: scripts/generate-update-signing-key.mjs
+    risk: R4
+    evidence: key-file mode, no private-key output, and owner-only execution
+  - path: release/update-manifest-keys.json
+    risk: R4
+    evidence: owner-approved public key, matching release environment secret, and rotation record
   - path: .github/ISSUE_TEMPLATE/**
     risk: R4
     evidence: issue-form contract tests and Project intake review

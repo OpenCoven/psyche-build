@@ -1,9 +1,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -691,5 +694,401 @@ describe('macOS release workflow contract', () => {
     expect(rustToolchain).toContain('components = ["rustfmt"]');
     expect(workflow.match(/toolchain: 1\.95\.0/g)).toHaveLength(2);
     expect(workflow).not.toMatch(/^\s*toolchain:\s*stable\s*$/m);
+  });
+});
+
+describe('update manifest release contract', () => {
+  const manifestSteps = [
+    'Resolve update manifest signing',
+    'Build update manifest',
+    'Sign update manifest',
+    'Verify signed update manifest',
+  ];
+
+  function publishJob(): string {
+    return workflowJobSource(workflowSource(), 'publish');
+  }
+
+  it('builds, signs, and self-verifies after checksums and before any release mutation', () => {
+    const job = publishJob();
+    const order = [
+      'Require complete artifacts and generate checksums',
+      ...manifestSteps,
+      'Generate curated GitHub release notes',
+      'Publish complete stable release',
+    ].map((name) => job.indexOf(`      - name: ${name}\n`));
+    for (const index of order) expect(index).toBeGreaterThan(0);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(job).toContain('environment: release');
+  });
+
+  it('gates every manifest step on a resolved current key and never on a missing secret', () => {
+    const job = publishJob();
+    const resolve = workflowNamedStepSource(job, 'Resolve update manifest signing');
+    expect(workflowStepCondition(resolve)).toBeUndefined();
+    expect(resolve).toContain('id: update-manifest');
+    for (const name of manifestSteps.slice(1)) {
+      expect(workflowStepCondition(workflowNamedStepSource(job, name))).toBe(
+        "steps.update-manifest.outputs.active == 'true'",
+      );
+    }
+    const build = workflowNamedStepSource(job, 'Build update manifest');
+    expect(build).toContain('--expires-in-days 30');
+    expect(build).toContain("%(taggerdate:iso-strict)");
+    expect(build).toContain('--sha256sums artifacts/SHA256SUMS');
+    const verify = workflowNamedStepSource(job, 'Verify signed update manifest');
+    expect(verify).toContain('--expect-tag "$RELEASE_TAG"');
+    expect(verify).toContain('--expect-source-sha "$RELEASE_SHA"');
+    expect(verify).toContain('--keys release/update-manifest-keys.json');
+  });
+
+  it('reads the tagger date only from the exact signed tag object the verify job checked', () => {
+    const workflow = workflowSource();
+    const verifyJob = workflowJobSource(workflow, 'verify');
+    expect(verifyJob).toContain('release_tag_object_sha: ${{ steps.signed-tag.outputs.tag_object_sha }}');
+    const signedTag = workflowNamedStepSource(verifyJob, 'Require a verified signed tag');
+    expect(signedTag).toContain('id: signed-tag');
+    const signedTagScript = workflowStepScript(workflow, 'Require a verified signed tag');
+    expect(signedTagScript.indexOf('echo "tag_object_sha=$TAG_OBJECT_SHA" >> "$GITHUB_OUTPUT"')).toBeGreaterThan(
+      signedTagScript.indexOf('if [ "$SIGNATURE_VERIFIED" != "true" ]; then'),
+    );
+
+    const build = workflowNamedStepSource(publishJob(), 'Build update manifest');
+    expect(build).toContain('VERIFIED_TAG_OBJECT_SHA: ${{ needs.verify.outputs.release_tag_object_sha }}');
+    const script = workflowStepScript(workflow, 'Build update manifest');
+    expect(script.indexOf('git rev-parse --verify "$RELEASE_TAG^{tag}"')).toBeLessThan(
+      script.indexOf('%(taggerdate:iso-strict)'),
+    );
+
+    const root = mkdtempSync(path.join(tmpdir(), 'psyche-tag-object-'));
+    try {
+      const gitEnv = {
+        PATH: process.env.PATH ?? '',
+        HOME: root,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+      };
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: root, env: gitEnv, encoding: 'utf8' }).trim();
+      git('init', '-q');
+      git('commit', '-q', '--allow-empty', '--no-gpg-sign', '-m', 'release');
+      git('tag', '-a', '--no-sign', '-m', 'release', 'v1.2.3');
+      const tagObject = git('rev-parse', 'v1.2.3^{tag}');
+      const run = (verified: string) =>
+        spawnSync('/bin/bash', ['-c', script], {
+          cwd: root,
+          env: { ...gitEnv, RELEASE_TAG: 'v1.2.3', RELEASE_VERSION: '1.2.3', RELEASE_SHA: git('rev-parse', 'HEAD'), VERIFIED_TAG_OBJECT_SHA: verified, UPDATE_MANIFEST_SCRIPT: path.join(root, 'missing', 'update-manifest.mjs') },
+          encoding: 'utf8',
+        });
+      for (const verified of ['', 'f'.repeat(40), git('rev-parse', 'HEAD')]) {
+        const result = run(verified);
+        expect(result.status).toBe(1);
+        expect(result.stdout).toMatch(/::error::(The verify job did not report|Release tag object does not match)/);
+      }
+      // With the matching object the check passes and the step proceeds to the
+      // builder, which is absent from this scratch repository.
+      const matching = run(tagObject);
+      expect(matching.stdout).not.toContain('::error::');
+      expect(matching.stderr).toContain('update-manifest.mjs');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('scopes the signing secret to the single sign step and fails closed when it is empty', () => {
+    const workflow = workflowSource();
+    expect(workflow.match(/secrets\.UPDATE_MANIFEST_SIGNING_KEY/g)).toHaveLength(1);
+    expect(workflow.match(/UPDATE_MANIFEST_SIGNING_KEY/g)).toHaveLength(5);
+    const signStep = workflowNamedStepSource(publishJob(), 'Sign update manifest');
+    expect(signStep).toContain('UPDATE_MANIFEST_SIGNING_KEY: ${{ secrets.UPDATE_MANIFEST_SIGNING_KEY }}');
+    expect(signStep).toContain('--key-env UPDATE_MANIFEST_SIGNING_KEY');
+    for (const name of manifestSteps.filter((step) => step !== 'Sign update manifest')) {
+      expect(workflowNamedStepSource(publishJob(), name)).not.toContain('UPDATE_MANIFEST_SIGNING_KEY');
+    }
+    expect(signStep).not.toMatch(/echo[^\n]*"\$UPDATE_MANIFEST_SIGNING_KEY"/);
+
+    const script = workflowStepScript(workflow, 'Sign update manifest');
+    const result = spawnSync('/bin/bash', ['-c', script], {
+      env: { PATH: process.env.PATH ?? '', UPDATE_MANIFEST_SIGNING_KEY: '' },
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('::error::Missing required release environment secret UPDATE_MANIFEST_SIGNING_KEY');
+  });
+
+  // Models the publish job's checkout of the requested tag for the resolve
+  // step. `keys` undefined means the tag has no keys file; `script: false`
+  // means the tag has no update-manifest.mjs. `workflowSha` selects
+  // GITHUB_WORKFLOW_SHA: the commit carrying the script, an unknown SHA, or unset.
+  function runResolveStep(input: {
+    keys?: string;
+    script?: boolean;
+    workflowSha?: 'committed' | 'unknown' | 'absent';
+  }) {
+    const script = workflowStepScript(workflowSource(), 'Resolve update manifest signing');
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'psyche-update-manifest-resolve-')));
+    try {
+      const checkout = path.join(root, 'checkout');
+      const runnerTemp = path.join(root, 'runner-temp');
+      mkdirSync(checkout);
+      mkdirSync(runnerTemp);
+      const env = {
+        PATH: process.env.PATH ?? '',
+        HOME: root,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+      };
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: checkout, env, encoding: 'utf8' }).trim();
+      git('init', '-q');
+      mkdirSync(path.join(checkout, 'scripts'));
+      writeFileSync(path.join(checkout, 'scripts/update-manifest.mjs'), readFileSync('scripts/update-manifest.mjs'));
+      git('add', '-A');
+      git('commit', '-q', '--no-gpg-sign', '-m', 'workflow revision');
+      const workflowCommit = git('rev-parse', 'HEAD');
+      if (input.script === false) rmSync(path.join(checkout, 'scripts'), { recursive: true });
+      if (input.keys !== undefined) {
+        mkdirSync(path.join(checkout, 'release'));
+        writeFileSync(path.join(checkout, 'release/update-manifest-keys.json'), input.keys);
+      }
+      const output = path.join(root, 'github-output');
+      const githubEnv = path.join(root, 'github-env');
+      writeFileSync(output, '');
+      writeFileSync(githubEnv, '');
+      const workflowSha = input.workflowSha ?? 'committed';
+      const result = spawnSync('/bin/bash', ['-c', script], {
+        cwd: checkout,
+        env: {
+          ...env,
+          GITHUB_OUTPUT: output,
+          GITHUB_ENV: githubEnv,
+          GITHUB_WORKFLOW_SHA:
+            workflowSha === 'committed' ? workflowCommit : workflowSha === 'unknown' ? 'f'.repeat(40) : '',
+          RUNNER_TEMP: runnerTemp,
+          RELEASE_TAG: 'v0.0.2',
+        },
+        encoding: 'utf8',
+      });
+      return {
+        ...result,
+        output: readFileSync(output, 'utf8'),
+        githubEnv: readFileSync(githubEnv, 'utf8'),
+        checkout,
+        runnerTemp,
+      };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it('skips with a notice when no current key exists, activates with one, and fails on a malformed keys file', () => {
+    const repositoryKeys = readFileSync('release/update-manifest-keys.json', 'utf8');
+    const raw = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(12);
+    const entry = { keyId: createHash('sha256').update(raw).digest('hex').slice(0, 16), publicKey: raw.toString('base64') };
+
+    const run = runResolveStep;
+
+    const inactive = run({ keys: repositoryKeys });
+    expect(inactive.status, inactive.stderr).toBe(0);
+    expect(inactive.output).toBe('active=false\n');
+    expect(inactive.stdout).toContain('::notice title=Update manifest not published::');
+    expect(inactive.githubEnv).toBe(`UPDATE_MANIFEST_SCRIPT=${inactive.checkout}/scripts/update-manifest.mjs\n`);
+
+    const active = run({ keys: JSON.stringify({ schema: 1, current: entry, next: null }) });
+    expect(active.status, active.stderr).toBe(0);
+    expect(active.output).toBe('active=true\n');
+    expect(active.stdout).toContain(`Update manifest signing is active for key ${entry.keyId}`);
+    expect(active.githubEnv).toBe(`UPDATE_MANIFEST_SCRIPT=${active.checkout}/scripts/update-manifest.mjs\n`);
+
+    const malformed = run({ keys: JSON.stringify({ schema: 1, current: { ...entry, keyId: '0'.repeat(16) }, next: null }) });
+    expect(malformed.status).not.toBe(0);
+    expect(malformed.output).toBe('');
+  });
+
+  it('treats a tag without the keys file as legacy and never lets a feature-era tag drop signing', () => {
+    const raw = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(12);
+    const entry = { keyId: createHash('sha256').update(raw).digest('hex').slice(0, 16), publicKey: raw.toString('base64') };
+    const activeKeys = JSON.stringify({ schema: 1, current: entry, next: null });
+    const run = runResolveStep;
+
+    // Legacy tag (v0.0.1/v0.0.2 shape): neither the keys file nor the script.
+    for (const workflowSha of ['committed', 'absent'] as const) {
+      const legacy = run({ script: false, workflowSha });
+      expect(legacy.status, legacy.stderr).toBe(0);
+      expect(legacy.output).toBe('active=false\n');
+      expect(legacy.stdout).toContain('::notice title=Update manifest not published::v0.0.2 predates update manifest signing');
+      expect(legacy.githubEnv).toBe('');
+    }
+
+    // Feature-era tag whose script is missing: the workflow revision's copy resolves it.
+    const borrowed = run({ keys: activeKeys, script: false, workflowSha: 'committed' });
+    expect(borrowed.status, borrowed.stderr).toBe(0);
+    expect(borrowed.output).toBe('active=true\n');
+    expect(borrowed.stdout).toContain("Using the workflow revision's update manifest script for v0.0.2");
+    expect(borrowed.githubEnv).toBe(`UPDATE_MANIFEST_SCRIPT=${borrowed.runnerTemp}/update-manifest.mjs\n`);
+
+    // Feature-era tag whose resolver cannot be obtained: fail closed, never inactive.
+    for (const workflowSha of ['unknown', 'absent'] as const) {
+      const failed = run({ keys: activeKeys, script: false, workflowSha });
+      expect(failed.status).toBe(1);
+      expect(failed.output).toBe('');
+      expect(failed.stdout).toMatch(/::error::release\/update-manifest-keys\.json exists but/);
+    }
+    // An empty keys file at a feature-era tag is malformed, not legacy.
+    const empty = run({ keys: '', script: true, workflowSha: 'committed' });
+    expect(empty.status).not.toBe(0);
+    expect(empty.output).toBe('');
+  });
+
+  it('runs every later manifest step through the resolved script path', () => {
+    const job = publishJob();
+    for (const name of ['Build update manifest', 'Sign update manifest', 'Verify signed update manifest']) {
+      const step = workflowNamedStepSource(job, name);
+      expect(step).toContain('node "$UPDATE_MANIFEST_SCRIPT"');
+      expect(step).not.toContain('node scripts/update-manifest.mjs');
+    }
+  });
+
+  describe('exact published asset set', () => {
+    const version = '1.2.3';
+    const baseAssets = [
+      `Psyche-Build-v${version}-aarch64.dmg`,
+      `Psyche-Build-v${version}-x86_64.dmg`,
+      'SHA256SUMS',
+    ];
+    const manifestAssets = ['update-manifest.json', 'update-manifest.json.sig'];
+
+    // A stateful fake `gh` modelling a draft GitHub Release.
+    const fakeGh = `#!/bin/bash
+set -euo pipefail
+state="$FAKE_GH_STATE"
+echo "$*" >> "$state/calls"
+[ "$1" = release ] || exit 2
+sub="$2"; shift 2
+case "$sub" in
+  view)
+    if [ "$#" = 1 ]; then [ -f "$state/created" ]; exit; fi
+    case "$*" in
+      *"--json isDraft"*) if [ -f "$state/published" ]; then echo false; else echo true; fi ;;
+      *"--json assets"*) ls -1 "$state/assets" ;;
+      *) exit 3 ;;
+    esac ;;
+  create) touch "$state/created" ;;
+  edit) case "$*" in *"--draft=false"*) touch "$state/published" ;; esac ;;
+  upload)
+    shift
+    [ "$1" = --clobber ] && shift
+    for file in "$@"; do cp "$file" "$state/assets/"; done ;;
+  download)
+    dir="$3"; mkdir -p "$dir"; cp "$state/assets/"* "$dir/" ;;
+  *) exit 4 ;;
+esac
+`;
+
+    function runPublish(input: {
+      active: string;
+      artifacts: string[];
+      preexistingDraftAssets?: string[];
+    }) {
+      const root = mkdtempSync(path.join(tmpdir(), 'psyche-publish-assets-'));
+      try {
+        const bin = path.join(root, 'bin');
+        const state = path.join(root, 'state');
+        const artifacts = path.join(root, 'artifacts');
+        for (const directory of [bin, state, path.join(state, 'assets'), artifacts]) mkdirSync(directory);
+        writeFileSync(path.join(bin, 'gh'), fakeGh);
+        chmodSync(path.join(bin, 'gh'), 0o755);
+        for (const asset of input.artifacts) writeFileSync(path.join(artifacts, asset), `content of ${asset}\n`);
+        const dmgs = baseAssets.slice(0, 2).filter((asset) => input.artifacts.includes(asset));
+        if (input.artifacts.includes('SHA256SUMS')) {
+          writeFileSync(
+            path.join(artifacts, 'SHA256SUMS'),
+            execFileSync('shasum', ['-a', '256', ...dmgs], { cwd: artifacts }),
+          );
+        }
+        if (input.preexistingDraftAssets) {
+          writeFileSync(path.join(state, 'created'), '');
+          for (const asset of input.preexistingDraftAssets) {
+            writeFileSync(path.join(state, 'assets', asset), 'stale\n');
+          }
+        }
+        const notes = path.join(root, 'notes.md');
+        writeFileSync(notes, 'notes\n');
+        const result = spawnSync('/bin/bash', ['-c', workflowStepScript(workflowSource(), 'Publish complete stable release')], {
+          cwd: root,
+          env: {
+            PATH: `${bin}:${process.env.PATH ?? ''}`,
+            FAKE_GH_STATE: state,
+            GH_TOKEN: 'test',
+            RELEASE_TAG: `v${version}`,
+            RELEASE_VERSION: version,
+            RELEASE_NOTES_PATH: notes,
+            RUNNER_TEMP: root,
+            UPDATE_MANIFEST_ACTIVE: input.active,
+          },
+          encoding: 'utf8',
+        });
+        const calls = path.join(state, 'calls');
+        const published = existsSync(calls) && readFileSync(calls, 'utf8').includes('--draft=false --latest');
+        const uploaded = execFileSync('ls', ['-1', path.join(state, 'assets')], { encoding: 'utf8' })
+          .split('\n')
+          .filter(Boolean)
+          .sort();
+        return { ...result, published, uploaded };
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    it('publishes exactly the DMGs and SHA256SUMS while signing is inactive', () => {
+      const result = runPublish({ active: 'false', artifacts: baseAssets });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.uploaded).toEqual([...baseAssets].sort());
+      expect(result.published).toBe(true);
+    });
+
+    it('publishes exactly five assets, including the manifest and signature, while signing is active', () => {
+      const result = runPublish({ active: 'true', artifacts: [...baseAssets, ...manifestAssets] });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.uploaded).toEqual([...baseAssets, ...manifestAssets].sort());
+      expect(result.published).toBe(true);
+    });
+
+    it('refuses to publish when the active manifest assets are missing', () => {
+      const result = runPublish({ active: 'true', artifacts: baseAssets });
+      expect(result.status).not.toBe(0);
+      expect(result.published).toBe(false);
+    });
+
+    it('refuses a draft carrying any asset outside the exact set, in either mode', () => {
+      const inactive = runPublish({ active: 'false', artifacts: baseAssets, preexistingDraftAssets: manifestAssets });
+      expect(inactive.status).not.toBe(0);
+      expect(inactive.stdout).toContain('Draft release must contain exactly the expected release assets');
+      expect(inactive.published).toBe(false);
+
+      const active = runPublish({
+        active: 'true',
+        artifacts: [...baseAssets, ...manifestAssets],
+        preexistingDraftAssets: ['update-manifest.json.minisig'],
+      });
+      expect(active.status).not.toBe(0);
+      expect(active.published).toBe(false);
+    });
+
+    it('fails closed when activation was never resolved', () => {
+      for (const active of ['', 'yes', 'TRUE']) {
+        const result = runPublish({ active, artifacts: [...baseAssets, ...manifestAssets] });
+        expect(result.status).toBe(1);
+        expect(result.stdout).toContain('::error::Update manifest activation is unresolved');
+        expect(result.published).toBe(false);
+      }
+    });
+
+    it('names both manifest assets literally, never by wildcard', () => {
+      const script = workflowStepScript(workflowSource(), 'Publish complete stable release');
+      expect(script).toContain('RELEASE_ASSETS+=(update-manifest.json update-manifest.json.sig)');
+      expect(script).not.toMatch(/update-manifest[^\s)]*\*/);
+      expect(script).not.toMatch(/"3"|three assets/);
+    });
   });
 });
