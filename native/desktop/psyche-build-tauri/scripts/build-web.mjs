@@ -26,6 +26,7 @@ const bundles = [
   ['web/diffs/diff-entry.js', 'PsycheDiffs', 'web/diffs.bundle.js'],
   ['web/status/status-entry.js', 'PsycheStatus', 'web/status.bundle.js'],
   ['web/workspace/workspace-entry.js', 'PsycheWorkspace', 'web/workspace.bundle.js'],
+  ['web/update/update-entry.js', 'PsycheUpdate', 'web/update.bundle.js'],
   ['web/runtime/runtime-entry.ts', 'PsycheRuntime', 'web/runtime.bundle.js'],
   [
     debug ? 'web/runtime/runtime-debug-entry.ts' : 'web/runtime/runtime-debug-stub.ts',

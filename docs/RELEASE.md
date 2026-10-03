@@ -1018,6 +1018,26 @@ never touched. On the first launch of a new version, the app records it as
 reports the previous value as `upgraded_from`; a downgrade reports nothing.
 Reconciling open project configs through the #464 gate is not implemented.
 
+**What users see.** Only the `available` state shows anything: a banner at
+the top right of the workspace. It is a polite live region (`role="status"`),
+so a screen reader announces it without moving focus. The banner shows the
+new version, the running version, and a note that Psyche Build never installs
+updates or restarts by itself. The instructions depend on the install source:
+
+- **Homebrew Cask** (the app is at `/Applications/Psyche Build.app` or
+  `~/Applications/Psyche Build.app`, and a `Caskroom/psyche-build` directory
+  exists): the command `brew upgrade --cask psyche-build`, with a copy button.
+- **DMG** (installed there without a Caskroom entry): a button that opens the
+  release page, and the SHA-256 of this architecture's DMG from the verified
+  manifest.
+- **Unknown** (any other location, such as a source build): both.
+
+The banner's only buttons are **Skip this version**, which persists, and
+**Dismiss**, which lasts until the next launch or a different version. Escape
+also dismisses. There is no install button. The
+**Check for updates** checkbox under Appearance turns checks off and on. It
+appears only in builds that have a provisioned key.
+
 **Commands.** Only the `main` webview may call `update_status`,
 `update_skip_version` (only for the version on offer), `update_dismiss`
 (lasts for this session) and `update_set_checks_enabled`. The
