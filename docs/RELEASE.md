@@ -70,6 +70,15 @@ One more secret, `UPDATE_MANIFEST_SIGNING_KEY`, also lives only in the `release`
 environment. It is required only once `release/update-manifest-keys.json`
 names a current key; see [Update manifest signing](#update-manifest-signing).
 
+Before tagging, also check the Homebrew token:
+
+- [ ] Confirm `HOMEBREW_TAP_TOKEN` has **Pull requests: read and write** (as
+  well as **Contents: read and write**) on `OpenCoven/homebrew-tap`. The
+  retired `repository_dispatch` needed only Contents write, so an older token
+  may lack the pull request permission. If you find the gap after the
+  release, fix the token and re-run the `homebrew-tap-pr` job;
+  `homebrew-tap-pr.mjs open` is safe to re-run.
+
 Protect `main` and `v*` tags before tagging. Two separate active tag rulesets
 must restrict creation to approved release managers and block tag
 update/deletion without giving those managers an immutability bypass.
@@ -961,17 +970,27 @@ request). Metadata read is implied. It needs no Actions, Workflows,
 Administration, or other repository permission, and the workflow only exposes
 it to the single step that opens the pull request. A pull request opened with
 this token, unlike one opened with a tap workflow's own `GITHUB_TOKEN`,
-triggers tap CI.
+triggers tap CI. If the job fails because the token lacks a permission,
+correct the token and re-run the job: `open` reuses whatever branch, commit, or
+pull request an earlier attempt left behind, so re-running it is safe.
 
 The release workflow no longer sends the `psyche-build-release`
-`repository_dispatch`. The tap's *Update Psyche Build cask* workflow still runs
-on its own schedule, but it cannot open pull requests: the tap does not permit
-GitHub Actions to create them, so its runs stop at that step.
+`repository_dispatch`. The tap's *Update Psyche Build cask* workflow still
+triggers every 6 hours, and on that dispatch event if anything sends it. Each
+run renders the Cask, force-pushes `automation/psyche-build-vX.Y.Z`, and then
+fails at `gh pr create`, because the tap does not permit GitHub Actions to
+create pull requests. Those failures are noise beside this job's
+`psyche-build-X.Y.Z` pull request. They do not affect it, and they stop once
+the bump merges. Fixing them takes a separate change in the tap: remove the
+schedule and `repository_dispatch` triggers for psyche-build, or skip the run
+when an open `psyche-build-*` pull request already exists.
 
 If the job fails, do not rebuild or republish the app. Read the error, fix
 the named condition (for example, delete a stale `psyche-build-<version>`
-branch), and re-run the failed `homebrew-tap-pr` job; it is idempotent. To
-render the Cask by hand, run:
+branch), and re-run the failed `homebrew-tap-pr` job; it is idempotent.
+Re-running an older release's job after a newer Cask has merged fails by
+design: the renderer refuses to downgrade the Cask. To render the Cask by
+hand, run:
 
 ```sh
 gh api repos/OpenCoven/homebrew-tap/contents/Casks/psyche-build.rb \
