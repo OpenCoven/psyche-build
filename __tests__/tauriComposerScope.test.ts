@@ -217,5 +217,27 @@ describe('Tauri composer target', () => {
       expect(dismiss).toContain('setComposerOpen(false)');
       expect(dismiss).toContain('focusThread(state.activeThreadId)');
     });
+
+    it('consumes Escape only when dismissal succeeds, from any composer control', () => {
+      expect(mainJs).toMatch(/if \(e\.key === "Escape"\) \{\s*if \(dismissComposer\(\)\) \{\s*e\.preventDefault\(\);\s*e\.stopPropagation\(\);/);
+      expect(mainJs).toContain('composerEl.addEventListener("keydown", function (event) {');
+      expect(functionSource(mainJs, 'dismissComposer')).toContain('if (composerIsOpen()) return false;');
+    });
+
+    it('restores the Files editor before falling back to the active pane', () => {
+      const dismiss = functionSource(mainJs, 'dismissComposer');
+      expect(dismiss.indexOf('restoreFileEditorFocus()')).toBeGreaterThan(-1);
+      expect(dismiss.indexOf('restoreFileEditorFocus()')).toBeLessThan(dismiss.indexOf('focusThread('));
+    });
+
+    it('never leaves focus inside the collapsed row', () => {
+      expect(functionSource(mainJs, 'releaseComposerFocus')).toContain('document.activeElement.blur()');
+      expect(mainJs).toContain('if (!composerIsOpen()) releaseComposerFocus();');
+    });
+
+    it('closes when a native browser preview takes focus and toggles from browser panes', () => {
+      expect(functionSource(mainJs, 'handleBrowserFocus')).toContain('setComposerOpen(false);');
+      expect(mainJs).toContain('listen("browser:shortcut-composer-toggle", function () {\n    toggleComposer();');
+    });
   });
 });

@@ -2259,6 +2259,7 @@ function browserNativeEventHandlers(options: {
     browserFocusEventContext,
     adoptBrowserDocumentEvent,
     markActiveSurface: (surface: string) => calls.push(`surface:${surface}`),
+    setComposerOpen: () => {},
     state,
     focusThread: (threadId: string) => calls.push(`focus:${threadId}`),
     publishBrowserControlResource,

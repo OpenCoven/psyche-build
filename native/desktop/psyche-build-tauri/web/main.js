@@ -12146,14 +12146,26 @@
     if (!next) hidePalette();
     scheduleTerminalPaneFits();
   }
+  // Collapsing must not leave keyboard focus inside the hidden row: typing
+  // would land in an invisible input, and a later focus() on the already
+  // focused input fires no focusin to reveal it again.
+  function releaseComposerFocus() {
+    if (composerEl && composerEl.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
+  }
+  // Returns false when an active call keeps the row open, so callers can let
+  // the event continue to the call-ending cascade.
   function dismissComposer() {
     setComposerOpen(false);
-    if (composerIsOpen()) return;
-    if (state.activeThreadId) {
+    if (composerIsOpen()) return false;
+    releaseComposerFocus();
+    if (filesPaneHasCanvasFocus()) {
+      restoreFileEditorFocus();
+    } else if (state.activeThreadId) {
       focusThread(state.activeThreadId).catch(function () {});
-    } else if (commandInput) {
-      commandInput.blur();
     }
+    return true;
   }
   function toggleComposer() {
     if (composerIsOpen() && composerEl && composerEl.contains(document.activeElement)) {
@@ -12171,9 +12183,23 @@
       var to = event.relatedTarget;
       if (to && !composerEl.contains(to)) setComposerOpen(false);
     });
+    // Some targets (pane dividers) cancel pointerdown, which also cancels the
+    // focus transfer, so focus is released explicitly after collapsing.
     document.addEventListener("pointerdown", function (event) {
-      if (composerIsOpen() && !composerEl.contains(event.target)) setComposerOpen(false);
+      if (!composerIsOpen() || composerEl.contains(event.target)) return;
+      setComposerOpen(false);
+      if (!composerIsOpen()) releaseComposerFocus();
     }, true);
+    // Escape from any composer control (mic, call, send), not only the input.
+    // The input's own handler runs first and consumes the palette and
+    // dismissal cases; anything left is handled here.
+    composerEl.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (dismissComposer()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    });
   }
 
   if (composerSendEl) {
@@ -12620,8 +12646,10 @@
       }
     }
     if (e.key === "Escape") {
-      e.preventDefault();
-      dismissComposer();
+      if (dismissComposer()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       return;
     }
     if (e.key === "Enter") {
@@ -13997,6 +14025,9 @@
     }
     var adopted = adoptBrowserDocumentEvent(context);
     markActiveSurface("browser");
+    // Presses inside the native preview never reach this document, so the
+    // composer's outside-press close cannot see them.
+    setComposerOpen(false);
     if (state.activeThreadId !== context.pane.id) focusThread(context.pane.id);
     if (typeof publishBrowserControlResource === "function") {
       publishBrowserControlResource(context.pair).catch(function () {});
@@ -14216,6 +14247,9 @@
   listen("browser:shortcut-composer", function () {
     commandInput.focus();
     openPalette("/", true);
+  }).catch(function () {});
+  listen("browser:shortcut-composer-toggle", function () {
+    toggleComposer();
   }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
