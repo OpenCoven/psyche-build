@@ -14,12 +14,12 @@ const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Find package.json by walking up the directory tree
-function findPackageJson(): { packageJson: any; packageJsonPath: string } {
+function findPackageJson(): any {
   let currentDir = __dirname;
   while (currentDir !== path.parse(currentDir).root) {
     const packagePath = path.join(currentDir, 'package.json');
     try {
-      return { packageJson: require(packagePath), packageJsonPath: packagePath };
+      return require(packagePath);
     } catch {
       // Expected - package.json not found at this level, continue traversing
       currentDir = path.dirname(currentDir);
@@ -29,9 +29,11 @@ function findPackageJson(): { packageJson: any; packageJsonPath: string } {
 }
 
 // `packageJson` is the running build's manifest and is require-cached for the
-// life of the process. Post-install verification must not use it: replacing
-// the installed package cannot change this value in-process.
-const { packageJson, packageJsonPath: PACKAGE_JSON_PATH } = findPackageJson();
+// life of the process. Post-install verification must not use it, nor the
+// running module's path: replacing the installed package changes neither.
+const packageJson = findPackageJson();
+
+const PACKAGE_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 /**
  * Read the version of the package currently installed at `packageJsonPath`,
@@ -68,9 +70,15 @@ export function isInsideGlobalPackageRoot(packageJsonPath: string, globalRoot: s
 }
 
 export function readInstalledPackageVersion(packageJsonPath: string): string | null {
+  return readInstalledManifest(packageJsonPath)?.version ?? null;
+}
+
+function readInstalledManifest(packageJsonPath: string): { name: unknown; version: string } | null {
   try {
     const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-    return parsed && typeof parsed.version === 'string' ? parsed.version : null;
+    return parsed && typeof parsed.version === 'string'
+      ? { name: parsed.name, version: parsed.version }
+      : null;
   } catch {
     return null;
   }
@@ -414,24 +422,32 @@ export class AutoUpdater {
   }
 
   /**
-   * Whether the package installed on disk now reports `expectedVersion`.
-   * Reads the manifest freshly; never consults the running build's version.
+   * Whether the package manager's current global install now reports
+   * `expectedVersion`. Resolves `<globalRoot>/<packageName>/package.json`
+   * freshly instead of the running module's own path: pnpm loads the running
+   * module from its physical store directory and points the global link at a
+   * new store directory on update, so the running path keeps the old manifest.
    */
   verifyInstalledVersion(
     expectedVersion: string,
     globalRoot: string | null,
-    packageJsonPath: string = PACKAGE_JSON_PATH,
+    packageName: string = packageJson.name,
   ): InstallVerification {
-    // A global update replaces the package under the package manager's global
-    // root. If this build's manifest lives anywhere else (a source checkout,
-    // a linked package, a local install), reading it says nothing about what
-    // the update installed.
-    if (!globalRoot || !isInsideGlobalPackageRoot(packageJsonPath, globalRoot)) {
+    if (!globalRoot || typeof packageName !== 'string' || !PACKAGE_NAME.test(packageName)) {
       return 'unverified';
     }
-    return readInstalledPackageVersion(packageJsonPath) === expectedVersion
-      ? 'verified'
-      : 'mismatch';
+    const installedManifest = path.join(globalRoot, packageName, 'package.json');
+    // The install must physically live under the global root. A source
+    // checkout exposed through `npm link`/`pnpm link` resolves outside it and
+    // says nothing about what the update installed.
+    if (!isInsideGlobalPackageRoot(installedManifest, globalRoot)) {
+      return 'unverified';
+    }
+    const manifest = readInstalledManifest(installedManifest);
+    if (!manifest || manifest.name !== packageName) {
+      return 'unverified';
+    }
+    return manifest.version === expectedVersion ? 'verified' : 'mismatch';
   }
 
   /** The package manager's global package root, or null when it cannot be determined. */

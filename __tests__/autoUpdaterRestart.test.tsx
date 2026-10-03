@@ -131,30 +131,51 @@ describe('AutoUpdater post-install verification', () => {
     expect(readInstalledPackageVersion(file)).toBeNull();
   });
 
-  it('verifies the expected version against the freshly installed global package', () => {
+  it('verifies the expected version against the current global install', () => {
     const updater = new AutoUpdater('/unused/.psyche/psyche.config.json');
     const { globalRoot, packageJson } = globalInstall('0.0.2');
 
-    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, packageJson)).toBe('mismatch');
+    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, 'psyche-build')).toBe('mismatch');
     writeFileSync(packageJson, JSON.stringify({ name: 'psyche-build', version: '0.0.3' }));
-    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, packageJson)).toBe('verified');
-    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, `${packageJson}.missing`)).toBe(
-      'unverified',
-    );
+    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, 'psyche-build')).toBe('verified');
+    // Nothing installed under that name in the global root.
+    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, 'other-package')).toBe('unverified');
   });
 
-  it('refuses to verify against a source checkout outside the global root', () => {
+  it('follows a pnpm global link switched to a new store directory', () => {
     const updater = new AutoUpdater('/unused/.psyche/psyche.config.json');
-    const { globalRoot } = globalInstall('0.0.3');
-    const checkout = packageJsonAt('0.0.3');
+    const base = mkdtempSync(path.join(tmpdir(), 'psyche-updater-pnpm-'));
+    roots.push(base);
+    const globalRoot = path.join(base, 'global', '5', 'node_modules');
+    const storeDir = (version: string) =>
+      path.join(globalRoot, '.pnpm', `psyche-build@${version}`, 'node_modules', 'psyche-build');
+    for (const version of ['0.0.2', '0.0.3']) {
+      mkdirSync(storeDir(version), { recursive: true });
+      writeFileSync(
+        path.join(storeDir(version), 'package.json'),
+        JSON.stringify({ name: 'psyche-build', version }),
+      );
+    }
+    const globalLink = path.join(globalRoot, 'psyche-build');
+    // Before the update the running module was loaded from the 0.0.2 store path.
+    symlinkSync(storeDir('0.0.2'), globalLink, 'dir');
+    const runningManifest = path.join(storeDir('0.0.2'), 'package.json');
+    // `pnpm update -g` points the global link at the new store directory.
+    rmSync(globalLink);
+    symlinkSync(storeDir('0.0.3'), globalLink, 'dir');
 
-    expect(isInsideGlobalPackageRoot(checkout, globalRoot)).toBe(false);
-    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, checkout)).toBe('unverified');
-    // No detectable global root means nothing can be verified.
-    expect(updater.verifyInstalledVersion('0.0.3', null, checkout)).toBe('unverified');
+    // The running module's physical path still holds the old manifest...
+    expect(readInstalledPackageVersion(runningManifest)).toBe('0.0.2');
+    // ...but verification resolves the current global install.
+    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, 'psyche-build')).toBe('verified');
   });
 
-  it('refuses to verify a linked checkout that only appears inside the global root', () => {
+  it('refuses to verify without a detectable global root', () => {
+    const updater = new AutoUpdater('/unused/.psyche/psyche.config.json');
+    expect(updater.verifyInstalledVersion('0.0.3', null, 'psyche-build')).toBe('unverified');
+  });
+
+  it('refuses to verify a source checkout linked into the global root', () => {
     const updater = new AutoUpdater('/unused/.psyche/psyche.config.json');
     const base = mkdtempSync(path.join(tmpdir(), 'psyche-updater-link-'));
     roots.push(base);
@@ -167,9 +188,23 @@ describe('AutoUpdater post-install verification', () => {
 
     expect(readInstalledPackageVersion(linkedPackageJson)).toBe('0.0.3');
     expect(isInsideGlobalPackageRoot(linkedPackageJson, globalRoot)).toBe(false);
-    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, linkedPackageJson)).toBe(
-      'unverified',
-    );
+    expect(isInsideGlobalPackageRoot(checkout, globalRoot)).toBe(false);
+    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, 'psyche-build')).toBe('unverified');
+  });
+
+  it('refuses a package name that could escape the global root', () => {
+    const updater = new AutoUpdater('/unused/.psyche/psyche.config.json');
+    const { globalRoot } = globalInstall('0.0.3');
+    for (const name of ['../psyche-build', 'a/../../b', '/abs', '']) {
+      expect(updater.verifyInstalledVersion('0.0.3', globalRoot, name)).toBe('unverified');
+    }
+  });
+
+  it('refuses an installed manifest that names a different package', () => {
+    const updater = new AutoUpdater('/unused/.psyche/psyche.config.json');
+    const { globalRoot, packageJson } = globalInstall('0.0.3');
+    writeFileSync(packageJson, JSON.stringify({ name: 'impostor', version: '0.0.3' }));
+    expect(updater.verifyInstalledVersion('0.0.3', globalRoot, 'psyche-build')).toBe('unverified');
   });
 
   it('does not treat the global root itself as an installed package', () => {
