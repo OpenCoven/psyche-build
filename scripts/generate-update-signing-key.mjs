@@ -78,11 +78,30 @@ function assertOutsideGit(target, directory, env) {
   assertGitSaysOutside(directory, env);
 }
 
+const defaultFileOps = { openSync, fchmodSync, writeSync, fstatSync, closeSync, unlinkSync };
+
+// Writes every byte, looping over short writes; a write that makes no
+// progress is an error rather than a silent truncation.
+function writeFully(fileOps, descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = fileOps.writeSync(descriptor, bytes, offset, bytes.length - offset);
+    if (!Number.isInteger(written) || written <= 0 || written > bytes.length - offset) {
+      throw Object.assign(new Error('Private key write made no progress'), { code: 'ESHORTWRITE' });
+    }
+    offset += written;
+  }
+  return offset;
+}
+
 /**
  * Generates a key pair, writes the private PEM to `outPath` with mode 0600,
- * and returns only the public entry `{ keyId, publicKey }`.
+ * and returns only the public entry `{ keyId, publicKey }`. Any failure after
+ * the file is created removes it, so no partial key is ever left behind.
+ * `fileOps` exists only so tests can inject write failures.
  */
-export function generateSigningKey(outPath, { env = process.env } = {}) {
+export function generateSigningKey(outPath, { env = process.env, fileOps: overrides = {} } = {}) {
+  const fileOps = { ...defaultFileOps, ...overrides };
   const target = path.resolve(outPath);
   const directory = path.dirname(target);
   if (!existsSync(directory)) throw new UsageError('The output directory does not exist');
@@ -90,25 +109,46 @@ export function generateSigningKey(outPath, { env = process.env } = {}) {
   assertOutsideGit(path.join(realDirectory, path.basename(target)), realDirectory, env);
   const { privateKey } = generateKeyPairSync('ed25519');
   const pem = privateKey.export({ format: 'pem', type: 'pkcs8' });
+  // Derive the public entry before touching the disk, so nothing that can
+  // fail remains once the key file exists.
+  const entry = publicKeyEntryFromPrivatePem(pem);
+  const bytes = Buffer.from(pem, 'utf8');
   // 'wx' refuses to follow or replace an existing path, and the mode applies
   // at creation so the key is never readable by anyone else, even briefly.
-  const descriptor = openSync(target, 'wx', 0o600);
-  let complete = false;
+  const descriptor = fileOps.openSync(target, 'wx', 0o600);
+  let failure;
   try {
-    fchmodSync(descriptor, 0o600);
-    const bytes = Buffer.from(pem, 'utf8');
-    const written = writeSync(descriptor, bytes);
-    if (written !== bytes.length) throw new Error('Private key was only partially written');
-    if ((fstatSync(descriptor).mode & 0o777) !== 0o600) {
-      throw new Error('Private key file mode is not 0600');
+    fileOps.fchmodSync(descriptor, 0o600);
+    if (writeFully(fileOps, descriptor, bytes) !== bytes.length) {
+      throw Object.assign(new Error('Private key was only partially written'), { code: 'ESHORTWRITE' });
     }
-    complete = true;
-  } finally {
-    closeSync(descriptor);
-    // Never leave a truncated key behind for someone to upload by mistake.
-    if (!complete) unlinkSync(target);
+    const stat = fileOps.fstatSync(descriptor);
+    if ((stat.mode & 0o777) !== 0o600) {
+      throw Object.assign(new Error('Private key file mode is not 0600'), { code: 'EKEYMODE' });
+    }
+    if (stat.size !== bytes.length) {
+      throw Object.assign(new Error('Private key file size does not match'), { code: 'ESHORTWRITE' });
+    }
+  } catch (error) {
+    failure = error;
   }
-  return publicKeyEntryFromPrivatePem(pem);
+  try {
+    fileOps.closeSync(descriptor);
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) {
+    // Never leave a truncated or unverified key behind for someone to upload.
+    try {
+      fileOps.unlinkSync(target);
+    } catch {
+      throw Object.assign(new Error('Key generation failed and the partial key file could not be removed'), {
+        code: 'EKEYCLEANUP',
+      });
+    }
+    throw failure;
+  }
+  return entry;
 }
 
 export function main(
@@ -148,6 +188,17 @@ export function main(
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Node resolves the entry module through symlinks (for example /var ->
+// /private/var on macOS runners), so compare against the real path.
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   process.exitCode = main();
 }

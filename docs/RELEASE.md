@@ -830,6 +830,14 @@ The `publish` job reads `release/update-manifest-keys.json` after it writes
   current key, a failed verification, or a malformed keys file stops the job
   before the release is created or changed.
 
+Manual recovery runs the workflow from `main` against the requested tag's
+source. A tag with no `release/update-manifest-keys.json`, such as `v0.0.1` or
+`v0.0.2`, predates this feature. The job treats it as a legacy tag: it posts a
+notice and publishes the three-asset set. The keys file and the script were
+added together, so every later tag has the keys file and cannot silently drop
+signing. If such a tag lacks `scripts/update-manifest.mjs`, the job uses the
+workflow revision's copy, and fails if it cannot read that copy.
+
 Before building, the job checks that the local tag object is the exact signed
 object the `verify` job checked against GitHub. It reads the tagger date only
 from that object.

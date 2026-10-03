@@ -807,12 +807,39 @@ jobs:
       # current public key to release/update-manifest-keys.json. Until then the
       # release proceeds without it and says so. Once a current key exists, a
       # missing secret or a failed self-verification blocks publication.
+      #
+      # Manual recovery runs this workflow from main against an older tag. A
+      # tag without the keys file predates the feature and is a legacy tag:
+      # it publishes without a manifest. The keys file was added together with
+      # the script, so a feature-era tag always has it and cannot silently drop
+      # signing. If such a tag lacks the script, the workflow revision's copy
+      # is used; if that cannot be obtained, the job fails.
       - name: Resolve update manifest signing
         id: update-manifest
         shell: bash
         run: |
           set -euo pipefail
-          STATUS="$(node scripts/update-manifest.mjs status --keys release/update-manifest-keys.json)"
+          KEYS_FILE=release/update-manifest-keys.json
+          if [ ! -e "$KEYS_FILE" ] && [ ! -L "$KEYS_FILE" ]; then
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Update manifest not published::$RELEASE_TAG predates update manifest signing (no $KEYS_FILE), so this release publishes no update-manifest.json."
+            exit 0
+          fi
+          UPDATE_MANIFEST_SCRIPT="$PWD/scripts/update-manifest.mjs"
+          if [ ! -f "$UPDATE_MANIFEST_SCRIPT" ]; then
+            if [[ ! "${GITHUB_WORKFLOW_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::$KEYS_FILE exists but no update manifest resolver is available"
+              exit 1
+            fi
+            UPDATE_MANIFEST_SCRIPT="$RUNNER_TEMP/update-manifest.mjs"
+            if ! git show "$GITHUB_WORKFLOW_SHA:scripts/update-manifest.mjs" > "$UPDATE_MANIFEST_SCRIPT"; then
+              echo "::error::$KEYS_FILE exists but the workflow revision's update manifest resolver cannot be read"
+              exit 1
+            fi
+            echo "Using the workflow revision's update manifest script for $RELEASE_TAG"
+          fi
+          echo "UPDATE_MANIFEST_SCRIPT=$UPDATE_MANIFEST_SCRIPT" >> "$GITHUB_ENV"
+          STATUS="$(node "$UPDATE_MANIFEST_SCRIPT" status --keys "$KEYS_FILE")"
           case "$STATUS" in
             active=false)
               echo "active=false" >> "$GITHUB_OUTPUT"
@@ -854,7 +881,7 @@ jobs:
             echo "::error::Release tag $RELEASE_TAG has no tagger date for the update manifest"
             exit 1
           fi
-          node scripts/update-manifest.mjs build \
+          node "$UPDATE_MANIFEST_SCRIPT" build \
             --version "${RELEASE_VERSION}" \
             --tag "$RELEASE_TAG" \
             --source-sha "$RELEASE_SHA" \
@@ -874,7 +901,7 @@ jobs:
             echo "::error::Missing required release environment secret UPDATE_MANIFEST_SIGNING_KEY while release/update-manifest-keys.json names a current key"
             exit 1
           fi
-          node scripts/update-manifest.mjs sign \
+          node "$UPDATE_MANIFEST_SCRIPT" sign \
             --manifest artifacts/update-manifest.json \
             --keys release/update-manifest-keys.json \
             --key-env UPDATE_MANIFEST_SIGNING_KEY \
@@ -887,7 +914,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/update-manifest.mjs verify \
+          node "$UPDATE_MANIFEST_SCRIPT" verify \
             --manifest artifacts/update-manifest.json \
             --signature artifacts/update-manifest.json.sig \
             --keys release/update-manifest-keys.json \

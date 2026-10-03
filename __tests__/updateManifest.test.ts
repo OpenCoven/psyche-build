@@ -1,6 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { createPrivateKey, generateKeyPairSync, sign } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -136,7 +146,7 @@ describe('manifest build', () => {
       SUMS.replace(ARM_DIGEST, 'G'.repeat(64)),
       SUMS.replace(ARM_DIGEST, ARM_DIGEST.slice(1)),
       SUMS.replace('1.2.3-aarch64', '1.2.4-aarch64'),
-      SUMS.replace('\n', '\r\n'),
+      SUMS.replaceAll('\n', '\r\n'),
       `${SUMS}\n`,
     ];
     for (const sums of bad) {
@@ -267,9 +277,13 @@ describe('sign and verify', () => {
     expect(() => signManifest(pretty, current.pem, keys)).toThrow(
       expect.objectContaining({ reason: 'manifest_not_canonical' }),
     );
-    const { privateKey: rsa } = generateKeyPairSync('rsa', { modulusLength: 1024 });
+    const { privateKey: rsa } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     expect(() =>
       signManifest(manifestBytes(), rsa.export({ format: 'pem', type: 'pkcs8' }).toString(), keys),
+    ).toThrow(expect.objectContaining({ reason: 'invalid_private_key' }));
+    const { privateKey: ed448 } = generateKeyPairSync('ed448');
+    expect(() =>
+      signManifest(manifestBytes(), ed448.export({ format: 'pem', type: 'pkcs8' }).toString(), keys),
     ).toThrow(expect.objectContaining({ reason: 'invalid_private_key' }));
   });
 
@@ -513,6 +527,18 @@ describe('update-manifest CLI', () => {
     expect(main(['nope'], { io: capture().io })).toBe(64);
   });
 
+  it('runs when invoked through a symlinked path, as on macOS runner temp directories', () => {
+    const { files } = writeFixture(undefined, keysText(null));
+    const root = temporaryRoot();
+    const linkDir = path.join(root, 'link');
+    symlinkSync(path.resolve('scripts'), linkDir);
+    const result = spawnSync(process.execPath, [path.join(linkDir, 'update-manifest.mjs'), 'status', '--keys', files.keys], {
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('active=false\n');
+  });
+
   it('runs as a standalone Node script with only built-ins', () => {
     const { files } = writeFixture(undefined, keysText(null));
     const result = spawnSync(process.execPath, ['scripts/update-manifest.mjs', 'status', '--keys', files.keys], {
@@ -626,6 +652,60 @@ describe('generate-update-signing-key', () => {
     const worktree = temporaryRoot();
     writeFileSync(path.join(worktree, '.git'), 'gitdir: /elsewhere\n');
     expectRefused(path.join(worktree, 'k.pem'), { PATH: lying }, /Git working tree/);
+  });
+
+  it('completes short writes and removes the key file on every post-open failure', async () => {
+    const fs = await import('node:fs');
+    const outside = () => path.join(temporaryRoot(), 'k.pem');
+
+    // Short writes are continued until every byte is on disk.
+    const chunked = outside();
+    let calls = 0;
+    const entry = generateSigningKey(chunked, {
+      fileOps: {
+        writeSync: (fd, buffer, offset, length) => {
+          calls += 1;
+          return fs.writeSync(fd, buffer, offset, Math.min(length, 7));
+        },
+      },
+    });
+    expect(calls).toBeGreaterThan(10);
+    expect(publicKeyEntryFromPrivatePem(readFileSync(chunked, 'utf8'))).toEqual(entry);
+
+    const boom = (code: string) => () => {
+      throw Object.assign(new Error('injected'), { code });
+    };
+    const failures: Array<[string, Parameters<typeof generateSigningKey>[1]]> = [
+      ['fchmod', { fileOps: { fchmodSync: boom('EFCHMOD') } }],
+      ['write throws', { fileOps: { writeSync: boom('EIO') } }],
+      ['write makes no progress', { fileOps: { writeSync: () => 0 } }],
+      ['write over-reports', { fileOps: { writeSync: (_fd, _b, _o, length) => length + 1 } }],
+      ['fstat throws', { fileOps: { fstatSync: boom('EFSTAT') } }],
+      ['wrong mode', { fileOps: { fstatSync: (fd) => Object.assign(fs.fstatSync(fd), { mode: 0o100644 }) } }],
+      ['size mismatch', { fileOps: { fstatSync: (fd) => Object.assign(fs.fstatSync(fd), { size: 1 }) } }],
+      [
+        'close throws',
+        {
+          fileOps: {
+            closeSync: (fd) => {
+              fs.closeSync(fd);
+              throw Object.assign(new Error('injected'), { code: 'ECLOSE' });
+            },
+          },
+        },
+      ],
+    ];
+    for (const [label, options] of failures) {
+      const target = outside();
+      expect(() => generateSigningKey(target, options), label).toThrow();
+      expect(fs.existsSync(target), label).toBe(false);
+    }
+
+    // If even the cleanup fails, the error says so instead of claiming success.
+    const stuck = outside();
+    expect(() =>
+      generateSigningKey(stuck, { fileOps: { writeSync: () => 0, unlinkSync: boom('EPERM') } }),
+    ).toThrow(expect.objectContaining({ code: 'EKEYCLEANUP' }));
   });
 
   it('refuses to write inside a Git working tree and requires an explicit --out', () => {

@@ -22,7 +22,7 @@
 // Only Node built-ins are used, so the release job needs no dependency install.
 
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -697,6 +697,17 @@ export function main(
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Node resolves the entry module through symlinks (for example /var ->
+// /private/var on macOS runners), so compare against the real path.
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   process.exitCode = main();
 }

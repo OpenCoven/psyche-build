@@ -210,6 +210,7 @@ describe('release documentation contract', () => {
     expect(section).toContain('published_at_in_future');
     expect(section).toContain('manifest_not_yet_valid');
     expect(section).toMatch(/30-day window starts when the tag is created/);
+    expect(section).toMatch(/legacy tag[\s\S]*three-asset set/);
   });
 
   it('creates the release environment only after publication and permits immutable-tag recovery', async () => {
