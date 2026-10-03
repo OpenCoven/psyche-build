@@ -20,12 +20,17 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
-type FakeNode = { nodeType: 1; background: string; parentElement: FakeNode | null };
+type FakeNode = {
+  nodeType: 1;
+  isConnected: boolean;
+  background: string;
+  parentElement: FakeNode | null;
+};
 
 function chain(...backgrounds: string[]): FakeNode {
   let parent: FakeNode | null = null;
   for (const background of [...backgrounds].reverse()) {
-    parent = { nodeType: 1, background, parentElement: parent };
+    parent = { nodeType: 1, isConnected: true, background, parentElement: parent };
   }
   return parent as FakeNode;
 }
@@ -46,7 +51,10 @@ function themeFor(host: FakeNode) {
   return factory(
     { getElementById: () => host },
     { getComputedStyle: (node: FakeNode) => ({ backgroundColor: node.background }) },
-  ) as { terminalTheme: () => { background: string }; VIBRANCY_BASE_RGB: number[] };
+  ) as {
+    terminalTheme: (start?: FakeNode) => { background: string };
+    VIBRANCY_BASE_RGB: number[];
+  };
 }
 
 describe('terminal surface colour reported to TUIs', () => {
@@ -64,6 +72,21 @@ describe('terminal surface colour reported to TUIs', () => {
     const background = themeFor(host).terminalTheme().background;
     const expected = [40, 41, 42].map((c, k) => Math.round(c * 0.45 + [8, 8, 10][k] * 0.55));
     expect(background).toBe(`rgba(${expected.join(', ')}, 0)`);
+  });
+
+  it("samples from the terminal's own container so its pane frame counts", () => {
+    // container (transparent) → pane body → .terminal-pane (solid) → host …
+    const host = chain('rgba(0, 0, 0, 0)', 'rgb(11, 11, 13)');
+    const pane = chain('rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'rgb(19, 19, 21)');
+    const { terminalTheme } = themeFor(host);
+    expect(terminalTheme(pane).background).toBe('rgba(19, 19, 21, 0)');
+    expect(terminalTheme().background).toBe('rgba(11, 11, 13, 0)');
+    expect(terminalTheme({ ...pane, isConnected: false }).background).toBe('rgba(11, 11, 13, 0)');
+  });
+
+  it('applies the per-terminal colour at creation and on refresh', () => {
+    expect(mainJs).toContain('theme: terminalTheme(container),');
+    expect(functionSource('refreshTerminalThemes')).toContain('terminalTheme(thread.host)');
   });
 
   it('refreshes every terminal when the theme, solid mode or opacity changes', () => {

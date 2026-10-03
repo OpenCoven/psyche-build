@@ -2311,7 +2311,9 @@
   // and TUIs such as Claude Code and Codex derive their prompt and text
   // shading from the answer; a bare transparent black made them shade for a
   // black terminal. The visible colour is the stack of translucent CSS
-  // backgrounds behind the terminal host composited over the window material,
+  // backgrounds behind the terminal (its pane frame, the terminal area and the
+  // workspace chrome, sampled from the terminal's own container so a pane that
+  // paints itself is included) composited over the window material,
   // which WebKit cannot report, so it is approximated by the dark HUD tone.
   var VIBRANCY_BASE_RGB = [30, 30, 32];
   function parseCssRgba(value) {
@@ -2321,8 +2323,8 @@
     if (parts.length < 3 || parts.some(function (n) { return !Number.isFinite(n); })) return null;
     return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
   }
-  function terminalSurfaceRgb() {
-    var host = document.getElementById("terminal-host");
+  function terminalSurfaceRgb(start) {
+    var host = start && start.isConnected ? start : document.getElementById("terminal-host");
     var layers = [];
     for (var node = host; node && node.nodeType === 1; node = node.parentElement) {
       var colour = parseCssRgba(window.getComputedStyle(node).backgroundColor);
@@ -2342,9 +2344,9 @@
       return Math.max(0, Math.min(255, Math.round(channel)));
     });
   }
-  function terminalTheme() {
+  function terminalTheme(start) {
     return {
-      background: "rgba(" + terminalSurfaceRgb().join(", ") + ", 0)",
+      background: "rgba(" + terminalSurfaceRgb(start).join(", ") + ", 0)",
       foreground: "#ece9f5",
       cursor: "#a78bfa",
       selectionBackground: "rgba(167,139,250,0.30)",
@@ -2449,9 +2451,10 @@
   // Re-run whenever anything that changes the pane's visible colour changes,
   // so the colour reported to TUIs follows the theme, solid mode and opacity.
   function refreshTerminalThemes() {
-    var theme = terminalTheme();
     state.threads.forEach(function (thread) {
-      if (thread.terminalController) thread.terminalController.setTheme(theme);
+      if (thread.terminalController) {
+        thread.terminalController.setTheme(terminalTheme(thread.host));
+      }
     });
   }
   function applySolidBg(on, opts) {
@@ -5404,7 +5407,7 @@
         // Fully transparent canvas: the terminal's tint comes from
         // .terminal-area's CSS background, which already tracks --bg-opacity.
         allowTransparency: true,
-        theme: terminalTheme(),
+        theme: terminalTheme(container),
         cursorBlink: true,
         convertEol: false,
         allowProposedApi: true,
