@@ -121,6 +121,10 @@ export async function cleanupPromptFilesForSlug(
  * of the typing process. The dialect is the pane's own shell
  * (`resolvePaneShell`), never Psyche's `$SHELL`: tmux's `default-shell` can
  * differ (#508). A pane with no known dialect must not receive this line.
+ *
+ * What follows decides whether the prompt then reaches the agent's own argv:
+ * `positional` and `option` transports expand it there (#523, recorded per
+ * agent as `promptArgvExposure`); `stdin` pipes it from a shell builtin.
  */
 export function buildPromptReadAndDeleteSnippet(
   promptPath: string,

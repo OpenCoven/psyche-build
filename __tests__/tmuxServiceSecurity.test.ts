@@ -206,4 +206,88 @@ describe('TmuxService command construction', () => {
       expect.objectContaining({ encoding: 'utf-8', stdio: 'pipe' }),
     );
   });
+  // #523: an agent prompt is protected data. The paste path must never place
+  // it in the argv of tmux or of a shell, nor in a logged command line.
+  describe('argv-free prompt paste', () => {
+    const PROMPT = "secret prompt with 'quotes' and\nnewlines $(whoami)";
+
+    function stdinCapturingChild(stdinChunks: string[]) {
+      return {
+        stdin: {
+          end: vi.fn((chunk?: string) => {
+            if (chunk !== undefined) stdinChunks.push(String(chunk));
+          }),
+        },
+      };
+    }
+
+    it('loads the buffer from stdin: the prompt is in no argv and no shell runs', async () => {
+      const stdinChunks: string[] = [];
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        setImmediate(() => cb(null, '', ''));
+        return stdinCapturingChild(stdinChunks);
+      });
+
+      await TmuxService.getInstance().loadBufferFromStdin('psyche-prompt-1', PROMPT);
+
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+      const [file, args] = execFileMock.mock.calls[0] as [string, string[]];
+      expect(file).toBe('tmux');
+      expect(args).toEqual(['load-buffer', '-b', 'psyche-prompt-1', '-']);
+      expect(JSON.stringify(execFileMock.mock.calls)).not.toContain('secret prompt');
+      expect(stdinChunks.join('')).toBe(PROMPT);
+      expect(execSyncMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects without echoing the prompt when load-buffer fails', async () => {
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        setImmediate(() => cb(new Error('Command failed: tmux load-buffer -b psyche-prompt-1 -'), '', ''));
+        return stdinCapturingChild([]);
+      });
+
+      const error = await TmuxService.getInstance()
+        .loadBufferFromStdin('psyche-prompt-1', PROMPT)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(String((error as Error).message)).not.toContain('secret prompt');
+    });
+
+    it('pastes with bracketed-paste markers and deletes the buffer in the same tmux command', async () => {
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        setImmediate(() => cb(null, '', ''));
+        return stdinCapturingChild([]);
+      });
+
+      await TmuxService.getInstance().pasteBufferAndDelete('psyche-prompt-1', '%7');
+
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['paste-buffer', '-d', '-p', '-b', 'psyche-prompt-1', '-t', '%7'],
+        expect.objectContaining({ timeout: expect.any(Number) }),
+        expect.any(Function),
+      );
+      expect(execSyncMock).not.toHaveBeenCalled();
+    });
+
+    it('deletes a named buffer without a shell', async () => {
+      execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+        setImmediate(() => cb(null, '', ''));
+        return stdinCapturingChild([]);
+      });
+
+      await TmuxService.getInstance().deleteBuffer('psyche-prompt-1');
+
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['delete-buffer', '-b', 'psyche-prompt-1'],
+        expect.anything(),
+        expect.any(Function),
+      );
+      expect(execSyncMock).not.toHaveBeenCalled();
+    });
+
+    it('no longer offers set-buffer, which put the content on a shell command line', () => {
+      expect((TmuxService.getInstance() as unknown as Record<string, unknown>).setBuffer).toBeUndefined();
+    });
+  });
 });

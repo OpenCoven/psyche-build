@@ -53,7 +53,13 @@ export function paneShellDialectForCommand(
 export type PaneShellUnknownReason = 'unrecognized_shell' | 'not_a_shell' | 'unreadable_shell';
 
 /** Why an agent was launched without its initial prompt. */
-export type PromptBootstrapSkipReason = PaneShellUnknownReason | 'prompt_file_unwritable';
+export type PromptBootstrapSkipReason =
+  | PaneShellUnknownReason
+  | 'prompt_file_unwritable'
+  /** The pasted-prompt transport never saw the agent take the foreground (#523). */
+  | 'agent_not_ready'
+  /** tmux could not load or paste the prompt buffer (#523). */
+  | 'prompt_paste_failed';
 
 export type PaneShellResolution =
   | { readonly dialect: PaneShellDialect; readonly paneCommand: string }
@@ -172,6 +178,8 @@ const SKIP_REASON_PHRASES: Readonly<Record<PromptBootstrapSkipReason, string>> =
   unrecognized_shell: 'the pane runs a shell Psyche cannot safely type a prompt into (supported: POSIX shells and fish)',
   not_a_shell: 'the pane was running a program rather than its shell',
   prompt_file_unwritable: 'the prompt file could not be written',
+  agent_not_ready: 'the agent did not start in time to receive a pasted prompt',
+  prompt_paste_failed: 'tmux could not paste the prompt',
 };
 
 /**

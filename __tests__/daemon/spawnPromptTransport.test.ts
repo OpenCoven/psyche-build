@@ -230,6 +230,27 @@ describe('spawnBridgePane prompt transports', () => {
     });
   });
 
+  // #523: the paste is not attempted blindly. When the agent never takes the
+  // foreground, the client is told the prompt was withheld.
+  it.each(['agent_not_ready', 'prompt_paste_failed'] as const)(
+    'warns initial_prompt_skipped when the paste reports %s',
+    async (reason) => {
+      const h = harness();
+      h.sendPromptKeys.mockResolvedValueOnce(reason as never);
+      const { result } = await spawn('cline', 'Fix the failing auth tests', h);
+
+      expect(result.warnings?.map((w) => w.code)).toEqual(['initial_prompt_skipped']);
+      expect(result.warnings?.[0]?.message).not.toContain('auth tests');
+    },
+  );
+
+  it('adds no warning when the paste was delivered', async () => {
+    const h = harness();
+    h.sendPromptKeys.mockResolvedValueOnce(null as never);
+    const { result } = await spawn('cline', 'Fix the failing auth tests', h);
+    expect(result.warnings ?? []).toEqual([]);
+  });
+
   it('leaves no orphaned prompt file for send-keys agents', async () => {
     await spawn('cline', 'Fix the failing auth tests');
     expect(promptFiles()).toEqual([]);

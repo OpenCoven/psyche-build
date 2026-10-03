@@ -146,7 +146,9 @@ export interface BridgeSpawnDeps {
    * __tests__ is outside tsconfig's `include`, so a required field here would
    * not be a compile error for callers in tests, just a runtime TypeError.
    */
-  sendPromptKeys?: (request: BridgeSpawnPromptKeysRequest) => Promise<void>;
+  sendPromptKeys?: (
+    request: BridgeSpawnPromptKeysRequest,
+  ) => Promise<PromptBootstrapSkipReason | null | void>;
   /**
    * Reads the pane's `#{pane_current_command}` — its shell, before anything is
    * typed — so the prompt bootstrap uses the pane's dialect rather than the
@@ -1904,7 +1906,12 @@ export async function spawnBridgePane(
         const prompt = request.prompt;
         if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
           const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
-          await sendPromptKeys({ paneId: persistedPaneId, prompt, agent });
+          const pasteSkipped = await sendPromptKeys({ paneId: persistedPaneId, prompt, agent });
+          if (pasteSkipped) {
+            // No blind paste (#523): the agent never took the foreground, or
+            // tmux could not paste. The pane and agent are fine.
+            warnings.push(initialPromptSkippedWarning(agent, pasteSkipped, persistedPaneId));
+          }
         }
       } catch (error) {
         warnings.push(effectUnknownWarning(
@@ -2341,7 +2348,7 @@ export function sendTmuxCommand(paneId: string, command: string): void {
 
 export async function sendPromptKeysToPane(
   request: BridgeSpawnPromptKeysRequest,
-): Promise<void> {
+): Promise<PromptBootstrapSkipReason | null> {
   const { paneId, prompt, agent } = request;
   const tmuxService = TmuxService.getInstance();
   let baselineCommand: string | undefined;
@@ -2351,7 +2358,7 @@ export async function sendPromptKeysToPane(
     baselineCommand = undefined;
   }
 
-  await sendPromptViaTmux({
+  const pasted = await sendPromptViaTmux({
     paneId,
     prompt,
     tmuxService,
@@ -2362,6 +2369,7 @@ export async function sendPromptKeysToPane(
     postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
     readyDelayMs: getSendKeysReadyDelayMs(agent),
   });
+  return pasted.delivered ? null : pasted.reason;
 }
 
 export const defaultSpawnDeps: BridgeSpawnDeps = {

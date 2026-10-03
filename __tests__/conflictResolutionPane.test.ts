@@ -35,7 +35,9 @@ const buildPromptReadAndDeleteSnippetMock = vi.hoisted(() => vi.fn(() => 'read-p
 const writePromptFileMock = vi.hoisted(() => vi.fn(async (): Promise<string> => {
   throw new Error('use inline prompt');
 }));
-const sendPromptViaTmuxMock = vi.hoisted(() => vi.fn(async () => {}));
+const sendPromptViaTmuxMock = vi.hoisted(() => vi.fn(async (): Promise<
+  { delivered: true } | { delivered: false; reason: 'agent_not_ready' | 'prompt_paste_failed' }
+> => ({ delivered: true })));
 
 vi.mock('../src/services/TmuxService.js', () => ({
   TmuxService: { getInstance: () => tmuxService },
@@ -398,6 +400,20 @@ describe('conflict resolution pane transaction', () => {
       expect(report.logWarn.mock.calls[0][1]).toBe('conflictResolutionPane');
       expect(report.showToast).toHaveBeenCalledTimes(1);
       expect(report.showToast.mock.calls[0][0]).toContain('without its initial prompt');
+    });
+
+    // #523: a send-keys agent that never took the foreground is not pasted
+    // into blindly; the skip is reported like any other withheld prompt.
+    it('reports a send-keys paste that was not delivered', async () => {
+      tmuxService.getPaneCurrentCommand.mockResolvedValue('zsh');
+      getPromptTransportMock.mockReturnValue('send-keys');
+      sendPromptViaTmuxMock.mockResolvedValueOnce({ delivered: false, reason: 'agent_not_ready' });
+      await createPane();
+      expect(sendPromptViaTmuxMock).toHaveBeenCalledTimes(1);
+      expect(report.logWarn).toHaveBeenCalledTimes(1);
+      expect(report.logWarn.mock.calls[0][0]).toContain('[initial_prompt_skipped:agent_not_ready]');
+      expect(report.logWarn.mock.calls[0][0]).not.toContain('conflicts merging');
+      expect(report.showToast).toHaveBeenCalledTimes(1);
     });
 
     // AGENTS.md: the prompt is never inlined into the typed line or argv.

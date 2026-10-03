@@ -8,7 +8,7 @@ import {
   buildCodexHookedCommand,
 } from './codexHooks.js';
 import { ensureGeminiFolderTrusted } from './geminiTrust.js';
-import { sendPromptViaTmux } from './agentPromptDispatch.js';
+import { sendPromptViaTmux, type PromptPasteClock } from './agentPromptDispatch.js';
 import {
   buildAgentExitRecorderSuffix,
   type AgentExitRecorder,
@@ -43,6 +43,19 @@ export const AGENT_IDS = [
 
 export type AgentName = typeof AGENT_IDS[number];
 export type PermissionMode = '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+/**
+ * How an initial prompt reaches the agent. See docs/AGENT-PROMPT-TRANSPORT.md.
+ *
+ * - `send-keys`: launched bare, then the prompt is pasted into the TUI through
+ *   a tmux buffer loaded over stdin. It is in no process argv.
+ * - `stdin`: piped to the agent from the prompt file by the pane's shell
+ *   (`printf` is a shell builtin there). It is not in the agent's argv.
+ * - `launch-only`: no initial prompt is delivered.
+ * - `positional` / `option`: the pane's shell expands the prompt into the
+ *   AGENT's argv, visible in `ps` for the agent's lifetime (#523). Every such
+ *   entry must carry `promptArgvExposure` saying why no argv-free transport is
+ *   used yet.
+ */
 export type PromptTransport = 'launch-only' | 'positional' | 'option' | 'stdin' | 'send-keys';
 
 export interface AgentLaunchOption {
@@ -64,6 +77,11 @@ export interface AgentRegistryEntry {
   noPromptCommand?: string;
   promptTransport: PromptTransport;
   promptOption?: string;
+  /**
+   * Required for `positional` and `option` transports: why the prompt still
+   * reaches this agent's argv rather than an argv-free transport (#523).
+   */
+  promptArgvExposure?: string;
   sendKeysPrePrompt?: string[];
   sendKeysSubmit?: string[];
   sendKeysPostPasteDelayMs?: number;
@@ -95,6 +113,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     ],
     promptCommand: 'claude',
     promptTransport: 'positional',
+    promptArgvExposure:
+      'No documented initial-prompt file flag (--system-prompt-file and --append-system-prompt-file set the system prompt); piped stdin is documented only with -p (non-interactive). Pasting after launch is unverified, and would race the workspace-trust dialog Psyche auto-answers.',
     permissionFlags: {
       plan: '--permission-mode plan',
       acceptEdits: '--permission-mode acceptEdits',
@@ -119,6 +139,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     promptCommand: 'opencode',
     promptTransport: 'option',
     promptOption: '--prompt',
+    promptArgvExposure:
+      "Piped stdin becomes the TUI's initial prompt in source (packages/opencode/src/cli/cmd/tui.ts), but that is undocumented and keyboard input after stdin EOF is unverified. No prompt-file flag (run --file attaches). Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).",
     permissionFlags: {},
     defaultEnabled: true,
   },
@@ -138,6 +160,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     ],
     promptCommand: 'codex',
     promptTransport: 'positional',
+    promptArgvExposure:
+      'No prompt-file flag; the interactive TUI refuses a non-terminal stdin (codex exec - is non-interactive). Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).',
     permissionFlags: {
       acceptEdits: '--ask-for-approval untrusted --sandbox danger-full-access',
       bypassPermissions: '--dangerously-bypass-approvals-and-sandbox',
@@ -186,6 +210,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     promptCommand: 'gemini',
     promptTransport: 'option',
     promptOption: '--prompt-interactive',
+    promptArgvExposure:
+      '--prompt-interactive refuses piped stdin; @path only attaches file content and needs the file at submit time. Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).',
     permissionFlags: {
       plan: '--approval-mode plan',
       acceptEdits: '--approval-mode auto_edit',
@@ -211,6 +237,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     promptCommand: 'qwen',
     promptTransport: 'option',
     promptOption: '-i',
+    promptArgvExposure:
+      'Same as gemini (fork): -i refuses piped stdin; @path only attaches file content. Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).',
     permissionFlags: {
       plan: '--approval-mode plan',
       acceptEdits: '--approval-mode auto-edit',
@@ -256,6 +284,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     ],
     promptCommand: 'pi',
     promptTransport: 'positional',
+    promptArgvExposure:
+      'pi @file is documented, but it wraps the content in a <file name=ABS> block (changing the prompt and exposing the path) and the file must outlive startup; piped stdin forces print mode. Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).',
     permissionFlags: {
       plan: '--tools read,grep,find,ls',
     },
@@ -278,6 +308,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     ],
     promptCommand: 'cursor-agent',
     promptTransport: 'positional',
+    promptArgvExposure:
+      'No documented prompt-file flag or interactive stdin; @ only adds files to context. Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).',
     permissionFlags: {},
     defaultEnabled: false,
   },
@@ -298,6 +330,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     promptCommand: 'copilot',
     promptTransport: 'option',
     promptOption: '-i',
+    promptArgvExposure:
+      'No prompt-file flag; a piped prompt is treated like -p (non-interactive); @FILE only adds context. Pasting after launch is unverified (see docs/AGENT-PROMPT-TRANSPORT.md).',
     permissionFlags: {
       acceptEdits: '--allow-tool write',
       bypassPermissions: '--allow-all',
@@ -361,6 +395,23 @@ for (const agentId of AGENT_IDS) {
   }
 }
 
+// #523: an agent whose prompt reaches its own argv must say why, so the
+// exposure is a recorded decision rather than a silent default.
+for (const agentId of AGENT_IDS) {
+  const entry = AGENT_REGISTRY[agentId];
+  const exposesArgv = entry.promptTransport === 'positional' || entry.promptTransport === 'option';
+  if (exposesArgv && !entry.promptArgvExposure?.trim()) {
+    throw new Error(
+      `Agent "${agentId}" passes its prompt in argv (${entry.promptTransport}) without promptArgvExposure`
+    );
+  }
+  if (!exposesArgv && entry.promptArgvExposure !== undefined) {
+    throw new Error(
+      `Agent "${agentId}" declares promptArgvExposure but its ${entry.promptTransport} transport keeps the prompt out of argv`
+    );
+  }
+}
+
 const shortLabelSet = new Set<string>();
 for (const agentId of AGENT_IDS) {
   const shortLabel = AGENT_REGISTRY[agentId].shortLabel;
@@ -396,6 +447,15 @@ export function getAgentDescription(agent: AgentName): string {
 
 export function getPromptTransport(agent: AgentName): PromptTransport {
   return AGENT_REGISTRY[agent].promptTransport;
+}
+
+/**
+ * True when the agent's initial prompt is expanded into the agent's own argv
+ * (#523). Such agents carry `promptArgvExposure` explaining why.
+ */
+export function promptReachesAgentArgv(agent: AgentName): boolean {
+  const transport = AGENT_REGISTRY[agent].promptTransport;
+  return transport === 'positional' || transport === 'option';
 }
 
 export function getAgentSlugSuffix(agent: AgentName): string {
@@ -603,10 +663,17 @@ export interface LaunchAgentInPaneOptions {
   paneShellProbe?: PaneShellProbeOptions;
   /** Log and toast seams for a skipped prompt; injectable for tests. */
   promptSkipReport?: PromptSkipReportDeps;
+  /** Clock and sleep for the pasted-prompt readiness wait; injectable for tests. */
+  promptPasteClock?: PromptPasteClock;
   /** Injectable for tests. */
   tmuxService?: Pick<
     TmuxService,
-    'sendShellCommand' | 'sendTmuxKeys' | 'getPaneCurrentCommand'
+    | 'sendShellCommand'
+    | 'sendTmuxKeys'
+    | 'getPaneCurrentCommand'
+    | 'loadBufferFromStdin'
+    | 'pasteBufferAndDelete'
+    | 'deleteBuffer'
   >;
 }
 
@@ -644,6 +711,7 @@ export async function launchAgentInPane(
     exitRecorder,
     paneShellProbe,
     promptSkipReport,
+    promptPasteClock,
     tmuxService = TmuxService.getInstance(),
   } = options;
 
@@ -724,17 +792,22 @@ export async function launchAgentInPane(
   }
 
   if (shouldSendPromptViaTmux) {
-    await sendPromptViaTmux({
+    const pasted = await sendPromptViaTmux({
       paneId,
       prompt,
-      tmuxService: tmuxService as TmuxService,
+      tmuxService,
       expectedCommand: getAgentProcessName(agent),
       baselineCommand,
       prePromptKeys: getSendKeysPrePrompt(agent),
       submitKeys: getSendKeysSubmit(agent),
       postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
       readyDelayMs: getSendKeysReadyDelayMs(agent),
+      ...promptPasteClock,
     });
+    if (!pasted.delivered) {
+      initialPromptSkipped = pasted.reason;
+      await reportPromptBootstrapSkipped(agent, pasted.reason, 'agentLaunch', paneId, promptSkipReport);
+    }
   }
 
   return {

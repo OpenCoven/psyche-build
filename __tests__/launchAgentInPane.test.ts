@@ -12,7 +12,7 @@ import {
 } from '../src/utils/agentLaunch.js';
 
 vi.mock('../src/utils/agentPromptDispatch.js', () => ({
-  sendPromptViaTmux: vi.fn(async () => {}),
+  sendPromptViaTmux: vi.fn(async () => ({ delivered: true })),
 }));
 vi.mock('../src/utils/geminiTrust.js', () => ({
   ensureGeminiFolderTrusted: vi.fn(() => {}),
@@ -146,6 +146,32 @@ describe('launchAgentInPane', () => {
         prompt: 'Fix the failing tests',
         baselineCommand: 'zsh',
       });
+    });
+
+    // #523: no blind paste. A paste that could not be made is reported with
+    // the existing initial_prompt_skipped warning.
+    it.each(['agent_not_ready', 'prompt_paste_failed'] as const)(
+      'reports a send-keys paste that was not delivered (%s)',
+      async (reason) => {
+        vi.mocked(sendPromptViaTmux).mockResolvedValueOnce({ delivered: false, reason });
+        const report = silentReport();
+        const tmux = await launch('cline', 'Fix the failing tests', { promptSkipReport: report });
+
+        expect(tmux.result.initialPromptSkipped).toBe(reason);
+        expect(report.logWarn).toHaveBeenCalledWith(
+          expect.stringContaining(`[initial_prompt_skipped:${reason}]`),
+          'agentLaunch',
+          '%1',
+        );
+        expect(JSON.stringify(report.logWarn.mock.calls)).not.toContain('failing tests');
+      },
+    );
+
+    it('reports nothing when the send-keys paste was delivered', async () => {
+      const report = silentReport();
+      const tmux = await launch('cline', 'Fix the failing tests', { promptSkipReport: report });
+      expect(tmux.result.initialPromptSkipped).toBeNull();
+      expect(report.logWarn).not.toHaveBeenCalled();
     });
 
     it('does not invoke the send-keys path for positional agents', async () => {

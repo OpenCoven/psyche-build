@@ -291,7 +291,7 @@ async function createConflictResolutionPaneWithReservation(
     }
 
     if (shouldSendPromptViaTmux) {
-      await sendPromptViaTmux({
+      const pasted = await sendPromptViaTmux({
         paneId: paneInfo,
         prompt,
         tmuxService,
@@ -302,6 +302,15 @@ async function createConflictResolutionPaneWithReservation(
         postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
         readyDelayMs: getSendKeysReadyDelayMs(agent),
       });
+      if (!pasted.delivered) {
+        await reportPromptBootstrapSkipped(
+          agent,
+          pasted.reason,
+          'conflictResolutionPane',
+          paneInfo,
+          options.promptSkipReport,
+        );
+      }
     }
 
     if (agent === 'claude') {
