@@ -522,6 +522,70 @@ git push origin v0.0.1
 Have the configured non-self reviewer approve the pending `release`
 deployment once. Do not bypass the environment or start a duplicate run.
 
+## Release candidate builds
+
+`.github/workflows/release-candidate.yml` builds signed and notarized macOS
+DMGs from one exact `main` commit without publishing anything. Use it to freeze
+a release candidate before the signed tag exists.
+
+A candidate embeds the final stable version already committed on `main`. The
+workflow requires every version surface to agree (`pnpm release:coherence`) and
+to equal the requested version (`pnpm release:check`). It never adds a
+prerelease suffix. The candidate identity, `rc-` followed by the first 12
+hexadecimal characters of the commit SHA, appears only in artifact names and in
+build provenance. The accepted commit therefore passes the later tag run's
+version checks unchanged.
+
+Dispatch it from `main` with the exact commit and the final version:
+
+```sh
+candidate_sha="$(git rev-parse origin/main)"
+gh workflow run "Release candidate" --repo OpenCoven/psyche-build --ref main \
+  -f sha="$candidate_sha" -f version=<MAJOR.MINOR.PATCH>
+```
+
+The workflow refuses:
+
+- a dispatch from any ref other than `main`;
+- a SHA that is not 40 lowercase hexadecimal characters, does not name a
+  commit, or is not equal to or an ancestor of `origin/main`;
+- a version that is not stable `MAJOR.MINOR.PATCH`, disagrees with the
+  committed version surfaces, or already has a `v` tag.
+
+`verify` runs the same shared TypeScript, protocol, package, Rust, and Tauri
+gates as the tag run. It does not run iOS verification; the tag run still does.
+The two `build-macos` jobs wait at the protected `release` environment, whose
+existing `main` deployment policy covers this dispatch. They read only the six
+Developer ID and notarization secrets that the tag run's macOS jobs use. There
+is no new secret and no repository-level fallback, and the iOS distribution,
+App Store Connect, and Homebrew secrets are never referenced. The dependency,
+credential, signing, notarization, Gatekeeper, and cleanup steps are copies of
+`release.yml`'s, and `__tests__/releaseCandidateWorkflow.test.ts` fails if they
+diverge.
+
+The `provenance` job checks both DMGs against their per-architecture build
+records. It then writes `SHA256SUMS` and `release-candidate-provenance.json`,
+which records the candidate SHA and identity, the embedded version, the
+workflow ref, run ID and attempt, each DMG's digest and size, and the runner
+image and toolchain versions. It contains no secret values. Both files and the
+two DMGs are uploaded as the workflow artifact `psyche-build-rc-<id>`, retained
+for 30 days. The intermediate per-architecture artifacts are retained for 7
+days.
+
+The workflow has only `contents: read`. It never creates a tag, a GitHub
+Release, a TestFlight upload, or a Homebrew notification. Download the
+candidate before it expires and keep it with the acceptance evidence:
+
+```sh
+gh run download <run-id> --repo OpenCoven/psyche-build \
+  --name psyche-build-rc-<id> --dir <evidence-dir>
+(cd <evidence-dir> && shasum -a 256 -c SHA256SUMS)
+```
+
+After acceptance, the tag run rebuilds and re-notarizes the DMGs from the same
+commit. The published DMGs are new builds, not the candidate's bytes, so match
+them to the candidate by commit and version rather than by digest.
+
 ## Workflow behavior and recovery
 
 The tag run verifies the exact tag/source SHA, all version surfaces, tests,
