@@ -3429,7 +3429,7 @@ dependencies = [
  "block2",
  "ed25519-dalek",
  "env_logger",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "gtk",
  "libc",
  "log",
