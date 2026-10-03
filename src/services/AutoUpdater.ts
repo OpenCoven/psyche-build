@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { readFileSync } from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -13,12 +14,12 @@ const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Find package.json by walking up the directory tree
-function findPackageJson(): any {
+function findPackageJson(): { packageJson: any; packageJsonPath: string } {
   let currentDir = __dirname;
   while (currentDir !== path.parse(currentDir).root) {
     const packagePath = path.join(currentDir, 'package.json');
     try {
-      return require(packagePath);
+      return { packageJson: require(packagePath), packageJsonPath: packagePath };
     } catch {
       // Expected - package.json not found at this level, continue traversing
       currentDir = path.dirname(currentDir);
@@ -27,7 +28,25 @@ function findPackageJson(): any {
   throw new Error('Could not find package.json');
 }
 
-const packageJson = findPackageJson();
+// `packageJson` is the running build's manifest and is require-cached for the
+// life of the process. Post-install verification must not use it: replacing
+// the installed package cannot change this value in-process.
+const { packageJson, packageJsonPath: PACKAGE_JSON_PATH } = findPackageJson();
+
+/**
+ * Read the version of the package currently installed at `packageJsonPath`,
+ * straight from disk on every call (bypassing the require cache), so it
+ * reflects an install that happened after this process started. Returns null
+ * when the file is missing, unreadable, or has no string version.
+ */
+export function readInstalledPackageVersion(packageJsonPath: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    return parsed && typeof parsed.version === 'string' ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Whether the CLI may consult a package registry for updates or install from it.
@@ -356,13 +375,21 @@ export class AutoUpdater {
         timeout: 60000 // 1 minute timeout
       });
 
-      // Verify the update was successful
-      const newUpdateInfo = await this.checkForUpdates();
-      return newUpdateInfo.currentVersion === updateInfo.latestVersion;
+      // Verify against the freshly installed manifest. The running process
+      // keeps the old version until the user restarts it.
+      return this.verifyInstalledVersion(updateInfo.latestVersion);
     } catch (error) {
       this.logger.error('Update failed', 'AutoUpdater', undefined, error as Error);
       return false;
     }
+  }
+
+  /**
+   * Whether the package installed on disk now reports `expectedVersion`.
+   * Reads the manifest freshly; never consults the running build's version.
+   */
+  verifyInstalledVersion(expectedVersion: string, packageJsonPath: string = PACKAGE_JSON_PATH): boolean {
+    return readInstalledPackageVersion(packageJsonPath) === expectedVersion;
   }
 
   async skipVersion(version: string): Promise<void> {

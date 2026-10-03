@@ -109,10 +109,9 @@ export default function useAutoUpdater(autoUpdater: any | undefined, setStatusMe
       const success = await autoUpdater.performUpdate(updateInfo);
 
       if (success) {
-        setStatusMessage('Update completed successfully! Please restart psyche.');
-        setTimeout(() => {
-          process.exit(0);
-        }, 3000);
+        // Never restart on the user's behalf: a running session may hold
+        // unsaved work. The new version takes effect on the next launch.
+        setStatusMessage('Update installed. Restart psyche when you are ready to use it.');
       } else {
         setStatusMessage('Update failed. Please update manually.');
         setTimeout(() => setStatusMessage(''), 3000);
