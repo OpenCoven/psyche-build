@@ -29,6 +29,7 @@ const steps: BundleStep[] = [
   { outfile: 'web/runtime.bundle.js' },
   { outfile: 'web/sessions.bundle.js' },
   { outfile: 'web/status.bundle.js' },
+  { outfile: 'web/update.bundle.js' },
   { outfile: 'web/workspace.bundle.js' },
 ];
 const artifactRoot = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
@@ -91,6 +92,7 @@ describe('committed web bundles', () => {
       'web/runtime.bundle.js',
       'web/sessions.bundle.js',
       'web/status.bundle.js',
+      'web/update.bundle.js',
       'web/workspace.bundle.js',
     ]);
   });

@@ -132,7 +132,8 @@ kbd {
 .app {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: var(--titlebar-h) minmax(0, 1fr) auto;
+  /* titlebar, workbench, update notice (empty unless shown), footer */
+  grid-template-rows: var(--titlebar-h) minmax(0, 1fr) auto auto;
   height: 100vh;
   background: transparent;
 }
@@ -1223,6 +1224,7 @@ kbd {
 
 .detail {
   display: block;
+  position: relative;
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -5019,3 +5021,55 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-color: var(--border-strong);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
+
+/* Notify-only update banner (update/update-banner.mjs). It is a normal-flow
+   row of .app between the workbench and the footer, never an overlay: native
+   browser webviews sit above every DOM layer and would cover and intercept an
+   overlay, but they are confined to the preview rectangle inside .detail.
+   When the banner appears the workbench shrinks, and the ResizeObserver on
+   .detail resyncs native bounds. */
+.app > .update-banner { grid-row: 3; }
+.app > .footer-stack { grid-row: 4; }
+.update-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 14px;
+  row-gap: 4px;
+  min-width: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  background: rgba(var(--rgb-deep), 0.97);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+.update-banner[hidden] { display: none; }
+.update-banner:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.update-banner-title { margin: 0; color: var(--text); font-weight: 600; }
+.update-banner-note { margin: 0; color: var(--muted); }
+.update-banner-steps { display: flex; flex-direction: column; gap: 4px; }
+.update-banner-step { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.update-banner-command,
+.update-banner-digest {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+.update-banner-actions { display: flex; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.update-banner-button {
+  min-height: 24px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font: inherit;
+}
+.update-banner-button:hover { color: var(--text); }
+.update-banner-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.update-checks-row { display: flex; align-items: center; gap: 6px; padding: 0 5px 4px; color: var(--muted); font-size: 11px; }
+.update-checks-row[hidden] { display: none; }

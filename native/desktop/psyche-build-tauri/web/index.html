@@ -167,6 +167,10 @@
                 />
                 <span class="bg-opacity-value" id="bg-opacity-value">100%</span>
               </label>
+              <label class="update-checks-row" id="update-checks-row" title="Look for a newer signed release once a day. Never installs anything." hidden>
+                <input id="update-checks" type="checkbox" disabled />
+                <span>Check for updates</span>
+              </label>
             </details>
           </div>
 
@@ -343,6 +347,17 @@
           </div>
         </div>
       </div>
+
+      <!-- The update notice is its own grid row, outside .workbench and
+           .detail: native browser webviews are positioned only inside the
+           detail's preview rectangle, so they can never cover it. -->
+      <section
+        class="update-banner"
+        id="update-banner"
+        aria-label="Psyche Build update"
+        tabindex="-1"
+        hidden
+      ></section>
 
       <div class="footer-stack" id="footer-stack">
         <footer class="composer" id="composer">
@@ -567,6 +582,7 @@
     <script src="./input.bundle.js" defer></script>
     <script src="./status.bundle.js" defer></script>
     <script src="./workspace.bundle.js" defer></script>
+    <script src="./update.bundle.js" defer></script>
     <script src="./runtime.bundle.js" defer></script>
     <script src="./runtime-debug.bundle.js" defer></script>
     <script src="./main.js" defer></script>

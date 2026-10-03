@@ -2920,6 +2920,40 @@
 
   statusController = buildStatusController();
 
+  // ---- Update notice (notify only) ----
+  // Shows the native update_status when a verified newer release exists. It
+  // never installs, downloads, or restarts anything.
+  function buildUpdateBanner() {
+    var PsycheUpdate = window.PsycheUpdate;
+    var container = document.getElementById("update-banner");
+    if (!PsycheUpdate || typeof PsycheUpdate.createUpdateBannerController !== "function" || !container) {
+      return null;
+    }
+    var controller = PsycheUpdate.createUpdateBannerController({
+      invoke: invokeNative,
+      listen: listen,
+      container: container,
+      checksToggle: document.getElementById("update-checks"),
+      checksRow: document.getElementById("update-checks-row"),
+      writeText: clipboardManager && typeof clipboardManager.writeText === "function"
+        ? function (text) { return clipboardManager.writeText(text); }
+        : null,
+      openUrl: openUrl,
+      announce: function (message) { toast(message); },
+      // Used when the element focused before the banner is gone.
+      restoreFocus: function () {
+        var thread = state.threads.find(function (candidate) {
+          return candidate.id === state.activeThreadId;
+        });
+        if (thread && thread.terminalController) thread.terminalController.focus();
+      },
+    });
+    controller.refresh();
+    return controller;
+  }
+
+  buildUpdateBanner();
+
   function noteStatusActivity(at) {
     if (!statusController || typeof statusController.noteActivity !== "function") return;
     statusController.noteActivity(at);
