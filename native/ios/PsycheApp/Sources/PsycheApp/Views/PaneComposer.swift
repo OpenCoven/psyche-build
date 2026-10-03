@@ -34,6 +34,22 @@ final class PaneComposerModel: ObservableObject {
         self.sendAttempts = sendAttempts
     }
 
+    /// The pane the composer types into: the registry's focused pane, but only
+    /// while that pane is one the workspace is showing.
+    ///
+    /// A pane switch shows the new terminal at once, while the registry moves
+    /// focus only after it has reattached sessions. In that window the focused
+    /// pane is one the user can no longer see; targeting it would show its
+    /// draft under another pane's terminal and send there. No target instead
+    /// leaves the composer empty and disabled until focus catches up (#538).
+    nonisolated static func target(
+        focusedPaneID: String?,
+        shownPaneIDs: [String?]
+    ) -> String? {
+        guard let focusedPaneID, shownPaneIDs.contains(focusedPaneID) else { return nil }
+        return focusedPaneID
+    }
+
     var armedControl: Bool { modifiers.contains(.control) }
     var armedAlt: Bool { modifiers.contains(.alt) }
 
@@ -179,7 +195,17 @@ struct PaneComposer: View {
         _model = StateObject(wrappedValue: PaneComposerModel(sendAttempts: sendAttempts))
     }
 
-    private var targetPaneID: String? { registry.focusedPaneID }
+    private var targetPaneID: String? {
+        PaneComposerModel.target(
+            focusedPaneID: registry.focusedPaneID,
+            shownPaneIDs: [store.primaryPaneID, store.secondaryPaneID]
+        )
+    }
+
+    /// A pane is on screen but focus has not reached it yet.
+    private var isSwitchingPanes: Bool {
+        targetPaneID == nil && store.primaryPaneID != nil
+    }
 
     /// Nothing can be typed at state we know is out of date, or when no pane
     /// owns the keystrokes.
@@ -239,6 +265,7 @@ struct PaneComposer: View {
 
     private var placeholder: String {
         if store.isStale { return "Reconnecting…" }
+        if isSwitchingPanes { return "Switching panes…" }
         return targetPaneID == nil ? "No pane focused" : "Send to terminal"
     }
 
