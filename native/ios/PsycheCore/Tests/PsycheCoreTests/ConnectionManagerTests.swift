@@ -1048,8 +1048,18 @@ final class ConnectionManagerTests: XCTestCase {
 
         XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
         XCTAssertTrue(composition.workspaceStore.isStale)
+        XCTAssertEqual(composition.hostReadiness.state, .synchronizing)
         let disconnecting = Task {
             await composition.manager.disconnect()
+        }
+        // Release the selection only once teardown has reconciled readiness.
+        // Releasing it as soon as the disconnect task exists lets the
+        // selection finalize first; that is the legitimate "disconnect after
+        // ready" ordering covered by
+        // `testDisconnectAfterReadyHostSelectionFinalizesKeepsTheNewHost`, not
+        // a disconnect during selection (#510).
+        try await waitForReadinessState(in: composition.hostReadiness) {
+            $0 != .synchronizing
         }
         secureStore.releaseRead()
         await disconnecting.value
@@ -1064,6 +1074,67 @@ final class ConnectionManagerTests: XCTestCase {
         let selected = try await composition.pairedHostStore.selectedHost()
         XCTAssertEqual(selected?.serverID, previouslyReady.serverID)
         XCTAssertEqual(selected?.endpoint, previouslyReady.endpoint)
+    }
+
+    /// The other side of the race above: once the candidate's workspace has
+    /// gone live, its selection is durable reconnect authority, and a later
+    /// disconnect only labels the workspace stale.
+    func testDisconnectAfterReadyHostSelectionFinalizesKeepsTheNewHost() async throws {
+        let secureStore = BlockingReadSecureStore()
+        try await PairedHostStore(secureStore: secureStore).save(makeStoredHost())
+        let candidateEndpoint = HostEndpoint(
+            host: "candidate.local",
+            port: 5252,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            secureStore: secureStore
+        )
+
+        try await reachReadyStoredHost(composition: composition, transport: fake)
+        await composition.manager.disconnect()
+        let candidateConnect = Task {
+            await composition.manager.connect(to: candidateEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome(serverID: "server-z"))))
+        await candidateConnect.value
+        let pairing = pairingResult(code: "123456", on: composition.manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(
+            PairAcceptedPayload(token: "candidate-token")
+        )))
+        _ = try await pairing.value.get()
+        let snapshotID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+
+        secureStore.blockNextRead()
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        try await secureStore.waitUntilReadBegins(timeout: .seconds(2))
+        secureStore.releaseRead()
+        try await waitForReadinessState(in: composition.hostReadiness) {
+            $0 == .ready
+        }
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 2)
+        guard case .live(let liveHostID, _) = composition.hostReadiness.presentation else {
+            return XCTFail("The finalized candidate workspace must be live")
+        }
+        XCTAssertEqual(liveHostID, "server-z")
+
+        await composition.manager.disconnect()
+
+        XCTAssertNotEqual(composition.hostReadiness.state, .ready)
+        if case .live = composition.hostReadiness.presentation {
+            XCTFail("Transport teardown must label the workspace stale")
+        }
+        let selected = try await composition.pairedHostStore.selectedHost()
+        XCTAssertEqual(selected?.serverID, "server-z")
+        XCTAssertEqual(selected?.endpoint, candidateEndpoint)
     }
 
     func testSelectionMutationFailureKeepsPreviouslyReadyWorkspace() async throws {
@@ -3225,6 +3296,30 @@ final class ConnectionManagerTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Timed out waiting for disconnect \(count)", file: file, line: line)
+        throw TestError.timedOut
+    }
+
+    /// Waits on the readiness machine's own state rather than a yield count:
+    /// the transition under test crosses the connection actor and the main
+    /// actor, and a loaded runner can take many turns to schedule either.
+    private func waitForReadinessState(
+        in machine: HostReadinessMachine,
+        timeout: Duration = .seconds(5),
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        until isSatisfied: (HostReadinessState) -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if isSatisfied(machine.state) { return }
+            await Task.yield()
+        }
+        if isSatisfied(machine.state) { return }
+        XCTFail(
+            "Timed out waiting for readiness; state is \(machine.state)",
+            file: file,
+            line: line
+        )
         throw TestError.timedOut
     }
 
