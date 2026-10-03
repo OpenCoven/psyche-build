@@ -973,6 +973,7 @@ Every check ends in exactly one state, and nothing else happens:
 |---|---|
 | `disabled` | No current key in this build, unsupported platform, or acceptance profile. No request was made. |
 | `off` | The user turned update checks off. |
+| `unavailable` | The app data directory could not be resolved. Nothing is stored, and no check runs. |
 | `idle` / `checking` | No check has finished in this session yet, or one is running. |
 | `unreachable` | Network failure, timeout, or a non-success HTTP status. |
 | `oversize` | An asset was larger than 64 KiB. |
@@ -1006,7 +1007,11 @@ of them.
 failure count. It is written through a temporary file and an atomic rename,
 and it is read field by field: an unreadable or oversized file loads as
 defaults, and one invalid or unknown field never discards the others, so a
-checks-off setting survives a downgrade. Project configs are
+checks-off setting survives a downgrade. A file without a `schema` (or with
+`1`) loads as version 1. A file whose `schema` is newer was written by a later
+release: it is read, but never rewritten, so downgrading cannot destroy it.
+In that case, `update_status` reports `storage: "newer_schema"` and
+preference changes are refused. Check results stay in memory only. Project configs are
 never touched. On the first launch of a new version, the app records it as
 `last_seen_version`. When that is a move to a strictly newer version, it
 reports the previous value as `upgraded_from`; a downgrade reports nothing.
@@ -1015,7 +1020,11 @@ Reconciling open project configs through the #464 gate is not implemented.
 **Commands.** Only the `main` webview may call `update_status`,
 `update_skip_version` (only for the version on offer), `update_dismiss`
 (lasts for this session) and `update_set_checks_enabled`. The
-`main-update-check` capability grants them.
+`main-update-check` capability grants them. A command that changes a saved
+preference returns a bounded error when the save fails, for example
+`update preference not saved: PermissionDenied`. The in-memory choice is then
+left unchanged, so the UI never reports a choice that was not saved. Failed
+saves of background check results are only logged.
 
 ## Homebrew publication and recovery
 

@@ -172,9 +172,16 @@ pub fn run() {
             // (`~/Library/Application Support/dev.opencoven.psyche` on macOS),
             // never in a project config. The acceptance profile keeps none.
             if !acceptance::active() {
-                if let Ok(directory) = app.path().app_data_dir() {
-                    app.state::<UpdateCheck>().initialize(directory);
-                    update_check::spawn_scheduler(app.handle().clone());
+                match app.path().app_data_dir() {
+                    Ok(directory) => {
+                        app.state::<UpdateCheck>().initialize(directory);
+                        update_check::spawn_scheduler(app.handle().clone());
+                    }
+                    Err(_) => {
+                        // Bounded: the error text could carry a path.
+                        log::error!("update check unavailable: no app data directory");
+                        app.state::<UpdateCheck>().mark_unavailable();
+                    }
                 }
             }
             if let Err(error) = platform::configure_window(app) {

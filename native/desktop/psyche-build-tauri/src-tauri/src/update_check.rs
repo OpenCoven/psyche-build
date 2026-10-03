@@ -51,6 +51,9 @@ pub enum CheckState {
     Disabled,
     /// The user turned checks off.
     Off,
+    /// The app data directory could not be resolved, so there is nowhere to
+    /// keep state; no check runs.
+    Unavailable,
     Checking,
     Unreachable,
     Oversize,
@@ -188,8 +191,17 @@ impl Persisted {
     /// build before a downgrade) falls back to its own default.
     fn from_json(value: &serde_json::Value) -> Self {
         let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        // A missing or legacy schema reads as version 1; a newer one is kept
+        // so the caller can refuse to overwrite that file.
+        let schema = value
+            .get("schema")
+            .and_then(|v| v.as_u64())
+            .filter(|schema| *schema > u64::from(STATE_SCHEMA))
+            .map_or(STATE_SCHEMA, |schema| {
+                schema.min(u64::from(u32::MAX)) as u32
+            });
         Self {
-            schema: STATE_SCHEMA,
+            schema,
             checks_enabled: value.get("checks_enabled").and_then(|v| v.as_bool()),
             last_check: text("last_check"),
             last_outcome: value
@@ -205,7 +217,7 @@ impl Persisted {
     }
 
     fn sanitized(mut self) -> Self {
-        self.schema = STATE_SCHEMA;
+        self.schema = self.schema.max(STATE_SCHEMA);
         if self
             .last_check
             .as_deref()
@@ -358,14 +370,32 @@ pub struct UpdateStatusView {
     /// The previous `last_seen_version` when this launch is the first of a new
     /// version. Project-config reconciliation is out of scope (#464 gate).
     pub upgraded_from: Option<String>,
+    pub storage: Storage,
+}
+
+/// Whether the app-scoped state file can be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Storage {
+    /// `initialize` has not run (for example, the acceptance profile).
+    NotLoaded,
+    Ok,
+    /// The file was written by a newer build. It is read but never rewritten,
+    /// so downgrading cannot destroy the newer build's state.
+    NewerSchema,
+    /// No app data directory could be resolved.
+    Unavailable,
 }
 
 struct Inner {
     persisted: Persisted,
     state: CheckState,
     available: Option<Manifest>,
-    dismissed: bool,
+    /// The version the user dismissed in this session. The banner stays
+    /// hidden for exactly that version and reappears for a different one.
+    dismissed_version: Option<String>,
     in_flight: bool,
+    storage: Storage,
 }
 
 /// Tauri-managed update-check state.
@@ -402,8 +432,9 @@ impl UpdateCheck {
                     CheckState::Disabled
                 },
                 available: None,
-                dismissed: false,
+                dismissed_version: None,
                 in_flight: false,
+                storage: Storage::NotLoaded,
             }),
         }
     }
@@ -437,15 +468,25 @@ impl UpdateCheck {
     pub fn initialize(&self, directory: PathBuf) {
         let path = directory.join(STATE_FILE);
         let mut persisted = load_state(&path);
+        let storage = if persisted.schema > STATE_SCHEMA {
+            log::warn!("update check state has a newer schema; it is read but left unchanged");
+            Storage::NewerSchema
+        } else {
+            Storage::Ok
+        };
         // Only a move to a strictly newer version is an upgrade; a downgrade
         // or a reinstall of the same version reports nothing. A prerelease
         // running build is never reported as an upgrade.
-        let upgraded_from = persisted.last_seen_version.clone().filter(|seen| {
-            update_manifest::is_newer_version(&self.running_version, seen) == Some(true)
-        });
+        let upgraded_from = persisted
+            .last_seen_version
+            .clone()
+            .filter(|seen| {
+                update_manifest::is_newer_version(&self.running_version, seen) == Some(true)
+            })
+            .filter(|_| storage == Storage::Ok);
         let first_launch_of_version =
             persisted.last_seen_version.as_deref() != Some(&self.running_version);
-        if first_launch_of_version {
+        if first_launch_of_version && storage == Storage::Ok {
             persisted.last_seen_version = Some(self.running_version.clone());
             if let Err(error) = save_state(&path, &persisted) {
                 log::warn!("update check state not saved: {}", error.kind());
@@ -461,15 +502,53 @@ impl UpdateCheck {
             };
         }
         inner.persisted = persisted;
+        inner.storage = storage;
         drop(inner);
         let _ = self.path.set(path);
     }
 
-    fn save(&self, persisted: &Persisted) {
-        if let Some(path) = self.path.get() {
-            if let Err(error) = save_state(path, persisted) {
-                log::warn!("update check state not saved: {}", error.kind());
+    /// Records that no app data directory exists: no state, no checks, and
+    /// `update_status` reports `unavailable`.
+    pub fn mark_unavailable(&self) {
+        let mut inner = self.inner.lock();
+        inner.storage = Storage::Unavailable;
+        inner.state = if self.supported {
+            CheckState::Unavailable
+        } else {
+            CheckState::Disabled
+        };
+    }
+
+    /// Writes a user's choice. Errors are bounded and returned to the
+    /// command, so the UI never reports a choice that was not saved.
+    fn persist(&self, storage: Storage, persisted: &Persisted) -> Result<(), String> {
+        match storage {
+            Storage::Ok => {}
+            Storage::NewerSchema => {
+                return Err(
+                    "update preferences were saved by a newer Psyche Build and are left unchanged"
+                        .into(),
+                )
             }
+            Storage::NotLoaded | Storage::Unavailable => {
+                return Err("update preferences cannot be saved".into())
+            }
+        }
+        let path = self
+            .path
+            .get()
+            .ok_or("update preferences cannot be saved")?;
+        save_state(path, persisted)
+            .map_err(|error| format!("update preference not saved: {}", error.kind()))
+    }
+
+    /// Background bookkeeping (check results): failures are only logged.
+    fn save_in_background(&self, storage: Storage, persisted: &Persisted) {
+        if storage != Storage::Ok {
+            return;
+        }
+        if let Err(error) = self.persist(storage, persisted) {
+            log::warn!("{error}");
         }
     }
 
@@ -505,7 +584,10 @@ impl UpdateCheck {
             skipped: available.as_ref().is_some_and(|view| {
                 inner.persisted.skipped_version.as_deref() == Some(view.version.as_str())
             }),
-            dismissed: inner.dismissed,
+            dismissed: available.as_ref().is_some_and(|view| {
+                inner.dismissed_version.as_deref() == Some(view.version.as_str())
+            }),
+            storage: inner.storage,
             available,
             upgraded_from: self.upgraded_from.get().cloned().flatten(),
         }
@@ -529,7 +611,6 @@ impl UpdateCheck {
     fn finish_check(&self, outcome: Outcome, now_seconds: i64) {
         let mut inner = self.inner.lock();
         inner.in_flight = false;
-        let previous_version = inner.available.as_ref().map(|m| m.version.clone());
         inner.persisted.last_check = Some(update_manifest::format_timestamp(now_seconds));
         inner.persisted.last_outcome = Some(outcome.state);
         inner.persisted.consecutive_failures = if outcome.state.is_success() {
@@ -542,10 +623,11 @@ impl UpdateCheck {
                 .min(16)
         };
         if outcome.state.is_success() {
-            // A newly offered version is shown again even if a previous one
-            // was dismissed.
-            if outcome.manifest.as_ref().map(|m| &m.version) != previous_version.as_ref() {
-                inner.dismissed = false;
+            // Only an offer of a different version clears a dismissal; a
+            // not_newer result or a re-offer of the same version keeps it.
+            let offered = outcome.manifest.as_ref().map(|m| m.version.as_str());
+            if offered.is_some() && offered != inner.dismissed_version.as_deref() {
+                inner.dismissed_version = None;
             }
             inner.available = outcome.manifest;
         } else {
@@ -571,9 +653,9 @@ impl UpdateCheck {
         } else {
             CheckState::Off
         };
-        let persisted = inner.persisted.clone();
+        let (storage, persisted) = (inner.storage, inner.persisted.clone());
         drop(inner);
-        self.save(&persisted);
+        self.save_in_background(storage, &persisted);
     }
 
     /// Records "Skip this version" for exactly the version on offer.
@@ -583,16 +665,17 @@ impl UpdateCheck {
         if inner.state != CheckState::Available || offered != Some(version) {
             return Err("only the version currently on offer can be skipped".into());
         }
-        inner.persisted.skipped_version = Some(version.to_string());
-        let persisted = inner.persisted.clone();
-        drop(inner);
-        self.save(&persisted);
+        let mut next = inner.persisted.clone();
+        next.skipped_version = Some(version.to_string());
+        self.persist(inner.storage, &next)?;
+        inner.persisted = next;
         Ok(())
     }
 
     /// Hides the banner until the next launch or a different version.
     pub fn dismiss(&self) {
-        self.inner.lock().dismissed = true;
+        let mut inner = self.inner.lock();
+        inner.dismissed_version = inner.available.as_ref().map(|m| m.version.clone());
     }
 
     pub fn set_checks_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -600,16 +683,17 @@ impl UpdateCheck {
             return Err("update checks are unavailable in this build".into());
         }
         let mut inner = self.inner.lock();
-        inner.persisted.checks_enabled = Some(enabled);
+        let mut next = inner.persisted.clone();
+        next.checks_enabled = Some(enabled);
+        // Nothing changes unless the choice was saved.
+        self.persist(inner.storage, &next)?;
+        inner.persisted = next;
         if !enabled {
             inner.state = CheckState::Off;
             inner.available = None;
         } else if inner.state == CheckState::Off {
             inner.state = CheckState::Idle;
         }
-        let persisted = inner.persisted.clone();
-        drop(inner);
-        self.save(&persisted);
         Ok(())
     }
 
@@ -1277,6 +1361,158 @@ mod tests {
             load_state(&path).last_seen_version.as_deref(),
             Some("0.0.2")
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_app_data_directory_is_reported_and_runs_nothing() {
+        let check = UpdateCheck::new(vectors().keys, true, "0.0.2".into(), InstallSource::Unknown);
+        check.mark_unavailable();
+        let status = check.status();
+        assert_eq!(status.state, CheckState::Unavailable);
+        assert_eq!(status.storage, Storage::Unavailable);
+        let constructed = AtomicUsize::new(0);
+        let ran = check
+            .run_if_due(0, || {
+                constructed.fetch_add(1, Ordering::SeqCst);
+                Err::<&Fake, _>(FetchError::Unreachable)
+            })
+            .await;
+        assert!(!ran);
+        assert_eq!(constructed.load(Ordering::SeqCst), 0);
+        assert!(
+            check.set_checks_enabled(false).is_err(),
+            "an unsaved choice is not reported as saved"
+        );
+        let unsupported = UpdateCheck::new(
+            TrustedKeys {
+                current: None,
+                next: None,
+            },
+            true,
+            "0.0.2".into(),
+            InstallSource::Unknown,
+        );
+        unsupported.mark_unavailable();
+        assert_eq!(unsupported.status().state, CheckState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn a_newer_schema_file_is_read_but_never_rewritten() {
+        let v = vectors();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let newer = br#"{"schema":2,"checks_enabled":false,"skipped_version":"1.0.0","last_seen_version":"0.0.9","future":{"x":1}}"#;
+        std::fs::write(&path, newer).unwrap();
+        let check = UpdateCheck::new(v.keys.clone(), true, "0.0.2".into(), InstallSource::Unknown);
+        check.initialize(dir.path().to_path_buf());
+        let status = check.status();
+        assert_eq!(status.storage, Storage::NewerSchema);
+        assert_eq!(
+            status.state,
+            CheckState::Off,
+            "the newer file's checks-off choice is honoured"
+        );
+        assert_eq!(status.upgraded_from, None);
+        assert!(check.set_checks_enabled(true).is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            newer,
+            "the newer file is untouched"
+        );
+
+        // With checks on, a check runs in memory and still leaves the file alone.
+        let enabled = br#"{"schema":3,"checks_enabled":true}"#;
+        std::fs::write(&path, enabled).unwrap();
+        let check = UpdateCheck::new(v.keys.clone(), true, "0.0.2".into(), InstallSource::Unknown);
+        check.initialize(dir.path().to_path_buf());
+        let (manifest, signature, now) = v.case("valid_current_key");
+        let fake = Fake::serving(manifest, signature);
+        assert!(check.run_if_due(now, || Ok::<_, FetchError>(&fake)).await);
+        assert_eq!(check.status().state, CheckState::Available);
+        assert!(check.skip_version("9.8.7").is_err());
+        assert!(!check.status().skipped);
+        assert_eq!(std::fs::read(&path).unwrap(), enabled);
+
+        // A missing or legacy schema loads as version 1 and is upgraded.
+        std::fs::write(&path, br#"{"checks_enabled":false}"#).unwrap();
+        let legacy = UpdateCheck::new(v.keys.clone(), true, "0.0.2".into(), InstallSource::Unknown);
+        legacy.initialize(dir.path().to_path_buf());
+        assert_eq!(legacy.status().storage, Storage::Ok);
+        assert_eq!(legacy.status().state, CheckState::Off);
+        let rewritten: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["schema"], 1);
+        assert_eq!(rewritten["checks_enabled"], false);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_choices_report_a_failed_save_and_change_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = vectors();
+        let dir = tempfile::tempdir().unwrap();
+        let check = UpdateCheck::new(v.keys.clone(), true, "0.0.2".into(), InstallSource::Unknown);
+        check.initialize(dir.path().to_path_buf());
+        let (manifest, signature, now) = v.case("valid_current_key");
+        let fake = Fake::serving(manifest, signature);
+        assert!(check.run_if_due(now, || Ok::<_, FetchError>(&fake)).await);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let skip = check.skip_version("9.8.7");
+        let toggle = check.set_checks_enabled(false);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = skip.unwrap_err();
+        assert!(
+            error.starts_with("update preference not saved: "),
+            "{error}"
+        );
+        assert!(
+            !error.contains(dir.path().to_str().unwrap()),
+            "no path in the error"
+        );
+        assert!(toggle.is_err());
+        let status = check.status();
+        assert!(!status.skipped);
+        assert!(status.checks_enabled);
+        assert_eq!(status.state, CheckState::Available);
+        // Once the directory is writable again the same choices succeed.
+        check.skip_version("9.8.7").unwrap();
+        assert!(check.status().skipped);
+    }
+
+    #[test]
+    fn a_dismissal_lasts_for_its_version_only() {
+        let v = vectors();
+        let (manifest, _, now) = v.case("valid_current_key");
+        let keys = v.keys.clone();
+        let parsed =
+            update_manifest::verify_manifest(&manifest, &v.case("valid_current_key").1, &keys, now)
+                .unwrap()
+                .manifest;
+        let dir = tempfile::tempdir().unwrap();
+        let check = UpdateCheck::new(keys, true, "0.0.2".into(), InstallSource::Unknown);
+        check.initialize(dir.path().to_path_buf());
+        let seconds = now / 1000;
+        let offer = |m: &Manifest| Outcome {
+            state: CheckState::Available,
+            manifest: Some(m.clone()),
+        };
+        check.finish_check(offer(&parsed), seconds);
+        check.dismiss();
+        assert!(check.status().dismissed);
+        // not_newer withdraws the offer but not the dismissal of 9.8.7.
+        check.finish_check(Outcome::state(CheckState::NotNewer), seconds + 1);
+        assert!(check.status().available.is_none());
+        check.finish_check(offer(&parsed), seconds + 2);
+        assert!(check.status().dismissed, "the same version stays dismissed");
+        let mut newer = parsed.clone();
+        newer.version = "9.8.8".into();
+        newer.tag = "v9.8.8".into();
+        check.finish_check(offer(&newer), seconds + 3);
+        assert!(
+            !check.status().dismissed,
+            "a different version is shown again"
+        );
+        check.finish_check(offer(&parsed), seconds + 4);
+        assert!(!check.status().dismissed, "the old dismissal was cleared");
     }
 
     #[test]
