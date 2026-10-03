@@ -787,6 +787,10 @@ Independent review and an owner decision are required before launching it.
 A future candidate must have:
 
 - one exact commit SHA on `origin/main`;
+- signed and notarized candidate DMGs built from that SHA by the
+  [non-publishing candidate workflow](./RELEASE.md#release-candidate-builds),
+  with its `SHA256SUMS` and `release-candidate-provenance.json` retained
+  alongside the acceptance evidence;
 - one coherent version across package, native application, update, and release
   metadata;
 - no unresolved current review finding on included work;
@@ -795,8 +799,15 @@ A future candidate must have:
 - a signed annotated immutable release tag created only after acceptance;
 - no repository-level fallback copy of protected release credentials.
 
+Freeze a candidate by dispatching the `Release candidate` workflow with the
+exact SHA and the final version. Acceptance evidence names the candidate
+identity (`rc-` plus the first 12 hexadecimal characters of the SHA), the SHA,
+and the provenance file's digest. The candidate never carries a prerelease
+version, so the accepted SHA is tagged unchanged.
+
 After freeze, a new change enters only when it names the failed acceptance case
-it repairs. The full candidate gate then runs again.
+it repairs. The change produces a new SHA and therefore a new candidate, and the
+full candidate gate then runs again.
 
 ## Secrets and operator safety
 

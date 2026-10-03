@@ -598,6 +598,35 @@ describe('release documentation contract', () => {
     expect(iosReadme).not.toMatch(/(?:is|now|already) live|currently available/i);
   });
 
+  it('documents the non-publishing release candidate path and freezes candidates through it', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const acceptance = await readFile('docs/RELEASE-ACCEPTANCE.md', 'utf8');
+    const section = runbook.slice(
+      runbook.indexOf('## Release candidate builds'),
+      runbook.indexOf('## Workflow behavior and recovery'),
+    );
+
+    expect(section.length).toBeGreaterThan(0);
+    for (const expected of [
+      '.github/workflows/release-candidate.yml',
+      'pnpm release:coherence',
+      'pnpm release:check',
+      'gh workflow run "Release candidate" --repo OpenCoven/psyche-build --ref main',
+      '-f sha="$candidate_sha" -f version=<MAJOR.MINOR.PATCH>',
+      'equal to or an ancestor of `origin/main`',
+      'protected `release` environment',
+      'no repository-level fallback',
+      'release-candidate-provenance.json',
+      'SHA256SUMS',
+      'It never creates a tag, a GitHub\nRelease, a TestFlight upload, or a Homebrew notification.',
+    ]) {
+      expect(section).toContain(expected);
+    }
+    expect(section).not.toMatch(/-rc\.\d/);
+    expect(acceptance).toContain('(./RELEASE.md#release-candidate-builds)');
+    expect(acceptance).toContain('Freeze a candidate by dispatching the `Release candidate` workflow');
+  });
+
   it('ignores untracked files, so a stray doc cannot fail the contract', async () => {
     // This test used to enumerate by walking the working tree, which meant any
     // untracked file in the repo joined the contract: the suite failed for

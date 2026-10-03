@@ -129,6 +129,7 @@ describe('pull request CI workflow contract', () => {
     for (const required of [
       'ci.yml',
       'release.yml',
+      'release-candidate.yml',
       'contributor-acceptance.yml',
       'codeql.yml',
       'dependency-review.yml',

@@ -1,0 +1,578 @@
+name: Release candidate
+
+# Builds signed and notarized macOS release-candidate DMGs from one exact commit
+# on main and retains them only as workflow artifacts. It never creates a tag,
+# a GitHub Release, a TestFlight upload, or a Homebrew tap notification.
+#
+# The candidate embeds the final stable version already committed on main, so
+# the accepted commit later passes release.yml's tag checks unchanged. The
+# candidate identity (rc-<12-hex sha prefix>) appears only in artifact names and
+# build provenance, never in the embedded version.
+#
+# The signing, notarization, and verification steps below are copies of the
+# build-macos steps in release.yml. __tests__/releaseCandidateWorkflow.test.ts
+# requires them to stay byte-identical, so the two paths cannot drift.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Exact 40-character commit SHA on main to build"
+        required: true
+        type: string
+      version:
+        description: "Final stable MAJOR.MINOR.PATCH version committed at that SHA"
+        required: true
+        type: string
+
+# One run per candidate SHA: a duplicate dispatch of the same commit queues
+# behind the first instead of racing it for notarization, while candidates for
+# different SHAs stay independent. The group never collides with release.yml's
+# release-<tag> groups, and nothing is cancelled mid-signing.
+concurrency:
+  group: release-candidate-${{ github.event.inputs.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify candidate source
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.sha }}
+      candidate_id: ${{ steps.candidate.outputs.id }}
+      candidate_version: ${{ steps.candidate.outputs.version }}
+      main_head: ${{ steps.candidate.outputs.main_head }}
+    steps:
+      - name: Validate candidate inputs
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          RAW_CANDIDATE_SHA: ${{ github.event.inputs.sha }}
+          RAW_CANDIDATE_VERSION: ${{ github.event.inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != "refs/heads/main" ]; then
+            echo "::error::Release candidates must be dispatched from main"
+            exit 1
+          fi
+          if [[ ! "$RAW_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Candidate sha must be an exact 40-character lowercase hexadecimal commit SHA"
+            exit 1
+          fi
+          if [[ ! "$RAW_CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Candidate version must use stable MAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the candidate commit on origin/main
+        id: candidate
+        env:
+          RAW_CANDIDATE_SHA: ${{ github.event.inputs.sha }}
+          RAW_CANDIDATE_VERSION: ${{ github.event.inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="$RAW_CANDIDATE_SHA"
+          CANDIDATE_VERSION="$RAW_CANDIDATE_VERSION"
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Candidate sha must be an exact 40-character lowercase hexadecimal commit SHA"
+            exit 1
+          fi
+          if [[ ! "$CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Candidate version must use stable MAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          if [ "$(git cat-file -t "$CANDIDATE_SHA" 2>/dev/null || true)" != "commit" ]; then
+            echo "::error::Candidate sha does not name a commit"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$CANDIDATE_SHA" ]; then
+            echo "::error::Checked out source does not match the candidate sha"
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$CANDIDATE_SHA" origin/main; then
+            echo "::error::Candidate sha must be a commit on origin/main"
+            exit 1
+          fi
+          MAIN_HEAD="$(git rev-parse origin/main)"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v$CANDIDATE_VERSION" >/dev/null
+          TAG_STATUS=$?
+          set -e
+          if [ "$TAG_STATUS" = "0" ]; then
+            echo "::error::v$CANDIDATE_VERSION already exists; a candidate must precede its release tag"
+            exit 1
+          elif [ "$TAG_STATUS" != "2" ]; then
+            echo "::error::Unable to confirm that v$CANDIDATE_VERSION does not exist yet"
+            exit 1
+          fi
+          CANDIDATE_ID="rc-${CANDIDATE_SHA:0:12}"
+          {
+            echo "sha=$CANDIDATE_SHA"
+            echo "id=$CANDIDATE_ID"
+            echo "version=$CANDIDATE_VERSION"
+            echo "main_head=$MAIN_HEAD"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Require pinned Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - name: Require coherent release versions
+        run: pnpm release:coherence
+
+      - name: Require the final release version
+        env:
+          CANDIDATE_VERSION: ${{ steps.candidate.outputs.version }}
+        run: pnpm release:check -- "v$CANDIDATE_VERSION"
+
+      - name: Verify shared TypeScript, protocol, and package surfaces
+        run: |
+          set -euo pipefail
+          pnpm docs:focus:check
+          pnpm --dir docs build
+          pnpm test
+          pnpm typecheck
+          pnpm build
+          pnpm smoke:pack
+
+      - name: Verify Rust and Tauri surfaces
+        run: |
+          set -euo pipefail
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
+          cargo fmt --manifest-path "$MANIFEST" --check
+          cargo test --manifest-path "$MANIFEST" --locked
+          cargo check --manifest-path "$MANIFEST" --locked
+          pnpm --dir native/desktop/psyche-build-tauri build:web
+
+  build-macos:
+    name: Build ${{ matrix.arch }} candidate DMG
+    needs: verify
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: aarch64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.verify.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set candidate metadata
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ needs.verify.outputs.candidate_sha }}
+          RAW_CANDIDATE_ID: ${{ needs.verify.outputs.candidate_id }}
+          RAW_CANDIDATE_VERSION: ${{ needs.verify.outputs.candidate_version }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+             [[ ! "$RAW_CANDIDATE_ID" =~ ^rc-[0-9a-f]{12}$ ]] || \
+             [[ "$RAW_CANDIDATE_ID" != "rc-${EXPECTED_CANDIDATE_SHA:0:12}" ]] || \
+             [[ ! "$RAW_CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Candidate metadata from the verify job is malformed"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$EXPECTED_CANDIDATE_SHA" ]; then
+            echo "::error::Checked out source does not match the candidate sha"
+            exit 1
+          fi
+          # RELEASE_TAG is the tag the accepted commit will later receive. No tag
+          # is created here; the shared steps use it only for release:check.
+          {
+            echo "CANDIDATE_SHA=$EXPECTED_CANDIDATE_SHA"
+            echo "CANDIDATE_ID=$RAW_CANDIDATE_ID"
+            echo "RELEASE_TAG=v$RAW_CANDIDATE_VERSION"
+            echo "RELEASE_VERSION=$RAW_CANDIDATE_VERSION"
+            echo "ARCH=$MATRIX_ARCH"
+            echo "RUST_TARGET=$MATRIX_TARGET"
+          } >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        with:
+          toolchain: 1.95.0
+
+      - name: Install locked dependencies and Rust target
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          rustup target add "$RUST_TARGET"
+          pnpm release:check -- "$RELEASE_TAG"
+
+      - name: Require the release tag to remain absent
+        shell: bash
+        run: |
+          # verify checked tag absence before this job waited for release
+          # environment approval. Re-check it after approval and before any
+          # credential is read, so a tag created during the wait cannot yield
+          # signed candidates for an already-tagged version.
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Candidate version must use stable MAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v$RELEASE_VERSION" >/dev/null
+          TAG_STATUS=$?
+          set -e
+          if [ "$TAG_STATUS" = "0" ]; then
+            echo "::error::v$RELEASE_VERSION already exists; a candidate must precede its release tag"
+            exit 1
+          elif [ "$TAG_STATUS" != "2" ]; then
+            echo "::error::Unable to confirm that v$RELEASE_VERSION does not exist yet"
+            exit 1
+          fi
+
+      - name: Require signing and notarization credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for secret_name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [ -z "${!secret_name:-}" ]; then
+              echo "::error::Missing required release environment secret $secret_name"
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-macos-signing.keychain-db"
+          umask 077
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          decode_base64() {
+            if base64 --decode </dev/null >/dev/null 2>&1; then
+              base64 --decode
+            else
+              base64 -D
+            fi
+          }
+          printf '%s' "$APPLE_CERTIFICATE" | decode_base64 > "$CERTIFICATE_PATH"
+          chmod 0600 "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Build signed and notarized DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --dir native/desktop/psyche-build-tauri build:web
+          pnpm --dir native/desktop/psyche-build-tauri exec tauri build \
+            --target "$RUST_TARGET" \
+            --bundles dmg
+
+      - name: Verify Gatekeeper and notarization
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="native/desktop/psyche-build-tauri/src-tauri/target/$RUST_TARGET/release/bundle/dmg"
+          DMG_PATH="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          if [ -z "$DMG_PATH" ]; then
+            echo "::error::No DMG found in $BUNDLE_DIR"
+            exit 1
+          fi
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          MOUNT_POINT="$(mktemp -d "$RUNNER_TEMP/psyche-dmg.XXXXXX")"
+          hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          APP_PATH="$MOUNT_POINT/Psyche Build.app"
+          if [ ! -d "$APP_PATH" ]; then
+            hdiutil detach "$MOUNT_POINT"
+            echo "::error::DMG does not contain Psyche Build.app"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          hdiutil detach "$MOUNT_POINT"
+          xcrun stapler validate "$DMG_PATH"
+
+          ARTIFACT_DIR="$RUNNER_TEMP/release-artifact"
+          mkdir -p "$ARTIFACT_DIR"
+          ARTIFACT_NAME="Psyche-Build-v${RELEASE_VERSION}-${ARCH}.dmg"
+          cp "$DMG_PATH" "$ARTIFACT_DIR/$ARTIFACT_NAME"
+          echo "ARTIFACT_PATH=$ARTIFACT_DIR/$ARTIFACT_NAME" >> "$GITHUB_ENV"
+
+      - name: Record candidate DMG identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE_DIR="$RUNNER_TEMP/candidate-artifact"
+          mkdir -p "$CANDIDATE_DIR"
+          CANDIDATE_DMG="Psyche-Build-v${RELEASE_VERSION}-${CANDIDATE_ID}-${ARCH}.dmg"
+          mv "$ARTIFACT_PATH" "$CANDIDATE_DIR/$CANDIDATE_DMG"
+          DMG_SHA256="$(shasum -a 256 "$CANDIDATE_DIR/$CANDIDATE_DMG" | awk '{print $1}')"
+          DMG_BYTES="$(wc -c < "$CANDIDATE_DIR/$CANDIDATE_DMG" | tr -d ' ')"
+          XCODE_VERSION="$(xcodebuild -version | paste -sd ' ' -)"
+          TAURI_CLI_VERSION="$(pnpm --dir native/desktop/psyche-build-tauri exec tauri --version)"
+          jq -n \
+            --arg arch "$ARCH" \
+            --arg target "$RUST_TARGET" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg candidate_id "$CANDIDATE_ID" \
+            --arg version "$RELEASE_VERSION" \
+            --arg file "$CANDIDATE_DMG" \
+            --arg sha256 "$DMG_SHA256" \
+            --argjson bytes "$DMG_BYTES" \
+            --arg runner_os "$RUNNER_OS" \
+            --arg runner_arch "$RUNNER_ARCH" \
+            --arg image_os "${ImageOS:-unknown}" \
+            --arg image_version "${ImageVersion:-unknown}" \
+            --arg macos_version "$(sw_vers -productVersion)" \
+            --arg xcode "$XCODE_VERSION" \
+            --arg rustc "$(rustc --version)" \
+            --arg cargo "$(cargo --version)" \
+            --arg node "$(node --version)" \
+            --arg pnpm "$(pnpm --version)" \
+            --arg tauri_cli "$TAURI_CLI_VERSION" \
+            '{
+              arch: $arch,
+              target: $target,
+              candidateSha: $candidate_sha,
+              candidateId: $candidate_id,
+              version: $version,
+              artifact: {file: $file, sha256: $sha256, bytes: $bytes},
+              signing: {codesign: "verified", notarization: "accepted", stapled: true, gatekeeper: "accepted"},
+              runner: {os: $runner_os, arch: $runner_arch, imageOs: $image_os, imageVersion: $image_version, macosVersion: $macos_version},
+              toolchain: {xcode: $xcode, rustc: $rustc, cargo: $cargo, node: $node, pnpm: $pnpm, tauriCli: $tauri_cli}
+            }' > "$CANDIDATE_DIR/build-${ARCH}.json"
+          echo "CANDIDATE_ARTIFACT_DIR=$CANDIDATE_DIR" >> "$GITHUB_ENV"
+
+      - name: Upload candidate DMG
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: psyche-build-${{ env.CANDIDATE_ID }}-${{ matrix.arch }}
+          path: ${{ env.CANDIDATE_ARTIFACT_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove ephemeral macOS signing material
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          CLEANUP_FAILED=0
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-macos-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-developer-id.p12"
+          if [ -e "$KEYCHAIN_PATH" ] && ! security delete-keychain "$KEYCHAIN_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          if ! rm -f "$CERTIFICATE_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          exit "$CLEANUP_FAILED"
+
+  provenance:
+    name: Record candidate checksums and provenance
+    needs: [verify, build-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Set candidate metadata
+        env:
+          RAW_CANDIDATE_SHA: ${{ needs.verify.outputs.candidate_sha }}
+          RAW_CANDIDATE_ID: ${{ needs.verify.outputs.candidate_id }}
+          RAW_CANDIDATE_VERSION: ${{ needs.verify.outputs.candidate_version }}
+          RAW_MAIN_HEAD: ${{ needs.verify.outputs.main_head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RAW_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+             [[ "$RAW_CANDIDATE_ID" != "rc-${RAW_CANDIDATE_SHA:0:12}" ]] || \
+             [[ ! "$RAW_CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+             [[ ! "$RAW_MAIN_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Candidate metadata from the verify job is malformed"
+            exit 1
+          fi
+          {
+            echo "CANDIDATE_SHA=$RAW_CANDIDATE_SHA"
+            echo "CANDIDATE_ID=$RAW_CANDIDATE_ID"
+            echo "RELEASE_VERSION=$RAW_CANDIDATE_VERSION"
+            echo "MAIN_HEAD=$RAW_MAIN_HEAD"
+          } >> "$GITHUB_ENV"
+
+      - name: Download candidate DMGs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: psyche-build-${{ env.CANDIDATE_ID }}-*
+          path: candidate
+          merge-multiple: true
+
+      - name: Require complete artifacts and write checksums and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARM_DMG="Psyche-Build-v${RELEASE_VERSION}-${CANDIDATE_ID}-aarch64.dmg"
+          INTEL_DMG="Psyche-Build-v${RELEASE_VERSION}-${CANDIDATE_ID}-x86_64.dmg"
+          cd candidate
+          test -f "$ARM_DMG"
+          test -f "$INTEL_DMG"
+          test -f build-aarch64.json
+          test -f build-x86_64.json
+          ACTUAL_COUNT="$(find . -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [ "$ACTUAL_COUNT" != "4" ]; then
+            echo "::error::Expected exactly two candidate DMGs and two build records; found $ACTUAL_COUNT files"
+            exit 1
+          fi
+          shasum -a 256 "$ARM_DMG" "$INTEL_DMG" > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          for arch in aarch64 x86_64; do
+            DMG="Psyche-Build-v${RELEASE_VERSION}-${CANDIDATE_ID}-${arch}.dmg"
+            ACTUAL_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+            jq -e \
+              --arg arch "$arch" \
+              --arg file "$DMG" \
+              --arg sha256 "$ACTUAL_SHA256" \
+              --arg candidate_sha "$CANDIDATE_SHA" \
+              --arg candidate_id "$CANDIDATE_ID" \
+              --arg version "$RELEASE_VERSION" \
+              '.arch == $arch and .artifact.file == $file and .artifact.sha256 == $sha256 and
+               .candidateSha == $candidate_sha and .candidateId == $candidate_id and .version == $version' \
+              "build-${arch}.json" >/dev/null || {
+                echo "::error::Build record for $arch does not match the downloaded candidate DMG"
+                exit 1
+              }
+          done
+          jq -n \
+            --arg candidate_id "$CANDIDATE_ID" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg version "$RELEASE_VERSION" \
+            --arg main_head "$MAIN_HEAD" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg workflow_sha "$GITHUB_SHA" \
+            --arg dispatch_ref "$GITHUB_REF" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile arm build-aarch64.json \
+            --slurpfile intel build-x86_64.json \
+            '{
+              schema: "psyche-build.release-candidate-provenance.v1",
+              candidate: {id: $candidate_id, sha: $candidate_sha, embeddedVersion: $version, intendedReleaseTag: ("v" + $version)},
+              source: {repository: $repository, mainHeadAtVerify: $main_head},
+              workflow: {ref: $workflow_ref, sha: $workflow_sha, dispatchRef: $dispatch_ref, runId: $run_id, runAttempt: $run_attempt, runUrl: $run_url},
+              publication: {tagCreated: false, releaseCreated: false, testflightUploaded: false, homebrewNotified: false},
+              checksums: "SHA256SUMS",
+              builds: [$arm[0], $intel[0]],
+              generatedAt: $generated_at
+            }' > release-candidate-provenance.json
+          rm build-aarch64.json build-x86_64.json
+          {
+            echo "### Release candidate $CANDIDATE_ID"
+            echo
+            echo "- Commit: \`$CANDIDATE_SHA\`"
+            echo "- Embedded version: \`$RELEASE_VERSION\`"
+            echo "- No tag, release, TestFlight upload, or Homebrew notification was created."
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload candidate artifacts and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: psyche-build-${{ env.CANDIDATE_ID }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 30
