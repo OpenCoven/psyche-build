@@ -60,7 +60,7 @@ exists. Each credential is required and belongs only in that environment:
 | `APP_STORE_CONNECT_ISSUER_ID` | Team API issuer ID |
 | `APP_STORE_CONNECT_PRIVATE_KEY` | Complete downloaded `.p8` contents |
 | `APPLE_TEAM_ID` | Confirmed team ID shared by both release identities |
-| `HOMEBREW_TAP_TOKEN` | Least-privilege token that dispatches `OpenCoven/homebrew-tap` |
+| `HOMEBREW_TAP_TOKEN` | Fine-grained token limited to `OpenCoven/homebrew-tap` that opens the Cask bump pull request (Contents and Pull requests: read and write) |
 
 Do not stage these values in files or create repository-level fallback secrets.
 There is no repository-secret fallback, scheduled no-secret fallback, or
@@ -666,7 +666,7 @@ Desktop-only publication still requires `APPLE_CERTIFICATE`,
 `APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`,
 `APP_STORE_CONNECT_ISSUER_ID`, or `APP_STORE_CONNECT_PRIVATE_KEY`. It still
 requires the signed annotated tag, both signed and notarized DMGs, checksums,
-curated notes, protected-environment approval, and Homebrew notification.
+curated notes, protected-environment approval, and a verified Homebrew Cask pull request.
 Desktop-only publication does not upload or claim TestFlight availability.
 The shared protocol/schema validation in the root test, typecheck, and build
 gate remains mandatory in both modes. Only iOS-specific XcodeGen setup,
@@ -675,7 +675,7 @@ distribution credentials, archive, and upload work is skipped.
 
 For either manual mode, retain the workflow run URL, exact release SHA, the
 resolved `desktop_only` output, and the `verify`, both `build-macos`,
-`upload-ios`, `publish`, and `notify-homebrew` job results. For desktop-only
+`upload-ios`, `publish`, and `homebrew-tap-pr` job results. For desktop-only
 publication, the expected `upload-ios` result is `skipped`; for a coordinated
 release it must be `success`. A failed/cancelled shared verification or macOS
 build is not acceptable evidence and must not reach publication.
@@ -925,20 +925,65 @@ notice. Homebrew and the DMG checksums still guard what gets installed.
 
 ## Homebrew publication and recovery
 
-The application is a Cask, not a Formula. The release workflow dispatches
-`OpenCoven/homebrew-tap` only after publication. If notification fails, do not
-rebuild or republish the app; manually run the tap's existing updater:
+The application is a Cask, not a Formula. After publication, the release
+workflow's `homebrew-tap-pr` job proposes the Cask bump as a pull request on
+`OpenCoven/homebrew-tap` and then verifies it by reading the tap back:
+
+1. It downloads `SHA256SUMS` from the published (non-draft) release and
+   requires exactly the two DMG entries for the release version.
+2. `scripts/render-homebrew-cask.mjs` renders the new Cask from the tap's
+   current `Casks/psyche-build.rb`, changing only the `version` line and the
+   `sha256 arm:`/`intel:` stanza. It refuses a downgrade, a rewrite of an
+   already-published version with different checksums, and a Cask whose
+   `arch` or `url` stanza no longer matches the published asset names.
+3. `scripts/homebrew-tap-pr.mjs open` uses `HOMEBREW_TAP_TOKEN` through the
+   GitHub REST API only (no clone, no `git push`, no credential in a URL) to
+   create branch `psyche-build-<version>`, commit the rendered Cask, and open
+   the pull request. A re-run reuses the branch, commit, and open pull
+   request. It stops instead of overwriting a branch that holds some other
+   Cask, and it will not reopen a pull request a maintainer closed. If the
+   tap's `main` already carries the release, it opens nothing.
+4. `scripts/homebrew-tap-pr.mjs verify` re-reads the tap with the run's
+   read-only token and fails unless the pull request targets `main` from that
+   branch, changes only `Casks/psyche-build.rb`, touches only the version and
+   checksum lines, and carries exactly the `SHA256SUMS` version and digests at
+   its head commit.
+
+The job never merges. Tap CI (`brew style`, `brew audit`, native install
+smoke tests) and a maintainer merge the pull request; the Cask is not public
+until they do.
+
+`HOMEBREW_TAP_TOKEN` must be a fine-grained personal access token (or
+equivalent GitHub App token) whose repository access is only
+`OpenCoven/homebrew-tap`, with **Contents: read and write** (create the branch
+and commit) and **Pull requests: read and write** (find and open the pull
+request). Metadata read is implied. It needs no Actions, Workflows,
+Administration, or other repository permission, and the workflow only exposes
+it to the single step that opens the pull request. A pull request opened with
+this token, unlike one opened with a tap workflow's own `GITHUB_TOKEN`,
+triggers tap CI.
+
+The release workflow no longer sends the `psyche-build-release`
+`repository_dispatch`. The tap's *Update Psyche Build cask* workflow still runs
+on its own schedule, but it cannot open pull requests: the tap does not permit
+GitHub Actions to create them, so its runs stop at that step.
+
+If the job fails, do not rebuild or republish the app. Read the error, fix
+the named condition (for example, delete a stale `psyche-build-<version>`
+branch), and re-run the failed `homebrew-tap-pr` job; it is idempotent. To
+render the Cask by hand, run:
 
 ```sh
-gh workflow run "Update Psyche Build cask" \
-  --repo OpenCoven/homebrew-tap \
-  --ref main \
-  -f tag=v0.0.1
+gh api repos/OpenCoven/homebrew-tap/contents/Casks/psyche-build.rb \
+  --jq .content | base64 -d > psyche-build.rb
+TAG=vX.Y.Z  # the published release being proposed
+gh release download "$TAG" --repo OpenCoven/psyche-build --pattern SHA256SUMS
+node scripts/render-homebrew-cask.mjs --cask psyche-build.rb --sums SHA256SUMS --version "$TAG"
 ```
 
-Verify the updater PR's two URLs and hashes against the published assets, then
-require tap CI and review before merge. Once the `v0.0.1` release and Cask are
-actually available, public macOS installation is:
+Verify the pull request's version and both hashes against the published
+`SHA256SUMS`, then require tap CI and review before merge. Once the `v0.0.1`
+release and Cask are actually available, public macOS installation is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
