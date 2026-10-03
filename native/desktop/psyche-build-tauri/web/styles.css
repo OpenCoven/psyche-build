@@ -2306,6 +2306,19 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .footer-stack > .composer { grid-row: 1; }
 
+/* Collapsed until summoned (⌘K). The input stays in layout at zero height so
+   focus() can still reach it; focusing it opens the row. */
+.footer-stack:not(.composer-open) {
+  grid-template-rows: 0 auto var(--status-h);
+}
+.footer-stack:not(.composer-open) > .composer {
+  height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  overflow: hidden;
+}
+
 .footer-stack > .status-detail { grid-row: 2; }
 
 .footer-stack > .status-bar { grid-row: 3; }
