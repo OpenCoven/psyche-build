@@ -1019,7 +1019,10 @@ reports the previous value as `upgraded_from`; a downgrade reports nothing.
 Reconciling open project configs through the #464 gate is not implemented.
 
 **What users see.** Only the `available` state shows anything: a banner at
-the top right of the workspace. Only its title line is a polite live region
+a strip above the footer, outside the workspace. It is never an overlay:
+native browser webviews would cover an overlay and intercept its clicks, but
+they stay inside the workspace's preview area, which shrinks to make room.
+Only its title line is a polite live region
 (`role="status"`), so a screen reader announces the new version once, without
 moving focus, and does not re-read the command or the SHA-256. Refreshing the
 same status re-renders nothing. The banner shows the
@@ -1036,7 +1039,8 @@ updates or restarts by itself. The instructions depend on the install source:
 
 The banner's only buttons are **Skip this version**, which persists, and
 **Dismiss**, which lasts until the next launch or a different version. Escape
-also dismisses, but only while focus is inside the banner. This is
+also dismisses, but only while focus is inside the banner, and the key
+is consumed there, so it does not also leave pane focus mode. This is
 intentional: Escape elsewhere belongs to the terminal and other panels, and
 the banner never takes focus. When the banner hides while it has focus, focus
 returns to the element focused before it, or to the active terminal. If

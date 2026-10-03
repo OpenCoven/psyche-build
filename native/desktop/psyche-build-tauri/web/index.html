@@ -188,13 +188,6 @@
         </aside>
 
         <main class="detail" id="detail">
-          <section
-            class="update-banner"
-            id="update-banner"
-            aria-label="Psyche Build update"
-            tabindex="-1"
-            hidden
-          ></section>
           <section class="terminal-area">
             <div class="terminal-host" id="terminal-host"></div>
           </section>
@@ -354,6 +347,17 @@
           </div>
         </div>
       </div>
+
+      <!-- The update notice is its own grid row, outside .workbench and
+           .detail: native browser webviews are positioned only inside the
+           detail's preview rectangle, so they can never cover it. -->
+      <section
+        class="update-banner"
+        id="update-banner"
+        aria-label="Psyche Build update"
+        tabindex="-1"
+        hidden
+      ></section>
 
       <div class="footer-stack" id="footer-stack">
         <footer class="composer" id="composer">

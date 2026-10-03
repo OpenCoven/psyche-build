@@ -229,7 +229,10 @@ export function createUpdateBannerController({
   // and the banner never steals focus to receive it.
   function onKeydown(event) {
     if (event.key === 'Escape' && !container.hidden) {
+      // Consumed here: it must not bubble to the document-level Escape
+      // cascade in main.js and also leave pane focus mode.
       event.preventDefault();
+      event.stopPropagation();
       handlers.dismiss();
     }
   }

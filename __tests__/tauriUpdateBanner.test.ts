@@ -47,7 +47,9 @@ class FakeElement {
   }
   removeEventListener(type: string, listener: (event: any) => void) { this.listeners.get(type)?.delete(listener); }
   dispatch(type: string, init: Record<string, unknown> = {}) {
-    const event = { type, target: this, preventDefault: vi.fn(), ...init };
+    const event = { type, target: this, propagationStopped: false, preventDefault: vi.fn(), stopPropagation: vi.fn(), ...init };
+    const stop = event.stopPropagation;
+    event.stopPropagation = vi.fn(() => { event.propagationStopped = true; stop(); });
     for (const listener of this.listeners.get(type) ?? []) listener(event);
     return event;
   }
@@ -176,6 +178,30 @@ describe('update banner rendering', () => {
     expect(h.openRelease).toHaveBeenCalledWith('https://github.com/OpenCoven/psyche-build/releases/tag/v0.0.3');
   });
 
+  it('sits in its own app row, outside the area native browser webviews can cover', () => {
+    const app = indexHtml.slice(indexHtml.indexOf('<div class="app" id="app"'));
+    const banner = app.indexOf('id="update-banner"');
+    const detail = app.indexOf('<main class="detail" id="detail">');
+    const footer = app.indexOf('<div class="footer-stack" id="footer-stack">');
+    expect(banner).toBeGreaterThan(-1);
+    // Not inside .detail, where the native preview webview is positioned...
+    const detailEnd = app.indexOf('</main>', detail);
+    expect(banner < detail || banner > detailEnd).toBe(true);
+    // ...but directly before the footer, as a top-level child of .app.
+    const between = app.slice(app.indexOf('></section>', banner) + '></section>'.length, footer);
+    expect(between.replace(/<!--[\s\S]*?-->/g, '').trim()).toBe('');
+    expect(app.slice(0, banner)).toContain('id="browser-surface-staging"');
+    const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
+    expect(stylesCss).toMatch(/\.app \{[^}]*grid-template-rows: var\(--titlebar-h\) minmax\(0, 1fr\) auto auto;/s);
+    expect(stylesCss).toContain('.app > .update-banner { grid-row: 3; }');
+    expect(stylesCss).toContain('.app > .footer-stack { grid-row: 4; }');
+    const bannerRule = stylesCss.match(/\n\.update-banner \{([^}]*)\}/)?.[1] ?? '';
+    expect(bannerRule).not.toMatch(/position:\s*(absolute|fixed)/);
+    // Showing the banner shrinks .detail; this observer then resyncs the
+    // native webview bounds so they never extend over it.
+    expect(mainJs).toMatch(/new ResizeObserver\(function \(\) \{ scheduleBrowserBounds\(\); \}\); ro\.observe\(preview\); ro\.observe\(detail\);/);
+  });
+
   it('makes only the title a polite live region and keeps it across renders', () => {
     const doc = new FakeDocument();
     const container = doc.createElement('section');
@@ -264,6 +290,27 @@ describe('update banner controller', () => {
     expect(event.preventDefault).toHaveBeenCalled();
     expect(second.native.invoke).toHaveBeenCalledWith('update_dismiss', undefined);
     expect(second.container.hidden).toBe(true);
+  });
+
+  it('consumes Escape so it never bubbles to the document Escape cascade', async () => {
+    const { controller, container } = setup();
+    await controller.refresh();
+    // Stand-in for main.js's bubbling document listener, which would leave
+    // pane focus mode on the same keypress.
+    const documentEscape = vi.fn();
+    const event = container.dispatch('keydown', { key: 'Escape' });
+    if (!event.propagationStopped) documentEscape(event);
+    await flush();
+    expect(event.stopPropagation).toHaveBeenCalled();
+    expect(documentEscape).not.toHaveBeenCalled();
+    expect(container.hidden).toBe(true);
+    // Other keys, and Escape on a hidden banner, are left alone.
+    const other = setup();
+    await other.controller.refresh();
+    expect(other.container.dispatch('keydown', { key: 'Enter' }).propagationStopped).toBe(false);
+    const hidden = setup(available({ state: 'not_newer', available: null as never }));
+    await hidden.controller.refresh();
+    expect(hidden.container.dispatch('keydown', { key: 'Escape' }).propagationStopped).toBe(false);
   });
 
   it('copies the Cask command and opens only the expected release page', async () => {
