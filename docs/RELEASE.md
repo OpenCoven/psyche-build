@@ -550,7 +550,9 @@ The workflow refuses:
 - a SHA that is not 40 lowercase hexadecimal characters, does not name a
   commit, or is not equal to or an ancestor of `origin/main`;
 - a version that is not stable `MAJOR.MINOR.PATCH`, disagrees with the
-  committed version surfaces, or already has a `v` tag.
+  committed version surfaces, or already has a `v` tag. Each build job checks
+  for the tag again after environment approval and before reading any
+  credential, and a failed tag lookup also refuses.
 
 `verify` runs the same shared TypeScript, protocol, package, Rust, and Tauri
 gates as the tag run. It does not run iOS verification; the tag run still does.

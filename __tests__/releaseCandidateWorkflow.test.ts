@@ -197,6 +197,7 @@ const CANDIDATE_BUILD_ORDER = [
   'uses: actions/setup-node',
   'uses: dtolnay/rust-toolchain',
   'Install locked dependencies and Rust target',
+  'Require the release tag to remain absent',
   'Require signing and notarization credentials',
   'Import Developer ID certificate',
   'Build signed and notarized DMG',
@@ -212,6 +213,7 @@ const CANDIDATE_ONLY_STEPS = new Set([
   'Require coherent release versions',
   'Require the final release version',
   'Set candidate metadata',
+  'Require the release tag to remain absent',
   'Record candidate DMG identity',
   'Upload candidate DMG',
 ]);
@@ -354,6 +356,73 @@ describe('release candidate workflow contract', () => {
       expect(tagged.status).toBe(1);
       expect(tagged.stdout).toContain('v9.9.9 already exists');
       expect(tagged.output).toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('re-checks tag absence after environment approval and before any credential is read', () => {
+    const build = jobSource(candidateSource(), 'build-macos');
+    const step = stepSource(build, 'Require the release tag to remain absent');
+    const names = stepNames(build);
+    const firstCredentialStep = names.findIndex((name) =>
+      stepSource(build, name).includes('secrets.'),
+    );
+
+    expect(step).not.toContain('secrets.');
+    expect(step).not.toMatch(/run: \|[\s\S]*\$\{\{/);
+    expect(firstCredentialStep).toBeGreaterThan(0);
+    expect(names.indexOf('Require the release tag to remain absent')).toBe(firstCredentialStep - 1);
+    expect(build.indexOf('Require the release tag to remain absent')).toBeLessThan(
+      build.indexOf('secrets.'),
+    );
+
+    const script = stepScript(build, 'Require the release tag to remain absent');
+    const root = mkdtempSync(path.join(tmpdir(), 'psyche-candidate-delayed-tag-'));
+    try {
+      const origin = path.join(root, 'origin.git');
+      const work = path.join(root, 'work');
+      git(root, 'init', '--bare', origin);
+      git(root, 'init', work);
+      writeFileSync(path.join(work, 'file.txt'), 'one\n');
+      git(work, 'add', 'file.txt');
+      git(work, 'commit', '-m', 'one');
+      git(work, 'remote', 'add', 'origin', origin);
+      git(work, 'push', '-q', 'origin', 'main');
+      const checkout = path.join(root, 'checkout');
+      git(root, 'clone', '-q', origin, checkout);
+
+      const run = (env: Record<string, string>, cwd = checkout) =>
+        spawnSync('bash', ['-c', script], {
+          cwd,
+          env: {
+            PATH: process.env.PATH ?? '',
+            HOME: process.env.HOME ?? root,
+            GIT_CONFIG_NOSYSTEM: '1',
+            ...env,
+          },
+          encoding: 'utf8',
+        });
+
+      // verify ran while the tag was absent; the same build step passes then.
+      expect(run({ RELEASE_VERSION: '0.1.0' }).status).toBe(0);
+
+      // The tag appears while build-macos waits for environment approval.
+      git(work, 'tag', 'v0.1.0');
+      git(work, 'push', '-q', 'origin', 'v0.1.0');
+      const delayed = run({ RELEASE_VERSION: '0.1.0' });
+      expect(delayed.status).toBe(1);
+      expect(delayed.stdout).toContain('v0.1.0 already exists');
+
+      // Lookup errors fail closed instead of reading as absence.
+      git(checkout, 'remote', 'set-url', 'origin', path.join(root, 'missing.git'));
+      const unreachable = run({ RELEASE_VERSION: '0.2.0' });
+      expect(unreachable.status).toBe(1);
+      expect(unreachable.stdout).toContain('Unable to confirm that v0.2.0 does not exist yet');
+
+      const malformed = run({ RELEASE_VERSION: '0.1.0-rc.1' });
+      expect(malformed.status).toBe(1);
+      expect(malformed.stdout).toContain('stable MAJOR.MINOR.PATCH');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

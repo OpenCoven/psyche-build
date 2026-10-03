@@ -250,6 +250,30 @@ jobs:
           rustup target add "$RUST_TARGET"
           pnpm release:check -- "$RELEASE_TAG"
 
+      - name: Require the release tag to remain absent
+        shell: bash
+        run: |
+          # verify checked tag absence before this job waited for release
+          # environment approval. Re-check it after approval and before any
+          # credential is read, so a tag created during the wait cannot yield
+          # signed candidates for an already-tagged version.
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Candidate version must use stable MAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v$RELEASE_VERSION" >/dev/null
+          TAG_STATUS=$?
+          set -e
+          if [ "$TAG_STATUS" = "0" ]; then
+            echo "::error::v$RELEASE_VERSION already exists; a candidate must precede its release tag"
+            exit 1
+          elif [ "$TAG_STATUS" != "2" ]; then
+            echo "::error::Unable to confirm that v$RELEASE_VERSION does not exist yet"
+            exit 1
+          fi
+
       - name: Require signing and notarization credentials
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
