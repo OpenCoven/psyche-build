@@ -636,11 +636,11 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				ECF6C642C37AA9953E6714DD /* PsycheCore */,
-				7BB8397E93E6CC7E68808C4A /* PsycheCoreTests */,
 				8ADE4C2F5910D2DE934CC66D /* PsycheApp */,
 				FF7723641178B1E943F72C8C /* PsycheAppTests */,
 				74A409596775FB76C108C60D /* PsycheAppUITests */,
+				ECF6C642C37AA9953E6714DD /* PsycheCore */,
+				7BB8397E93E6CC7E68808C4A /* PsycheCoreTests */,
 			);
 		};
 /* End PBXProject section */
