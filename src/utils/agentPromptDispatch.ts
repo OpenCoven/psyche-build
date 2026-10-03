@@ -1,19 +1,18 @@
 import { randomBytes } from 'node:crypto';
 import type { TmuxService } from '../services/TmuxService.js';
+import { isShellCommandName } from './paneShellDialect.js';
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 5000;
 const DEFAULT_POLL_INTERVAL_MS = 75;
 
-// Common shell process names reported by tmux for inactive panes.
-const SHELL_PROCESS_NAMES = new Set([
-  'bash',
-  'zsh',
-  'sh',
-  'fish',
-  'dash',
-  'ksh',
-  'tcsh',
-]);
+/**
+ * Foreground names that are never the agent unless they ARE the expected
+ * command: a shell (the pane's own, or one an agent crashed back to) and tmux
+ * itself (the exit recorder briefly runs `tmux set-option` in the pane).
+ */
+function isNeverAgentForeground(command: string): boolean {
+  return command === 'tmux' || isShellCommandName(command);
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -22,7 +21,12 @@ function sleep(ms: number): Promise<void> {
 /** The tmux calls the paste transport makes; injectable so tests never run tmux. */
 export type PromptPasteTmux = Pick<
   TmuxService,
-  'getPaneCurrentCommand' | 'sendTmuxKeys' | 'loadBufferFromStdin' | 'pasteBufferAndDelete' | 'deleteBuffer'
+  | 'getPaneCurrentCommand'
+  | 'getPaneBracketPasteFlag'
+  | 'sendTmuxKeys'
+  | 'loadBufferFromStdin'
+  | 'pasteBufferAndDelete'
+  | 'deleteBuffer'
 >;
 
 export interface PromptPasteClock {
@@ -46,8 +50,12 @@ function isAgentForeground(
 ): boolean {
   if (!currentCommand) return false;
   if (expectedCommand && currentCommand === expectedCommand) return true;
+  // A shell or tmux is never "the agent" just because it differs from a
+  // baseline: the baseline may have been sampled after the agent started,
+  // and the agent may have exited back to its shell since (#523 review).
+  if (isNeverAgentForeground(currentCommand)) return false;
   if (baselineCommand && currentCommand !== baselineCommand) return true;
-  return !expectedCommand && !baselineCommand && !SHELL_PROCESS_NAMES.has(currentCommand);
+  return !expectedCommand && !baselineCommand;
 }
 
 async function readForeground(
@@ -98,7 +106,11 @@ export async function waitForForegroundCommand(
 }
 
 /** Why a pasted prompt was not delivered. Closed, so it can be logged safely. */
-export type PromptPasteSkipReason = 'agent_not_ready' | 'prompt_paste_failed';
+export type PromptPasteSkipReason =
+  | 'agent_not_ready'
+  | 'prompt_paste_failed'
+  /** Multi-line prompt, but the agent has not enabled bracketed paste. */
+  | 'prompt_paste_unsafe_multiline';
 
 export type PromptPasteResult =
   | { readonly delivered: true }
@@ -177,21 +189,66 @@ export async function sendPromptViaTmux(
   const bufferName = `psyche-prompt-${Date.now()}-${randomBytes(6).toString('hex')}`;
   const interKeyDelayMs = 120;
   const interSubmitDelayMs = 60;
+  const stillAgent = async (): Promise<boolean> => isAgentForeground(
+    await readForeground(tmuxService, paneId),
+    expectedCommand,
+    baselineCommand,
+  );
+  const discardBuffer = async (): Promise<void> => {
+    try {
+      await tmuxService.deleteBuffer(bufferName);
+    } catch {
+      // Already gone (paste-buffer -d), or tmux is unreachable; a buffer is
+      // server memory only.
+    }
+  };
+  // The agent left the foreground mid-sequence: whatever reached the line is
+  // now in front of a shell. Clear it and never submit it.
+  const abandon = async (): Promise<PromptPasteResult> => {
+    try {
+      await tmuxService.sendTmuxKeys(paneId, 'C-u');
+    } catch {
+      // Best effort.
+    }
+    await discardBuffer();
+    return { delivered: false, reason: 'agent_not_ready' };
+  };
 
   for (const prePromptKey of prePromptKeys) {
     await tmuxService.sendTmuxKeys(paneId, prePromptKey);
     await wait(interKeyDelayMs);
   }
 
+  // Without bracketed paste, tmux sends each LF as CR, so every line of a
+  // multi-line prompt would be submitted separately. `-p` only brackets the
+  // paste when the program asked for it, so ask tmux first.
+  if (/[\r\n]/.test(prompt)) {
+    let bracketed = false;
+    try {
+      bracketed = await tmuxService.getPaneBracketPasteFlag(paneId);
+    } catch {
+      bracketed = false;
+    }
+    if (!bracketed) {
+      return { delivered: false, reason: 'prompt_paste_unsafe_multiline' };
+    }
+  }
+
   try {
     await tmuxService.loadBufferFromStdin(bufferName, prompt);
+  } catch {
+    await discardBuffer();
+    return { delivered: false, reason: 'prompt_paste_failed' };
+  }
+
+  if (!(await stillAgent())) {
+    return abandon();
+  }
+
+  try {
     await tmuxService.pasteBufferAndDelete(bufferName, paneId);
   } catch {
-    try {
-      await tmuxService.deleteBuffer(bufferName);
-    } catch {
-      // Already gone, or tmux is unreachable; a buffer is server memory only.
-    }
+    await discardBuffer();
     return { delivered: false, reason: 'prompt_paste_failed' };
   }
 
@@ -199,6 +256,9 @@ export async function sendPromptViaTmux(
     await wait(postPasteDelayMs);
   }
   for (let i = 0; i < submitKeys.length; i += 1) {
+    if (!(await stillAgent())) {
+      return abandon();
+    }
     await tmuxService.sendTmuxKeys(paneId, submitKeys[i]);
     if (i < submitKeys.length - 1) {
       await wait(interSubmitDelayMs);

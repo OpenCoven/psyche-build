@@ -30,6 +30,8 @@ function findExecutable(name: string): string | null {
 
 const realTmux = findExecutable('tmux');
 const paneShell = ['/bin/zsh', '/bin/bash'].find((candidate) => fs.existsSync(candidate));
+// A shebang cannot carry a path with spaces portably.
+const nodeUsable = !/\s/.test(process.execPath);
 
 const PROMPT = 'zq-pasted-prompt "quoted" $HOME it\'s #1';
 const AGENT_NAMES = [
@@ -37,15 +39,28 @@ const AGENT_NAMES = [
   'amp', 'pi', 'cursor-agent', 'copilot', 'crush', 'coven',
 ];
 
-const FAKE_AGENT_SCRIPT = `#!/bin/sh
-name=$(basename "$0")
-: > "$FAKE_AGENT_LOG/$name.argv"
-for arg in "$@"; do printf '%s\\n' "$arg" >> "$FAKE_AGENT_LOG/$name.argv"; done
-IFS= read -r line
-printf '%s' "$line" > "$FAKE_AGENT_LOG/$name.stdin"
+// A node script, not a shell script: the pane must report a non-shell
+// foreground for readiness, exactly as a real agent binary would. It records
+// its argv, then the first line typed on its terminal.
+const FAKE_AGENT_SCRIPT = `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const name = path.basename(process.argv[1]);
+const log = process.env.FAKE_AGENT_LOG;
+fs.writeFileSync(path.join(log, name + '.argv'), process.argv.slice(2).join('\\n'));
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  const end = input.search(/[\\r\\n]/);
+  if (end >= 0) {
+    fs.writeFileSync(path.join(log, name + '.stdin'), input.slice(0, end));
+    process.exit(0);
+  }
+});
 `;
 
-describe.skipIf(!realTmux || !paneShell)('pasted prompt on a private tmux socket (#523)', () => {
+describe.skipIf(!realTmux || !paneShell || !nodeUsable)('pasted prompt on a private tmux socket (#523)', () => {
   let sandbox: string;
   let socket: string;
   let log: string;

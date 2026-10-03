@@ -244,6 +244,34 @@ describe('spawnBridgePane prompt transports', () => {
     },
   );
 
+  // #523 review, finding 1: read after the launch line, the "baseline" could
+  // already be the agent, and an agent that crashed back to the shell would
+  // then look ready. The baseline is the shell, read before anything is sent.
+  it('reads the paste baseline from the pane before sending the launch line', async () => {
+    const order: string[] = [];
+    const h = harness();
+    h.readPaneCommand.mockImplementation(async () => {
+      order.push('read');
+      return order.includes('launch') ? 'cline' : 'zsh';
+    });
+    const sendTmuxCommand = h.deps.sendTmuxCommand;
+    h.deps.sendTmuxCommand = (paneId: string, command: string) => {
+      order.push('launch');
+      sendTmuxCommand(paneId, command);
+    };
+    await spawn('cline', 'Fix the failing auth tests', h);
+
+    expect(order.indexOf('read')).toBeLessThan(order.indexOf('launch'));
+    expect(h.sendPromptKeys.mock.calls[0][0].baselineCommand).toBe('zsh');
+  });
+
+  it('passes no baseline when the pane cannot be read, rather than guessing', async () => {
+    const h = harness(new Error('no pane'));
+    await spawn('cline', 'Fix the failing auth tests', h);
+    expect(h.sendPromptKeys).toHaveBeenCalledTimes(1);
+    expect(h.sendPromptKeys.mock.calls[0][0].baselineCommand).toBeUndefined();
+  });
+
   it('adds no warning when the paste was delivered', async () => {
     const h = harness();
     h.sendPromptKeys.mockResolvedValueOnce(null as never);

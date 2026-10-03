@@ -671,6 +671,7 @@ export interface LaunchAgentInPaneOptions {
     | 'sendShellCommand'
     | 'sendTmuxKeys'
     | 'getPaneCurrentCommand'
+    | 'getPaneBracketPasteFlag'
     | 'loadBufferFromStdin'
     | 'pasteBufferAndDelete'
     | 'deleteBuffer'

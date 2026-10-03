@@ -842,6 +842,33 @@ export class TmuxService {
   /**
    * Set global tmux option
    */
+  /**
+   * Whether the program in the pane has enabled bracketed paste mode
+   * (`#{bracket_paste_flag}`). Anything but an explicit `1`, including an
+   * older tmux without the format, is reported as false.
+   */
+  async getPaneBracketPasteFlag(paneId: string): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      execFile(
+        'tmux',
+        ['display-message', '-t', paneId, '-p', '#{bracket_paste_flag}'],
+        {
+          encoding: 'utf8',
+          timeout: PANE_CURRENT_COMMAND_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          maxBuffer: PANE_CURRENT_COMMAND_MAX_BYTES,
+        },
+        (error, stdout) => {
+          if (error) {
+            reject(new Error('tmux display-message failed'));
+            return;
+          }
+          resolve(String(stdout).trim() === '1');
+        },
+      );
+    });
+  }
+
   async setOption(option: string, value: string): Promise<void> {
     await this.executeWithRetry(
       () => {
@@ -953,6 +980,8 @@ export class TmuxService {
    */
   private execTmuxFile(args: string[], input?: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      const failure = `tmux ${args[0] ?? ''} failed`;
+      let stdinFailed = false;
       const child = execFile(
         'tmux',
         args,
@@ -962,19 +991,24 @@ export class TmuxService {
           killSignal: 'SIGKILL',
         },
         (error) => {
-          if (error) {
-            const message = `tmux ${args[0] ?? ''} failed`;
-            this.logger.debug(message, 'error');
-            reject(new Error(message));
+          if (error || stdinFailed) {
+            this.logger.debug(failure, 'error');
+            reject(new Error(failure));
             return;
           }
           resolve();
         },
       );
+      // tmux can exit before reading all of stdin (EPIPE). Without a listener
+      // that error is thrown as uncaught and takes the process down; with it,
+      // the failure is reported through the callback above.
+      child?.stdin?.on('error', () => {
+        stdinFailed = true;
+      });
       try {
         child?.stdin?.end(input);
       } catch {
-        // The callback reports the failure.
+        stdinFailed = true;
       }
     });
   }

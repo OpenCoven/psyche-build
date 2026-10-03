@@ -214,6 +214,7 @@ describe('TmuxService command construction', () => {
     function stdinCapturingChild(stdinChunks: string[]) {
       return {
         stdin: {
+          on: vi.fn(),
           end: vi.fn((chunk?: string) => {
             if (chunk !== undefined) stdinChunks.push(String(chunk));
           }),
@@ -283,6 +284,23 @@ describe('TmuxService command construction', () => {
         expect.anything(),
         expect.any(Function),
       );
+      expect(execSyncMock).not.toHaveBeenCalled();
+    });
+
+    it('reads #{bracket_paste_flag} without a shell and treats only "1" as enabled', async () => {
+      for (const [stdout, expected] of [['1\n', true], ['0\n', false], ['\n', false]] as const) {
+        execFileMock.mockReset();
+        execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
+          cb(null, stdout, '');
+        });
+        await expect(TmuxService.getInstance().getPaneBracketPasteFlag('%7')).resolves.toBe(expected);
+        expect(execFileMock).toHaveBeenCalledWith(
+          'tmux',
+          ['display-message', '-t', '%7', '-p', '#{bracket_paste_flag}'],
+          expect.objectContaining({ timeout: 1_000 }),
+          expect.any(Function),
+        );
+      }
       expect(execSyncMock).not.toHaveBeenCalled();
     });
 

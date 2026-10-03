@@ -40,6 +40,16 @@ function paneCommandName(paneCommand: string | undefined): string {
   return path.basename((paneCommand ?? '').trim()).replace(/^-/u, '').toLowerCase();
 }
 
+/**
+ * True when `paneCommand` names any known shell, supported dialect or not
+ * (`-zsh` and paths included). A pane reporting one of these is at a shell
+ * prompt, so it must never be mistaken for an agent that is ready for input.
+ */
+export function isShellCommandName(paneCommand: string | undefined): boolean {
+  const name = paneCommandName(paneCommand);
+  return POSIX_SHELLS.has(name) || name === 'fish' || OTHER_SHELLS.has(name);
+}
+
 export function paneShellDialectForCommand(
   paneCommand: string | undefined,
 ): PaneShellDialect | null {
@@ -59,7 +69,9 @@ export type PromptBootstrapSkipReason =
   /** The pasted-prompt transport never saw the agent take the foreground (#523). */
   | 'agent_not_ready'
   /** tmux could not load or paste the prompt buffer (#523). */
-  | 'prompt_paste_failed';
+  | 'prompt_paste_failed'
+  /** A multi-line prompt, and the agent has not enabled bracketed paste (#523). */
+  | 'prompt_paste_unsafe_multiline';
 
 export type PaneShellResolution =
   | { readonly dialect: PaneShellDialect; readonly paneCommand: string }
@@ -180,6 +192,7 @@ const SKIP_REASON_PHRASES: Readonly<Record<PromptBootstrapSkipReason, string>> =
   prompt_file_unwritable: 'the prompt file could not be written',
   agent_not_ready: 'the agent did not start in time to receive a pasted prompt',
   prompt_paste_failed: 'tmux could not paste the prompt',
+  prompt_paste_unsafe_multiline: 'the prompt has several lines and the agent had not enabled bracketed paste, so each line would have been submitted separately',
 };
 
 /**
