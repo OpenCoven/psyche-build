@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## [0.0.3] - 2026-10-03
+
+### Added
+
+- The desktop app checks a signed update manifest on launch and at most once a
+  day, verifies its Ed25519 signature against the embedded key set, and shows a
+  notify-only banner when a newer release exists. It never downloads or
+  installs anything (#529, #530).
+- Releases sign `update-manifest.json` when a current signing key is
+  provisioned, and open the Homebrew Cask bump as a verified tap pull request
+  instead of pushing to the tap (#527, #528).
+- A non-publishing release-candidate build exercises the release workflow on
+  any branch (#526).
+- Support bundles collect installed-provider, pane-lifecycle, and updater state
+  (#467, #483), and have a production CLI with persistence (#462).
+- The persisted project config is versioned and its read path is gated (#464).
+
+- The desktop composer row is hidden until summoned with ⌘K (or any path that
+  focuses it, such as ⌘F); Escape or ⌘K again dismisses it (#535).
+
+### Fixed
+
+- Terminal apps that query the terminal background (OSC 11), such as Claude
+  Code's prompt and Codex's text shading, now receive the pane's visible colour
+  instead of black (#536).
+- The CLI updater no longer consults a package registry the CLI is not
+  published to (#502, #525).
+- Agent prompts are pasted through argv-free tmux send-keys; the pane shell
+  probe no longer blocks, and the prompt bootstrap dialect follows the pane's
+  shell (#511, #522, #523, #524).
+- An agent CLI that fails at launch inside a live shell is classified as
+  failed (#484); an orphaned pane is reported once and a pane mid-creation is
+  never adopted (#520).
+- A half-removed worktree enters `recovery_required` (#512); full state storage
+  keeps the prior state whole (#513); unreadable recovery files are
+  quarantined instead of throwing (#460).
+- Bridge v2 `subscribePane` and `sendInput` are scoped to published panes
+  (#507).
+- iOS keeps a lost consequential-action outcome explicitly unknown and
+  separates an undispatched control request from an in-flight one (#466,
+  #469).
+
+### Security
+
+- Added Dependabot, CodeQL, and dependency review (#481), and CI now fails any
+  change whose release versions disagree (#482).
+
 ### Documentation
 
 - Planning moved from Beads to GitHub Issues and the Psyche Build Project
@@ -17,6 +64,13 @@
   merged iOS readiness, invite-authentication, ritual-publication, Coven
   launch-adapter, and Vim contract slices, and the stale scheduled Beads mirror
   sync. No support claim changed.
+
+### TestFlight: What to Test
+
+- Pair with a desktop host and send a pane action; confirm a lost connection
+  shows the outcome as unknown rather than failed or succeeded.
+- Queue a control request while offline and confirm it is shown as not yet
+  sent, distinct from one in flight.
 
 ## [0.0.2] - 2026-08-28
 
