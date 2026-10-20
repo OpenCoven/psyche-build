@@ -1,57 +1,79 @@
 # Bridge and daemon security model
 
-Psyche Build runs two WebSocket servers. Both hand a remote client control over
-tmux panes, and tmux panes are shells — so the boundary these servers enforce is
-the boundary between "a device on your network" and "arbitrary commands as
-you".
+Psyche Build has two WebSocket transports and a separate canonical local
+control IPC surface. Pane input can reach shells, so network reachability,
+authentication, project scoping, and operation authorization must be evaluated
+separately. A local socket or a successful handshake does not itself authorize
+protected operations.
 
-This document states what each server trusts, what it refuses, and why the
-refusals are shaped the way they are. Read it before adding a message type to
-either protocol.
+This document states what each surface trusts and refuses. It describes the
+implementation's boundaries and known gaps, not blanket security certification.
+Read it before adding a message type to any of these protocols.
 
-## The two surfaces
+## The three surfaces
 
-| | LAN bridge | Loopback daemon |
-|---|---|---|
-| Code | `src/services/bridge/` | `src/daemon/` |
-| Started by | the TUI, automatically (`src/index.ts`) | `psyche daemon`, explicitly |
-| Binds | `0.0.0.0`, ephemeral port, TLS | `127.0.0.1:47123`, plaintext |
-| Discovery | Bonjour `_psyche._tcp` | none |
-| Auth | device token from a bounded pairing code, or the invite-auth protocol slice where explicitly wired | 256-bit token in `~/.config/psyche/token` |
-| Clients | the iOS / macOS companion apps | local tooling, MCP-adjacent callers |
-| Runs inside | the psyche TUI process | its own process |
+| | LAN bridge | Legacy loopback daemon | Canonical control IPC |
+|---|---|---|---|
+| Code | `src/services/bridge/` | `src/daemon/` | `src/control/server.ts` |
+| Transport | TLS WebSocket on `0.0.0.0`, ephemeral port | Plaintext WebSocket on `127.0.0.1:47123` by default | Unix socket or Windows named pipe |
+| Discovery | Bonjour `_psyche._tcp` | none | canonical project-root endpoint |
+| Auth | device token from bounded pairing, or invite profile only where wired | 256-bit token in `~/.config/psyche/token` | project-scoped control credentials and authenticated task bindings |
+| Clients | companion apps | legacy local tooling | `psyche mcp` and control clients |
+| Availability boundary | published workspace and negotiated protocol | each daemon instance enforces its project root | production operator commands and provider registration refuse pending trusted native brokers |
 
-The LAN bridge is the higher-consequence surface on both axes: it is reachable
-from other machines, and a crash there takes down the user's whole TUI session
-rather than a background daemon.
+The LAN bridge is reachable from other machines and runs inside the TUI, so a
+bridge crash can take down that session. Loopback and IPC reduce network
+exposure, but do not isolate the application from arbitrary same-user code.
 
 ## What is trusted
 
-**Trusted:** the local filesystem, the tmux session psyche created, the git
-binary, and any client that has completed authentication.
+The host operating-system user, intended credential store, tmux session and git
+executable are part of the trusted computing base. Repository contents, paths,
+configuration values and every client frame remain untrusted input, including
+frames from authenticated clients. The wire decoder checks the envelope;
+per-field validation and authorization belong at the consuming boundary.
 
-**Not trusted:** every byte of every client frame, including from an
-authenticated client — pane ids, pane ids read back out of
-`.psyche/psyche.config.json`, base64 payloads, and message shapes. The wire
-decoder validates `type` and `payload` and nothing deeper, by design; per-field
-validation belongs in the handler.
+Authentication is not authorization. Each legacy daemon instance limits pane
+operations to its configured project root, but its token is a **per-user, operator-equivalent** credential, not a distinct project credential. Possession
+of the same token can authenticate to other daemon instances using that token.
+Project lookup checks do not create protection against arbitrary same-user
+processes that can read the credential or start another daemon.
 
-Authentication is not authorization. An authenticated client of the loopback
-daemon is authorized for *one project root*, not for the machine.
+The separate [Agent surface control](./AGENT-SURFACE-CONTROL.md) contract uses
+canonical project roots and authenticated task subjects. Agent credentials
+cannot self-grant, widen, renew, approve, or register browser providers.
+In production, `operatorCommandPolicy` defaults to `disabled`: operator
+`command.submit` returns `operator_authority_unavailable`, and
+`provider.register` returns `provider_authority_unavailable`. The
+`trusted-test-only` policy is not a production workaround. Native user-presence
+and identity brokers remain prerequisites for these operations; a token or
+visible approval drawer does not supply them.
 
-The loopback daemon also owns the agent surface-control protocol described in
-[Agent surface control](./AGENT-SURFACE-CONTROL.md). Agent tokens can request
-and use exact capability leases, but cannot grant, widen, renew, approve, or
-register a browser provider. Operator-provider sockets become provider-only
-after registration. Browser authority is limited to registered child WebViews;
-native lifecycle and automation commands reject every caller except the trusted
-main WebView.
+Provider-only connections, exact capability leases and child-WebView automation
+have implementation/test contracts, but those are not proof of a functioning
+production grant/approval/provider-registration path. Native lifecycle and
+automation commands continue to reject callers other than the trusted main
+WebView. The broader support-claim reconciliation is tracked separately in #504;
+this security-document correction does not enable authority or qualify a release.
+
+## First-pair trust
+
+The companion's initial self-signed certificate fingerprint is learned from
+Bonjour discovery: this is **trust on first use (TOFU)**, not independently
+authenticated host identity. Later certificate pinning protects continuity with
+the chosen pin; the pairing code does not cryptographically bind the discovered
+host identity or certificate to an independently trusted one. A malicious first
+pairing/discovery path therefore remains a separate risk from guessing a code.
+Pair only through a trusted local network and independently check the intended
+host; do not describe the six-digit code as protection against every first-pair
+impersonation. The #280 invite protocol slice is not evidence that production
+pairing and revocation have been integrated or accepted.
 
 ## Rules
 
 ### 1. A pane id is command text. Validate its shape, do not just quote it
 
-Both servers drive tmux through control mode (`tmux -C attach-session`), which
+The pane transports drive tmux through control mode (`tmux -C attach-session`), which
 is **line-oriented**: one command per line on the subprocess's stdin. Quoting an
 argument protects the *argument* boundary. Only rejecting control characters
 protects the *command* boundary — a newline inside single quotes still ends the
@@ -98,9 +120,12 @@ durable device token with pane-input rights.
 
 `PairingFlow` therefore closes the window after `PAIR_MAX_ATTEMPTS` (5) wrong
 codes, with close reason `exhausted`; the client sees `pairRejected` with reason
-`too_many_attempts`, and the host must consciously run `:pair` again. Code and
-token comparisons use `timingSafeEqual` behind a length guard (it throws on
-length mismatch).
+`too_many_attempts`, and the host must consciously run `:pair` again. Pairing-code
+comparison uses `timingSafeEqual` behind a length guard. The legacy loopback
+daemon token also uses a guarded timing-safe comparison. In contrast, LAN
+`TokenStore.validate` uses ordinary JavaScript string equality to search device
+records; no constant-time device-token lookup is claimed. This is a documented
+implementation gap, not a change to token issuance or authentication.
 
 `PairingFlow.attempt` returns the outcome — `accepted`, `invalid_code`,
 `too_many_attempts`, `expired`, `no_window_open` — and the daemon forwards it
@@ -109,9 +134,10 @@ An exhausted window and an already-expired one both end closed, so that
 inference tells a user who merely idled that someone is guessing at their code.
 `consume()` remains as a boolean view of `attempt()`.
 
-Any future short-secret challenge needs the same treatment. A long random token
-— the 256-bit daemon token — does not need an attempt cap, but still gets the
-constant-time compare, because it is free.
+Any future short-secret challenge needs an explicit attempt budget. A random
+256-bit daemon token has a different guessing risk from a six-digit code, but
+its entropy does not bound connection/resource exhaustion. Do not generalize a
+timing-safe primitive at one call site to a whole transport or token store.
 
 ### 4. Decoded payloads must be validated, not just typed
 
@@ -148,8 +174,14 @@ Three distinct crash routes, all of which were reachable:
 - The LAN bridge `maxPayload` is 1 MiB
   (`MAX_CLIENT_FRAME_BYTES = 1024 * 1024`; `ws` defaults to 100 MB, which an
   unauthenticated peer can send repeatedly to exhaust the heap).
-- The loopback daemon closes a connection that has not authenticated within
-  `AUTH_DEADLINE_MS` (10 s).
+- The legacy loopback daemon closes a connection that has not authenticated
+  within `AUTH_DEADLINE_MS` (10 s). This is not a LAN bridge guarantee.
+- The LAN `WSSListener` has no application-level idle authentication deadline
+  and no pre-authentication connection cap. Its per-frame limit does not bound
+  the number of waiting connections or the total queued work; do not describe
+  it as complete pre-authentication denial-of-service protection.
+- Canonical control IPC bounds each frame to 4 MiB and queued input to 128 frames / 8 MiB.
+  These limits belong to `src/control/server.ts`, not to the LAN WebSocket.
 - A connection may hold at most `MAX_STREAMS_PER_CONNECTION` (64) attached
   streams.
 - A connection registers **one** `output` listener on the shared `TmuxControl`
@@ -251,7 +283,14 @@ The rules above are pinned by:
 | `__tests__/bridge/legacyPaneScope.test.ts` | every pane v2 `listPanes` advertises passes the v2 pane scope |
 | `__tests__/daemon/daemonConnection.test.ts` | auth, project scoping, crash resistance, stream limits |
 | `__tests__/daemon/bridgeConfigIntegrity.test.ts` | config reads, atomic writes, concurrent mutation |
+| `__tests__/securityDocsContract.test.ts` | documentation claim guards; not runtime security or end-to-end acceptance |
 
 ## Reporting
 
-Security issues in this repository: <https://github.com/OpenCoven/psyche-build/issues>.
+Follow [SECURITY.md](../SECURITY.md) and submit a private vulnerability report at
+<https://github.com/OpenCoven/psyche-build/security/advisories/new>.
+Do not post vulnerabilities, tokens, private prompts, exploitable details or
+sensitive logs in public issues, pull requests or discussions. If the private
+form is unavailable, use the established private maintainer channel described
+in SECURITY.md and verify the recipient before sharing sensitive material.
+Ordinary non-sensitive support belongs in the channels named by SUPPORT.md.
