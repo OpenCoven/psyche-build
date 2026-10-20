@@ -190,15 +190,19 @@ struct PaneComposer: View {
     @EnvironmentObject private var registry: TerminalSessionRegistry
 
     @StateObject private var model: PaneComposerModel
+    // Supplied by the layout, not by the persisted split selection. A stored
+    // secondary pane may be hidden in portrait while its draft stays intact.
+    private let shownPaneIDs: [String?]
 
-    init(sendAttempts: PaneComposerSendAttempts) {
+    init(sendAttempts: PaneComposerSendAttempts, shownPaneIDs: [String?]) {
+        self.shownPaneIDs = shownPaneIDs
         _model = StateObject(wrappedValue: PaneComposerModel(sendAttempts: sendAttempts))
     }
 
     private var targetPaneID: String? {
         PaneComposerModel.target(
             focusedPaneID: registry.focusedPaneID,
-            shownPaneIDs: [store.primaryPaneID, store.secondaryPaneID]
+            shownPaneIDs: shownPaneIDs
         )
     }
 
