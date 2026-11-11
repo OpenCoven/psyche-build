@@ -20,6 +20,44 @@ action or receipt identity.
 | Ordering | `blocked by` / `blocking` issue dependencies | Use them only where order is real. Do not restate the hierarchy as dependencies. |
 | Release grouping | A milestone | Milestones group by release. They are not priority. |
 
+## Labels and milestones
+
+Labels and milestones are readable with a plain `repo` token, so they carry the
+coordination state an agent needs without Project access. They do not replace
+the Project fields below.
+
+| Label | Meaning |
+|---|---|
+| `outcome` | A maintainer-approved public outcome |
+| `needs-triage` | Filed and not yet triaged; remove it once owner, parent, and milestone are set |
+| `parked` | Off the active path and not a prerequisite for the current release. Do not start it without explicit owner direction |
+| `owner-action` | Waiting on something only the repository owner can do: credentials, repository or Project settings, people, or publication. An agent may prepare the change but must not perform it |
+| `area:*` | The owning surface: `desktop`, `tui`, `ios`, `release`, `recovery`, `security`, `docs`, `tracker`, `protocol` |
+
+| Milestone | Groups |
+|---|---|
+| `macOS public beta` | The reduced gate set for the public beta, owned by [#553](https://github.com/OpenCoven/psyche-build/issues/553) |
+| `v0.1.0 — macOS production` | The production claim, owned by [#480](https://github.com/OpenCoven/psyche-build/issues/480) |
+| `iOS internal beta` | The paused iOS train, owned by [#200](https://github.com/OpenCoven/psyche-build/issues/200) |
+
+## Finding work
+
+```bash
+# What is on the path to the nearest release, and startable by an agent
+gh issue list --milestone "macOS public beta" --search "-label:parked -label:owner-action"
+
+# What an issue waits on, and what it holds up
+gh api repos/OpenCoven/psyche-build/issues/<N>/dependencies/blocked_by --jq '.[] | "#\(.number) \(.state) \(.title)"'
+gh api repos/OpenCoven/psyche-build/issues/<N>/sub_issues --jq '.[] | "#\(.number) \(.state) \(.title)"'
+
+# What waits on the owner
+gh issue list --label owner-action
+```
+
+Pick an open issue with no open `blocked_by` entry. Read its parent outcome for
+the exit gate before starting, and check for an existing PR on its milestone
+before opening a competing one.
+
 ## Project fields
 
 | Field | Values | Meaning |
