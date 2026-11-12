@@ -241,10 +241,14 @@ old, which the standing register treats as control drift; this entry closes it.
   are now sub-issues of #200. No gate changed.
 - #473 stays open for owner-only cleanup: the M7 token, environment, and ref
   removal, and the Project's built-in workflows.
-- **Gap:** Project #11 fields were not reconciled. The reconciling token had no
-  `project` scope, so Status, Priority, Train, Risk, and Evidence for #553–#556
-  and #475 remain to be set. Labels, milestones, issue types, sub-issues, and
-  dependencies were reconciled.
+- Project #11 was reconciled the same day: #553–#556 carry Status, Priority,
+  Train, and Risk; #475 is Done with its Evidence link; #553, #555, #480, #477,
+  and #479 are Blocked; Priority and Risk for #504, #505, #506, #523, #538,
+  #213, and #216 follow their 2026-11-03 issue reviews; and twelve closed items
+  that still showed an open or empty Status are Done. Labels, milestones, issue
+  types, sub-issues, and dependencies were reconciled too.
+- **Gap:** the Project's built-in workflows remain off, and open PRs are not
+  Project items; both stay with #473.
 - Open PRs: #547 (#505), #548 and #549 (#554) are on the beta milestone; #539
   (#538) is on the iOS milestone. The remaining Dependabot PRs are maintenance
   under #478 and need individual triage; several fail required checks.

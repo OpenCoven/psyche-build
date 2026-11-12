@@ -25,7 +25,7 @@ The [November 11 reconciliation](./ROADMAP.md#november-11-reconciliation) is
 the current snapshot at source `97db32c4378aded6ba99ef6c20a16c1cfc1816f0`: the
 nearest release is the macOS public beta
 ([#553](https://github.com/OpenCoven/psyche-build/issues/553)), #475 is closed at source with its packaged observations moved to
-#555 and #474, and Project field reconciliation is a recorded gap.
+#555 and #474, and Project #11 fields were reconciled the same day.
 
 The [October 1 reconciliation](./ROADMAP.md#october-1-reconciliation) is the
 previous snapshot at source `c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1`: #196 and
