@@ -92,7 +92,11 @@ describe('renamed runtime contracts', () => {
     // '.psyche-build*' would not match the '.psyche/' directory actually
     // created at runtime, so the ignore rule has to track the command name.
     it('matches the runtime directory it is meant to ignore', () => {
-      expect('.psyche/'.startsWith(PSYCHE_RUNTIME_GITIGNORE_ENTRY.replace('*', ''))).toBe(true);
+      // The entry is a prefix glob: everything before its single trailing `*`.
+      expect(PSYCHE_RUNTIME_GITIGNORE_ENTRY.endsWith('*')).toBe(true);
+      const prefix = PSYCHE_RUNTIME_GITIGNORE_ENTRY.slice(0, -1);
+      expect(prefix).not.toContain('*');
+      expect('.psyche/'.startsWith(prefix)).toBe(true);
     });
   });
 
