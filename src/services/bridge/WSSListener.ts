@@ -30,6 +30,11 @@ export interface WSSListenerEvents {
    * network address for.
    */
   onAdmissionRefused?: (reason: PreAuthRefusal, refusedTotal: number) => void;
+  /**
+   * An unauthenticated peer was dropped because it was not reading its
+   * replies. `droppedTotal` counts such drops since the listener started.
+   */
+  onUnresponsivePeerDropped?: (droppedTotal: number) => void;
 }
 
 export interface WSSListenerOptions {
@@ -81,6 +86,8 @@ export class WSSListener {
   private readonly admitted = new Map<string, PreAuthConnection>();
   /** Transport errors raised by sessions that had not authenticated. */
   private preAuthTransportErrors = 0;
+  /** Unauthenticated peers dropped for not reading their replies. */
+  private unresponsiveDrops = 0;
 
   constructor(
     tls: TLSMaterial,
@@ -197,12 +204,23 @@ export class WSSListener {
       socket,
       remoteAddress: req.socket.remoteAddress ?? "?",
       remoteUserAgent: req.headers["user-agent"],
-      onRejected: () => this.gate.rejected(connection),
+      preAuth: {
+        maxBufferedBytes: this.limits.maxBufferedBytes,
+        onRejected: () => this.gate.rejected(connection),
+        onUnresponsive: () => {
+          this.gate.drop(connection);
+          this.unresponsiveDrops += 1;
+          this.events.onUnresponsivePeerDropped?.(this.unresponsiveDrops);
+        },
+      },
     });
     // A per-socket 'error' listener is mandatory: `ws` emits 'error' on an
     // abrupt peer reset, and an unhandled 'error' event throws out of the
     // EventEmitter and kills psyche. The 'close' that follows does the cleanup.
     socket.on("error", (err) => this.handleSocketError(session, connection, err));
+    // The library answers a ping with a pong before this runs, below the
+    // session, so the unread-reply bound is checked here as well.
+    socket.on("ping", () => { session.dropIfUnresponsive(); });
     this.gate.attach(connection, {
       isAuthenticated: () => session.state === "authenticated",
       reject: (error, closeCode) => session.reject(error, closeCode),
@@ -245,6 +263,8 @@ export class WSSListener {
     // answer can reach it, so nothing it asks for — a pairing least of all —
     // may take effect.
     if (session.state !== "authenticated" && !session.isOpen()) return;
+    // Nor one that is not reading what it has already been sent.
+    if (session.dropIfUnresponsive()) return;
     // Measured here, when the frame is handled, rather than on receipt: a
     // frame queued behind the one that authenticates the session is judged
     // against the session's state once that frame has taken effect.

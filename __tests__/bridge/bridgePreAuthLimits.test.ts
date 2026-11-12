@@ -42,6 +42,7 @@ const LIMITS: PreAuthLimits = {
   upgradeDeadlineMs: 1_000,
   authDeadlineMs: 60_000,
   maxFrameBytes: 1_024,
+  maxBufferedBytes: 16 * 1_024,
   closeGraceMs: 500,
 };
 
@@ -724,6 +725,109 @@ describe("LAN bridge pre-authentication frames", () => {
     // The pairing guess that followed the rejected frame was never evaluated.
     expect(client.messages.some((m) => m.type === "pairRejected")).toBe(false);
     expect(pairing.attemptsRemaining()).toBe(PAIR_MAX_ATTEMPTS);
+  });
+
+  /**
+   * Send `frame` over and over from a peer that never reads, until the host
+   * drops it or the test gives up. Reports the most reply bytes the host was
+   * ever holding for it.
+   */
+  async function floodWithoutReading(port: number, listener: WSSListener, frame: Buffer) {
+    const before = new Set(listener.activeSessions);
+    const peer = await silentWebSocketPeer(port);
+    const session = [...listener.activeSessions].find((candidate) => !before.has(candidate))!;
+    peer.socket.removeAllListeners("data");
+    peer.socket.pause();
+
+    const hostSocket = session.ctx.socket;
+    let peakBuffered = 0;
+    const sample = () => { peakBuffered = Math.max(peakBuffered, hostSocket.bufferedAmount); };
+    hostSocket.on("ping", sample);
+    hostSocket.on("message", sample);
+
+    const batch = Buffer.concat(Array.from({ length: 256 }, () => frame));
+    const giveUpAfterBytes = 48 * 1024 * 1024;
+    let sent = 0;
+    while (listener.unauthenticatedConnectionCount > 0 && sent < giveUpAfterBytes && !peer.socket.destroyed) {
+      const flushed = peer.socket.write(batch);
+      sent += batch.length;
+      if (!flushed) {
+        await Promise.race([
+          new Promise((resolve) => peer.socket.once("drain", resolve)),
+          new Promise((resolve) => peer.socket.once("close", resolve)),
+          waitFor(() => listener.unauthenticatedConnectionCount === 0, "peer dropped").catch(() => {}),
+        ]);
+      }
+      sample();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "unresponsive peer dropped");
+    return { sent, peakBuffered, giveUpAfterBytes };
+  }
+
+  /** The bound, plus room for the replies to one network read. */
+  const BUFFERED_CEILING = LIMITS.maxBufferedBytes + 128 * 1024;
+
+  it("drops an unauthenticated peer that stops reading instead of buffering its replies", async () => {
+    // Every pre-auth frame is answered. A peer that sends and never reads
+    // would otherwise have its answers queue in this process without limit.
+    const { port, pairing, listener } = await startDaemon();
+    const paired = await connect(port);
+    await authenticate(paired, pairing);
+
+    const ping = maskedFrame(JSON.stringify({ type: "ping", payload: { token: "p".repeat(900) } }));
+    const flood = await floodWithoutReading(port, listener, ping);
+
+    expect(flood.sent).toBeLessThan(flood.giveUpAfterBytes);
+    expect(flood.peakBuffered).toBeLessThanOrEqual(BUFFERED_CEILING);
+    // The session beside it was not touched.
+    await paired.roundTrip("after-unresponsive-peer");
+    expect(paired.closes).toEqual([]);
+  }, 30_000);
+
+  it("drops a non-reading peer that floods WebSocket pings, which the library answers itself", async () => {
+    // A WebSocket ping is answered with a pong by the library, below the
+    // session, so a bound applied only where the session sends never sees it.
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const { port, listener } = await startDaemon();
+
+    const flood = await floodWithoutReading(port, listener, maskedFrame("k".repeat(120), 9));
+
+    expect(flood.sent).toBeLessThan(flood.giveUpAfterBytes);
+    expect(flood.peakBuffered).toBeLessThanOrEqual(BUFFERED_CEILING);
+    // The drop leaves a trace on the host, without the peer's address.
+    const lines = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("was not reading"));
+    expect(lines).toEqual([
+      "bridge dropped an unauthenticated connection that was not reading its replies; 1 dropped since start",
+    ]);
+  }, 30_000);
+
+  it("delivers a revoked device's pending output and its closing reason", async () => {
+    // Revocation demotes the session. Its backlog was earned while it was
+    // authenticated and must not be judged by the pre-authentication bound.
+    const { daemon, port, pairing, listener } = await startDaemon();
+    const client = await connect(port);
+    const token = await authenticate(client, pairing);
+    const [session] = [...listener.activeSessions];
+    client.socket.pause();
+
+    const chunk = "o".repeat(8 * 1024);
+    const frames = 64;
+    for (let i = 0; i < frames; i += 1) session.send({ type: "pong", payload: { token: `${i}:${chunk}` } });
+    expect(session.ctx.socket.bufferedAmount).toBeGreaterThan(LIMITS.maxBufferedBytes);
+
+    await daemon.revokeDevice(token);
+    client.socket.resume();
+    await client.until(() => client.closes.length > 0, "revocation close");
+
+    expect(client.messages.filter((m) => m.type === "pong")).toHaveLength(frames);
+    expect(client.messages.at(-1)).toEqual({
+      type: "error",
+      payload: { code: "closing", message: "revoked by host" },
+    });
+    expect(client.closes[0]).toEqual({ code: 1000, reason: "revoked by host" });
   });
 
   it("accepts a frame exactly at the pre-auth bound", async () => {

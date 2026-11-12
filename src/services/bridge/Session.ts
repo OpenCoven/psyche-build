@@ -15,10 +15,20 @@ export interface SessionContext {
   remoteAddress: string;
   remoteUserAgent?: string;
   /**
-   * Called after `reject` has asked the peer to close, so the listener can
-   * drop a peer that never completes the close handshake.
+   * The pre-authentication limits the listener holds this session to. Absent
+   * when a session is built without a listener, as in a unit test.
    */
-  onRejected?: () => void;
+  preAuth?: {
+    /** Most reply bytes that may sit unread before authentication. */
+    maxBufferedBytes: number;
+    /**
+     * `reject` has asked the peer to close; the listener drops it if it
+     * never completes the close handshake.
+     */
+    onRejected: () => void;
+    /** The peer is not reading its replies; the listener drops it now. */
+    onUnresponsive: () => void;
+  };
 }
 
 export class Session {
@@ -35,6 +45,8 @@ export class Session {
    * caused the rejection must not be handled: the peer has been refused.
    */
   rejected = false;
+  /** True once the listener has been told this peer is not reading. */
+  private unresponsive = false;
   subscribedPaneIds = new Set<string>();
   subscriptionTeardowns = new Map<string, () => void>();
   /**
@@ -57,6 +69,7 @@ export class Session {
 
   send(msg: ServerMessage): void {
     if (this.ctx.socket.readyState !== 1) return; // 1 = OPEN
+    if (this.refusesUnreadBacklog()) return;
     try {
       this.ctx.socket.send(encodeServerMessage(msg));
     } catch {
@@ -68,6 +81,7 @@ export class Session {
 
   sendBinary(streamId: string, sequence: number, payload: Uint8Array): void {
     if (this.ctx.socket.readyState !== 1) return; // 1 = OPEN
+    if (this.refusesUnreadBacklog()) return;
     try {
       this.ctx.socket.send(encodeMobileBinaryFrame(streamId, sequence, payload));
     } catch {
@@ -76,13 +90,16 @@ export class Session {
   }
 
   close(reason: string): void {
-    this.state = "unauthenticated";
-    this.token = null;
+    // Sent before the session is demoted: what is queued for an authenticated
+    // session was earned while it was authenticated, and the reason for
+    // closing it must not be withheld under the pre-authentication bound.
     try {
       this.send({ type: "error", payload: { code: "closing", message: reason } });
     } catch {
       // ignore
     }
+    this.state = "unauthenticated";
+    this.token = null;
     this.ctx.socket.close(1000, reason);
   }
 
@@ -104,6 +121,40 @@ export class Session {
       // close() throws only for an invalid code or reason; the peer is
       // dropped by the listener's grace timer either way.
     }
-    this.ctx.onRejected?.();
+    this.ctx.preAuth?.onRejected();
+  }
+
+  /**
+   * True when this session has not authenticated and is not reading what it
+   * has already been sent. Nothing more is queued for it, and the listener is
+   * told once to drop it.
+   *
+   * An authenticated session is never subject to this: a paired device on a
+   * slow link legitimately has terminal output waiting.
+   */
+  private refusesUnreadBacklog(): boolean {
+    const preAuth = this.ctx.preAuth;
+    if (!preAuth || this.state === "authenticated") return false;
+    if (this.ctx.socket.bufferedAmount <= preAuth.maxBufferedBytes) return false;
+    if (!this.unresponsive) {
+      this.unresponsive = true;
+      this.rejected = true;
+      this.token = null;
+      preAuth.onUnresponsive();
+    }
+    return true;
+  }
+
+  /**
+   * The same check, for traffic arriving from the peer. Not every reply is
+   * sent through this session: the WebSocket library answers a ping with a
+   * pong by itself, so a peer that only pings would never reach `send`.
+   *
+   * A socket that is already closing is not judged. Nothing more is queued
+   * for it, and a session demoted by `close` may still hold output it was
+   * owed while it was authenticated.
+   */
+  dropIfUnresponsive(): boolean {
+    return this.isOpen() && this.refusesUnreadBacklog();
   }
 }

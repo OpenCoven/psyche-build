@@ -6,10 +6,10 @@ import type { BridgeError } from "./wireProtocol.js";
  *
  * The listener binds 0.0.0.0 and is advertised over Bonjour, so any host on
  * the network can open a connection before it has proved anything. Until a
- * connection authenticates, how many sockets it may hold, for how long, and
- * how large a frame it may send are bounded here. An authenticated session
- * is outside these limits entirely and is never closed, counted, or refused
- * by them.
+ * connection authenticates, how many sockets it may hold, for how long, how
+ * large a frame it may send, and how many reply bytes may sit unread for it
+ * are bounded here. An authenticated session is outside these limits
+ * entirely and is never closed, counted, or refused by them.
  */
 
 /** Unauthenticated connections tolerated at once, across every address. */
@@ -53,6 +53,17 @@ export const PRE_AUTH_DEADLINE_MS = PAIR_WINDOW_MS;
 export const PRE_AUTH_MAX_FRAME_BYTES = 4 * 1024;
 
 /**
+ * Most reply bytes that may sit unread for a connection that has not
+ * authenticated.
+ *
+ * Every pre-auth frame is answered — a pong, a rejection, an error — so a
+ * peer that sends and never reads would otherwise have its answers queue in
+ * this process without limit. A peer that is reading holds almost nothing
+ * here; one that is past this bound is dropped, not waited for.
+ */
+export const PRE_AUTH_MAX_BUFFERED_BYTES = 64 * 1024;
+
+/**
  * How long a rejected peer has to complete the close handshake before its
  * socket is destroyed. A peer that ignores the close frame would otherwise
  * keep its slot for the WebSocket library's own, much longer, close timeout.
@@ -69,6 +80,7 @@ export interface PreAuthLimits {
   upgradeDeadlineMs: number;
   authDeadlineMs: number;
   maxFrameBytes: number;
+  maxBufferedBytes: number;
   closeGraceMs: number;
 }
 
@@ -78,6 +90,7 @@ export const DEFAULT_PRE_AUTH_LIMITS: Readonly<PreAuthLimits> = Object.freeze({
   upgradeDeadlineMs: PRE_AUTH_UPGRADE_DEADLINE_MS,
   authDeadlineMs: PRE_AUTH_DEADLINE_MS,
   maxFrameBytes: PRE_AUTH_MAX_FRAME_BYTES,
+  maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
   closeGraceMs: PRE_AUTH_CLOSE_GRACE_MS,
 });
 
@@ -329,6 +342,18 @@ export class PreAuthGate {
       connection.graceTimer = null;
       connection.transport.destroy();
     }, this.limits.closeGraceMs);
+  }
+
+  /**
+   * Drop the connection now, with no close handshake and no grace. For a
+   * peer that is not reading: it cannot be told anything, and every moment
+   * it stays is more of its replies held in memory.
+   */
+  drop(handle: PreAuthConnection): void {
+    const connection = this.tracked(handle);
+    if (!connection) return;
+    this.clearAll(connection);
+    connection.transport.destroy();
   }
 
   /** The connection's socket has closed. Safe to call more than once. */

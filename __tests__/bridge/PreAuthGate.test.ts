@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PRE_AUTH_LIMITS,
   PRE_AUTH_DEADLINE_MS,
   PRE_AUTH_ERRORS,
+  PRE_AUTH_MAX_BUFFERED_BYTES,
   PRE_AUTH_MAX_CONNECTIONS,
   PRE_AUTH_MAX_CONNECTIONS_PER_ADDRESS,
   PRE_AUTH_MAX_FRAME_BYTES,
@@ -14,6 +15,7 @@ import {
   type PreAuthLimits,
 } from "../../src/services/bridge/PreAuthGate";
 import { PAIR_WINDOW_MS } from "../../src/services/bridge/PairingFlow";
+import { Session } from "../../src/services/bridge/Session";
 import { MAX_CLIENT_FRAME_BYTES } from "../../src/services/bridge/WSSListener";
 import { CLIENT_FIXTURES } from "../../protocol-fixtures/fixtures";
 import { ManualScheduler } from "../helpers/manualScheduler";
@@ -32,6 +34,7 @@ const LIMITS: PreAuthLimits = {
   upgradeDeadlineMs: 1_000,
   authDeadlineMs: 60_000,
   maxFrameBytes: 512,
+  maxBufferedBytes: 2_048,
   closeGraceMs: 500,
 };
 
@@ -65,6 +68,7 @@ describe("pre-auth limits", () => {
       upgradeDeadlineMs: PRE_AUTH_UPGRADE_DEADLINE_MS,
       authDeadlineMs: PRE_AUTH_DEADLINE_MS,
       maxFrameBytes: PRE_AUTH_MAX_FRAME_BYTES,
+      maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
       closeGraceMs: expect.any(Number),
     });
     expect(Object.isFrozen(DEFAULT_PRE_AUTH_LIMITS)).toBe(true);
@@ -106,6 +110,7 @@ describe("pre-auth limits", () => {
     ["a zero frame bound", { maxFrameBytes: 0 }],
     ["a frame bound above the transport cap", { maxFrameBytes: MAX_CLIENT_FRAME_BYTES + 1 }],
     ["a NaN grace", { closeGraceMs: Number.NaN }],
+    ["a zero outbound buffer bound", { maxBufferedBytes: 0 }],
   ])("refuses to start with %s", (_label, override) => {
     // A limit that silently means "no limit" is the failure this change
     // exists to remove, so a bad configuration must not construct.
@@ -298,6 +303,19 @@ describe("PreAuthGate deadlines", () => {
     expect(scheduler.pending).toBe(0);
   });
 
+  it("drops an unresponsive connection at once, with no grace", () => {
+    // A peer that is not reading cannot be told anything; waiting only lets
+    // more of its replies queue.
+    const { gate: g, scheduler } = gate();
+    const t = transport();
+    const connection = g.admit("10.0.0.1", t)!;
+    g.attach(connection, peer());
+
+    g.drop(connection);
+    expect(t.state.destroyed).toBe(1);
+    expect(scheduler.pending).toBe(0);
+  });
+
   it("holds no timer once a connection is released", () => {
     const { gate: g, scheduler } = gate();
     const t = transport();
@@ -331,6 +349,123 @@ describe("PreAuthGate deadlines", () => {
     // An authenticated session is closed by its owner, which can say why.
     expect(paired.state.destroyed).toBe(0);
     expect(g.admit("10.0.0.4", transport())).toBeNull();
+  });
+});
+
+describe("Session outbound bound before authentication", () => {
+  function socket(bufferedAmount: number) {
+    return { readyState: 1, bufferedAmount, send: vi.fn(), close: vi.fn() };
+  }
+  const pong = { type: "pong" as const, payload: { token: "t" } };
+
+  it("stops sending to an unauthenticated peer whose replies are not being read", () => {
+    const ws = socket(2_049);
+    const onUnresponsive = vi.fn();
+    const session = new Session({
+      socket: ws as any,
+      remoteAddress: "10.0.0.1",
+      preAuth: { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive },
+    });
+
+    session.send(pong);
+    session.send(pong);
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    // Refused, so frames it already queued are not handled either.
+    expect(session.rejected).toBe(true);
+  });
+
+  it("sends while the unread backlog is within the bound", () => {
+    const ws = socket(2_048);
+    const onUnresponsive = vi.fn();
+    const session = new Session({
+      socket: ws as any,
+      remoteAddress: "10.0.0.1",
+      preAuth: { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive },
+    });
+
+    session.send(pong);
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive).not.toHaveBeenCalled();
+  });
+
+  it("never applies the bound to an authenticated session", () => {
+    const ws = socket(50 * 1024 * 1024);
+    const onUnresponsive = vi.fn();
+    const session = new Session({
+      socket: ws as any,
+      remoteAddress: "10.0.0.1",
+      preAuth: { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive },
+    });
+    session.state = "authenticated";
+
+    session.send(pong);
+    session.sendBinary("stream", 1, new Uint8Array([1]));
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(session.rejected).toBe(false);
+  });
+});
+
+describe("Session backlog checks at the edges", () => {
+  function socket(bufferedAmount: number, readyState = 1) {
+    return { readyState, bufferedAmount, send: vi.fn(), close: vi.fn() };
+  }
+  function session(ws: ReturnType<typeof socket>) {
+    const preAuth = { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive: vi.fn() };
+    return { preAuth, session: new Session({ socket: ws as any, remoteAddress: "10.0.0.1", preAuth }) };
+  }
+
+  it("checks the backlog on inbound traffic, where the library replies below the session", () => {
+    const { session: s, preAuth } = session(socket(2_049));
+    expect(s.dropIfUnresponsive()).toBe(true);
+    expect(s.dropIfUnresponsive()).toBe(true);
+    expect(preAuth.onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(s.rejected).toBe(true);
+  });
+
+  it("does not drop on inbound traffic within the bound, or once authenticated", () => {
+    const within = session(socket(2_048));
+    expect(within.session.dropIfUnresponsive()).toBe(false);
+
+    const paired = session(socket(50 * 1024 * 1024));
+    paired.session.state = "authenticated";
+    expect(paired.session.dropIfUnresponsive()).toBe(false);
+    expect(paired.preAuth.onUnresponsive).not.toHaveBeenCalled();
+  });
+
+  it("does not judge the backlog of a socket that is already closing", () => {
+    // A revoked device is demoted while its socket closes; what is still
+    // queued for it was earned while it was authenticated.
+    const closing = session(socket(50 * 1024 * 1024, 2));
+    expect(closing.session.dropIfUnresponsive()).toBe(false);
+    expect(closing.preAuth.onUnresponsive).not.toHaveBeenCalled();
+  });
+
+  it("sends the closing reason to an authenticated session however much is queued for it", () => {
+    const ws = socket(50 * 1024 * 1024);
+    const { session: s, preAuth } = session(ws);
+    s.state = "authenticated";
+
+    s.close("revoked by host");
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({
+      type: "error",
+      payload: { code: "closing", message: "revoked by host" },
+    });
+    expect(ws.close).toHaveBeenCalledWith(1000, "revoked by host");
+    expect(preAuth.onUnresponsive).not.toHaveBeenCalled();
+    expect(s.rejected).toBe(false);
+    expect(s.state).toBe("unauthenticated");
+  });
+
+  it("drops at once, with no grace, when a rejection finds the peer already over the bound", () => {
+    const ws = socket(2_049);
+    const { session: s, preAuth } = session(ws);
+
+    s.reject(PRE_AUTH_ERRORS.helloRejected, 1008);
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(preAuth.onUnresponsive).toHaveBeenCalledTimes(1);
   });
 });
 
