@@ -106,6 +106,8 @@ class NoopHub extends PaneStreamHub {
 }
 
 let running: BridgeDaemon[] = [];
+/** Each listener's own certificate, so a hand-made TLS peer can verify it. */
+const certificateByPort = new Map<number, string>();
 let sockets: Array<{ destroy?: () => void; terminate?: () => void }> = [];
 let daemonCounter = 0;
 
@@ -144,6 +146,7 @@ async function startDaemon(limits: Partial<PreAuthLimits> | "defaults" = {}) {
   running.push(daemon);
   const { port } = await daemon.start();
   const listener = (daemon as any).listener as WSSListener;
+  certificateByPort.set(port, (daemon as any).tls.cert as string);
   return { daemon, port, pairing, tokens, scheduler, listener };
 }
 
@@ -239,11 +242,21 @@ function maskedFrame(payload: string, opcode = 1): Buffer {
 }
 
 /**
+ * A raw TLS connection to the listener. It trusts exactly the certificate
+ * that listener presented at start, and verifies it, as a paired device does.
+ */
+function connectTls(port: number, options: { allowHalfOpen?: boolean } = {}) {
+  const certificate = certificateByPort.get(port);
+  if (!certificate) throw new Error("no listener certificate recorded for this port");
+  return tls.connect({ port, host: "127.0.0.1", ca: certificate, ...options });
+}
+
+/**
  * A peer that completes the WebSocket upgrade by hand and then never answers
  * anything — including the close handshake a well-behaved client completes.
  */
 async function silentWebSocketPeer(port: number, options: { allowHalfOpen?: boolean } = {}) {
-  const socket = tls.connect({ port, host: "127.0.0.1", rejectUnauthorized: false, ...options });
+  const socket = connectTls(port, options);
   sockets.push(socket);
   const state = { closed: false, received: Buffer.alloc(0) };
   socket.on("data", (chunk: Buffer) => { state.received = Buffer.concat([state.received, chunk]); });
@@ -425,12 +438,13 @@ describe("LAN bridge authentication deadline", () => {
 
   it("drops a TLS connection that never upgrades to a WebSocket at the upgrade deadline", async () => {
     const { port, scheduler, listener } = await startDaemon();
-    const socket = tls.connect({ port, host: "127.0.0.1", rejectUnauthorized: false });
+    const socket = connectTls(port);
     sockets.push(socket);
     let closed = false;
     socket.on("close", () => { closed = true; });
     socket.on("error", () => {});
     await new Promise<void>((resolve) => socket.once("secureConnect", () => resolve()));
+    expect(socket.authorized).toBe(true);
     expect(listener.unauthenticatedConnectionCount).toBe(1);
 
     scheduler.advance(LIMITS.upgradeDeadlineMs);
