@@ -6,7 +6,7 @@
  */
 
 import { execSync, spawn } from 'child_process';
-import { existsSync, accessSync, constants, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, accessSync, constants, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import type { PsychePane } from '../types.js';
@@ -362,9 +362,10 @@ export function initializeHooksDirectory(projectRoot: string): void {
         madeChanges = true;
       }
 
-      // Make examples executable
+      // Make examples executable. The path is project data, so it goes to
+      // chmod(2) directly and never through a shell.
       try {
-        execSync(`chmod +x "${examplePath}"`, { stdio: 'pipe' });
+        chmodSync(examplePath, 0o755);
       } catch {
         // Ignore chmod errors (Windows, etc.)
       }
