@@ -41,10 +41,11 @@ const mockExecFile = vi.fn((
   const answer = args.includes('#{pane_current_command}') ? 'zsh\n' : '';
   queueMicrotask(() => callback(null, answer, ''));
 });
-// Git ref and worktree checks run through `execFileSync` with argv, so no
-// shell sees a branch name or a path. The string-keyed handler configured on
-// `mockExecSync` still answers them from the space-joined argv, but they are
-// recorded here only: `mockExecSync.mock.calls` holds real shell lines alone.
+// Git ref checks and every tmux command run through `execFileSync` with argv,
+// so no shell sees a branch name, a path, a pane title or typed keys. The
+// string-keyed handler configured on `mockExecSync` still answers them from
+// the space-joined argv, but they are recorded here only:
+// `mockExecSync.mock.calls` holds real shell lines alone.
 const mockExecFileSync = vi.fn((
   file: string,
   args: readonly string[] = [],
@@ -53,6 +54,18 @@ const mockExecFileSync = vi.fn((
   const handler = mockExecSync.getMockImplementation();
   return handler ? handler([file, ...args].join(' '), options as never) : '';
 });
+/**
+ * Every tmux invocation as one line: TmuxService's argv calls joined with
+ * spaces, then the shell lines other modules still run.
+ */
+const tmuxCommandLines = (): string[] => [
+  ...mockExecFileSync.mock.calls
+    .filter(([file]) => file === 'tmux')
+    .map(([file, args]) => [file, ...(args ?? [])].join(' ')),
+  ...mockExecSync.mock.calls
+    .map(([command]) => String(command).trim())
+    .filter((command) => command.startsWith('tmux ')),
+];
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
   execFileSync: mockExecFileSync,
@@ -325,7 +338,7 @@ describe('Pane Lifecycle Integration Tests', () => {
 
       // Tmux kill-pane
       if (cmd.includes('kill-pane')) {
-        const paneId = cmd.match(/-t '([^']+)'/)?.[1];
+        const paneId = cmd.match(/-t '?([^'\s]+)'?/)?.[1];
         if (paneId) {
           killedPaneIds.add(paneId);
         }
@@ -470,14 +483,14 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      expect(mockExecSync.mock.calls.some(([cmd]) =>
-        typeof cmd === 'string'
-        && cmd.includes('tmux set -t psyche-test pane-border-status top')
-      )).toBe(true);
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'tmux',
+        ['set', '-t', 'psyche-test', 'pane-border-status', 'top'],
+        expect.any(Object),
+      );
 
-      expect(mockExecSync.mock.calls.some(([cmd]) =>
-        typeof cmd === 'string'
-        && cmd.includes('tmux set-option -g pane-border-status top')
+      expect(tmuxCommandLines().some((cmd) =>
+        cmd.includes('tmux set-option -g pane-border-status top')
       )).toBe(false);
     });
 
@@ -739,10 +752,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       );
 
       // Verify tmux split-window was called
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('tmux split-window'),
-        expect.any(Object)
-      );
+      expect(tmuxCommandLines().some((cmd) => cmd.startsWith('tmux split-window'))).toBe(true);
 
       // Pane should have tmux pane ID
       if ('pane' in result) {
@@ -876,14 +886,10 @@ describe('Pane Lifecycle Integration Tests', () => {
     // at projectRoot would let the agent run against main, which is dangerous.
 
     const getSendKeysCommands = () =>
-      mockExecSync.mock.calls
-        .map(([cmd]) => (typeof cmd === 'string' ? cmd : ''))
-        .filter((cmd) => cmd.includes('send-keys'));
+      tmuxCommandLines().filter((cmd) => cmd.includes('send-keys'));
 
     const getKillPaneCommands = () =>
-      mockExecSync.mock.calls
-        .map(([cmd]) => (typeof cmd === 'string' ? cmd : ''))
-        .filter((cmd) => cmd.includes('kill-pane'));
+      tmuxCommandLines().filter((cmd) => cmd.includes('kill-pane'));
 
     it('kills the pane and throws when the worktree is missing', async () => {
       const { createPane } = await import('../../src/utils/paneCreation.js');
@@ -1312,10 +1318,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       }
 
       // Verify tmux kill-pane was called
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('tmux kill-pane'),
-        expect.any(Object)
-      );
+      expect(tmuxCommandLines().some((cmd) => cmd.startsWith('tmux kill-pane'))).toBe(true);
     });
 
     it('should queue worktree cleanup with kill_and_clean option', async () => {

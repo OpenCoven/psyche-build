@@ -58,7 +58,7 @@ export async function renderAsciiArt(
 
   // Kill any existing process in the pane
   try {
-    await tmuxService.sendKeys(paneId, 'C-c')
+    await tmuxService.sendKeys(paneId, ['C-c'])
   } catch {
     // Pane might not have a running process, that's okay
   }
@@ -70,7 +70,7 @@ export async function renderAsciiArt(
     : path.resolve(scriptPath)
   await tmuxService.sendKeys(
     paneId,
-    `'PSYCHE_THEME=${getActivePsycheTheme()} node "${absolutePath}"' Enter`
+    [`PSYCHE_THEME=${getActivePsycheTheme()} node "${absolutePath}"`, 'Enter']
   )
   await new Promise((resolve) => setTimeout(resolve, 150))
 }

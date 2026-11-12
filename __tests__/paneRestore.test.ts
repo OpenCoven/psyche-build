@@ -112,6 +112,38 @@ describe('pane restoration', () => {
     expect(tmuxServiceMock.sendTmuxKeys).toHaveBeenCalledWith('%9', 'Enter');
   });
 
+  // The restore banner is typed into the new pane's shell. The prompt is
+  // stored data (and can arrive from a paired device), so it must reach tmux
+  // as one argument and stay inert inside the banner's single quotes.
+  it('types the restore banner as whole tmux arguments with an inert prompt preview', async () => {
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+
+    const pane: PsychePane = {
+      id: 'psyche-1',
+      slug: 'feature-codex',
+      prompt: "x'; $(touch /tmp/p) `id` \\\u0003rm -rf ~\n",
+      paneId: '%2',
+      worktreePath: '/repo/.psyche/worktrees/feature-codex',
+      projectRoot: '/repo',
+      agent: 'codex',
+    };
+
+    await recreateMissingPanes([pane], '/repo/.psyche/psyche.config.json');
+
+    expect(tmuxServiceMock.sendKeys.mock.calls).toEqual([
+      ['%9', ["echo '# Pane restored: feature-codex'", 'Enter']],
+      ['%9', ["echo '# Original prompt: x ; $(touch /tmp/p) `id`  rm -rf ~ ...'", 'Enter']],
+      ['%9', ['cd "/repo/.psyche/worktrees/feature-codex"', 'Enter']],
+    ]);
+  });
+
+  it('leaves no quote, backslash or control character in banner text', async () => {
+    const { inertEchoText } = await import('../src/hooks/usePaneLoading.js');
+
+    expect(inertEchoText("it's a\\b\u0000c\u001bd\u007fe\r\nf")).toBe('it s a b c d e f');
+    expect(inertEchoText('plain prompt: fix #12 (v2) & ship')).toBe('plain prompt: fix #12 (v2) & ship');
+  });
+
   it('retains destructive protection when stale-pane recovery cannot persist', async () => {
     const complete = vi.fn(async () => {});
     const cancel = vi.fn(async () => {});
