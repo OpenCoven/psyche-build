@@ -226,12 +226,24 @@ async function idleTcp(port: number) {
   return { socket, state };
 }
 
+/** A client-to-server WebSocket frame, masked as RFC 6455 requires. */
+function maskedFrame(payload: string, opcode = 1): Buffer {
+  const body = Buffer.from(payload, "utf8");
+  const mask = randomBytes(4);
+  const header = body.length < 126
+    ? Buffer.from([0x80 | opcode, 0x80 | body.length])
+    : Buffer.from([0x80 | opcode, 0x80 | 126, body.length >> 8, body.length & 0xff]);
+  const masked = Buffer.alloc(body.length);
+  for (let i = 0; i < body.length; i += 1) masked[i] = body[i] ^ mask[i % 4];
+  return Buffer.concat([header, mask, masked]);
+}
+
 /**
  * A peer that completes the WebSocket upgrade by hand and then never answers
  * anything — including the close handshake a well-behaved client completes.
  */
-async function silentWebSocketPeer(port: number) {
-  const socket = tls.connect({ port, host: "127.0.0.1", rejectUnauthorized: false });
+async function silentWebSocketPeer(port: number, options: { allowHalfOpen?: boolean } = {}) {
+  const socket = tls.connect({ port, host: "127.0.0.1", rejectUnauthorized: false, ...options });
   sockets.push(socket);
   const state = { closed: false, received: Buffer.alloc(0) };
   socket.on("data", (chunk: Buffer) => { state.received = Buffer.concat([state.received, chunk]); });
@@ -304,7 +316,7 @@ describe("LAN bridge authentication deadline", () => {
     await client.roundTrip("after-deadline");
     expect(client.closes).toEqual([]);
     expect(client.errors()).toEqual([]);
-    // Nothing is left armed for a connection that authenticated.
+    // Once the deadline has passed over it, nothing is left armed for it.
     expect(scheduler.pending).toBe(0);
   });
 
@@ -354,6 +366,49 @@ describe("LAN bridge authentication deadline", () => {
     expect(tokens.touchCalls).toBe(0);
     // The device's credential is untouched: it reconnects and authenticates.
     expect(await tokens.list()).toHaveLength(1);
+  });
+
+  it("revokes the token when the socket drops while it is being written", async () => {
+    const { port, pairing, tokens, listener } = await startDaemon();
+    const client = await connect(port);
+    const window = pairing.open();
+    const release = tokens.block();
+
+    client.send({ type: "pair", payload: { code: window.code, clientId: "c", clientName: "c" } });
+    await waitFor(() => tokens.issueCalls === 1, "token issue started");
+    client.socket.terminate();
+    await waitFor(() => listener.activeSessions.size === 0, "session removed");
+    release();
+    await waitFor(() => tokens.settledCalls === 1, "token issue finished");
+    await settle();
+
+    expect(await tokens.list()).toEqual([]);
+  });
+
+  it("drops a peer that broke the WebSocket protocol once the grace has passed", async () => {
+    // The library answers a protocol error by starting a close of its own,
+    // with a much longer timeout; an unauthenticated peer does not get that.
+    // Half-open: this peer does not hang up when the host ends its side, so
+    // only the host can end the connection.
+    const { port, scheduler, listener } = await startDaemon();
+    const peer = await silentWebSocketPeer(port, { allowHalfOpen: true });
+    const [session] = [...listener.activeSessions];
+
+    peer.socket.write(maskedFrame("reserved opcode", 3));
+    await waitFor(() => !session.isOpen(), "protocol error handled");
+    await settle();
+    expect(listener.unauthenticatedConnectionCount).toBe(1);
+
+    scheduler.advance(LIMITS.closeGraceMs);
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
+  });
+
+  it("stops promptly while a silent unauthenticated peer is connected", async () => {
+    const { daemon, port } = await startDaemon();
+    const peer = await silentWebSocketPeer(port);
+
+    await daemon.stop();
+    await waitFor(() => peer.state.closed, "silent peer dropped at stop");
   });
 
   it("drops a TCP connection that never starts TLS at the upgrade deadline", async () => {
@@ -535,17 +590,36 @@ describe("LAN bridge unauthenticated connection cap", () => {
     for (const line of lines) expect(line).not.toMatch(/\d+\.\d+\.\d+\.\d+/);
   });
 
-  it("spends none of the pairing attempt budget on refused or expired connections", async () => {
-    const { port, pairing, scheduler } = await startDaemon();
+  it("neither spends nor restores the pairing attempt budget when a limit closes a connection", async () => {
+    const { port, pairing, scheduler, listener } = await startDaemon();
     const window = pairing.open();
+    const wrong = window.code === "000000" ? "111111" : "000000";
     const held: Client[] = [];
     for (let i = 0; i < LIMITS.maxConnectionsPerAddress; i += 1) held.push(await connect(port));
+
+    // Two real guesses are spent the ordinary way.
+    for (const client of held.slice(0, 2)) {
+      client.send({ type: "pair", payload: { code: wrong, clientId: "c", clientName: "c" } });
+      await client.until(() => client.messages.some((m) => m.type === "pairRejected"), "pairRejected");
+    }
+    expect(pairing.attemptsRemaining()).toBe(PAIR_MAX_ATTEMPTS - 2);
+
+    // Then every limit fires: refusals, a rejected frame with a guess queued
+    // behind it, and the deadline on the connections that made the guesses.
     for (let i = 0; i < 5; i += 1) expect(await attempt(port)).toBe("refused");
+    held[2].send({ type: "ping", payload: { token: "x".repeat(LIMITS.maxFrameBytes) } });
+    held[2].send({ type: "pair", payload: { code: wrong, clientId: "c", clientName: "c" } });
     scheduler.advance(LIMITS.authDeadlineMs);
     await waitFor(() => held.every((client) => client.closes.length > 0), "held connections closed");
+    await waitFor(() => listener.activeSessions.size === 0, "sessions removed");
 
-    expect(pairing.attemptsRemaining()).toBe(PAIR_MAX_ATTEMPTS);
+    expect(pairing.attemptsRemaining()).toBe(PAIR_MAX_ATTEMPTS - 2);
     expect(pairing.peek()).toEqual(window);
+
+    // The window the limits left alone still pairs a device that has the code.
+    const device = await connect(port);
+    device.send({ type: "pair", payload: { code: window.code, clientId: "d", clientName: "d" } });
+    await device.until(() => device.messages.some((m) => m.type === "pairAccepted"), "pairAccepted");
   });
 });
 
@@ -653,6 +727,24 @@ describe("LAN bridge hello handling", () => {
     await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
   });
 
+  it("does not evaluate a pairing code sent behind a hello it closed the connection for", async () => {
+    const { port, pairing, tokens, listener } = await startDaemon();
+    const window = pairing.open();
+    const client = await connect(port);
+
+    client.send({ type: "hello", payload: { ...validHello, protocolVersion: 99 } });
+    client.send({ type: "pair", payload: { code: window.code, clientId: "c", clientName: "c" } });
+    await client.until(() => client.closes.length > 0, "version-mismatch close");
+    await waitFor(() => listener.activeSessions.size === 0, "session removed");
+    await settle();
+
+    // The peer was already being closed, so it could never have been sent a
+    // token. The window is still open for a device that can.
+    expect(pairing.peek()).toEqual(window);
+    expect(tokens.issueCalls).toBe(0);
+    expect(await tokens.list()).toEqual([]);
+  });
+
   it("rejects a repeated hello before authentication without a second token lookup", async () => {
     const { port, tokens } = await startDaemon();
     const client = await connect(port);
@@ -698,6 +790,54 @@ describe("LAN bridge hello handling", () => {
     expect(Object.keys(PRE_AUTH_ERRORS).sort()).toEqual(
       ["deadline", "frameTooLarge", "helloRejected", "malformedFrame"],
     );
+  });
+});
+
+describe("LAN bridge listener accounting", () => {
+  it("terminates a WebSocket it cannot match to an admitted connection", async () => {
+    // Every WebSocket arrives on a connection admission accepted. One that
+    // cannot be matched is unaccounted for, so it must not be served.
+    const { listener } = await startDaemon();
+    const socket = { on: vi.fn(), terminate: vi.fn() };
+    (listener as any).handleConnection(socket, {
+      socket: { remoteAddress: "203.0.113.9", remotePort: 50_000, localAddress: "203.0.113.1", localPort: 1 },
+      headers: {},
+    });
+
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    expect(listener.activeSessions.size).toBe(0);
+  });
+
+  it("destroys a connection that has no remote address instead of counting it under a placeholder", async () => {
+    const { listener } = await startDaemon();
+    const socket = { on: vi.fn(), once: vi.fn(), destroy: vi.fn(), remoteAddress: undefined, remotePort: undefined };
+    (listener as any).admit(socket);
+
+    expect(socket.destroy).toHaveBeenCalledTimes(1);
+    expect(socket.once).not.toHaveBeenCalled();
+    expect(listener.unauthenticatedConnectionCount).toBe(0);
+  });
+
+  it("logs transport errors from unauthenticated peers a bounded number of times", async () => {
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const { port, listener } = await startDaemon({ maxConnections: 64, maxConnectionsPerAddress: 64 });
+
+    const peers = 20;
+    const sessions = new Set<any>();
+    for (let i = 0; i < peers; i += 1) {
+      const peer = await silentWebSocketPeer(port);
+      for (const session of listener.activeSessions) sessions.add(session);
+      peer.socket.write(maskedFrame("reserved opcode", 3));
+    }
+    expect(sessions.size).toBe(peers);
+    await waitFor(() => [...sessions].every((session) => !session.isOpen()), "protocol errors handled");
+    await settle();
+
+    const lines = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("bridge transport error"));
+    // The 1st, 2nd, 4th, 8th and 16th: five lines for twenty misbehaving peers.
+    expect(lines).toHaveLength(5);
   });
 });
 

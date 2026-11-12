@@ -79,6 +79,8 @@ export class WSSListener {
   private readonly gate: PreAuthGate;
   /** Admitted TCP connections by 4-tuple, until their socket closes. */
   private readonly admitted = new Map<string, PreAuthConnection>();
+  /** Transport errors raised by sessions that had not authenticated. */
+  private preAuthTransportErrors = 0;
 
   constructor(
     tls: TLSMaterial,
@@ -122,8 +124,9 @@ export class WSSListener {
   }
 
   async stop(): Promise<void> {
-    // Cancels every pre-auth timer and drops connections that never became a
-    // WebSocket; without that, one idle TCP peer keeps close() from finishing.
+    // Cancels every pre-auth timer and drops every connection that has not
+    // authenticated; without that, one silent peer keeps close() from
+    // finishing.
     this.gate.dispose();
     for (const s of this.sessions) s.close("daemon shutting down");
     await new Promise<void>((r) => this.wss.close(() => r()));
@@ -152,8 +155,9 @@ export class WSSListener {
   /**
    * Decide whether a newly accepted TCP connection may proceed.
    *
-   * A refused connection is destroyed here, before TLS: the peer sees a reset
-   * and learns nothing. Sessions already open are not involved.
+   * A refused connection is destroyed here, before TLS: the peer sees the
+   * connection close and learns nothing. Sessions already open are not
+   * involved.
    */
   private admit(socket: Socket): void {
     // Defensive: this listener destroys sockets the TLS layer is about to
@@ -178,16 +182,13 @@ export class WSSListener {
   }
 
   private handleConnection(socket: WebSocket, req: import("http").IncomingMessage) {
-    // A per-socket 'error' listener is mandatory: `ws` emits 'error' on an
-    // abrupt peer reset, and an unhandled 'error' event throws out of the
-    // EventEmitter and kills psyche. The 'close' that follows does the cleanup.
-    socket.on("error", (err) => this.events.onServerError?.(err));
     const key = connectionKey(req.socket);
     const connection = key ? this.admitted.get(key) : undefined;
     if (!connection) {
       // Every WebSocket arrives on a connection `admit` accepted. One that
       // cannot be matched to its admission is unaccounted for, so it is
       // dropped rather than served outside the limits.
+      socket.on("error", () => {});
       socket.terminate();
       return;
     }
@@ -197,6 +198,10 @@ export class WSSListener {
       remoteUserAgent: req.headers["user-agent"],
       onRejected: () => this.gate.rejected(connection),
     });
+    // A per-socket 'error' listener is mandatory: `ws` emits 'error' on an
+    // abrupt peer reset, and an unhandled 'error' event throws out of the
+    // EventEmitter and kills psyche. The 'close' that follows does the cleanup.
+    socket.on("error", (err) => this.handleSocketError(session, connection, err));
     this.gate.attach(connection, {
       isAuthenticated: () => session.state === "authenticated",
       reject: (error, closeCode) => session.reject(error, closeCode),
@@ -216,10 +221,29 @@ export class WSSListener {
     });
   }
 
+  private handleSocketError(session: Session, connection: PreAuthConnection, err: Error): void {
+    if (session.state === "authenticated") {
+      this.events.onServerError?.(err);
+      return;
+    }
+    // `ws` answers a protocol error by starting a close of its own, with its
+    // own much longer timeout. An unauthenticated peer gets the short grace.
+    this.gate.rejected(connection);
+    // Whoever is not authenticated can raise these at will, so they are
+    // reported on the 1st, 2nd, 4th, 8th… occurrence only.
+    this.preAuthTransportErrors += 1;
+    const count = this.preAuthTransportErrors;
+    if ((count & (count - 1)) === 0) this.events.onServerError?.(err);
+  }
+
   private async handleMessage(session: Session, raw: WebSocket.RawData): Promise<void> {
     // A refused peer gets nothing further handled, including frames that were
     // already queued behind the one that got it refused.
     if (session.rejected) return;
+    // Nor does an unauthenticated peer whose socket is already closing: no
+    // answer can reach it, so nothing it asks for — a pairing least of all —
+    // may take effect.
+    if (session.state !== "authenticated" && !session.isOpen()) return;
     // Measured here, when the frame is handled, rather than on receipt: a
     // frame queued behind the one that authenticates the session is judged
     // against the session's state once that frame has taken effect.

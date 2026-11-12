@@ -337,11 +337,11 @@ export class BridgeDaemon {
         }
         if (m.payload.token) {
           const rec = await this.tokens.validate(m.payload.token);
-          // The authentication deadline can refuse this connection while the
-          // lookup is in flight. A refused connection stays refused: marking
-          // it authenticated now would exempt a closing socket from the
-          // limits that just closed it.
-          if (s.rejected) return;
+          // The connection can be refused by the authentication deadline, or
+          // simply drop, while the lookup is in flight. It stays as it is:
+          // marking it authenticated now would exempt a closing socket from
+          // the limits that apply to it.
+          if (s.rejected || !s.isOpen()) return;
           if (rec) {
             s.state = "authenticated";
             s.token = m.payload.token;
@@ -365,10 +365,10 @@ export class BridgeDaemon {
           return;
         }
         const rec = await this.tokens.issue(m.payload.clientId, m.payload.clientName);
-        // The authentication deadline can refuse this connection while the
-        // token is being written. The peer will never be sent it, so it must
-        // not remain a valid credential that nobody holds.
-        if (s.rejected) {
+        // The connection can be refused by the authentication deadline, or
+        // simply drop, while the token is being written. The peer will never
+        // be sent it, so it must not remain a valid credential nobody holds.
+        if (s.rejected || !s.isOpen()) {
           await this.tokens.revoke(rec.token);
           return;
         }

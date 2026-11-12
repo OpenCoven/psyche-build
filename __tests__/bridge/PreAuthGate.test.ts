@@ -73,10 +73,11 @@ describe("pre-auth limits", () => {
     expect(PRE_AUTH_MAX_FRAME_BYTES).toBeLessThan(MAX_CLIENT_FRAME_BYTES);
   });
 
-  it("never lets the deadline cut short a pairing window that was open at connect", () => {
+  it("sets the deadline no shorter than one pairing window", () => {
     // Pairing is the one legitimate reason to sit unauthenticated: the user
-    // reads a code off the host and types it. A connection made as the window
-    // opens must be able to use all of it.
+    // reads a code off the host and types it. A connection made at or after
+    // the moment a window opens can use all of that window. One made earlier
+    // is still closed at its own deadline, which this does not prevent.
     expect(PRE_AUTH_DEADLINE_MS).toBeGreaterThanOrEqual(PAIR_WINDOW_MS);
   });
 
@@ -268,7 +269,7 @@ describe("PreAuthGate deadlines", () => {
     expect(p.state.rejections).toHaveLength(1);
   });
 
-  it("leaves an authenticated connection alone at the deadline and holds no timer for it", () => {
+  it("leaves an authenticated connection alone at the deadline, with nothing armed afterwards", () => {
     const { gate: g, scheduler } = gate();
     const t = transport();
     const p = peer();
@@ -311,19 +312,25 @@ describe("PreAuthGate deadlines", () => {
     expect(t.state.destroyed).toBe(0);
   });
 
-  it("clears every timer and drops un-upgraded connections on dispose", () => {
+  it("clears every timer and drops every unauthenticated connection on dispose", () => {
     const { gate: g, scheduler } = gate();
     const idle = transport();
-    const upgraded = transport();
+    const unpaired = transport();
+    const paired = transport();
+    const pairedPeer = peer();
     g.admit("10.0.0.1", idle);
-    g.attach(g.admit("10.0.0.2", upgraded)!, peer());
+    g.attach(g.admit("10.0.0.2", unpaired)!, peer());
+    g.attach(g.admit("10.0.0.3", paired)!, pairedPeer);
+    pairedPeer.state.authenticated = true;
 
     g.dispose();
     expect(scheduler.pending).toBe(0);
     expect(idle.state.destroyed).toBe(1);
-    // An upgraded connection has a session; the listener closes it itself.
-    expect(upgraded.state.destroyed).toBe(0);
-    expect(g.admit("10.0.0.3", transport())).toBeNull();
+    // With its timers cancelled, nothing else would ever drop this one.
+    expect(unpaired.state.destroyed).toBe(1);
+    // An authenticated session is closed by its owner, which can say why.
+    expect(paired.state.destroyed).toBe(0);
+    expect(g.admit("10.0.0.4", transport())).toBeNull();
   });
 });
 

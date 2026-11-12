@@ -6,9 +6,10 @@ import type { BridgeError } from "./wireProtocol.js";
  *
  * The listener binds 0.0.0.0 and is advertised over Bonjour, so any host on
  * the network can open a connection before it has proved anything. Until a
- * connection authenticates, what it may cost this process — a socket, a
- * timer, a frame — is bounded here. An authenticated session is outside these
- * limits entirely and is never closed, counted, or refused by them.
+ * connection authenticates, how many sockets it may hold, for how long, and
+ * how large a frame it may send are bounded here. An authenticated session
+ * is outside these limits entirely and is never closed, counted, or refused
+ * by them.
  */
 
 /** Unauthenticated connections tolerated at once, across every address. */
@@ -339,15 +340,15 @@ export class PreAuthGate {
   }
 
   /**
-   * Stop admitting, cancel every timer, and drop connections that never
-   * became a WebSocket. Sessions are closed by their owner, which can tell
-   * them why.
+   * Stop admitting, cancel every timer, and drop every connection that has
+   * not authenticated: with its timers gone, nothing else would. An
+   * authenticated session is left to its owner, which can tell it why.
    */
   dispose(): void {
     this.disposed = true;
     for (const connection of this.connections) {
       this.clearAll(connection);
-      if (!connection.peer) connection.transport.destroy();
+      if (!this.isAuthenticated(connection)) connection.transport.destroy();
     }
   }
 
