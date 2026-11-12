@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { loadOrCreateTLS, TLSMaterial } from "./TLSCertificate.js";
-import { WSSListener } from "./WSSListener.js";
+import { WSSListener, type WSSListenerOptions } from "./WSSListener.js";
+import { CLOSE_POLICY_VIOLATION, PRE_AUTH_ERRORS, isWellFormedHello } from "./PreAuthGate.js";
 import { Session } from "./Session.js";
 import {
   MobileControlGateway,
@@ -85,6 +86,11 @@ export interface BridgeDaemonOptions {
   tokenStore?: TokenStore;       // for tests; production creates a fresh one
   pairingFlow?: PairingFlow;     // for tests; same
   bonjourFactory?: () => Pick<BridgeBonjour, "publish" | "stop">;
+  /**
+   * Pre-authentication limit overrides and a timer source, for tests.
+   * Production passes nothing and runs with `DEFAULT_PRE_AUTH_LIMITS`.
+   */
+  listenerOptions?: WSSListenerOptions;
 }
 
 /** A loggable label for a scope-read failure: the error's class name, nothing it carries. */
@@ -201,7 +207,18 @@ export class BridgeDaemon {
       onServerError: (err) => {
         LogService.getInstance().warn(`bridge transport error: ${err.message}`, 'bridge');
       },
-    });
+      // Without a trace, a device refused by a cap looks like a dead bridge.
+      // But whoever causes refusals can cause them at will, so the log is
+      // written on the 1st, 2nd, 4th, 8th… refusal only: a million refused
+      // connections cost twenty lines.
+      onAdmissionRefused: (reason, refusedTotal) => {
+        if ((refusedTotal & (refusedTotal - 1)) !== 0) return;
+        LogService.getInstance().warn(
+          `bridge refused an unauthenticated connection (${reason}); ${refusedTotal} refused since start`,
+          'bridge',
+        );
+      },
+    }, this.opts.listenerOptions);
     const { port } = await this.listener.start();
     try {
       this.bonjour = this.opts.bonjourFactory?.() ?? new BridgeBonjour();
@@ -297,12 +314,21 @@ export class BridgeDaemon {
   private async onMessage(s: Session, m: ClientMessage) {
     switch (m.type) {
       case "hello": {
+        // One hello per connection, and only a well-formed one. A second
+        // hello would otherwise be a free token lookup per frame before
+        // authentication, and a way to rewrite an authenticated session's
+        // identity and protocol version after it.
+        if (s.helloReceived || !isWellFormedHello(m.payload)) {
+          this.rejectHello(s);
+          return;
+        }
         if (!isSupportedProtocolVersion(m.payload.protocolVersion)) {
           s.close(
             `protocol mismatch: client=${String(m.payload.protocolVersion)} supported=${SUPPORTED_PROTOCOL_VERSIONS.join(",")}`
           );
           return;
         }
+        s.helloReceived = true;
         s.clientId = m.payload.clientId;
         s.clientName = m.payload.clientName;
         s.protocolVersion = m.payload.protocolVersion;
@@ -311,6 +337,11 @@ export class BridgeDaemon {
         }
         if (m.payload.token) {
           const rec = await this.tokens.validate(m.payload.token);
+          // The authentication deadline can refuse this connection while the
+          // lookup is in flight. A refused connection stays refused: marking
+          // it authenticated now would exempt a closing socket from the
+          // limits that just closed it.
+          if (s.rejected) return;
           if (rec) {
             s.state = "authenticated";
             s.token = m.payload.token;
@@ -334,6 +365,13 @@ export class BridgeDaemon {
           return;
         }
         const rec = await this.tokens.issue(m.payload.clientId, m.payload.clientName);
+        // The authentication deadline can refuse this connection while the
+        // token is being written. The peer will never be sent it, so it must
+        // not remain a valid credential that nobody holds.
+        if (s.rejected) {
+          await this.tokens.revoke(rec.token);
+          return;
+        }
         s.state = "authenticated";
         s.token = rec.token;
         s.clientId = m.payload.clientId;
@@ -450,6 +488,22 @@ export class BridgeDaemon {
       default:
         return;
     }
+  }
+
+  /**
+   * Refuse a malformed or repeated hello with one fixed error, whichever
+   * check it failed, so the answer reveals nothing and reflects nothing.
+   *
+   * Before authentication the peer is closed: it has broken the handshake
+   * and is holding a pre-auth slot. An authenticated session is left exactly
+   * as it was — the stray frame is refused, not the device.
+   */
+  private rejectHello(s: Session): void {
+    if (s.state === "authenticated") {
+      s.send({ type: "error", payload: PRE_AUTH_ERRORS.helloRejected });
+      return;
+    }
+    s.reject(PRE_AUTH_ERRORS.helloRejected, CLOSE_POLICY_VIOLATION);
   }
 
   private requireAuthenticated(s: Session): boolean {
