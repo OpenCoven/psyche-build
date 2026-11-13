@@ -420,8 +420,57 @@ describe("LAN bridge authentication deadline", () => {
     const { daemon, port } = await startDaemon();
     const peer = await silentWebSocketPeer(port);
 
-    await daemon.stop();
+    // Left to the WebSocket library, this peer would hold stop() for its
+    // thirty-second close timeout.
+    const outcome = await Promise.race([
+      daemon.stop().then(() => "stopped"),
+      new Promise((resolve) => setTimeout(() => resolve("still stopping"), 5_000)),
+    ]);
+    expect(outcome).toBe("stopped");
     await waitFor(() => peer.state.closed, "silent peer dropped at stop");
+  });
+
+  it("does not authenticate a connection that dropped during the token lookup", async () => {
+    const { port, tokens, listener } = await startDaemon();
+    tokens.register("known-token");
+    const client = await connect(port);
+    const [session] = [...listener.activeSessions];
+    const release = tokens.block();
+
+    client.send({
+      type: "hello",
+      payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: "known-token" },
+    });
+    await waitFor(() => tokens.validateCalls === 1, "token lookup started");
+    client.socket.terminate();
+    await waitFor(() => listener.activeSessions.size === 0, "session removed");
+    release();
+    await waitFor(() => tokens.settledCalls === 1, "token lookup finished");
+    await settle();
+
+    expect(session.state).toBe("unauthenticated");
+    expect(session.token).toBeNull();
+    expect(tokens.touchCalls).toBe(0);
+  });
+
+  it("does not evaluate a pairing code a peer sends together with its own close", async () => {
+    // The code and the close frame arrive in one write, so the socket is
+    // already closing when the code would be handled: no answer can reach
+    // the peer, and the window stays open for a device that is still there.
+    const { port, pairing, tokens, listener } = await startDaemon();
+    const window = pairing.open();
+    const peer = await silentWebSocketPeer(port);
+
+    peer.socket.write(Buffer.concat([
+      maskedFrame(JSON.stringify({ type: "pair", payload: { code: window.code, clientId: "c", clientName: "c" } })),
+      maskedFrame("", 8),
+    ]));
+    await waitFor(() => listener.activeSessions.size === 0, "session removed");
+    await settle();
+
+    expect(tokens.issueCalls).toBe(0);
+    expect(pairing.peek()).toEqual(window);
+    expect(pairing.attemptsRemaining()).toBe(PAIR_MAX_ATTEMPTS);
   });
 
   it("drops a TCP connection that never starts TLS at the upgrade deadline", async () => {
@@ -852,6 +901,45 @@ describe("LAN bridge listener accounting", () => {
       .filter((message) => message.includes("bridge transport error"));
     // The 1st, 2nd, 4th, 8th and 16th: five lines for twenty misbehaving peers.
     expect(lines).toHaveLength(5);
+  });
+});
+
+describe("LAN bridge authenticated sessions and transport errors", () => {
+  /** A hand-made peer that authenticates with a stored device token. */
+  async function authenticatedRawPeer(port: number, listener: WSSListener, token: string) {
+    const before = new Set(listener.activeSessions);
+    const peer = await silentWebSocketPeer(port, { allowHalfOpen: true });
+    const session = [...listener.activeSessions].find((candidate) => !before.has(candidate))!;
+    peer.socket.write(maskedFrame(JSON.stringify({
+      type: "hello",
+      payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token },
+    })));
+    await waitFor(() => session.state === "authenticated", "raw peer authenticated");
+    return { peer, session };
+  }
+
+  it("reports every transport error from an authenticated session and gives it no pre-auth grace", async () => {
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const { port, tokens, scheduler, listener } = await startDaemon();
+    tokens.register("known-token");
+
+    const peers: Array<Awaited<ReturnType<typeof authenticatedRawPeer>>> = [];
+    for (let i = 0; i < 3; i += 1) peers.push(await authenticatedRawPeer(port, listener, "known-token"));
+    for (const { peer } of peers) peer.socket.write(maskedFrame("reserved opcode", 3));
+    await waitFor(() => peers.every(({ session }) => !session.isOpen()), "protocol errors handled");
+    await settle();
+
+    const lines = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("bridge transport error"));
+    // Unthrottled: three errors, three lines. The pre-auth throttle would log two.
+    expect(lines).toHaveLength(3);
+
+    // The short pre-auth grace does not apply: these connections are still up
+    // after it, left to the WebSocket library's own close handling.
+    scheduler.advance(LIMITS.closeGraceMs);
+    await settle();
+    expect(peers.every(({ peer }) => !peer.state.closed)).toBe(true);
   });
 });
 

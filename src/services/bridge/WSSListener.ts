@@ -125,8 +125,9 @@ export class WSSListener {
 
   async stop(): Promise<void> {
     // Cancels every pre-auth timer and drops every connection that has not
-    // authenticated; without that, one silent peer keeps close() from
-    // finishing.
+    // authenticated; without that, one silent unauthenticated peer keeps
+    // close() from finishing. A silent authenticated peer still can, for the
+    // WebSocket library's own close timeout.
     this.gate.dispose();
     for (const s of this.sessions) s.close("daemon shutting down");
     await new Promise<void>((r) => this.wss.close(() => r()));
