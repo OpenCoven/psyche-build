@@ -290,6 +290,21 @@ function secondLocalAddress(): string | null {
   return null;
 }
 
+/**
+ * True when a TCP connection to `host` completes promptly. An address the
+ * host lists can still be unreachable from the host itself — an interface
+ * that is asleep, a tunnel, a firewall — and a connection to it then hangs.
+ */
+async function reachable(port: number, host: string): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = net.connect({ port, host });
+    const finish = (result: boolean) => { socket.destroy(); resolve(result); };
+    socket.setTimeout(1_500, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
 describe("LAN bridge authentication deadline", () => {
   it("closes a connection that has not authenticated when the deadline expires", async () => {
     const { port, scheduler, listener } = await startDaemon();
@@ -620,9 +635,11 @@ describe("LAN bridge unauthenticated connection cap", () => {
 
   it.skipIf(!secondLocalAddress())(
     "keeps a second remote address connectable while the first is at its cap",
-    async () => {
+    async ({ skip }) => {
       const second = secondLocalAddress()!;
-      const { port } = await startDaemon();
+      const { port, listener } = await startDaemon();
+      if (!(await reachable(port, second))) skip();
+      await waitFor(() => listener.unauthenticatedConnectionCount === 0, "probe connection released");
       for (let i = 0; i < LIMITS.maxConnectionsPerAddress; i += 1) await connect(port);
       expect(await attempt(port)).toBe("refused");
 
