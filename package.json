@@ -113,7 +113,7 @@
     "react": "^19.2.8",
     "selfsigned": "^5.5.0",
     "string-width": "^8.2.2",
-    "vue": "^3.5.41",
+    "vue": "^3.5.42",
     "ws": "^8.21.3"
   },
   "devDependencies": {
@@ -135,7 +135,7 @@
     "strip-ansi": "^7.2.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1",
+    "vite": "^8.2.4",
     "vitest": "^4.1.11"
   },
   "packageManager": "pnpm@10.34.5",
