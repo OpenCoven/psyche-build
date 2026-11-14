@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
+import { exactNpmPin } from './support/dependencyPins.js';
 import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
 const root = process.cwd();
@@ -547,7 +548,8 @@ describe('desktop Tauri layout', () => {
     expect(configs[0].build.beforeDevCommand).toBe('pnpm run serve:web');
     expect(desktopPackage.scripts['serve:web'])
       .toBe('vite web --config vite.config.mjs --host 127.0.0.1 --port 1420 --strictPort');
-    expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
+    // Exact, so the dev server that Tauri starts is the one the lockfile names.
+    expect(() => exactNpmPin(desktopPackage, 'vite')).not.toThrow();
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
 

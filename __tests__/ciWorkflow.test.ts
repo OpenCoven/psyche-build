@@ -1,6 +1,11 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  divergentActionPins,
+  pinnedActionCommit,
+  rustToolchainChannel,
+} from './support/dependencyPins.js';
 
 const workflowPath = path.resolve('.github/workflows/ci.yml');
 const releaseWorkflowPath = path.resolve('.github/workflows/release.yml');
@@ -116,11 +121,18 @@ describe('pull request CI workflow contract', () => {
     for (const source of [workflow, releaseWorkflow]) {
       expect(source).not.toMatch(/pnpm\/action-setup@[^\n]+\n\s+with:\n\s+version:/);
     }
-    expect(workflow).toContain('toolchain: 1.95.0');
-    expect(workflow).toContain('actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5');
-    expect(workflow).toContain('pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1');
-    expect(workflow).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
-    expect(workflow).toContain('dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8');
+    // The pins themselves are read from the files that declare them, so an
+    // update changes one place. What is asserted is that each pin exists and
+    // is exact: one Rust release, and one full commit per action.
+    expect(workflow).toContain(`toolchain: ${rustToolchainChannel()}`);
+    for (const action of [
+      'actions/checkout',
+      'pnpm/action-setup',
+      'actions/setup-node',
+      'dtolnay/rust-toolchain',
+    ]) {
+      expect(pinnedActionCommit([[workflowPath, workflow]], action)).toMatch(/^[0-9a-f]{40}$/);
+    }
     expect(checkoutCount).toBeGreaterThan(0);
     expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
 
@@ -154,6 +166,9 @@ describe('pull request CI workflow contract', () => {
         );
       }
     }
+    // One commit per action across every workflow, so an update that reaches
+    // some files and not others is caught here and not at run time.
+    expect(divergentActionPins(sources)).toEqual([]);
   });
 
 
@@ -348,11 +363,10 @@ describe('security and supply-chain baseline contract', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toMatch(/timeout-minutes: \d+/);
     expect(workflow).toContain('persist-credentials: false');
-    expect(workflow).toContain(
-      'github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2',
-    );
-    expect(workflow).toContain(
-      'github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2',
+    // Both steps come from one CodeQL release, so they share one commit.
+    const codeql = [[codeqlWorkflowPath, workflow]] as const;
+    expect(pinnedActionCommit(codeql, 'github/codeql-action/init')).toBe(
+      pinnedActionCommit(codeql, 'github/codeql-action/analyze'),
     );
     expect(workflow).not.toContain('secrets.');
   });
@@ -364,9 +378,12 @@ describe('security and supply-chain baseline contract', () => {
     expect(workflow).toMatch(/^permissions:\n  contents: read\n\n/m);
     expect(workflow).not.toContain('pull-requests: write');
     expect(workflow).not.toMatch(/: write/);
-    expect(workflow).toContain(
-      'actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294',
-    );
+    expect(
+      pinnedActionCommit(
+        [[dependencyReviewWorkflowPath, workflow]],
+        'actions/dependency-review-action',
+      ),
+    ).toMatch(/^[0-9a-f]{40}$/);
     expect(workflow).toContain('fail-on-severity: high');
     expect(workflow).toContain('comment-summary-in-pr: never');
     expect(workflow).toContain('persist-credentials: false');
