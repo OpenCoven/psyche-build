@@ -456,6 +456,33 @@ describe('ControlRuntime', () => {
     failDirty = false;
   });
 
+  // The idempotency key is client-supplied. `console.error` treats its first
+  // argument as a printf format, so a key interpolated into it could consume
+  // the following arguments (`%s`, `%o`) and forge what the log line says.
+  it('logs a client-supplied idempotency key as data, never as the console format string', async () => {
+    const root = await newJournalRoot('control-runtime');
+    const journal = await ControlJournal.open(root, 4);
+    const hostileKey = 'idem-%s-%o-%d';
+    vi.spyOn(journal, 'storeOutcome').mockImplementation(async () => {
+      throw new Error('sidecar write failed');
+    });
+    handlers.openTerminal = vi.fn(async () => ({ paneId: 'pane-1' }));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 4, handlers, journal });
+
+    await expect(submit(runtime, openTerminalCommand(hostileKey, 'format-1')))
+      .resolves.toEqual({ status: 'succeeded', value: { paneId: 'pane-1' } });
+
+    const call = error.mock.calls.find(([message]) => (
+      String(message).includes('durable outcome persistence failed')
+    ));
+    expect(call).toBeDefined();
+    expect(String(call?.[0])).not.toContain(hostileKey);
+    expect(call?.[0]).toBe('[control-runtime] durable outcome persistence failed for %s');
+    expect(call?.[1]).toBe(hostileKey);
+    expect(call?.[2]).toBeInstanceOf(Error);
+  });
+
   it('blocks fresh cold misses after compaction is deferred until durability is repaired', async () => {
     const root = await newJournalRoot('control-runtime');
     const journal = await ControlJournal.open(root, 4);
