@@ -255,63 +255,14 @@ old, which the standing register treats as control drift; this entry closes it.
 
 ### October 1 reconciliation
 
-This snapshot was inspected against `main`
-`c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1`. The previous snapshot was 17 days
-old, which the standing register treats as control drift; this entry closes it.
-
-- [#196](https://github.com/OpenCoven/psyche-build/issues/196) and
-  [#199](https://github.com/OpenCoven/psyche-build/issues/199) were closed as
-  completed on 2026-09-16 without evidence comments. The 2026-10-01 decision
-  comments keep them closed as history; the closure is not a claim of operator
-  acceptance. Release-candidate acceptance moved to #474, the observed recovery
-  gaps to #475, and the remaining support-bundle collectors and UI to #476.
-- [#239](https://github.com/OpenCoven/psyche-build/issues/239) is closed as not
-  planned and superseded by #474: its evidence was pinned to `v0.0.1` source
-  while the Cask now installs `0.0.2`. Its 15 digests and
-  `terminal_state: incomplete` manifest remain history.
-- #246 closed as not planned on 2026-09-16; its Vim mirrors #222–#227 and the
-  broad GPU program #228 closed as not planned on 2026-10-01. #229 and #232
-  moved under #476.
-- Beads was retired under #473. The archive is recorded in
-  [the retirement record](./working-records/beads-retirement-2026-10.md). A
-  final dry run
-  ([36915661182](https://github.com/OpenCoven/psyche-build/actions/runs/36915661182))
-  planned 0 operations, and the scheduled sync was then disabled. Project #11 is
-  now the hand-maintained [Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11).
-- The production target is milestone `v0.1.0 — macOS production`, defined by the
-  [production-readiness plan](./superpowers/plans/2026-10-01-production-readiness.md)
-  (a `reference` record) and outcomes #474–#480.
+The dated record of the 1 October re-plan is in the
+[roadmap history record](./working-records/roadmap-history-2026-11.md#roadmap-october-1-reconciliation).
+The November 11 reconciliation above is the current state.
 
 ### September 14 reconciliation
 
-This snapshot was inspected against `main`
-`3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5`. Later issue/PR state is live state,
-not a reason to reinterpret the evidence at this source.
-
-- #197's [bounded persistence completion](https://github.com/OpenCoven/psyche-build/issues/197#issuecomment-5594299874)
-  supersedes the earlier unstarted atomic-publication slice. Extraction did not
-  add missing save scheduling, quarantine, or recovery guarantees.
-- [#388](https://github.com/OpenCoven/psyche-build/issues/388),
-  [#424](https://github.com/OpenCoven/psyche-build/issues/424), and
-  [#426](https://github.com/OpenCoven/psyche-build/issues/426) are delivered
-  through PRs #423, #421, and #437 respectively. #367 was retired as not
-  planned, not fixed; its root cause remains unestablished.
-- [PR #393](https://github.com/OpenCoven/psyche-build/pull/393) delivered
-  acceptance-validator remediation. The later #239 exact-release CLI smoke
-  does not reverify the earlier 15 records or supply packaged GUI/human
-  verification. #196/#239 remained open at that snapshot.
-- [PR #434](https://github.com/OpenCoven/psyche-build/pull/434) restored
-  disabled ritual controls when production execution is unavailable.
-  [#435](https://github.com/OpenCoven/psyche-build/issues/435) owns lost-reply
-  ambiguity; fixture and gateway characterization do not complete it.
-- PRs #422, #444, #445, and #448 delivered bounded recovery, acceptance
-  preflight, and GPU-verification tooling under #199. Preflight is read-only
-  inventory, not a product observation; GPU export validation is not physical
-  performance acceptance.
-- [PR #451](https://github.com/OpenCoven/psyche-build/pull/451) merged as
-  `3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5`: shortened-CRLF reload now clamps
-  selection to CodeMirror's normalized document. Its source-level recovery
-  evidence does not complete #196 or #199.
+The dated record of the 14 September reconciliation is in the
+[roadmap history record](./working-records/roadmap-history-2026-11.md#roadmap-september-14-reconciliation).
 
 ## Tracker and identity contract
 
@@ -491,79 +442,9 @@ acceptance gate, and pass required checks on its exact final head.
 
 ## Stage 0 — delivered control-state closure wave
 
-**Owners:** #238, #31, #237, and #240.  
-**Historical record (Beads era, to 2026-10-01).**  
-**Exit state:** reached. Public docs, branch policy, Beads, generated mirrors,
-priorities, and roadmap agree on delivered, active, blocked, and deferred work
-as of this reconciliation.
-
-#238 remains delivered through PR #245 / `5f4b7b05`. #240 closed through PR
-#263, #237 closed after source-first reconciliation, and #31 closed with the
-policy evidence recorded above and corrected by PR #351. Keep the source-first
-sync, protected environments, canonical mapping, and bounded drift validation
-intact. Direct pushes remain platform-blocked; ordinary PR merges require
-exact-head checks and resolved conversations, with no standing bypass.
-
-One control-state regression was opened and resolved in this window: the
-scheduled Beads Project sync failed on every scheduled run from 2026-08-30
-until 2026-09-02 after an accidental Beads v1.2.1 binary on one checkout
-migrated the shared Dolt schema and published it. The recovery retained Git
-sidecar `9c85d2b79e3da16c283278824866a5ba1217950a` and published Dolt transition
-`0at1pk83ng4ogm45svvp7ip122acgt4h` →
-`go64gshichpnsj3islhl6pmv5lgi2teb`, restoring schema v53, re-tracking the
-versioned `events` table, and preserving 111 Beads. The 1,362 event rows are the
-last durable 1,361-row pre-ignore snapshot plus the publication transition.
-Three known post-ignore writes retain their commits and final source state but
-not their clone-local event rows, leaving a bounded three-write audit gap.
-
-Scheduled apply
-[33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
-executed source head `9e4a9cf383a1993ca2c2099e3d296acb3dd3c5b4` on 2026-09-04 and
-performed seven operations; from the authoritative
-`psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and made the
-live read-only validator exit `0` with 111 sources, 27 managed mirrors, 24 canonical
-outcomes, and 0 findings. The following scheduled apply
-[33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
-executed source head `23cace08fdc5e35e3ee0cd46200b4ed3bbd94131` on 2026-09-05,
-planned and applied 0 operations, completed every step without warnings or
-visibility drift, and retained schema v53.
-
-Mirror #230 was regenerated after its authoritative source entered closed state.
-It has never been manually edited since the first run; generated-body repair did
-not supply this proof.
-
-The provenance and mirror deviations remain explicit: PR #346 reviewed
-unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, but another checkout
-published `go64gshichpnsj3islhl6pmv5lgi2teb`, so the exact-candidate gate did
-not hold despite matching intended logical state. Mirror #230 first entered the
-closed state through GitHub keyword syntax at that PR's merge rather than the
-synchronizer. PR #350 documented recovery before the second qualifying run and
-omitted this documentation contract assertion; it is not closeout proof.
-[#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the
-evidence under #195.
-
-The later [#420 recovery record](https://github.com/OpenCoven/psyche-build/issues/420#issuecomment-5616402711)
-retains protected apply
-[34459609608](https://github.com/OpenCoven/psyche-build/actions/runs/34459609608)
-and normal no-op
-[34460856341](https://github.com/OpenCoven/psyche-build/actions/runs/34460856341)
-at source `73039d5c3827e2f49cf28c7ad7db74cc3b5a5247`: 25 approved operations,
-no newly created issues, original survivors preserved, then zero operations and
-a zero-finding authenticated drift report. #420 is complete.
-
-Recent scheduled runs
-[34747362154](https://github.com/OpenCoven/psyche-build/actions/runs/34747362154)
-and [34761084154](https://github.com/OpenCoven/psyche-build/actions/runs/34761084154)
-on September 13 both succeeded at source
-`8650344ce560ffcfe190ea99acc2010921409753`, with 0 planned and 0 applied
-operations: 111 sources, 14 active, 97 closed, all 14 active mapped, no
-unmapped/unknown/malformed targets, priority mismatches, warnings, or visibility
-drift. The latter retained summary SHA-256 is
-`907c2fadb5c1a57d661911af7a5643002bb93758c7868eb9cc01133f99e22720`.
-These bounded observations establish recent sync health, not execution against
-the September 14 snapshot or this closeout's exact head. Counts, source, and
-run links are retained here so expiring workflow artifacts are not the only
-record. No Beads or generated mirror mutation is part of this closeout.
+Delivered. The evidence record for this stage is in the
+[roadmap history record](./working-records/roadmap-history-2026-11.md#roadmap-stage-0--delivered-control-state-closure-wave).
+It is history, not a queue: nothing in it is open work.
 
 ## Stage 1 — close the supported release stabilization baseline
 

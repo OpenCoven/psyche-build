@@ -11,6 +11,15 @@ const pullUrl = (pull: number): string =>
 const runUrl = (run: number): string =>
   `https://github.com/OpenCoven/psyche-build/actions/runs/${run}`;
 
+// Delivered stages and earlier reconciliations were moved out of the two
+// contracts under #564, word for word. A case that holds a historical record
+// reads the contract together with that record, so the evidence stays pinned
+// wherever it now lives. Cases about current state still read the contract
+// alone.
+const HISTORY_RECORD = 'docs/working-records/roadmap-history-2026-11.md';
+const readWithHistory = async (filePath: string): Promise<string> =>
+  `${await readFile(filePath, 'utf8')}\n${await readFile(HISTORY_RECORD, 'utf8')}`;
+
 describe('post-release execution documentation', () => {
   it('focuses the rollout on macOS acceptance and recovery without retiring safety gates', async () => {
     for (const filePath of ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md']) {
@@ -91,7 +100,7 @@ describe('post-release execution documentation', () => {
     expect(history).toMatch(/no creation-date cutoff/);
     expect(history).toMatch(/no[\s\S]{0,20}per-file overrides/);
 
-    for (const source of [roadmap, execution]) {
+    for (const source of [await readWithHistory('docs/ROADMAP.md'), execution]) {
       expect(source).toContain('**Last reconciled:** 2026-11-11');
       expect(source).toContain('97db32c4378aded6ba99ef6c20a16c1cfc1816f0');
       expect(source).toContain(issueUrl(553));
@@ -117,7 +126,7 @@ describe('post-release execution documentation', () => {
   });
 
   it('retains recent tracker health with immutable provenance rather than current-head claims', async () => {
-    const roadmap = await readFile('docs/ROADMAP.md', 'utf8');
+    const roadmap = await readWithHistory('docs/ROADMAP.md');
     expect(roadmap).toContain(issueUrl(420));
     for (const run of [34459609608, 34460856341, 34747362154, 34761084154]) {
       expect(roadmap).toContain(runUrl(run));
@@ -174,7 +183,7 @@ describe('post-release execution documentation', () => {
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
-        source: await readFile(filePath, 'utf8'),
+        source: await readWithHistory(filePath),
       })),
     );
 
@@ -324,7 +333,7 @@ describe('post-release execution documentation', () => {
       readFile('docs/TRACKER.md', 'utf8'),
       readFile('AGENTS.md', 'utf8'),
       readFile('CONTRIBUTING.md', 'utf8'),
-      readFile('docs/ROADMAP.md', 'utf8'),
+      readWithHistory('docs/ROADMAP.md'),
       readFile('docs/working-records/beads-retirement-2026-10.md', 'utf8'),
     ]);
 
@@ -380,7 +389,7 @@ describe('post-release execution documentation', () => {
     const documents = await Promise.all(
       ['docs/ROADMAP.md', 'docs/POST-RELEASE-EXECUTION.md'].map(async (filePath) => ({
         filePath,
-        source: await readFile(filePath, 'utf8'),
+        source: await readWithHistory(filePath),
       })),
     );
 
@@ -408,7 +417,11 @@ describe('post-release execution documentation', () => {
       const mirrorDurability = paragraphs.find((paragraph) =>
         /Mirror #230 was regenerated after/.test(paragraph),
       );
-      const pr350Deviation = paragraphs.find((paragraph) => /PR #350/.test(paragraph));
+      // The deviation paragraph, not the first mention of PR #350: with the
+      // history record read after the contract, an unrelated mention comes first.
+      const pr350Deviation = paragraphs.find(
+        (paragraph) => /PR #350/.test(paragraph) && /before the second/.test(paragraph),
+      );
 
       expect(source, filePath).toContain(issueUrl(342));
       expect(source, filePath).toContain('9c85d2b79e3da16c283278824866a5ba1217950a');
@@ -466,6 +479,42 @@ describe('post-release execution documentation', () => {
     expect(acceptance).toMatch(/Reusable recovery harness[\s\S]{0,160}\*\*Delivered on source only\*\*/);
     expect(acceptance).toMatch(/Operator-observed failure scenarios[\s\S]{0,160}\*\*Open post-release stabilization debt\*\*/);
     expect(acceptance).toMatch(/completed publication evidence[\s\S]{0,180}operator-observed acceptance work/i);
+  });
+
+  it('keeps moved history reachable from the heading it was moved from', async () => {
+    const record = await readFile(HISTORY_RECORD, 'utf8');
+    expect(record).toMatch(/They are history: do\s+not read them for current gates, owners, or priorities/);
+
+    const moved: Array<[string, string, string]> = [
+      ['docs/ROADMAP.md', '### October 1 reconciliation', 'roadmap-october-1-reconciliation'],
+      ['docs/ROADMAP.md', '### September 14 reconciliation', 'roadmap-september-14-reconciliation'],
+      [
+        'docs/ROADMAP.md',
+        '## Stage 0 — delivered control-state closure wave',
+        'roadmap-stage-0--delivered-control-state-closure-wave',
+      ],
+      [
+        'docs/POST-RELEASE-EXECUTION.md',
+        '## Stage 0 — delivered control-state closure wave',
+        'execution-contract-stage-0--delivered-control-state-closure-wave',
+      ],
+    ];
+    for (const [filePath, heading, anchor] of moved) {
+      const source = await readFile(filePath, 'utf8');
+      // The heading stays, so links to its anchor keep working, and what
+      // follows it is the pointer, not the old text.
+      const body = source.split(`${heading}\n`)[1]?.split(/\n#{2,3} /)[0];
+      expect(body, `${filePath} ${heading}`).toBeDefined();
+      expect(body, `${filePath} ${heading}`).toContain(
+        `./working-records/roadmap-history-2026-11.md#${anchor}`,
+      );
+      expect(body!.split('\n').length, `${filePath} ${heading}`).toBeLessThan(8);
+      // The record has a heading that produces that anchor.
+      const slugs = [...record.matchAll(/^### (.+)$/gm)].map(([, title]) =>
+        title.toLowerCase().replace(/[^a-z0-9 -]/g, '').replace(/ /g, '-'),
+      );
+      expect(slugs, anchor).toContain(anchor);
+    }
   });
 
   it('states merge and closure gates in evidence terms rather than test-count terms', async () => {
