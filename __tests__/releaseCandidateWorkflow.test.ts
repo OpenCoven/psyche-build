@@ -609,6 +609,14 @@ describe('release candidate workflow contract', () => {
         writeFileSync(path.join(fakeBin, name), `#!/bin/bash\n${body}\n`);
         chmodSync(path.join(fakeBin, name), 0o755);
       }
+      // A startup file that puts another toolchain first on PATH, as a hosted
+      // runner's own `~/.bashrc` can. The step must not read it.
+      const startupHome = path.join(root, 'home');
+      const startupBin = path.join(startupHome, 'bin');
+      mkdirSync(startupBin, { recursive: true });
+      writeFileSync(path.join(startupBin, 'rustc'), '#!/bin/bash\necho "rustc from a startup file"\n');
+      chmodSync(path.join(startupBin, 'rustc'), 0o755);
+      writeFileSync(path.join(startupHome, '.bashrc'), `export PATH="${startupBin}:$PATH"\n`);
       const candidateDir = path.join(root, 'candidate');
       mkdirSync(candidateDir);
       for (const arch of ['aarch64', 'x86_64']) {
@@ -618,9 +626,15 @@ describe('release candidate workflow contract', () => {
         writeFileSync(artifactPath, `dmg-${arch}`);
         const githubEnv = path.join(runnerTemp, 'github-env');
         writeFileSync(githubEnv, '');
-        const result = spawnSync('bash', ['-c', record], {
+        // GitHub Actions runs a `shell: bash` step with `--noprofile --norc`.
+        // Without them bash sources `~/.bashrc` here, because Node hands it a
+        // socket for stdin and bash takes that for a remote-shell login, and a
+        // startup file that prepends to PATH then runs real tools in place of
+        // the stubs above.
+        const result = spawnSync('bash', ['--noprofile', '--norc', '-c', record], {
           env: {
             PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+            HOME: startupHome,
             RUNNER_TEMP: runnerTemp,
             RUNNER_OS: 'macOS',
             RUNNER_ARCH: arch === 'aarch64' ? 'ARM64' : 'X64',
