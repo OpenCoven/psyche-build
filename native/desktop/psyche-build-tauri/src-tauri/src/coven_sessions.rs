@@ -3240,7 +3240,10 @@ mod tests {
             started_tx.send(()).unwrap();
             let mut byte = [0];
             done_tx.send(stream.read_exact(&mut byte)).unwrap();
-            byte
+            // Hand the stream back instead of closing it here. Closing it as
+            // soon as the byte is read races the client's shutdown below,
+            // which macOS then refuses with "Socket is not connected".
+            (byte, stream)
         });
 
         started_rx
@@ -3256,7 +3259,8 @@ mod tests {
             .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
             .unwrap()
             .is_ok());
-        assert_eq!(reader.join().unwrap(), *b"x");
+        let (byte, _stream) = reader.join().unwrap();
+        assert_eq!(byte, *b"x");
     }
 
     #[cfg(unix)]
@@ -3277,7 +3281,10 @@ mod tests {
             started_tx.send(()).unwrap();
             let mut byte = [0];
             done_tx.send(stream.read_exact(&mut byte)).unwrap();
-            byte
+            // Hand the stream back instead of closing it here. Closing it as
+            // soon as the byte is read races the client's shutdown below,
+            // which macOS then refuses with "Socket is not connected".
+            (byte, stream)
         });
 
         started_rx
@@ -3293,7 +3300,8 @@ mod tests {
             .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
             .unwrap()
             .is_ok());
-        assert_eq!(reader.join().unwrap(), *b"x");
+        let (byte, _stream) = reader.join().unwrap();
+        assert_eq!(byte, *b"x");
     }
 
     #[cfg(unix)]
