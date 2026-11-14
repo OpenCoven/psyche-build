@@ -35,7 +35,7 @@ sysinfo = "0.36.1"
 sha2 = "0.10"
 base64 = "0.22"
 unicode-normalization = "0.1"
-getrandom = "0.2"
+getrandom = "0.4"
 tempfile = "3"
 # Verifies the signed release update manifest (src/update_manifest.rs). Pure
 # Rust, verify-only; the reference signer is Node's built-in Ed25519.
