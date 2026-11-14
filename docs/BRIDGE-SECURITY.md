@@ -176,10 +176,11 @@ Three distinct crash routes, all of which were reachable:
   unauthenticated peer can send repeatedly to exhaust the heap).
 - The legacy loopback daemon closes a connection that has not authenticated
   within `AUTH_DEADLINE_MS` (10 s). This is not a LAN bridge guarantee.
-- The LAN `WSSListener` has no application-level idle authentication deadline
-  and no pre-authentication connection cap. Its per-frame limit does not bound
-  the number of waiting connections or the total queued work; do not describe
-  it as complete pre-authentication denial-of-service protection.
+- The LAN `WSSListener` holds a connection that has not authenticated to the
+  limits under [LAN bridge pre-authentication limits](#lan-bridge-pre-authentication-limits)
+  below. They bound how many such connections exist and how long each lives.
+  They do not bound everything one of them can cost while it lives; do not
+  describe them as complete pre-authentication denial-of-service protection.
 - Canonical control IPC bounds each frame to 4 MiB and queued input to 128 frames / 8 MiB.
   These limits belong to `src/control/server.ts`, not to the LAN WebSocket.
 - A connection may hold at most `MAX_STREAMS_PER_CONNECTION` (64) attached
@@ -205,6 +206,57 @@ Three distinct crash routes, all of which were reachable:
   lifetime, 32-byte secret, 16-byte invite ID, five wrong presentations,
   16 retained records, 2,048-byte payload cap, and 60-second clock-skew
   tolerance.
+
+#### LAN bridge pre-authentication limits
+
+`PreAuthGate` (`src/services/bridge/PreAuthGate.ts`) tracks every TCP
+connection the LAN listener accepts, from accept until its socket closes. A
+connection counts against these limits until it authenticates with a device
+token or a pairing code:
+
+| Limit | Value | Constant |
+|---|---|---|
+| Unauthenticated connections, all addresses | 32 | `PRE_AUTH_MAX_CONNECTIONS` |
+| Unauthenticated connections, one remote address | 4 | `PRE_AUTH_MAX_CONNECTIONS_PER_ADDRESS` |
+| Time to finish TLS and the WebSocket upgrade | 10 s | `PRE_AUTH_UPGRADE_DEADLINE_MS` |
+| Time to authenticate, counted from accept | 5 min (`PAIR_WINDOW_MS`) | `PRE_AUTH_DEADLINE_MS` |
+| Size of one frame before authentication | 4 KiB | `PRE_AUTH_MAX_FRAME_BYTES` |
+| Time to finish closing after a rejection | 2 s | `PRE_AUTH_CLOSE_GRACE_MS` |
+| Length of a `hello` field; of its token | 256; 512 characters | `HELLO_MAX_FIELD_CHARS`, `HELLO_MAX_TOKEN_CHARS` |
+
+- A connection over either cap is destroyed before the TLS handshake. It is
+  told nothing. A slot is free again as soon as the connection that held it
+  authenticates or closes.
+- Authenticated sessions are not counted and are not touched when a cap or
+  deadline acts on another connection. The 1 MiB `maxPayload` still applies to
+  them.
+- A second `hello` on one connection, or a `hello` whose fields are missing,
+  mistyped or over length, is refused. An authenticated session that repeats
+  its `hello` gets the error and keeps its session.
+- A refused peer is sent one of four fixed errors in the existing `error`
+  message, then a close with code 1008 or 1009: `auth_timeout`,
+  `frame_too_large`, `invalid_hello`, `parse_failed`. Nothing the peer sent and
+  nothing about the host is included.
+- Cap refusals and transport errors from unauthenticated peers are logged on
+  the 1st, 2nd, 4th, 8th… occurrence, without the peer's address.
+- The bridge refuses to start with a limit that is zero, negative, fractional
+  or inconsistent with another, rather than start unbounded.
+- The v2 and v3 wire messages and the pairing attempt budget are unchanged.
+
+What these limits do not do:
+
+- Eight source addresses can hold all 32 slots for the length of the
+  authentication deadline and keep a new device from pairing. Paired devices
+  that are already connected are unaffected.
+- The authentication deadline runs from accept, not from the opening of a
+  pairing window, so a connection opened before `:pair` is run has less than
+  the full window left.
+- The frame bound is applied when a complete message is handled, not at the
+  transport, and there is no limit on how many frames an unauthenticated
+  connection sends before its deadline.
+- `stop()` drops unauthenticated connections at once, but a silent
+  authenticated peer can still hold it for the WebSocket library's 30-second
+  close timeout.
 
 ### 7. Destructive git operations are not remotely reachable
 
@@ -279,6 +331,8 @@ The rules above are pinned by:
 | `__tests__/utils/base64.test.ts` | strict base64 validation of wire payloads |
 | `__tests__/services/tmuxControl.test.ts` | no tmux command is built from an injecting pane id |
 | `__tests__/bridge/PairingFlow.test.ts` | the pairing attempt budget |
+| `__tests__/bridge/PreAuthGate.test.ts` | pre-authentication admission policy: both caps, both deadlines, limit validation, `hello` shape |
+| `__tests__/bridge/bridgePreAuthLimits.test.ts` | the same limits over a real TLS WebSocket with test-controlled timers: deadline expiry, cap exhaustion and recovery, frame bound, `hello` rejection, unchanged wire fixtures and pairing budget |
 | `__tests__/bridge/bridgeDaemonHardening.test.ts` | pairing, input validation, v2 pane scope (races, cache), socket errors, frame cap — over a real TLS WebSocket |
 | `__tests__/bridge/legacyPaneScope.test.ts` | every pane v2 `listPanes` advertises passes the v2 pane scope |
 | `__tests__/daemon/daemonConnection.test.ts` | auth, project scoping, crash resistance, stream limits |
