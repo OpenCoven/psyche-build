@@ -26,6 +26,7 @@ import MergePane from '../src/components/panes/MergePane.js';
 
 const ESC = String.fromCharCode(27);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const WAIT = { timeout: 5_000, interval: 20 };
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -48,7 +49,7 @@ describe('MergePane agent resolution', () => {
     launchMock.mockImplementation(() => new Promise(() => {}));
     const onCancel = vi.fn();
 
-    const { stdin, unmount } = render(
+    const { stdin, lastFrame, unmount } = render(
       <MergePane
         pane={{
           id: 'p1',
@@ -63,16 +64,28 @@ describe('MergePane agent resolution', () => {
       />,
     );
     try {
-      await sleep(30);
-      stdin.write('a');
-      await sleep(30);
-      stdin.write('\r');
-      await sleep(30);
+      // Each step waits for what it needs instead of for a fixed 30 ms, which a
+      // loaded runner does not always give the render. A key that arrives
+      // before the pane is ready for it is dropped, so it is sent again.
+      await vi.waitFor(() => {
+        if (!lastFrame()?.includes('Enter prompt for agent')) {
+          stdin.write('a');
+          throw new Error('the agent prompt is not shown yet');
+        }
+      }, WAIT);
+      await vi.waitFor(() => {
+        if (launchMock.mock.calls.length === 0) {
+          stdin.write('\r');
+          throw new Error('the agent launch has not started yet');
+        }
+      }, WAIT);
       expect(launchMock).toHaveBeenCalledTimes(1);
 
       stdin.write(ESC);
+      // Nothing to wait for: the assertion is that nothing happens.
       await sleep(60);
       expect(onCancel).not.toHaveBeenCalled();
+      expect(launchMock).toHaveBeenCalledTimes(1);
     } finally {
       unmount();
     }
