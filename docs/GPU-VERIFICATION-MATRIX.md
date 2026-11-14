@@ -2,8 +2,10 @@
 
 **Status:** Operational evidence procedure; physical results not collected
 
-**Owner:** [#232](https://github.com/OpenCoven/psyche-build/issues/232) under
-[#199](https://github.com/OpenCoven/psyche-build/issues/199); both remain open
+**Owner:** [#476](https://github.com/OpenCoven/psyche-build/issues/476) for bounded
+diagnostics and [#474](https://github.com/OpenCoven/psyche-build/issues/474) for
+macOS acceptance. The former owners [#232](https://github.com/OpenCoven/psyche-build/issues/232)
+and [#199](https://github.com/OpenCoven/psyche-build/issues/199) are closed
 
 **Contract:** [Release acceptance](./RELEASE-ACCEPTANCE.md),
 [support matrix](./SUPPORT-MATRIX.md), and
@@ -276,7 +278,7 @@ command. Observe the normal run and, in a separate disposable run, cancellation
 and cleanup: fixture PTYs and browser/editor resources gone, prior disposable
 workspace restored, controls no longer active, and no orphan fixture activity.
 Do not kill unrelated processes or delete ambiguous resources. If cleanup is
-uncertain, stop further runs and preserve a bounded failure summary for #232.
+uncertain, stop further runs and preserve a bounded failure summary for #476.
 Shutdown the diagnostic app and launcher; remove only verified disposable
 resources. Never clean an ordinary user's profile as rollback.
 
@@ -337,8 +339,8 @@ and proof gaps in the existing acceptance record. No physical run, driver
 matrix, six-pane latency result or packaged acceptance is asserted here.
 Rollback for this source-only slice is to revert its documentation/intake
 validator changes through normal review; it requires no native permissions,
-profile migration, or capability change. Keep #232/#199 open until their
-remaining independently evidenced gates are met.
+profile migration, or capability change. #232 and #199 are closed; their
+remaining independently evidenced gates belong to #476 and #474.
 The parent/maintainer must still perform the final cumulative spec/code review
 of the diagnostics implementation and require protected exact-head checks
 before merge. A focused review of this runbook/intake tool is not that approval.

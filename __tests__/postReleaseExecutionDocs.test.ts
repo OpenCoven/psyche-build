@@ -92,7 +92,11 @@ describe('post-release execution documentation', () => {
     expect(history).toMatch(/no[\s\S]{0,20}per-file overrides/);
 
     for (const source of [roadmap, execution]) {
-      expect(source).toContain('**Last reconciled:** 2026-10-01');
+      expect(source).toContain('**Last reconciled:** 2026-11-11');
+      expect(source).toContain('97db32c4378aded6ba99ef6c20a16c1cfc1816f0');
+      expect(source).toContain(issueUrl(553));
+      expect(source).toMatch(/#475[\s\S]{0,80}closed at source/i);
+      expect(source).toMatch(/`parked`[\s\S]{0,120}explicit owner direction/);
       expect(source).toContain('c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1');
       expect(source).toContain('3ec865dc8eef7dedcb45e2b72cde265ae30cc9e5');
       expect(source).toMatch(/#474 is the active P0 acceptance gate/);
