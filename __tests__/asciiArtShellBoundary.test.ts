@@ -48,3 +48,33 @@ it('refuses to type a decorative launch into an unsupported pane shell', async (
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+const terminalControls = [
+  ['interrupt', '\u0003'],
+  ['tab', '\t'],
+  ['line feed', '\n'],
+  ['carriage return', '\r'],
+  ['line erase', '\u0015'],
+  ['escape', '\u001b'],
+  ['delete', '\u007f'],
+] as const;
+
+// Windows rejects these filename characters before the launch boundary.
+it.skipIf(process.platform === 'win32').each(
+  ['sh', 'fish'].flatMap((shell) => terminalControls.map(([label, character]) => ({ shell, label, character }))),
+)('refuses a $label installation path before sending any keys to $shell', async ({ shell, character }) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'art-controls-'));
+  const directory = path.join(root, `package-${character}-literal`);
+  fs.mkdirSync(directory);
+  fixture.script = path.join(directory, 'decorative.js');
+  fs.writeFileSync(fixture.script, '');
+  service.getPaneCurrentCommand.mockResolvedValue(shell);
+  try {
+    const { renderAsciiArt } = await import('../src/utils/asciiArt.js');
+    await expect(renderAsciiArt({ paneId: '%9', art: [] }))
+      .rejects.toThrow('installation path contains terminal control characters');
+    expect(service.sendKeys).not.toHaveBeenCalled();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

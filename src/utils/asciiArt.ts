@@ -49,6 +49,14 @@ export async function renderAsciiArt(
     }
   }
 
+  const absolutePath = path.isAbsolute(scriptPath)
+    ? scriptPath
+    : path.resolve(scriptPath)
+  // Shell quoting does not stop the pane's terminal from interpreting keys.
+  if (/[\u0000-\u001f\u007f]/u.test(absolutePath)) {
+    throw new Error("Cannot launch decorative pane: installation path contains terminal control characters")
+  }
+
   // Verify the script exists
   if (!fs.existsSync(scriptPath)) {
     throw new Error(
@@ -73,9 +81,6 @@ export async function renderAsciiArt(
   const quote = shell.dialect === "fish" ? fishQuote : shellQuote
 
   // Run the decorative pane script with absolute path
-  const absolutePath = path.isAbsolute(scriptPath)
-    ? scriptPath
-    : path.resolve(scriptPath)
   await tmuxService.sendKeys(
     paneId,
     [`PSYCHE_THEME=${quote(getActivePsycheTheme())} node ${quote(absolutePath)}`, 'Enter']
