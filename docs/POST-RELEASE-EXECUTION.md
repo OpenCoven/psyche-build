@@ -254,8 +254,10 @@ Two contract improvements came out of it and are enforced now: the synchronizer
 reports schema skew as a bounded `Beads schema version skew` diagnostic instead
 of an unclassified failure, and the drift validator scopes missing-mirror drift
 to active Beads so it stops reporting findings the synchronizer cannot repair.
-The Beads CLI fleet rule and the closing-keyword rule in
-[`.beads/README.md`](../.beads/README.md) record the two recurrence risks:
+The Beads CLI fleet rule and the closing-keyword rule in `.beads/README.md`
+(removed with Beads under #473; see
+[the retirement record](./working-records/beads-retirement-2026-10.md))
+recorded the two recurrence risks:
 any clone running a non-pinned CLI can re-migrate the shared schema, and a
 GitHub closing keyword before a mirror reference can change mirror state
 outside the synchronizer.

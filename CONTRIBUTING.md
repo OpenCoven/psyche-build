@@ -29,6 +29,27 @@ bash ./scripts/agent-bootstrap
 
 Bootstrap installs the locked dependency graph and must leave repository state unchanged. If it cannot satisfy the pinned environment without mutating the checkout, it fails instead of silently repairing source state.
 
+### Working in a second worktree
+
+One branch per outcome usually means a second `git worktree`. Three things
+differ from the main checkout:
+
+- **Put it under `.worktrees/` or `.claude/worktrees/`.** Both are ignored by
+  Git and excluded in `vitest.config.ts`, so the main checkout's test run does
+  not pick up the copy's tests.
+- **Bootstrap it.** A worktree has no `node_modules`, and the gate needs the
+  dependencies of the root and of every workspace package (`docs/`,
+  `frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`).
+  Run `bash ./scripts/agent-bootstrap` there.
+- **Keep its path short.** Two tests in `__tests__/controlRuntime.test.ts` fail
+  from a checkout whose path is longer than 128 bytes, because a lease request
+  refuses a longer project path
+  ([#565](https://github.com/OpenCoven/psyche-build/issues/565)). If those two
+  fail in a fresh worktree, check the path before the code.
+
+Run one full gate at a time on a machine. Two concurrent runs compete for the
+processor and time-sensitive tests can fail for that reason alone.
+
 ### 3. Choose the smallest owning surface
 
 Before editing, identify the canonical owner in `docs/REPOSITORY-MAP.md` and the relevant scoped authority document. In particular:
