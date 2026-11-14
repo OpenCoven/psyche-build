@@ -130,7 +130,7 @@
     "ink-testing-library": "^4.0.0",
     "npm-run-all2": "^9.0.3",
     "postcss": "^8.5.26",
-    "postcss-selector-parser": "^7.1.5",
+    "postcss-selector-parser": "^7.1.6",
     "postcss-value-parser": "^4.2.0",
     "strip-ansi": "^7.2.0",
     "tsx": "^4.23.12",
