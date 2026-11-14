@@ -437,10 +437,12 @@ describe("LAN bridge authentication deadline", () => {
 
     // Left to the WebSocket library, this peer would hold stop() for its
     // thirty-second close timeout.
+    let giveUp: NodeJS.Timeout | undefined;
     const outcome = await Promise.race([
       daemon.stop().then(() => "stopped"),
-      new Promise((resolve) => setTimeout(() => resolve("still stopping"), 5_000)),
+      new Promise((resolve) => { giveUp = setTimeout(() => resolve("still stopping"), 5_000); }),
     ]);
+    clearTimeout(giveUp);
     expect(outcome).toBe("stopped");
     await waitFor(() => peer.state.closed, "silent peer dropped at stop");
   });
@@ -952,11 +954,12 @@ describe("LAN bridge authenticated sessions and transport errors", () => {
     // Unthrottled: three errors, three lines. The pre-auth throttle would log two.
     expect(lines).toHaveLength(3);
 
-    // The short pre-auth grace does not apply: these connections are still up
-    // after it, left to the WebSocket library's own close handling.
+    // The short pre-auth grace does not apply: the host still holds these
+    // connections after it, left to the WebSocket library's own close
+    // handling. Observed on the host, because a half-open peer cannot tell.
     scheduler.advance(LIMITS.closeGraceMs);
-    await settle();
-    expect(peers.every(({ peer }) => !peer.state.closed)).toBe(true);
+    await waitFor(() => listener.activeSessions.size < peers.length, "a connection dropped", 300).catch(() => {});
+    expect(listener.activeSessions.size).toBe(peers.length);
   });
 });
 
