@@ -121,8 +121,10 @@ export class WSSListener {
     // connection, so a peer that pipelines requests grows that queue for as
     // long as it likes. The connection is dropped at the first one.
     this.https.on("request", (req) => req.socket.destroy());
-    // A request with an `Expect` header never reaches 'request': the HTTP
-    // server answers it by itself and keeps the connection open.
+    // A request with an `Expect` header is answered by the HTTP server
+    // itself: `100 Continue` and then 'request', or, for any other
+    // expectation, a 417 with the connection kept open and no 'request' at
+    // all. Neither gets an answer here.
     this.https.on("checkContinue", (req) => req.socket.destroy());
     this.https.on("checkExpectation", (req) => req.socket.destroy());
   }
@@ -223,6 +225,7 @@ export class WSSListener {
       preAuth: {
         maxBufferedBytes: this.limits.maxBufferedBytes,
         maxInboundBytes: this.limits.maxInboundBytes,
+        maxLookupBytes: this.limits.maxLookupBytes,
         onRejected: () => this.gate.rejected(connection),
         onDrop: (reason) => {
           this.gate.drop(connection);
@@ -246,6 +249,8 @@ export class WSSListener {
     req.socket.on("data", (chunk: Buffer) => { session.noteInbound(chunk.length); });
     this.gate.attach(connection, {
       isAuthenticated: () => session.state === "authenticated",
+      wasAuthenticated: () => session.wasAuthenticated,
+      drop: (reason) => session.dropFor(reason),
       isAuthenticating: () => session.authenticating,
       isOpen: () => session.isOpen(),
       reject: (error, closeCode) => session.reject(error, closeCode),

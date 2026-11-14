@@ -46,6 +46,7 @@ const LIMITS: PreAuthLimits = {
   maxBufferedBytes: 16 * 1_024,
   maxInboundBytes: 256 * 1_024,
   maxTransportBytes: 512 * 1_024,
+  maxLookupBytes: 1_024 * 1_024,
   closeGraceMs: 500,
 };
 
@@ -152,6 +153,12 @@ async function startDaemon(limits: Partial<PreAuthLimits> | "defaults" = {}) {
   const listener = (daemon as any).listener as WSSListener;
   certificateByPort.set(port, (daemon as any).tls.cert as string);
   return { daemon, port, pairing, tokens, scheduler, listener };
+}
+
+/** Bytes the host has counted from the peer on its only session. */
+function inboundBytes(listener: WSSListener): number {
+  const [session] = [...listener.activeSessions];
+  return session ? (session as unknown as { inboundBytes: number }).inboundBytes : 0;
 }
 
 async function waitFor(predicate: () => boolean, label: string, timeoutMs = 3000) {
@@ -892,23 +899,157 @@ describe("LAN bridge pre-authentication frames", () => {
     await settle();
     expect(listener.unauthenticatedConnectionCount).toBe(1);
 
+    const [session] = [...listener.activeSessions];
+    const dropLines = () => warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("bridge dropped an unauthenticated connection"));
+    // The session's state in the same turn as the drop: frames still queued
+    // for it must find it refused, not open for one more turn.
+    let atDrop: { open: boolean; rejected: boolean } | null = null;
+    await waitFor(() => {
+      scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+      if (!atDrop && dropLines().length > 0) atDrop = { open: session.isOpen(), rejected: session.rejected };
+      return listener.unauthenticatedConnectionCount === 0;
+    }, "peer dropped at the transport budget");
+    expect(atDrop).toEqual({ open: false, rejected: true });
+    expect(dropLines()).toEqual([
+      "bridge dropped an unauthenticated connection (transport_budget); 1 dropped since start",
+    ]);
+  }, 30_000);
+
+  it("gives an unauthenticated peer that starts a close the short grace, not the library's long one", async () => {
+    // A peer may send a close frame and then never finish closing. The
+    // WebSocket library would hold that connection for its own 30 seconds.
+    const { port, listener, scheduler } = await startDaemon();
+    const peer = await silentWebSocketPeer(port, { allowHalfOpen: true });
+    const [session] = [...listener.activeSessions];
+
+    peer.socket.write(maskedFrame("", 8));
+    await waitFor(() => !session.isOpen(), "host saw the close frame");
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    await settle();
+    expect(listener.unauthenticatedConnectionCount).toBe(1);
+
+    scheduler.advance(LIMITS.closeGraceMs);
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "closing peer dropped after the grace");
+    await waitFor(() => listener.activeSessions.size === 0, "session removed");
+  });
+
+  it("gives the same grace to a peer the host is closing for an unsupported protocol version", async () => {
+    const { port, listener, scheduler } = await startDaemon();
+    const peer = await silentWebSocketPeer(port, { allowHalfOpen: true });
+    const [session] = [...listener.activeSessions];
+
+    peer.socket.write(maskedFrame(JSON.stringify({
+      type: "hello",
+      payload: { clientId: "c", clientName: "c", protocolVersion: 99, token: null },
+    })));
+    await waitFor(() => !session.isOpen(), "host began closing");
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    scheduler.advance(LIMITS.closeGraceMs);
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "closing peer dropped after the grace");
+  });
+
+  it("still holds a closing unauthenticated peer to the transport budget", async () => {
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const budget = 8 * 1024;
+    const { port, listener, scheduler } = await startDaemon({ maxInboundBytes: budget, maxTransportBytes: budget });
+    const peer = await silentWebSocketPeer(port, { allowHalfOpen: true });
+    const [session] = [...listener.activeSessions];
+
+    peer.socket.write(maskedFrame("", 8));
+    await waitFor(() => !session.isOpen(), "host saw the close frame");
+    const unanswered = Buffer.concat(Array.from({ length: 256 }, () => maskedFrame("u".repeat(120), 10)));
+    await new Promise<void>((resolve) => peer.socket.write(unanswered, () => resolve()));
+
+    // Dropped at a look, well inside the grace.
     await waitFor(() => {
       scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
       return listener.unauthenticatedConnectionCount === 0;
-    }, "peer dropped at the transport budget");
+    }, "closing peer dropped at the transport budget");
     const lines = warn.mock.calls
       .map(([message]) => String(message))
       .filter((message) => message.includes("bridge dropped an unauthenticated connection"));
     expect(lines).toEqual([
       "bridge dropped an unauthenticated connection (transport_budget); 1 dropped since start",
     ]);
-  }, 30_000);
+  });
+
+  it("holds a device to an allowance, not to nothing, while its token is looked up", async () => {
+    // Frames behind the hello wait for the lookup, so what arrives during it
+    // is held. A lookup that never ended would otherwise hold without limit.
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const { port, tokens, listener } = await startDaemon({
+      maxInboundBytes: 8 * 1024, maxTransportBytes: 8 * 1024, maxLookupBytes: 16 * 1024,
+    });
+    tokens.register("known-token");
+    tokens.block();
+    const client = await connect(port);
+
+    client.send({
+      type: "hello",
+      payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: "known-token" },
+    });
+    for (let i = 0; i < 96; i += 1) {
+      client.send({ type: "ping", payload: { token: `${i}:${"d".repeat(400)}` } });
+    }
+
+    await client.until(() => client.closes.length > 0, "dropped during the lookup");
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
+    const lines = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("bridge dropped an unauthenticated connection"));
+    expect(lines).toEqual([
+      "bridge dropped an unauthenticated connection (inbound_budget); 1 dropped since start",
+    ]);
+  });
+
+  it("judges a peer by the budget when its token lookup fails outright", async () => {
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const budget = 8 * 1024;
+    const { port, tokens, listener } = await startDaemon({ maxInboundBytes: budget });
+    let fail!: (err: Error) => void;
+    const lookup = new Promise<never>((_resolve, reject) => { fail = reject; });
+    lookup.catch(() => {});
+    vi.spyOn(tokens, "validate").mockImplementation(() => lookup);
+    const client = await connect(port);
+
+    const frames: unknown[] = [{
+      type: "hello",
+      payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: "any-token" },
+    }];
+    for (let i = 0; i < 48; i += 1) frames.push({ type: "ping", payload: { token: `${i}:${"d".repeat(400)}` } });
+    // On the wire: the payload, a 4-byte mask, and a 2- or 4-byte header.
+    const wireBytes = frames
+      .map((frame) => Buffer.byteLength(JSON.stringify(frame)))
+      .reduce((total, length) => total + length + (length < 126 ? 6 : 8), 0);
+    expect(wireBytes).toBeGreaterThan(budget);
+    for (const frame of frames) client.send(frame);
+    await waitFor(() => inboundBytes(listener) === wireBytes, "the whole burst reached the host during the lookup");
+    expect(client.closes).toEqual([]);
+
+    // Nothing more arrives from the peer: the account is settled by the
+    // lookup ending, not by its next frame.
+    fail(new Error("token store unavailable"));
+    await client.until(() => client.closes.length > 0, "dropped once the lookup failed");
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
+    expect(client.messages.filter((m) => m.type === "pong")).toEqual([]);
+    // Dropped for the budget, at once: not refused later, frame by frame, by
+    // some other bound.
+    expect(client.errors()).toEqual([]);
+    const lines = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("bridge dropped an unauthenticated connection"));
+    expect(lines).toEqual([
+      "bridge dropped an unauthenticated connection (inbound_budget); 1 dropped since start",
+    ]);
+  });
 
   it("does not hold a device with a valid token to the budget while that token is looked up", async () => {
     // The lookup is asynchronous, so what a device sends straight after its
     // hello arrives while it is still unauthenticated.
     const budget = 8 * 1024;
-    const { port, tokens, scheduler } = await startDaemon({ maxInboundBytes: budget, maxTransportBytes: budget });
+    const { port, tokens, scheduler, listener } = await startDaemon({ maxInboundBytes: budget, maxTransportBytes: budget });
     tokens.register("known-token");
     const release = tokens.block();
     const client = await connect(port);
@@ -922,7 +1063,7 @@ describe("LAN bridge pre-authentication frames", () => {
       client.send({ type: "ping", payload: { token: `${i}:${"d".repeat(400)}` } });
     }
     await waitFor(() => tokens.validateCalls === 1, "token lookup started");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => inboundBytes(listener) > budget, "the burst reached the host during the lookup");
     scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS * 2);
     await settle();
     expect(client.closes).toEqual([]);
@@ -950,7 +1091,7 @@ describe("LAN bridge pre-authentication frames", () => {
       client.send({ type: "ping", payload: { token: `${i}:${"d".repeat(400)}` } });
     }
     await waitFor(() => tokens.validateCalls === 1, "token lookup started");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => inboundBytes(listener) > budget, "the burst reached the host during the lookup");
     expect(client.closes).toEqual([]);
 
     release();
@@ -1195,6 +1336,21 @@ describe("LAN bridge plain HTTP requests", () => {
     socket.write("GET / HTTP/1.1\r\nHost: a\r\nExpect: nothing\r\n\r\n");
     await waitFor(() => closed, "connection dropped on the first request");
     await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
+  });
+
+  it("drops a request that expects 100-continue without answering it", async () => {
+    const { port } = await startDaemon();
+    const socket = connectTls(port);
+    const received: Buffer[] = [];
+    let closed = false;
+    socket.on("data", (chunk: Buffer) => received.push(chunk));
+    socket.on("close", () => { closed = true; });
+    socket.on("error", () => {});
+    await new Promise<void>((resolve) => socket.once("secureConnect", () => resolve()));
+
+    socket.write("POST / HTTP/1.1\r\nHost: a\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n");
+    await waitFor(() => closed, "connection dropped");
+    expect(Buffer.concat(received).toString("latin1")).toBe("");
   });
 
   it("still upgrades a WebSocket request", async () => {

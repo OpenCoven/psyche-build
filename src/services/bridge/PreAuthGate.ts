@@ -89,17 +89,37 @@ export const PRE_AUTH_MAX_INBOUND_BYTES = 32 * 1024;
  * messages of its own that never do, and the TLS layer answers some of them
  * by itself, so a peer can make the host work and queue replies without the
  * parser seeing a byte. This count sees everything. A handshake and an
- * upgrade cost under 2 KiB of it; the rest is the inbound budget plus record
+ * upgrade cost about 2 KiB of it; the rest is the inbound budget plus record
  * overhead.
+ *
+ * This bounds memory. It does not bound processor time: see the poll below.
  */
 export const PRE_AUTH_MAX_TRANSPORT_BYTES = 64 * 1024;
 
 /**
  * How often the transport budget is checked. Nothing raises an event for
- * bytes the TLS layer consumes, so the gate has to look. What a peer can
- * send between two looks is the overshoot.
+ * bytes the TLS layer consumes, so the gate has to look.
+ *
+ * The look is a timer, and a timer runs only between turns of the event
+ * loop. A peer flooding TLS-level messages keeps one turn busy for about
+ * half a second and over a megabyte before any timer can run, so that, not
+ * this interval, is the overshoot. The connection is then dropped, but a
+ * peer that reconnects can do it again: the budget does not stop one address
+ * from costing the host most of its event loop for as long as it keeps
+ * reconnecting.
  */
 export const PRE_AUTH_TRANSPORT_POLL_MS = 250;
+
+/**
+ * Most bytes a connection may send, by either count, while the token it
+ * presented is being looked up.
+ *
+ * The lookup is asynchronous, and a device with a valid token may send on
+ * without waiting for the answer, so the two budgets above cannot apply
+ * during it. Frames behind the hello wait for the lookup, though, so what
+ * arrives meanwhile is held: this is the most that may be.
+ */
+export const PRE_AUTH_MAX_LOOKUP_BYTES = 1024 * 1024;
 
 /**
  * How long a rejected peer has to complete the close handshake before its
@@ -121,6 +141,7 @@ export interface PreAuthLimits {
   maxBufferedBytes: number;
   maxInboundBytes: number;
   maxTransportBytes: number;
+  maxLookupBytes: number;
   closeGraceMs: number;
 }
 
@@ -133,6 +154,7 @@ export const DEFAULT_PRE_AUTH_LIMITS: Readonly<PreAuthLimits> = Object.freeze({
   maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
   maxInboundBytes: PRE_AUTH_MAX_INBOUND_BYTES,
   maxTransportBytes: PRE_AUTH_MAX_TRANSPORT_BYTES,
+  maxLookupBytes: PRE_AUTH_MAX_LOOKUP_BYTES,
   closeGraceMs: PRE_AUTH_CLOSE_GRACE_MS,
 });
 
@@ -214,6 +236,9 @@ export function resolvePreAuthLimits(overrides: Partial<PreAuthLimits> = {}): Pr
   if (limits.maxTransportBytes < limits.maxInboundBytes) {
     throw new Error("invalid pre-auth limit maxTransportBytes: below maxInboundBytes");
   }
+  if (limits.maxLookupBytes < limits.maxTransportBytes) {
+    throw new Error("invalid pre-auth limit maxLookupBytes: below maxTransportBytes");
+  }
   return limits;
 }
 
@@ -264,6 +289,16 @@ export interface PreAuthTransport {
 /** The session on a connection once it has become a WebSocket. */
 export interface PreAuthPeer {
   isAuthenticated(): boolean;
+  /**
+   * True if the session has ever been authenticated. It stays true when the
+   * host demotes the session in order to close it.
+   */
+  wasAuthenticated(): boolean;
+  /**
+   * Drop the peer now: mark its session refused, so nothing queued for it is
+   * handled, and destroy its connection.
+   */
+  drop(reason: PreAuthDropReason): void;
   /** True while the peer's token is being looked up. */
   isAuthenticating(): boolean;
   /** False once the WebSocket has begun closing. */
@@ -399,9 +434,10 @@ export class PreAuthGate {
     connection.rejected = true;
     this.clear(connection, "upgradeTimer");
     this.clear(connection, "authTimer");
-    this.clear(connection, "pollTimer");
+    // The transport budget still applies during the grace: a peer that has
+    // been refused can go on sending below the WebSocket.
     connection.graceTimer = this.scheduler.setTimeout(() => {
-      connection.graceTimer = null;
+      this.clearAll(connection);
       connection.transport.destroy();
     }, this.limits.closeGraceMs);
   }
@@ -454,19 +490,31 @@ export class PreAuthGate {
   }
 
   /**
-   * Look at how much the connection's transport has carried. The looking
-   * stops for good once the connection authenticates or begins to close: an
-   * authenticated session is held to no budget, and a closing socket is
-   * already on its way out with whatever it was owed.
+   * Look at how much the connection's transport has carried.
+   *
+   * The looking stops for good only once the connection has authenticated:
+   * such a session is held to no budget, including after the host demotes it
+   * in order to close it, when it may still be owed output.
+   *
+   * A connection that has never authenticated is watched until its socket
+   * closes. If its WebSocket has begun to close, by its own close frame or
+   * the host's, it also gets the short grace here: the WebSocket library
+   * would otherwise hold it for its own much longer timeout, with nothing
+   * above the transport hearing from it again.
    */
   private onTransportPoll(connection: TrackedConnection): void {
     connection.pollTimer = null;
     const peer = connection.peer;
-    if (peer && (peer.isAuthenticated() || !peer.isOpen())) return;
-    if (!peer?.isAuthenticating() && connection.transport.bytesRead() > this.limits.maxTransportBytes) {
+    if (peer?.wasAuthenticated()) return;
+    if (peer && !peer.isOpen()) this.rejected(connection);
+    const budget = peer?.isAuthenticating() ? this.limits.maxLookupBytes : this.limits.maxTransportBytes;
+    if (connection.transport.bytesRead() > budget) {
       this.clearAll(connection);
+      // Through the session where there is one, so that frames still queued
+      // for it find it refused rather than open for one more turn.
+      if (peer) peer.drop("transport_budget");
+      else this.onDropped?.("transport_budget");
       connection.transport.destroy();
-      this.onDropped?.("transport_budget");
       return;
     }
     this.armTransportPoll(connection);
@@ -475,7 +523,7 @@ export class PreAuthGate {
   private onUpgradeDeadline(connection: TrackedConnection): void {
     connection.upgradeTimer = null;
     if (connection.peer) return;
-    this.clear(connection, "authTimer");
+    this.clearAll(connection);
     connection.transport.destroy();
   }
 
@@ -483,6 +531,7 @@ export class PreAuthGate {
     connection.authTimer = null;
     if (this.isAuthenticated(connection)) return;
     if (!connection.peer) {
+      this.clearAll(connection);
       connection.transport.destroy();
       return;
     }

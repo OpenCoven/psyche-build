@@ -345,15 +345,20 @@ export class BridgeDaemon {
         }
         if (m.payload.token) {
           // The lookup is asynchronous. A device with a valid token may send
-          // on without waiting for it, so the session is not judged by the
-          // pre-auth budgets until the answer is known.
+          // on without waiting for it, so until the answer is known the
+          // session is held to the lookup allowance, not the pre-auth budgets.
           s.authenticating = true;
           let rec: Awaited<ReturnType<TokenStore["validate"]>>;
           try {
             rec = await this.tokens.validate(m.payload.token);
-          } finally {
+          } catch (err) {
+            // A lookup that fails authenticates nothing: what the peer sent
+            // during it counts against it now, not at its next frame.
             s.authenticating = false;
+            s.noteInbound(0);
+            throw err;
           }
+          s.authenticating = false;
           // The connection can be refused by the authentication deadline, or
           // simply drop, while the lookup is in flight. It stays as it is:
           // marking it authenticated now would exempt a closing socket from

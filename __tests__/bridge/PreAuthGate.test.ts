@@ -5,6 +5,7 @@ import {
   PRE_AUTH_ERRORS,
   PRE_AUTH_MAX_BUFFERED_BYTES,
   PRE_AUTH_MAX_INBOUND_BYTES,
+  PRE_AUTH_MAX_LOOKUP_BYTES,
   PRE_AUTH_MAX_TRANSPORT_BYTES,
   PRE_AUTH_TRANSPORT_POLL_MS,
   PRE_AUTH_MAX_CONNECTIONS,
@@ -40,6 +41,7 @@ const LIMITS: PreAuthLimits = {
   maxBufferedBytes: 2_048,
   maxInboundBytes: 4_096,
   maxTransportBytes: 8_192,
+  maxLookupBytes: 65_536,
   closeGraceMs: 500,
 };
 
@@ -51,13 +53,18 @@ function transport() {
 function peer(initiallyAuthenticated = false) {
   const state = {
     authenticated: initiallyAuthenticated,
+    wasAuthenticated: initiallyAuthenticated,
     authenticating: false,
     open: true,
     rejections: [] as Array<{ error: unknown; closeCode: number }>,
+    drops: [] as string[],
   };
   return {
     state,
     isAuthenticated: () => state.authenticated,
+    // Latches, as the real session does when its state is set.
+    wasAuthenticated: () => { state.wasAuthenticated ||= state.authenticated; return state.wasAuthenticated; },
+    drop: (reason: string) => { state.drops.push(reason); },
     isAuthenticating: () => state.authenticating,
     isOpen: () => state.open,
     reject: (error: unknown, closeCode: number) => { state.rejections.push({ error, closeCode }); },
@@ -85,6 +92,7 @@ describe("pre-auth limits", () => {
       maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
       maxInboundBytes: PRE_AUTH_MAX_INBOUND_BYTES,
       maxTransportBytes: PRE_AUTH_MAX_TRANSPORT_BYTES,
+      maxLookupBytes: PRE_AUTH_MAX_LOOKUP_BYTES,
       closeGraceMs: expect.any(Number),
     });
     expect(Object.isFrozen(DEFAULT_PRE_AUTH_LIMITS)).toBe(true);
@@ -129,6 +137,7 @@ describe("pre-auth limits", () => {
     ["a zero outbound buffer bound", { maxBufferedBytes: 0 }],
     ["a zero inbound budget", { maxInboundBytes: 0 }],
     ["a zero transport budget", { maxTransportBytes: 0 }],
+    ["a lookup allowance smaller than the transport budget", { maxTransportBytes: 8_192, maxLookupBytes: 8_191 }],
     ["a transport budget smaller than the inbound budget", { maxInboundBytes: 4_096, maxTransportBytes: 4_095 }],
   ])("refuses to start with %s", (_label, override) => {
     // A limit that silently means "no limit" is the failure this change
@@ -431,7 +440,9 @@ describe("Session backlog checks at the edges", () => {
     return { readyState, bufferedAmount, send: vi.fn(), close: vi.fn() };
   }
   function session(ws: ReturnType<typeof socket>) {
-    const preAuth = { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop: vi.fn() };
+    const preAuth = {
+      maxBufferedBytes: 2_048, maxInboundBytes: 4_096, maxLookupBytes: 65_536, onRejected: vi.fn(), onDrop: vi.fn(),
+    };
     return { preAuth, session: new Session({ socket: ws as any, remoteAddress: "10.0.0.1", preAuth }) };
   }
 
@@ -515,6 +526,35 @@ describe("Session backlog checks at the edges", () => {
     expect(preAuth.onDrop).toHaveBeenCalledWith("inbound_budget");
   });
 
+  it("holds it to a larger allowance during the lookup, not to none", () => {
+    // Frames behind the hello wait for the lookup, so what arrives meanwhile
+    // is held. A lookup that never ended would otherwise hold without limit.
+    const { session: s, preAuth } = session(socket(0));
+    s.authenticating = true;
+    expect(s.noteInbound(65_536)).toBe(false);
+    expect(s.noteInbound(1)).toBe(true);
+    expect(preAuth.onDrop).toHaveBeenCalledWith("inbound_budget");
+  });
+
+  it("remembers that a session was authenticated after it is demoted to close", () => {
+    const ws = socket(0);
+    const { session: s } = session(ws);
+    expect(s.wasAuthenticated).toBe(false);
+    s.state = "authenticated";
+    s.close("revoked by host");
+    expect(s.state).toBe("unauthenticated");
+    expect(s.wasAuthenticated).toBe(true);
+  });
+
+  it("can be dropped from outside, once, and handles nothing afterwards", () => {
+    const { session: s, preAuth } = session(socket(0));
+    s.dropFor("transport_budget");
+    s.dropFor("transport_budget");
+    expect(preAuth.onDrop).toHaveBeenCalledTimes(1);
+    expect(preAuth.onDrop).toHaveBeenCalledWith("transport_budget");
+    expect(s.rejected).toBe(true);
+  });
+
   it("does not count what an authenticated session sends", () => {
     const { session: s, preAuth } = session(socket(0));
     s.state = "authenticated";
@@ -579,8 +619,9 @@ describe("pre-auth transport budget", () => {
     const { gate: g, scheduler, drops } = gate();
     const silent = transport();
     const upgraded = transport();
+    const upgradedPeer = peer();
     g.admit("10.0.0.1", silent);
-    g.attach(g.admit("10.0.0.2", upgraded)!, peer());
+    g.attach(g.admit("10.0.0.2", upgraded)!, upgradedPeer);
 
     silent.state.bytesRead = 8_192;
     upgraded.state.bytesRead = 8_192;
@@ -591,57 +632,107 @@ describe("pre-auth transport budget", () => {
     upgraded.state.bytesRead = 8_193;
     scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
     expect([silent.state.destroyed, upgraded.state.destroyed]).toEqual([1, 1]);
-    expect(drops).toEqual(["transport_budget", "transport_budget"]);
+    // A connection with a session is dropped through it, so the session
+    // stops handling frames at once; one without is reported by the gate.
+    expect(drops).toEqual(["transport_budget"]);
+    expect(upgradedPeer.state.drops).toEqual(["transport_budget"]);
     expect(scheduler.pending).toBe(0);
   });
 
-  it("leaves an authenticated connection and a closing one alone", () => {
+  it("stops looking for good once a connection has authenticated, even after it is demoted to close", () => {
     const { gate: g, scheduler, drops } = gate();
-    const paired = transport();
-    const closing = transport();
-    const closingPeer = peer();
-    g.attach(g.admit("10.0.0.1", paired)!, peer(true));
-    g.attach(g.admit("10.0.0.2", closing)!, closingPeer);
-    closingPeer.state.open = false;
+    const t = transport();
+    const p = peer(true);
+    g.attach(g.admit("10.0.0.1", t)!, p);
 
-    paired.state.bytesRead = 50 * 1024 * 1024;
-    closing.state.bytesRead = 50 * 1024 * 1024;
-    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS * 4);
-    expect([paired.state.destroyed, closing.state.destroyed]).toEqual([0, 0]);
+    // The host closes it: demoted, closing, megabytes already received.
+    p.state.authenticated = false;
+    p.state.open = false;
+    t.state.bytesRead = 50 * 1024 * 1024;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS * 4 + LIMITS.closeGraceMs);
+    expect(t.state.destroyed).toBe(0);
+    expect(p.state.drops).toEqual([]);
     expect(drops).toEqual([]);
   });
 
-  it("waits for a token lookup to end before judging the connection", () => {
-    const { gate: g, scheduler, drops } = gate();
+  it("gives a never-authenticated connection that begins to close the short grace, and keeps looking meanwhile", () => {
+    // A peer can start a close whenever it likes. Left to the WebSocket
+    // library, a closing connection is held for that library's own, much
+    // longer, timeout, and nothing above the transport hears from it again.
+    const graced = transport();
+    const flooding = transport();
+    const gracedPeer = peer();
+    const floodingPeer = peer();
+    const { gate: g, scheduler } = gate();
+    g.attach(g.admit("10.0.0.1", graced)!, gracedPeer);
+    g.attach(g.admit("10.0.0.2", flooding)!, floodingPeer);
+    gracedPeer.state.open = false;
+    floodingPeer.state.open = false;
+
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect([graced.state.destroyed, flooding.state.destroyed]).toEqual([0, 0]);
+
+    flooding.state.bytesRead = 8_193;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect(flooding.state.destroyed).toBe(1);
+    expect(floodingPeer.state.drops).toEqual(["transport_budget"]);
+    expect(graced.state.destroyed).toBe(0);
+
+    scheduler.advance(LIMITS.closeGraceMs);
+    expect(graced.state.destroyed).toBe(1);
+    expect(gracedPeer.state.drops).toEqual([]);
+    expect(scheduler.pending).toBe(0);
+  });
+
+  it("keeps looking at a rejected connection until its grace ends", () => {
+    const { gate: g, scheduler } = gate();
+    const t = transport();
+    const p = peer();
+    const connection = g.admit("10.0.0.1", t)!;
+    g.attach(connection, p);
+    g.rejected(connection);
+
+    t.state.bytesRead = 8_193;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect(t.state.destroyed).toBe(1);
+    expect(p.state.drops).toEqual(["transport_budget"]);
+    expect(scheduler.pending).toBe(0);
+  });
+
+  it("holds a connection to the lookup allowance, not the budget, while its token is looked up", () => {
+    const { gate: g, scheduler } = gate();
     const t = transport();
     const p = peer();
     g.attach(g.admit("10.0.0.1", t)!, p);
 
     p.state.authenticating = true;
-    t.state.bytesRead = 50_000;
+    t.state.bytesRead = 65_536;
     scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS * 4);
     expect(t.state.destroyed).toBe(0);
 
+    // The lookup ends without authenticating it: the budget applies again.
     p.state.authenticating = false;
     scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
     expect(t.state.destroyed).toBe(1);
-    expect(drops).toEqual(["transport_budget"]);
+    expect(p.state.drops).toEqual(["transport_budget"]);
   });
 
-  it("stops looking once the connection is released or rejected", () => {
+  it("drops a connection that passes the lookup allowance during the lookup", () => {
     const { gate: g, scheduler } = gate();
-    const released = g.admit("10.0.0.1", transport())!;
-    g.release(released);
-    expect(scheduler.pending).toBe(0);
-
     const t = transport();
-    const rejected = g.admit("10.0.0.2", t)!;
-    g.attach(rejected, peer());
-    g.rejected(rejected);
-    t.state.bytesRead = 50_000;
-    scheduler.advance(LIMITS.closeGraceMs);
-    // Destroyed once, by the grace timer, and not reported as a budget drop.
+    const p = peer();
+    g.attach(g.admit("10.0.0.1", t)!, p);
+
+    p.state.authenticating = true;
+    t.state.bytesRead = 65_537;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
     expect(t.state.destroyed).toBe(1);
+    expect(p.state.drops).toEqual(["transport_budget"]);
+  });
+
+  it("stops looking once the connection is released", () => {
+    const { gate: g, scheduler } = gate();
+    g.release(g.admit("10.0.0.1", transport())!);
     expect(scheduler.pending).toBe(0);
   });
 });
