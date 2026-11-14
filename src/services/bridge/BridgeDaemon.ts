@@ -344,7 +344,16 @@ export class BridgeDaemon {
           this.sendWelcome(s, PROTOCOL_VERSION);
         }
         if (m.payload.token) {
-          const rec = await this.tokens.validate(m.payload.token);
+          // The lookup is asynchronous. A device with a valid token may send
+          // on without waiting for it, so the session is not judged by the
+          // pre-auth budgets until the answer is known.
+          s.authenticating = true;
+          let rec: Awaited<ReturnType<TokenStore["validate"]>>;
+          try {
+            rec = await this.tokens.validate(m.payload.token);
+          } finally {
+            s.authenticating = false;
+          }
           // The connection can be refused by the authentication deadline, or
           // simply drop, while the lookup is in flight. It stays as it is:
           // marking it authenticated now would exempt a closing socket from
@@ -355,6 +364,8 @@ export class BridgeDaemon {
             s.token = m.payload.token;
             await this.tokens.touch(m.payload.token);
           } else {
+            // Whatever it sent during the lookup now counts against it.
+            if (s.noteInbound(0)) return;
             s.send({ type: "error", payload: { code: "invalid_token", message: "token not recognized" } });
             // session stays unauthenticated; caller may then run :pair on the Mac and retry
           }

@@ -7,8 +7,9 @@ import type { BridgeError } from "./wireProtocol.js";
  * The listener binds 0.0.0.0 and is advertised over Bonjour, so any host on
  * the network can open a connection before it has proved anything. Until a
  * connection authenticates, how many sockets it may hold, for how long, how
- * large a frame it may send, how much it may send in total, and how many
- * reply bytes may sit unread for it are bounded here. An authenticated session is outside these limits
+ * large a frame it may send, how much it may send in total (as the
+ * WebSocket parser counts it, and as the wire does), and how many reply
+ * bytes may sit unread for it are bounded here. An authenticated session is outside these limits
  * entirely and is never closed, counted, or refused by them.
  */
 
@@ -73,8 +74,32 @@ export const PRE_AUTH_MAX_BUFFERED_BYTES = 64 * 1024;
  * hello, a few codes and the odd ping: a few hundred bytes. This is that,
  * many times over, and nothing else an unauthenticated peer does is owed
  * more.
+ *
+ * Not enforced while the connection's token is being looked up: a device
+ * with a valid token may send on without waiting for the answer.
  */
-export const PRE_AUTH_MAX_INBOUND_BYTES = 64 * 1024;
+export const PRE_AUTH_MAX_INBOUND_BYTES = 32 * 1024;
+
+/**
+ * Most bytes a connection's transport may carry, in total, before it
+ * authenticates: the TLS handshake, the upgrade request, and everything
+ * after, as counted on the wire.
+ *
+ * The inbound budget counts what reaches the WebSocket parser. TLS has
+ * messages of its own that never do, and the TLS layer answers some of them
+ * by itself, so a peer can make the host work and queue replies without the
+ * parser seeing a byte. This count sees everything. A handshake and an
+ * upgrade cost under 2 KiB of it; the rest is the inbound budget plus record
+ * overhead.
+ */
+export const PRE_AUTH_MAX_TRANSPORT_BYTES = 64 * 1024;
+
+/**
+ * How often the transport budget is checked. Nothing raises an event for
+ * bytes the TLS layer consumes, so the gate has to look. What a peer can
+ * send between two looks is the overshoot.
+ */
+export const PRE_AUTH_TRANSPORT_POLL_MS = 250;
 
 /**
  * How long a rejected peer has to complete the close handshake before its
@@ -95,6 +120,7 @@ export interface PreAuthLimits {
   maxFrameBytes: number;
   maxBufferedBytes: number;
   maxInboundBytes: number;
+  maxTransportBytes: number;
   closeGraceMs: number;
 }
 
@@ -106,6 +132,7 @@ export const DEFAULT_PRE_AUTH_LIMITS: Readonly<PreAuthLimits> = Object.freeze({
   maxFrameBytes: PRE_AUTH_MAX_FRAME_BYTES,
   maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
   maxInboundBytes: PRE_AUTH_MAX_INBOUND_BYTES,
+  maxTransportBytes: PRE_AUTH_MAX_TRANSPORT_BYTES,
   closeGraceMs: PRE_AUTH_CLOSE_GRACE_MS,
 });
 
@@ -184,6 +211,9 @@ export function resolvePreAuthLimits(overrides: Partial<PreAuthLimits> = {}): Pr
   if (limits.maxFrameBytes > TRANSPORT_MAX_FRAME_BYTES) {
     throw new Error("invalid pre-auth limit maxFrameBytes: exceeds the transport frame cap");
   }
+  if (limits.maxTransportBytes < limits.maxInboundBytes) {
+    throw new Error("invalid pre-auth limit maxTransportBytes: below maxInboundBytes");
+  }
   return limits;
 }
 
@@ -227,17 +257,26 @@ export function isWellFormedHello(payload: unknown): boolean {
 export interface PreAuthTransport {
   /** Drop the connection immediately, without a close handshake. */
   destroy(): void;
+  /** Bytes received on the wire so far, at every layer. */
+  bytesRead(): number;
 }
 
 /** The session on a connection once it has become a WebSocket. */
 export interface PreAuthPeer {
   isAuthenticated(): boolean;
+  /** True while the peer's token is being looked up. */
+  isAuthenticating(): boolean;
+  /** False once the WebSocket has begun closing. */
+  isOpen(): boolean;
   /** Send one fixed error, then begin closing with `closeCode`. */
   reject(error: BridgeError, closeCode: number): void;
 }
 
 /** Why an admitted, unauthenticated connection was dropped outright. */
-export type PreAuthDropReason = "unread_replies" | "inbound_budget";
+export type PreAuthDropReason = "unread_replies" | "inbound_budget" | "transport_budget";
+
+/** Told when the gate itself drops a connection, so the host can log it. */
+export type PreAuthDropObserver = (reason: PreAuthDropReason) => void;
 
 /** Which cap refused a connection. Carries nothing about the peer. */
 export type PreAuthRefusal = "connection_cap" | "address_cap";
@@ -256,6 +295,7 @@ interface TrackedConnection extends PreAuthConnection {
   upgradeTimer: unknown;
   authTimer: unknown;
   graceTimer: unknown;
+  pollTimer: unknown;
   rejected: boolean;
 }
 
@@ -277,6 +317,7 @@ export class PreAuthGate {
     private readonly limits: PreAuthLimits,
     private readonly scheduler: PreAuthScheduler = systemPreAuthScheduler,
     private readonly onRefused?: PreAuthRefusalObserver,
+    private readonly onDropped?: PreAuthDropObserver,
   ) {}
 
   /** Connections a cap has refused since this gate was created. */
@@ -324,6 +365,7 @@ export class PreAuthGate {
       upgradeTimer: null,
       authTimer: null,
       graceTimer: null,
+      pollTimer: null,
       rejected: false,
     };
     this.connections.add(connection);
@@ -335,6 +377,7 @@ export class PreAuthGate {
       () => this.onAuthDeadline(connection),
       this.limits.authDeadlineMs,
     );
+    this.armTransportPoll(connection);
     return connection;
   }
 
@@ -356,6 +399,7 @@ export class PreAuthGate {
     connection.rejected = true;
     this.clear(connection, "upgradeTimer");
     this.clear(connection, "authTimer");
+    this.clear(connection, "pollTimer");
     connection.graceTimer = this.scheduler.setTimeout(() => {
       connection.graceTimer = null;
       connection.transport.destroy();
@@ -402,6 +446,32 @@ export class PreAuthGate {
     return null;
   }
 
+  private armTransportPoll(connection: TrackedConnection): void {
+    connection.pollTimer = this.scheduler.setTimeout(
+      () => this.onTransportPoll(connection),
+      PRE_AUTH_TRANSPORT_POLL_MS,
+    );
+  }
+
+  /**
+   * Look at how much the connection's transport has carried. The looking
+   * stops for good once the connection authenticates or begins to close: an
+   * authenticated session is held to no budget, and a closing socket is
+   * already on its way out with whatever it was owed.
+   */
+  private onTransportPoll(connection: TrackedConnection): void {
+    connection.pollTimer = null;
+    const peer = connection.peer;
+    if (peer && (peer.isAuthenticated() || !peer.isOpen())) return;
+    if (!peer?.isAuthenticating() && connection.transport.bytesRead() > this.limits.maxTransportBytes) {
+      this.clearAll(connection);
+      connection.transport.destroy();
+      this.onDropped?.("transport_budget");
+      return;
+    }
+    this.armTransportPoll(connection);
+  }
+
   private onUpgradeDeadline(connection: TrackedConnection): void {
     connection.upgradeTimer = null;
     if (connection.peer) return;
@@ -429,7 +499,10 @@ export class PreAuthGate {
     return this.connections.has(connection) ? connection : null;
   }
 
-  private clear(connection: TrackedConnection, timer: "upgradeTimer" | "authTimer" | "graceTimer"): void {
+  private clear(
+    connection: TrackedConnection,
+    timer: "upgradeTimer" | "authTimer" | "graceTimer" | "pollTimer",
+  ): void {
     if (connection[timer] === null) return;
     this.scheduler.clearTimeout(connection[timer]);
     connection[timer] = null;
@@ -439,5 +512,6 @@ export class PreAuthGate {
     this.clear(connection, "upgradeTimer");
     this.clear(connection, "authTimer");
     this.clear(connection, "graceTimer");
+    this.clear(connection, "pollTimer");
   }
 }

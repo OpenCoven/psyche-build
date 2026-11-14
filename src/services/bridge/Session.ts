@@ -48,6 +48,12 @@ export class Session {
    * caused the rejection must not be handled: the peer has been refused.
    */
   rejected = false;
+  /**
+   * True while the daemon is looking up the token this peer presented. The
+   * inbound budget is not enforced meanwhile; the daemon calls
+   * `noteInbound(0)` when a lookup ends without authenticating the session.
+   */
+  authenticating = false;
   /** True once the listener has been told to drop this peer. */
   private dropped = false;
   /** Bytes received from the peer since the connection became a WebSocket. */
@@ -171,13 +177,15 @@ export class Session {
    * Count bytes received from the peer and drop it once it has sent more
    * than an unauthenticated peer may. Returns true if it has been dropped.
    *
-   * Counted for every connection but enforced only before authentication,
-   * and never on a socket that is already closing.
+   * Nothing an authenticated session sends is counted. Before that, bytes
+   * are counted as they arrive but not judged while a token lookup is in
+   * flight, and never on a socket that is already closing.
    */
   noteInbound(bytes: number): boolean {
-    this.inboundBytes += bytes;
     const preAuth = this.ctx.preAuth;
-    if (!preAuth || this.state === "authenticated" || !this.isOpen()) return false;
+    if (!preAuth || this.state === "authenticated") return false;
+    this.inboundBytes += bytes;
+    if (this.authenticating || !this.isOpen()) return false;
     if (this.inboundBytes <= preAuth.maxInboundBytes) return this.dropped;
     this.drop("inbound_budget");
     return true;

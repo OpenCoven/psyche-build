@@ -5,6 +5,8 @@ import {
   PRE_AUTH_ERRORS,
   PRE_AUTH_MAX_BUFFERED_BYTES,
   PRE_AUTH_MAX_INBOUND_BYTES,
+  PRE_AUTH_MAX_TRANSPORT_BYTES,
+  PRE_AUTH_TRANSPORT_POLL_MS,
   PRE_AUTH_MAX_CONNECTIONS,
   PRE_AUTH_MAX_CONNECTIONS_PER_ADDRESS,
   PRE_AUTH_MAX_FRAME_BYTES,
@@ -37,29 +39,39 @@ const LIMITS: PreAuthLimits = {
   maxFrameBytes: 512,
   maxBufferedBytes: 2_048,
   maxInboundBytes: 4_096,
+  maxTransportBytes: 8_192,
   closeGraceMs: 500,
 };
 
 function transport() {
-  const state = { destroyed: 0 };
-  return { state, destroy: () => { state.destroyed += 1; } };
+  const state = { destroyed: 0, bytesRead: 0 };
+  return { state, destroy: () => { state.destroyed += 1; }, bytesRead: () => state.bytesRead };
 }
 
 function peer(initiallyAuthenticated = false) {
   const state = {
     authenticated: initiallyAuthenticated,
+    authenticating: false,
+    open: true,
     rejections: [] as Array<{ error: unknown; closeCode: number }>,
   };
   return {
     state,
     isAuthenticated: () => state.authenticated,
+    isAuthenticating: () => state.authenticating,
+    isOpen: () => state.open,
     reject: (error: unknown, closeCode: number) => { state.rejections.push({ error, closeCode }); },
   };
 }
 
 function gate(limits: Partial<PreAuthLimits> = {}) {
   const scheduler = new ManualScheduler();
-  return { scheduler, gate: new PreAuthGate({ ...LIMITS, ...limits }, scheduler) };
+  const drops: string[] = [];
+  return {
+    scheduler,
+    drops,
+    gate: new PreAuthGate({ ...LIMITS, ...limits }, scheduler, undefined, (reason) => drops.push(reason)),
+  };
 }
 
 describe("pre-auth limits", () => {
@@ -72,6 +84,7 @@ describe("pre-auth limits", () => {
       maxFrameBytes: PRE_AUTH_MAX_FRAME_BYTES,
       maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
       maxInboundBytes: PRE_AUTH_MAX_INBOUND_BYTES,
+      maxTransportBytes: PRE_AUTH_MAX_TRANSPORT_BYTES,
       closeGraceMs: expect.any(Number),
     });
     expect(Object.isFrozen(DEFAULT_PRE_AUTH_LIMITS)).toBe(true);
@@ -115,6 +128,8 @@ describe("pre-auth limits", () => {
     ["a NaN grace", { closeGraceMs: Number.NaN }],
     ["a zero outbound buffer bound", { maxBufferedBytes: 0 }],
     ["a zero inbound budget", { maxInboundBytes: 0 }],
+    ["a zero transport budget", { maxTransportBytes: 0 }],
+    ["a transport budget smaller than the inbound budget", { maxInboundBytes: 4_096, maxTransportBytes: 4_095 }],
   ])("refuses to start with %s", (_label, override) => {
     // A limit that silently means "no limit" is the failure this change
     // exists to remove, so a bad configuration must not construct.
@@ -486,6 +501,29 @@ describe("Session backlog checks at the edges", () => {
     expect(closing.preAuth.onDrop).not.toHaveBeenCalled();
   });
 
+  it("does not judge a peer by the inbound budget while its token is being looked up", () => {
+    // The lookup is asynchronous. A device with a valid token that sends on
+    // without waiting is still unauthenticated when those bytes arrive.
+    const { session: s, preAuth } = session(socket(0));
+    s.authenticating = true;
+    expect(s.noteInbound(50_000)).toBe(false);
+    expect(preAuth.onDrop).not.toHaveBeenCalled();
+
+    // The lookup ends without authenticating it: what it sent now counts.
+    s.authenticating = false;
+    expect(s.noteInbound(0)).toBe(true);
+    expect(preAuth.onDrop).toHaveBeenCalledWith("inbound_budget");
+  });
+
+  it("does not count what an authenticated session sends", () => {
+    const { session: s, preAuth } = session(socket(0));
+    s.state = "authenticated";
+    s.noteInbound(50 * 1024 * 1024);
+    s.state = "unauthenticated";
+    expect(s.noteInbound(1)).toBe(false);
+    expect(preAuth.onDrop).not.toHaveBeenCalled();
+  });
+
   it("says which bound a drop was for", () => {
     const { session: s, preAuth } = session(socket(2_049));
     expect(s.dropIfUnresponsive()).toBe(true);
@@ -529,5 +567,81 @@ describe("isWellFormedHello", () => {
     ["an oversized token", { ...valid, token: "t".repeat(513) }],
   ])("rejects %s", (_label, payload) => {
     expect(isWellFormedHello(payload)).toBe(false);
+  });
+});
+
+describe("pre-auth transport budget", () => {
+  // Not everything a peer sends reaches the WebSocket parser: TLS has
+  // messages of its own, which the TLS layer answers by itself. The bytes on
+  // the wire are the only count that sees them, and nothing raises an event
+  // for them, so the gate looks at intervals.
+  it("drops a connection whose transport has carried more than the budget, upgraded or not", () => {
+    const { gate: g, scheduler, drops } = gate();
+    const silent = transport();
+    const upgraded = transport();
+    g.admit("10.0.0.1", silent);
+    g.attach(g.admit("10.0.0.2", upgraded)!, peer());
+
+    silent.state.bytesRead = 8_192;
+    upgraded.state.bytesRead = 8_192;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect([silent.state.destroyed, upgraded.state.destroyed]).toEqual([0, 0]);
+
+    silent.state.bytesRead = 8_193;
+    upgraded.state.bytesRead = 8_193;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect([silent.state.destroyed, upgraded.state.destroyed]).toEqual([1, 1]);
+    expect(drops).toEqual(["transport_budget", "transport_budget"]);
+    expect(scheduler.pending).toBe(0);
+  });
+
+  it("leaves an authenticated connection and a closing one alone", () => {
+    const { gate: g, scheduler, drops } = gate();
+    const paired = transport();
+    const closing = transport();
+    const closingPeer = peer();
+    g.attach(g.admit("10.0.0.1", paired)!, peer(true));
+    g.attach(g.admit("10.0.0.2", closing)!, closingPeer);
+    closingPeer.state.open = false;
+
+    paired.state.bytesRead = 50 * 1024 * 1024;
+    closing.state.bytesRead = 50 * 1024 * 1024;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS * 4);
+    expect([paired.state.destroyed, closing.state.destroyed]).toEqual([0, 0]);
+    expect(drops).toEqual([]);
+  });
+
+  it("waits for a token lookup to end before judging the connection", () => {
+    const { gate: g, scheduler, drops } = gate();
+    const t = transport();
+    const p = peer();
+    g.attach(g.admit("10.0.0.1", t)!, p);
+
+    p.state.authenticating = true;
+    t.state.bytesRead = 50_000;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS * 4);
+    expect(t.state.destroyed).toBe(0);
+
+    p.state.authenticating = false;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect(t.state.destroyed).toBe(1);
+    expect(drops).toEqual(["transport_budget"]);
+  });
+
+  it("stops looking once the connection is released or rejected", () => {
+    const { gate: g, scheduler } = gate();
+    const released = g.admit("10.0.0.1", transport())!;
+    g.release(released);
+    expect(scheduler.pending).toBe(0);
+
+    const t = transport();
+    const rejected = g.admit("10.0.0.2", t)!;
+    g.attach(rejected, peer());
+    g.rejected(rejected);
+    t.state.bytesRead = 50_000;
+    scheduler.advance(LIMITS.closeGraceMs);
+    // Destroyed once, by the grace timer, and not reported as a budget drop.
+    expect(t.state.destroyed).toBe(1);
+    expect(scheduler.pending).toBe(0);
   });
 });

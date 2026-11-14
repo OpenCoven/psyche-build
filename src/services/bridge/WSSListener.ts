@@ -101,6 +101,7 @@ export class WSSListener {
       this.limits,
       options.scheduler,
       (reason, refusedTotal) => this.events.onAdmissionRefused?.(reason, refusedTotal),
+      (reason) => this.notePreAuthDrop(reason),
     );
     this.https = https.createServer({ cert: tls.cert, key: tls.key });
     // Admission runs on the raw TCP connection, ahead of the TLS server's own
@@ -120,6 +121,10 @@ export class WSSListener {
     // connection, so a peer that pipelines requests grows that queue for as
     // long as it likes. The connection is dropped at the first one.
     this.https.on("request", (req) => req.socket.destroy());
+    // A request with an `Expect` header never reaches 'request': the HTTP
+    // server answers it by itself and keeps the connection open.
+    this.https.on("checkContinue", (req) => req.socket.destroy());
+    this.https.on("checkExpectation", (req) => req.socket.destroy());
   }
 
   async start(): Promise<{ port: number }> {
@@ -185,7 +190,10 @@ export class WSSListener {
       socket.destroy();
       return;
     }
-    const connection = this.gate.admit(address, { destroy: () => socket.destroy() });
+    const connection = this.gate.admit(address, {
+      destroy: () => socket.destroy(),
+      bytesRead: () => socket.bytesRead,
+    });
     if (!connection) {
       socket.destroy();
       return;
@@ -221,8 +229,7 @@ export class WSSListener {
           // Also stop the library: until the socket's 'close' reaches it, it
           // would go on answering whatever is left in the chunk being parsed.
           socket.terminate();
-          this.preAuthDrops += 1;
-          this.events.onPreAuthPeerDropped?.(reason, this.preAuthDrops);
+          this.notePreAuthDrop(reason);
         },
       },
     });
@@ -239,6 +246,8 @@ export class WSSListener {
     req.socket.on("data", (chunk: Buffer) => { session.noteInbound(chunk.length); });
     this.gate.attach(connection, {
       isAuthenticated: () => session.state === "authenticated",
+      isAuthenticating: () => session.authenticating,
+      isOpen: () => session.isOpen(),
       reject: (error, closeCode) => session.reject(error, closeCode),
     });
     this.sessions.add(session);
@@ -254,6 +263,11 @@ export class WSSListener {
       this.sessions.delete(session);
       this.events.onClose(session);
     });
+  }
+
+  private notePreAuthDrop(reason: PreAuthDropReason): void {
+    this.preAuthDrops += 1;
+    this.events.onPreAuthPeerDropped?.(reason, this.preAuthDrops);
   }
 
   private handleSocketError(session: Session, connection: PreAuthConnection, err: Error): void {
