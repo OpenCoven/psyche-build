@@ -114,6 +114,9 @@ describe('production control authority documents', () => {
     expect(availability).toMatch(/`trusted-test-only`[\s\S]*not a production workaround/);
     // The v0 composition is named so that it is not read as operator authority.
     expect(availability).toMatch(/`orchestration\.execute`[\s\S]*`pane\.create`/);
+    // That self-grant is journaled with a `human` actor (src/daemon/index.ts),
+    // so the document must say that the label is not a person's approval.
+    expect(availability).toMatch(/`human` actor kind[\s\S]*not evidence that a person approved it/);
     expect(contract).toContain('## Approve-once operations (unavailable in production)');
     // The earlier text said this as a fact about a running desktop.
     expect(contract).not.toContain('The desktop registers as an operator-authenticated browser provider.');
