@@ -979,6 +979,29 @@ describe("LAN bridge hello handling", () => {
   });
 });
 
+describe("LAN bridge plain HTTP requests", () => {
+  it("drops a connection that sends an HTTP request instead of upgrading", async () => {
+    // Nothing here serves HTTP. An unanswered request is otherwise kept by
+    // the HTTP server, one entry per request, for as long as the peer likes.
+    const { port, listener } = await startDaemon();
+    const socket = connectTls(port);
+    let closed = false;
+    socket.on("close", () => { closed = true; });
+    socket.on("error", () => {});
+    await new Promise<void>((resolve) => socket.once("secureConnect", () => resolve()));
+
+    socket.write("GET / HTTP/1.1\r\nHost: a\r\n\r\n".repeat(64));
+    await waitFor(() => closed, "connection dropped on the first request");
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
+  });
+
+  it("still upgrades a WebSocket request", async () => {
+    const { port } = await startDaemon();
+    const client = await connect(port);
+    await client.roundTrip("upgraded");
+  });
+});
+
 describe("LAN bridge listener accounting", () => {
   it("terminates a WebSocket it cannot match to an admitted connection", async () => {
     // Every WebSocket arrives on a connection admission accepted. One that

@@ -112,6 +112,12 @@ export class WSSListener {
     // conditions (a client vanishing mid-TLS-handshake, for instance).
     this.wss.on("error", (err) => this.events.onServerError?.(err));
     this.https.on("clientError", (_err, socket) => socket.destroy());
+    // Nothing here serves plain HTTP: the only request this listener accepts
+    // is the WebSocket upgrade, which the server routes elsewhere. Left
+    // unanswered, each request and its response object stay queued on the
+    // connection, so a peer that pipelines requests grows that queue for as
+    // long as it likes. The connection is dropped at the first one.
+    this.https.on("request", (req) => req.socket.destroy());
   }
 
   async start(): Promise<{ port: number }> {
