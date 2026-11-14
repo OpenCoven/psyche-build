@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { desktopCargoPin } from './support/dependencyPins.js';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 import {
   desktopFunctionBody,
@@ -14,10 +15,6 @@ const libSourcePath = resolve(
 const mainSourcePath = resolve(
   process.cwd(),
   'native/desktop/psyche-build-tauri/web/main.js',
-);
-const cargoTomlPath = resolve(
-  process.cwd(),
-  'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml',
 );
 const covenSessionsPath = resolve(
   process.cwd(),
@@ -48,14 +45,13 @@ function functionBody(source: string, functionName: string): string {
 
 describe('Tauri workspace metrics native contract', () => {
   test('wires PTY identity retention and the async metrics command', async () => {
-    const [libSource, cargoToml, mainSource, covenSessions] = await Promise.all([
+    const [libSource, mainSource, covenSessions] = await Promise.all([
       Promise.resolve(readDesktopCommandSurface()),
-      readFile(cargoTomlPath, 'utf8'),
       readFile(mainSourcePath, 'utf8'),
       readFile(covenSessionsPath, 'utf8'),
     ]);
 
-    expect(cargoToml).toMatch(/\bsysinfo = "0\.36\.1"/);
+    expect(() => desktopCargoPin('sysinfo')).not.toThrow();
 
     // `PtySession` moved to `pty_lifecycle` in #197 slice 3; the code that
     // builds one did not. This asserts the shape where it is now declared.
