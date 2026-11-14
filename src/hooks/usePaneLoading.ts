@@ -506,7 +506,8 @@ async function restoreMissingPaneWithLease(
       newPaneId,
       [`echo '# Original prompt: ${promptPreview}...'`, 'Enter'],
     );
-    await tmuxService.sendKeys(newPaneId, [`cd "${worktreePath}"`, 'Enter']);
+    // splitPane already starts the pane in the reserved canonical directory.
+    // Do not re-interpret that filesystem identity as source in its shell.
     await restoreAgentSessionForPane(tmuxService, missingPane, newPaneId);
   } catch (error) {
     if (error instanceof RestoreReservationRetentionError) {

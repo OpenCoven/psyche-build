@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { PsychePane } from '../src/types.js';
 
 const tmuxServiceMock = vi.hoisted(() => ({
@@ -74,6 +78,29 @@ describe('pane restoration', () => {
     }));
   });
 
+  it('preserves a literal restored working directory through the pane shell', async () => {
+    const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'restore-shell-')));
+    const worktree = path.join(sandbox, "worktree-$(touch SIDE_EFFECT)-'quoted");
+    fs.mkdirSync(worktree);
+    try {
+      const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+      await recreateMissingPanes([{
+        id: 'restored', slug: 'restored', prompt: '', paneId: '%2',
+        worktreePath: worktree, projectRoot: sandbox,
+      }], path.join(sandbox, '.psyche', 'psyche.config.json'));
+      expect(splitPaneMock).toHaveBeenCalledWith({ cwd: worktree });
+      const calls = tmuxServiceMock.sendKeys.mock.calls as unknown as Array<[string, string[]]>;
+      const commands = calls.flatMap(([, keys]) => keys.filter((key) => key !== 'Enter'));
+      const output = execFileSync('/bin/sh', ['-c', `${commands.join('\n')}\npwd -P`], {
+        cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      expect(fs.existsSync(path.join(worktree, 'SIDE_EFFECT'))).toBe(false);
+      expect(output.trim().split('\n').at(-1)).toBe(worktree);
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it('resumes restored worktree panes with their original agent command', async () => {
     const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
 
@@ -133,7 +160,6 @@ describe('pane restoration', () => {
     expect(tmuxServiceMock.sendKeys.mock.calls).toEqual([
       ['%9', ["echo '# Pane restored: feature-codex'", 'Enter']],
       ['%9', ["echo '# Original prompt: x ; $(touch /tmp/p) `id`  rm -rf ~ ...'", 'Enter']],
-      ['%9', ['cd "/repo/.psyche/worktrees/feature-codex"', 'Enter']],
     ]);
   });
 
