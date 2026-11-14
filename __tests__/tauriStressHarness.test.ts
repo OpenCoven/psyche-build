@@ -188,7 +188,7 @@ describe('Tauri diagnostics stress harness', () => {
         return canvas;
       },
     };
-    const script = page.html.match(/<script>([\s\S]+)<\/script>/)?.[1];
+    const script = page.html.match(/<script\b[^>]*>([\s\S]+)<\/script\b[^>]*>/i)?.[1];
     expect(script).toBeDefined();
     Function('window', 'document', 'requestAnimationFrame', script as string)(
       browserWindow,

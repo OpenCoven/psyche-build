@@ -101,8 +101,8 @@ Interactive hooks (\`run_test\` and \`run_dev\`) can update psyche UI via HTTP.
 
 ### Update Test Status
 \`\`\`bash
-curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test" \
-  -H "Content-Type: application/json" \
+curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test" \\
+  -H "Content-Type: application/json" \\
   -d '{"status": "running", "output": "optional test output"}'
 
 # Status values: "running" | "passed" | "failed"
@@ -110,8 +110,8 @@ curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test
 
 ### Update Dev Server
 \`\`\`bash
-curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/dev" \
-  -H "Content-Type: application/json" \
+curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/dev" \\
+  -H "Content-Type: application/json" \\
   -d '{"status": "running", "url": "http://localhost:3000"}'
 
 # Status values: "running" | "stopped"
@@ -170,7 +170,7 @@ cd "$PSYCHE_WORKTREE_PATH"
 API="http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test"
 
 # Update: starting
-curl -s -X PUT "$API" -H "Content-Type: application/json" \
+curl -s -X PUT "$API" -H "Content-Type: application/json" \\
   -d '{"status": "running"}' > /dev/null
 
 # Run tests and capture output
@@ -185,8 +185,8 @@ fi
 OUTPUT=$(head -c 5000 "$OUTPUT_FILE")
 
 # Update: complete
-curl -s -X PUT "$API" -H "Content-Type: application/json" \
-  -d "$(jq -n --arg status "$STATUS" --arg output "$OUTPUT" \
+curl -s -X PUT "$API" -H "Content-Type: application/json" \\
+  -d "$(jq -n --arg status "$STATUS" --arg output "$OUTPUT" \\
     '{status: $status, output: $output}')" > /dev/null
 
 rm -f "$OUTPUT_FILE"
@@ -210,21 +210,21 @@ DEV_PID=$!
 sleep 5
 
 # Detect port from logs
-PORT=$(grep -oP 'localhost:\K\d+' "$LOG_FILE" | head -1)
+PORT=$(grep -oP 'localhost:\\K\\d+' "$LOG_FILE" | head -1)
 [ -z "$PORT" ] && PORT=3000
 
 # Optional: Create tunnel with cloudflared
 if command -v cloudflared &> /dev/null; then
-  TUNNEL=$(cloudflared tunnel --url "http://localhost:$PORT" 2>&1 | \
-    grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' | head -1)
+  TUNNEL=$(cloudflared tunnel --url "http://localhost:$PORT" 2>&1 | \\
+    grep -oP 'https://[a-z0-9-]+\\.trycloudflare\\.com' | head -1)
   URL="\${TUNNEL:-http://localhost:$PORT}"
 else
   URL="http://localhost:$PORT"
 fi
 
 # Report status
-curl -s -X PUT "$API" -H "Content-Type: application/json" \
-  -d "{\"status\": \"running\", \"url\": \"$URL\"}" > /dev/null
+curl -s -X PUT "$API" -H "Content-Type: application/json" \\
+  -d "{\\"status\\": \\"running\\", \\"url\\": \\"$URL\\"}" > /dev/null
 
 echo "[Hook] Dev server running at $URL (PID: $DEV_PID)"
 \`\`\`
@@ -247,17 +247,17 @@ git push origin "$PSYCHE_TARGET_BRANCH"
 
 # Trigger deployment (example: Vercel)
 if [ -n "$VERCEL_TOKEN" ]; then
-  curl -s -X POST "https://api.vercel.com/v1/deployments" \
-    -H "Authorization: Bearer $VERCEL_TOKEN" \
-    -H "Content-Type: application/json" \
+  curl -s -X POST "https://api.vercel.com/v1/deployments" \\
+    -H "Authorization: Bearer $VERCEL_TOKEN" \\
+    -H "Content-Type: application/json" \\
     -d '{"name": "my-project"}' > /dev/null
 fi
 
 # Close GitHub issue if prompt contains #123
-ISSUE=$(echo "$PSYCHE_PROMPT" | grep -oP '#\K\d+' | head -1)
+ISSUE=$(echo "$PSYCHE_PROMPT" | grep -oP '#\\K\\d+' | head -1)
 if [ -n "$ISSUE" ] && command -v gh &> /dev/null; then
-  gh issue close "$ISSUE" \
-    -c "Resolved in $PSYCHE_SLUG, merged to $PSYCHE_TARGET_BRANCH" \
+  gh issue close "$ISSUE" \\
+    -c "Resolved in $PSYCHE_SLUG, merged to $PSYCHE_TARGET_BRANCH" \\
     2>/dev/null || true
 fi
 \`\`\`
@@ -341,7 +341,7 @@ jq -r '.scripts.dev' package.json
 ### Environment Variables
 \`\`\`bash
 # Check for .env files to copy
-ls -la | grep '\.env'
+ls -la | grep '\\.env'
 \`\`\`
 
 ### Build System
