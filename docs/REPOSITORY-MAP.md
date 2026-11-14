@@ -25,9 +25,15 @@ Psyche Build is the coding cockpit and product client. Its local project, pane, 
 | `native/ios/` | internal iOS companion source and generated Xcode project | `SUPPORT-MATRIX.md`, `RELEASE-ACCEPTANCE.md` | `pnpm ios:project:check` plus owning Core/app/UI checks on a compatible macOS host; R4 |
 | `native/macos/` | macOS-native support code outside the desktop Tauri tree | owning source/tests and support contract | owning native checks; do not infer release acceptance from compile success |
 | `protocol-fixtures/` | checked-in protocol fixtures used by product compatibility tests | `PSYCHE-COMPATIBILITY-MAP.md`, generator source | `pnpm fixtures:generate` and no generated drift; R3/R4 when compatibility changes |
-| `scripts/` | repository automation, builds, release tooling, tracker synchronization and validators | script-specific docs, `AGENTS.md` | focused script tests plus the owning end-to-end/dry-run contract |
+| `scripts/` | repository automation: agent bootstrap and check gates, builds, release tooling, generators and validators | script-specific docs, `AGENTS.md` | focused script tests plus the owning end-to-end/dry-run contract |
+| `script/` | one file, `build_and_run.sh`: the local build-and-open helper that `.codex/environments/environment.toml` runs for the desktop app. It is not `scripts/`; new automation belongs there | the script itself | run it; it is not part of any gate |
+| `psyche` | the package's `bin` launcher: it imports `dist/index.js` and nothing else | `package.json` `bin` | `pnpm build`, then `pnpm smoke:pack` |
+| `release/` | release data read by the release workflow and its tests: `rollback-floor.json` and `update-manifest-keys.json` | `RELEASE.md` | `__tests__/releaseWorkflow.test.ts`, `__tests__/updateManifest.test.ts`; R4 |
+| `packages/vim-core/` | the shared Vim engine, workspace package `@opencoven/psyche-vim-core`, used by the CLI and the desktop web layer | package source and tests | `pnpm typecheck` (runs the package's own first) |
+| `frontend/` | the Vue pages (`dashboard`, `terminal`) that `pnpm build:frontend` builds into `dist/` | `frontend/vite.config.ts` | `pnpm build` |
 | `.github/` | CI, release workflows, issue/PR intake and issue forms, CODEOWNERS | `SECURITY.md`, `CONTRIBUTOR-SAFETY.md`, `RELEASE.md` | syntax/contract tests and live settings evidence where applicable; R4 |
 | `docs/` | current product, architecture, support, release and contributor contracts plus the public docs application | `docs/README.md` authority order | `pnpm docs:focus:check`, `pnpm --dir docs build` |
+| `docs/superpowers/`, `docs/working-records/` | dated design, plan and working records. History, not backlog and not proof that behavior shipped; do not read them to learn current behavior | `docs/superpowers/README.md` | none; a record is not edited to match later changes |
 | `__tests__/` | repository behavior, contract, security, workflow and regression evidence | `__tests__/README.md` | run the narrowest owning test first, then the repository gate |
 | `agent/` | machine-readable repository/agent contract | `AGENTS.md` | `__tests__/agentRepositoryContract.test.ts` plus agent fast/full checks |
 
