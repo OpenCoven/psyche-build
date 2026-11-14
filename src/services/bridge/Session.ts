@@ -4,6 +4,7 @@ import {
   ServerMessage,
   encodeMobileBinaryFrame,
   encodeServerMessage,
+  type BridgeError,
   type SupportedProtocolVersion,
 } from "./wireProtocol.js";
 
@@ -13,6 +14,11 @@ export interface SessionContext {
   socket: WebSocket;
   remoteAddress: string;
   remoteUserAgent?: string;
+  /**
+   * Called after `reject` has asked the peer to close, so the listener can
+   * drop a peer that never completes the close handshake.
+   */
+  onRejected?: () => void;
 }
 
 export class Session {
@@ -22,6 +28,13 @@ export class Session {
   clientName: string | null = null;
   protocolVersion: SupportedProtocolVersion | null = null;
   token: string | null = null;
+  /** True once a well-formed `hello` has been accepted; a second is refused. */
+  helloReceived = false;
+  /**
+   * True once `reject` has run. Frames already queued behind the one that
+   * caused the rejection must not be handled: the peer has been refused.
+   */
+  rejected = false;
   subscribedPaneIds = new Set<string>();
   subscriptionTeardowns = new Map<string, () => void>();
   /**
@@ -71,5 +84,26 @@ export class Session {
       // ignore
     }
     this.ctx.socket.close(1000, reason);
+  }
+
+  /**
+   * Refuse the peer: one fixed error frame, then a close with `closeCode`.
+   *
+   * `error` must be a constant. Its message is also the close reason, so
+   * nothing the peer sent can be reflected back through either.
+   */
+  reject(error: BridgeError, closeCode: number): void {
+    if (this.rejected) return;
+    this.rejected = true;
+    this.state = "unauthenticated";
+    this.token = null;
+    this.send({ type: "error", payload: error });
+    try {
+      this.ctx.socket.close(closeCode, error.message);
+    } catch {
+      // close() throws only for an invalid code or reason; the peer is
+      // dropped by the listener's grace timer either way.
+    }
+    this.ctx.onRejected?.();
   }
 }
