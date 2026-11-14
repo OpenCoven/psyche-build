@@ -228,84 +228,9 @@ and [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build
 
 ## Stage 0 — delivered control-state closure wave
 
-**Owners:** #238, #31, #237, and #240.
-
-#238 remains delivered through PR #245 / `5f4b7b05`. #31, #237, and #240 are
-closed with the evidence linked in their owning issues: the proof PR, sanitized
-policy evidence (later corrected by PR #351), the first apply, and the zero-operation run. Preserve the
-deployed single-writer lease, protected `main`-only environments, canonical
-target mapping, deterministic drift validation, and bounded GraphQL behavior.
-Direct pushes remain platform-blocked; ordinary PR merges require exact-head
-checks and resolved conversations, with no standing bypass.
-
-**Exit state:** reached. Roadmap, support claims, branch policy, Beads, GitHub
-mirrors, and live PR disposition agree on what is delivered, active, blocked,
-and deferred as of this reconciliation.
-
-**Resolved control-state regression:** the scheduled Beads Project sync failed
-on every scheduled run from 2026-08-30 until 2026-09-02 because a checkout
-running the accidental Beads v1.2.1 release migrated the shared Dolt schema to
-v65 and pushed it; the pinned 1.2.2 CLI could not open it. The recovery retained
-the Git sidecar at `9c85d2b79e3da16c283278824866a5ba1217950a` and the published
-Dolt transition
-`0at1pk83ng4ogm45svvp7ip122acgt4h` →
-`go64gshichpnsj3islhl6pmv5lgi2teb`. That state restored schema v53,
-re-tracked the versioned `events` table, and preserved all 111 Beads. Its 1,362
-event rows comprise the last durable pre-ignore snapshot of 1,361 rows plus the
-publication transition. Three known post-ignore writes retain their commits and
-final source state, but their clone-local event rows are unavailable; this is a
-bounded three-write audit gap, not an uninterrupted journal.
-
-The retained qualifying proof begins with scheduled apply
-[33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
-executed source head `9e4a9cf383a1993ca2c2099e3d296acb3dd3c5b4` on 2026-09-04. It
-performed seven operations; from the authoritative
-`psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and ran the
-live read-only validator to exit `0`: 111 sources, 27 managed mirrors, 24 canonical
-outcomes, and 0 findings. The following scheduled apply
-[33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
-executed source head `23cace08fdc5e35e3ee0cd46200b4ed3bbd94131` on 2026-09-05,
-planned and applied 0 operations, completed every step, reported no warnings or
-visibility drift, and retained schema v53.
-
-Mirror #230 was regenerated after its authoritative source entered closed state.
-It was last updated by the first run and was never manually edited afterward;
-generated-body repair did not supply the proof.
-
-The audit also records two deviations rather than treating them as proof. PR
-#346 reviewed unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, while a
-different checkout published `go64gshichpnsj3islhl6pmv5lgi2teb`; the intended
-logical state agreed, but the exact-candidate gate did not hold. At that PR's
-merge, mirror #230 first entered the closed state through GitHub keyword syntax,
-not through the synchronizer. PR #350 then documented the recovery before the
-second qualifying scheduled run and omitted this documentation contract
-assertion. Neither deviation is counted as closeout evidence.
-
-Two contract improvements came out of it and are enforced now: the synchronizer
-reports schema skew as a bounded `Beads schema version skew` diagnostic instead
-of an unclassified failure, and the drift validator scopes missing-mirror drift
-to active Beads so it stops reporting findings the synchronizer cannot repair.
-The Beads CLI fleet rule and the closing-keyword rule in `.beads/README.md`
-(removed with Beads under #473; see
-[the retirement record](./working-records/beads-retirement-2026-10.md))
-recorded the two recurrence risks:
-any clone running a non-pinned CLI can re-migrate the shared schema, and a
-GitHub closing keyword before a mirror reference can change mirror state
-outside the synchronizer.
-[#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the full
-evidence under #195.
-
-The later [#420 recovery](https://github.com/OpenCoven/psyche-build/issues/420#issuecomment-5616402711)
-is complete: protected apply and normal no-op at source
-`73039d5c3827e2f49cf28c7ad7db74cc3b5a5247`, original survivors preserved,
-25 approved operations, no newly created issues, then zero operations and a
-zero-finding authenticated drift report. The
-[roadmap evidence record](./ROADMAP.md#stage-0--delivered-control-state-closure-wave)
-also retains September 13 scheduled runs 34747362154 and 34761084154 at
-`8650344ce560ffcfe190ea99acc2010921409753`: both successful, zero planned/applied
-operations, all 14 active sources mapped, and no warnings or visibility drift.
-Recent sync health is not exact-current-head execution proof. No Beads or
-generated mirror mutation is part of this closeout.
+Delivered. The execution record for this stage is in the
+[roadmap history record](./working-records/roadmap-history-2026-11.md#execution-contract-stage-0--delivered-control-state-closure-wave).
+It is history, not a queue: nothing in it is open work.
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
