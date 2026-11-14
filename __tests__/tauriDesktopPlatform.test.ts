@@ -547,7 +547,7 @@ describe('desktop Tauri layout', () => {
     expect(configs[0].build.beforeDevCommand).toBe('pnpm run serve:web');
     expect(desktopPackage.scripts['serve:web'])
       .toBe('vite web --config vite.config.mjs --host 127.0.0.1 --port 1420 --strictPort');
-    expect(desktopPackage.devDependencies.vite).toBe('8.2.1');
+    expect(desktopPackage.devDependencies.vite).toBe('8.2.4');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
 
