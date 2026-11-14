@@ -129,6 +129,13 @@ describe("pre-auth limits", () => {
     expect(resolvePreAuthLimits()).toEqual(DEFAULT_PRE_AUTH_LIMITS);
   });
 
+  it("names the lookup allowance when it is smaller than the transport budget", () => {
+    // With every other limit at its default, so no other check can be the
+    // one that refuses.
+    expect(() => resolvePreAuthLimits({ maxLookupBytes: PRE_AUTH_MAX_TRANSPORT_BYTES - 1 }))
+      .toThrow("invalid pre-auth limit maxLookupBytes: below maxTransportBytes");
+  });
+
   it.each([
     ["a zero connection cap", { maxConnections: 0 }],
     ["a fractional per-address cap", { maxConnectionsPerAddress: 1.5 }],
@@ -550,13 +557,6 @@ describe("Session backlog checks at the edges", () => {
     expect(s.wasAuthenticated).toBe(true);
   });
 
-  it("names the lookup allowance when it is smaller than the transport budget", () => {
-    // With every other limit at its default, so no other check can be the
-    // one that refuses.
-    expect(() => resolvePreAuthLimits({ maxLookupBytes: PRE_AUTH_MAX_TRANSPORT_BYTES - 1 }))
-      .toThrow("invalid pre-auth limit maxLookupBytes: below maxTransportBytes");
-  });
-
   it("can be dropped from outside, once, and handles nothing afterwards", () => {
     const { session: s, preAuth } = session(socket(0));
     s.dropFor("transport_budget");
@@ -675,7 +675,10 @@ describe("pre-auth transport budget", () => {
     const connection = g.admit("10.0.0.1", t)!;
     g.attach(connection, p);
     p.state.authenticated = true;
+    // The first look at an authenticated connection is the last, and takes
+    // the authentication deadline with it.
     scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    expect(scheduler.pending).toBe(0);
 
     p.state.authenticated = false;
     p.state.open = false;
@@ -685,6 +688,23 @@ describe("pre-auth transport budget", () => {
     expect(scheduler.pending).toBe(0);
 
     g.dispose();
+    expect(t.state.destroyed).toBe(0);
+  });
+
+  it("does not reject at the deadline a session that authenticated and was closed before any look", () => {
+    // Deadlines shorter than the interval between looks, so the deadline
+    // timer itself has to make the decision.
+    const { gate: g, scheduler } = gate({ upgradeDeadlineMs: 100, authDeadlineMs: 100 });
+    const t = transport();
+    const p = peer();
+    g.attach(g.admit("10.0.0.1", t)!, p);
+    p.state.authenticated = true;
+    p.state.authenticated = false;
+    p.state.open = false;
+
+    scheduler.advance(100);
+    expect(p.state.rejections).toEqual([]);
+    scheduler.advance(LIMITS.closeGraceMs);
     expect(t.state.destroyed).toBe(0);
   });
 

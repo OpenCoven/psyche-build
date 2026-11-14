@@ -1002,6 +1002,8 @@ describe("LAN bridge pre-authentication frames", () => {
     }
     await waitFor(() => inboundBytes(listener) > 8 * 1024, "the first burst reached the host");
     await settle();
+    expect(listener.activeSessions.size).toBe(1);
+    expect(listener.unauthenticatedConnectionCount).toBe(1);
     expect(client.closes).toEqual([]);
     // Past the allowance: dropped, with the lookup still in flight.
     for (let i = 24; i < 96; i += 1) {
@@ -1440,16 +1442,20 @@ describe("LAN bridge authenticated sessions and transport errors", () => {
     // The host demotes a session to close it. A transport error from it
     // then must not be mistaken for one from a peer that never proved
     // anything: it is still owed its output on the library's own timeout.
-    vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
     const { port, tokens, scheduler, listener } = await startDaemon();
     tokens.register("known-token");
     const { peer, session } = await authenticatedRawPeer(port, listener, "known-token");
 
     session.close("revoked by host");
     expect(session.state).toBe("unauthenticated");
-    // An unmasked frame is a protocol error.
+    // An unmasked frame is a protocol error. The host has reported it, as it
+    // does for an authenticated session, before any time passes.
     peer.socket.write(Buffer.from([0x81, 0x01, 0x78]));
-    await settle();
+    await waitFor(
+      () => warn.mock.calls.filter(([message]) => String(message).startsWith("bridge transport error")).length === 1,
+      "the transport error reached the host",
+    );
     scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
     scheduler.advance(LIMITS.closeGraceMs);
     await waitFor(() => listener.activeSessions.size < 1, "the connection dropped", 300).catch(() => {});
