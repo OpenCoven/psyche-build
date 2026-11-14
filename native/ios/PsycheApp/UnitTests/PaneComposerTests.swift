@@ -34,6 +34,67 @@ final class PaneComposerTests: XCTestCase {
         XCTAssertEqual(store.drafts["ios-cockpit"], "keep this")
     }
 
+    func testComposerTargetsTheFocusedPaneOnlyWhileItIsShown() {
+        XCTAssertEqual(
+            PaneComposerModel.target(focusedPaneID: "web-home", shownPaneIDs: ["web-home", nil]),
+            "web-home"
+        )
+        XCTAssertEqual(
+            PaneComposerModel.target(
+                focusedPaneID: "ios-cockpit",
+                shownPaneIDs: ["web-home", "ios-cockpit"]
+            ),
+            "ios-cockpit"
+        )
+        XCTAssertNil(PaneComposerModel.target(focusedPaneID: nil, shownPaneIDs: ["web-home", nil]))
+    }
+
+    /// #538: a chip tap moves the shown pane before the registry reattaches and
+    /// moves focus. The composer must not keep targeting, showing the draft of,
+    /// or sending to the pane that just left the screen.
+    func testPaneSwitchWindowHasNoTargetSoThePreviousDraftIsNeitherShownNorSent() async {
+        let client = ComposerTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let model = PaneComposerModel()
+        await registry.show(primary: "web-home")
+        registry.focus("web-home")
+        store.drafts = ["web-home": "meant for web-home"]
+
+        // The switch: the workspace now shows ios-cockpit, but the registry has
+        // not run show(...) yet, so it still reports web-home as focused.
+        store.primaryPaneID = "ios-cockpit"
+        store.secondaryPaneID = nil
+        XCTAssertEqual(registry.focusedPaneID, "web-home")
+
+        let target = PaneComposerModel.target(
+            focusedPaneID: registry.focusedPaneID,
+            shownPaneIDs: [store.primaryPaneID, store.secondaryPaneID]
+        )
+        XCTAssertNil(target)
+
+        let task = model.submit(
+            targetPaneID: target,
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        )
+        await task?.value
+        let sends = await client.sends
+        XCTAssertTrue(sends.isEmpty)
+        XCTAssertEqual(store.drafts["web-home"], "meant for web-home")
+
+        // Once the registry catches up, the composer targets the shown pane.
+        await registry.show(primary: "ios-cockpit")
+        XCTAssertEqual(
+            PaneComposerModel.target(
+                focusedPaneID: registry.focusedPaneID,
+                shownPaneIDs: [store.primaryPaneID, store.secondaryPaneID]
+            ),
+            "ios-cockpit"
+        )
+    }
+
     func testMismatchedResponseRetainsTheExactDraftAndExposesThePaneError() async {
         let client = ComposerTerminalClient(sendError: TerminalControlError.unexpectedResponse)
         let registry = TerminalSessionRegistry(client: client)

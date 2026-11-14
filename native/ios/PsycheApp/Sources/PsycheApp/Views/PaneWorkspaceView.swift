@@ -31,6 +31,7 @@ struct PaneWorkspaceView: View {
             // chosen, so it could never appear.
             let hasRoomForTwo = hasRoomForTwo(proxy.size)
             let showsSplit = hasRoomForTwo && secondaryPane != nil
+            let shownPaneIDs: [String?] = [primaryPane?.id, showsSplit ? secondaryPane?.id : nil]
             VStack(spacing: 0) {
                 if let primary = primaryPane {
                     // The terminals are the greedy part; the switcher and the
@@ -50,14 +51,28 @@ struct PaneWorkspaceView: View {
                         primaryPaneID: store.primaryPaneID,
                         secondaryPaneID: showsSplit ? store.secondaryPaneID : nil,
                         canSplit: hasRoomForTwo,
-                        onSelect: select,
+                        onSelect: { select($0, showsSplit: showsSplit) },
                         onSplit: splitBeside
                     )
                 }
                 if primaryPane != nil {
                     Divider().overlay(PsycheTheme.border)
-                    PaneComposer(sendAttempts: appModel.paneComposerSendAttempts)
+                    PaneComposer(
+                        sendAttempts: appModel.paneComposerSendAttempts,
+                        shownPaneIDs: shownPaneIDs
+                    )
                         .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .onChange(of: shownPaneIDs, initial: true) { _, shown in
+                // Keep the secondary selection for the next split, but move
+                // keyboard focus off a pane the layout has hidden. The
+                // composer's visibility guard also covers the render window
+                // before this callback and any pending registry attachment.
+                if let focused = registry.focusedPaneID,
+                   !shown.contains(focused),
+                   let primary = primaryPane?.id {
+                    registry.focus(primary)
                 }
             }
         }
@@ -146,8 +161,8 @@ struct PaneWorkspaceView: View {
 
     // MARK: - Selection
 
-    private func select(_ paneID: String) {
-        if store.secondaryPaneID == paneID {
+    private func select(_ paneID: String, showsSplit: Bool) {
+        if showsSplit && store.secondaryPaneID == paneID {
             registry.focus(paneID)
             return
         }
