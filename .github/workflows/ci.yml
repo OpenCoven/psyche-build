@@ -22,7 +22,7 @@ jobs:
       ios: ${{ steps.classifier.outputs.ios }}
       typescript: ${{ steps.classifier.outputs.typescript }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -40,7 +40,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -116,7 +116,7 @@ jobs:
         if: needs.changes.outputs.desktop != 'true'
         run: echo "Desktop web validation skipped."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.desktop == 'true'
         with:
           persist-credentials: false
@@ -165,7 +165,7 @@ jobs:
         if: needs.changes.outputs.desktop != 'true'
         run: echo "Desktop Rust validation skipped."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.desktop == 'true'
         with:
           persist-credentials: false
@@ -226,7 +226,7 @@ jobs:
         if: needs.changes.outputs.desktop != 'true'
         run: echo "Desktop cargo check skipped."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.desktop == 'true'
         with:
           persist-credentials: false
@@ -307,7 +307,7 @@ jobs:
         if: needs.changes.outputs.typescript != 'true'
         run: echo "TypeScript validation skipped."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.typescript == 'true'
         with:
           persist-credentials: false
@@ -360,7 +360,7 @@ jobs:
         if: needs.changes.outputs.ios != 'true'
         run: echo "iOS Core validation skipped."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.ios == 'true'
         with:
           persist-credentials: false
@@ -445,7 +445,7 @@ jobs:
         if: needs.changes.outputs.ios != 'true'
         run: echo "iOS app validation skipped."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.ios == 'true'
         with:
           persist-credentials: false
