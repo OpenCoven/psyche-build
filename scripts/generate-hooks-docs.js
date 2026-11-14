@@ -216,7 +216,7 @@ PORT=$(grep -oP 'localhost:\\K\\d+' "$LOG_FILE" | head -1)
 if command -v cloudflared &> /dev/null; then
   TUNNEL=$(cloudflared tunnel --url "http://localhost:$PORT" 2>&1 | \\
     grep -oP 'https://[a-z0-9-]+\\.trycloudflare\\.com' | head -1)
-  URL="\\\${TUNNEL:-http://localhost:$PORT}"
+  URL="\${TUNNEL:-http://localhost:$PORT}"
 else
   URL="http://localhost:$PORT"
 fi
@@ -428,6 +428,15 @@ When creating a new hook:
 *Version: ${docsVersion}*
 `;
 
+// A template literal gives a backslash, a backtick and \`${\` special meaning.
+// Escape all three, backslash first, so the generated constant evaluates back
+// to exactly \`agentsMd\`: shell line continuations and regular-expression
+// escapes in the examples would otherwise vanish from the published guide.
+const escapeTemplateLiteral = (text) => text
+  .replace(/\\/g, '\\\\')
+  .replace(/`/g, '\\`')
+  .replace(/\$\{/g, '\\${');
+
 // Write the generated markdown
 const outputPath = join(projectRoot, 'src/utils/generated-agents-doc.ts');
 const tsContent = `/**
@@ -435,7 +444,7 @@ const tsContent = `/**
  * DO NOT EDIT MANUALLY - run 'pnpm generate:hooks-docs' to regenerate
  */
 
-export const AGENTS_MD = \`${agentsMd.replace(/`/g, '\\`')}\`;
+export const AGENTS_MD = \`${escapeTemplateLiteral(agentsMd)}\`;
 `;
 
 writeFileSync(outputPath, tsContent);
