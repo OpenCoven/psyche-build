@@ -4,6 +4,54 @@ Psyche Build exposes project-scoped terminal panes and embedded browser tabs to
 agents through one authenticated control owner. It does not grant agents tmux,
 WebView, accessibility, coordinate, or whole-desktop authority directly.
 
+## Production availability
+
+This document describes the control contract that the source implements and
+tests. A running Psyche Build does not complete it. The owner has no way to
+establish that an operator command comes from a person at the machine, so it
+refuses every operation that depends on that.
+
+`ControlServer` takes an `operatorCommandPolicy` that defaults to `disabled`,
+and the daemon starts it without one (`src/daemon/index.ts`). Under `disabled`:
+
+| Request | Result |
+|---|---|
+| Any `command.submit` on an operator connection, including `lease.grant`, `lease.revoke`, `approval.resolve`, and provider resource updates | Rejected with `operator_authority_unavailable` before it reaches the runtime |
+| `provider.register` on any connection | Error `provider_authority_unavailable` |
+| `lease.request` from a task-bound agent | Accepted; the request stays pending |
+| `lease.grant`, `lease.revoke`, or `approval.resolve` from an agent | Rejected with `operator_required` |
+
+What that means for a user or an agent:
+
+- **Lease grant, operator revoke, and approve-once are unavailable.** The
+  desktop's Agent control drawer cannot grant, approve, deny, or revoke: the
+  owner refuses each of those commands.
+- **Browser provider registration is unavailable.** The desktop cannot register
+  as a browser provider, so it publishes no browser tab as a controllable
+  resource.
+- **No leased operation can run.** An agent can list resources, request a
+  lease, and read that request's status, but nothing can grant the request.
+  Every MCP tool that takes `lease_id` and `lease_revision` therefore has
+  nothing valid to pass: `psyche_pane_observe`, `psyche_pane_action`,
+  `psyche_browser_inspect`, `psyche_browser_action`, `psyche_browser_script`,
+  `psyche_execute_task`, `psyche_create_pane`, `psyche_kill_pane`, and
+  `psyche_get_pane_output`.
+- **Still available:** `psyche_control_list`, `psyche_control_lease` (request,
+  status), `psyche_control_action_status`, `psyche_list_panes`,
+  `psyche_list_rituals`, and `psyche_list_worktrees`.
+
+One internal composition is not operator authority. When an authenticated client of the legacy v0 daemon WebSocket sends `orchestration.execute`, the handler requests and grants one lease for `pane.create` on its project root, inside the owner process, to launch the lanes of that request. It does not pass through the control socket, and it grants only the request it has just made, never an agent's pending request. No desktop or iOS source in this repository sends that message; `psyche_execute_task` goes through the control socket and needs a granted lease. The handler submits the lease request and grant commands with the `human` actor kind; that is not evidence that a person approved it.
+
+`trusted-test-only`, the other policy value, exists so tests can exercise the
+grant, approval, and provider paths. No flag, environment variable, or
+configuration selects it, and it is not a production workaround. Making these
+operations available needs a native user-presence approval broker and a native
+identity broker for provider registration. That is a separately approved
+design, not a policy change.
+
+The sections below marked **(unavailable in production)** describe behavior
+that only the test policy reaches today.
+
 ## Owner and project scope
 
 `psyche mcp` connects to the canonical project root's local control socket. If
@@ -72,10 +120,13 @@ project-local paths. It does not try to hide credentials from already-arbitrary
 same-user code execution, which can read process memory or the per-user state
 directory directly.
 
-The desktop registers as an operator-authenticated browser provider. Provider
-connections are provider-only after registration; an agent token cannot
-register or impersonate one. Native browser commands accept calls only from the
-trusted `main` webview.
+The desktop is built to register as an operator-authenticated browser
+provider, and in production the owner refuses that registration with
+`provider_authority_unavailable` (see
+[Production availability](#production-availability)). Where registration is
+permitted, provider connections are provider-only afterwards; an agent token
+cannot register or impersonate one. Native browser commands accept calls only
+from the trusted `main` webview.
 
 ## MCP tools
 
@@ -132,6 +183,10 @@ lease id/revision whenever the owner can still prove them.
 
 ## Lease lifecycle
 
+Step 1 works in production. Step 3 does not: the owner refuses the grant with
+`operator_authority_unavailable`, so a request stays pending and steps 4 and 5
+are **unavailable in production**.
+
 1. An agent requests narrow grants with `psyche_control_lease`.
 2. The Agent control drawer shows the agent, task, exact resources,
    capabilities, and expiry.
@@ -148,7 +203,11 @@ after `resource_replaced`. Browser element references belong to a single
 30-second semantic snapshot; inspect again after `snapshot_stale` or
 `element_missing`.
 
-## Approve-once operations
+## Approve-once operations (unavailable in production)
+
+No leased action can start without a granted lease, and the owner refuses an
+operator's `approval.resolve` with `operator_authority_unavailable`. This
+section describes the contract that the test policy exercises.
 
 Pane close, browser close, form submission, submit-capable generic clicks,
 secret input, upload/download, permission responses, and scripts pause only the
@@ -267,8 +326,15 @@ raw tmux command, XPath, selector, or whole-desktop fallback.
 
 - `control_owner_unavailable`: verify the canonical project is accessible and
   run `psyche daemon --port 0 --project-root <root>` once to inspect startup.
-- `provider_unavailable`: open the desktop project/browser surface and wait for
-  its authenticated provider registration; do not fall back to desktop input.
+- `operator_authority_unavailable`: the owner refused an operator command
+  because no native user-presence approval broker exists. This is the expected
+  production result for a lease grant, revoke, or approval. There is no retry
+  or setting that changes it.
+- `provider_authority_unavailable`: the owner refused a browser provider
+  registration because no native identity broker exists. This is the expected
+  production result.
+- `provider_unavailable`: no browser provider is registered. In production none
+  can be; do not fall back to desktop input.
 - `resource_replaced`: refresh `psyche_control_list`, request/grant authority for
   the new generation, and do not reuse the old lease.
 - `snapshot_stale` or `element_missing`: call `psyche_browser_inspect` again and
