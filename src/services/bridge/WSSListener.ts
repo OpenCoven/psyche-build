@@ -12,6 +12,7 @@ import {
   normalizeRemoteAddress,
   resolvePreAuthLimits,
   type PreAuthConnection,
+  type PreAuthDropReason,
   type PreAuthLimits,
   type PreAuthRefusal,
   type PreAuthScheduler,
@@ -31,10 +32,11 @@ export interface WSSListenerEvents {
    */
   onAdmissionRefused?: (reason: PreAuthRefusal, refusedTotal: number) => void;
   /**
-   * An unauthenticated peer was dropped because it was not reading its
-   * replies. `droppedTotal` counts such drops since the listener started.
+   * An admitted, unauthenticated peer was dropped outright: it had too many
+   * replies unread, or had sent more than an unauthenticated peer may.
+   * `droppedTotal` counts such drops since the listener started.
    */
-  onUnresponsivePeerDropped?: (droppedTotal: number) => void;
+  onPreAuthPeerDropped?: (reason: PreAuthDropReason, droppedTotal: number) => void;
 }
 
 export interface WSSListenerOptions {
@@ -86,8 +88,8 @@ export class WSSListener {
   private readonly admitted = new Map<string, PreAuthConnection>();
   /** Transport errors raised by sessions that had not authenticated. */
   private preAuthTransportErrors = 0;
-  /** Unauthenticated peers dropped for not reading their replies. */
-  private unresponsiveDrops = 0;
+  /** Unauthenticated peers dropped for passing a pre-authentication bound. */
+  private preAuthDrops = 0;
 
   constructor(
     tls: TLSMaterial,
@@ -212,11 +214,15 @@ export class WSSListener {
       remoteUserAgent: req.headers["user-agent"],
       preAuth: {
         maxBufferedBytes: this.limits.maxBufferedBytes,
+        maxInboundBytes: this.limits.maxInboundBytes,
         onRejected: () => this.gate.rejected(connection),
-        onUnresponsive: () => {
+        onDrop: (reason) => {
           this.gate.drop(connection);
-          this.unresponsiveDrops += 1;
-          this.events.onUnresponsivePeerDropped?.(this.unresponsiveDrops);
+          // Also stop the library: until the socket's 'close' reaches it, it
+          // would go on answering whatever is left in the chunk being parsed.
+          socket.terminate();
+          this.preAuthDrops += 1;
+          this.events.onPreAuthPeerDropped?.(reason, this.preAuthDrops);
         },
       },
     });
@@ -227,6 +233,10 @@ export class WSSListener {
     // The library answers a ping with a pong before this runs, below the
     // session, so the unread-reply bound is checked here as well.
     socket.on("ping", () => { session.dropIfUnresponsive(); });
+    // Every byte the peer sends is counted here, below the WebSocket parser:
+    // a message that never finishes and frames that need no answer raise no
+    // event above it.
+    req.socket.on("data", (chunk: Buffer) => { session.noteInbound(chunk.length); });
     this.gate.attach(connection, {
       isAuthenticated: () => session.state === "authenticated",
       reject: (error, closeCode) => session.reject(error, closeCode),

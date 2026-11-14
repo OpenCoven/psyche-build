@@ -7,8 +7,8 @@ import type { BridgeError } from "./wireProtocol.js";
  * The listener binds 0.0.0.0 and is advertised over Bonjour, so any host on
  * the network can open a connection before it has proved anything. Until a
  * connection authenticates, how many sockets it may hold, for how long, how
- * large a frame it may send, and how many reply bytes may sit unread for it
- * are bounded here. An authenticated session is outside these limits
+ * large a frame it may send, how much it may send in total, and how many
+ * reply bytes may sit unread for it are bounded here. An authenticated session is outside these limits
  * entirely and is never closed, counted, or refused by them.
  */
 
@@ -64,6 +64,19 @@ export const PRE_AUTH_MAX_FRAME_BYTES = 4 * 1024;
 export const PRE_AUTH_MAX_BUFFERED_BYTES = 64 * 1024;
 
 /**
+ * Most bytes a connection may send, in total, before it authenticates.
+ *
+ * The frame bound above measures a message once it is complete, and the
+ * unread-reply bound measures only what is answered. Neither limits a peer
+ * that keeps a message unfinished, or sends frames that need no answer, or
+ * simply sends a great many small ones. A device that is pairing sends a
+ * hello, a few codes and the odd ping: a few hundred bytes. This is that,
+ * many times over, and nothing else an unauthenticated peer does is owed
+ * more.
+ */
+export const PRE_AUTH_MAX_INBOUND_BYTES = 64 * 1024;
+
+/**
  * How long a rejected peer has to complete the close handshake before its
  * socket is destroyed. A peer that ignores the close frame would otherwise
  * keep its slot for the WebSocket library's own, much longer, close timeout.
@@ -81,6 +94,7 @@ export interface PreAuthLimits {
   authDeadlineMs: number;
   maxFrameBytes: number;
   maxBufferedBytes: number;
+  maxInboundBytes: number;
   closeGraceMs: number;
 }
 
@@ -91,6 +105,7 @@ export const DEFAULT_PRE_AUTH_LIMITS: Readonly<PreAuthLimits> = Object.freeze({
   authDeadlineMs: PRE_AUTH_DEADLINE_MS,
   maxFrameBytes: PRE_AUTH_MAX_FRAME_BYTES,
   maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
+  maxInboundBytes: PRE_AUTH_MAX_INBOUND_BYTES,
   closeGraceMs: PRE_AUTH_CLOSE_GRACE_MS,
 });
 
@@ -221,6 +236,9 @@ export interface PreAuthPeer {
   reject(error: BridgeError, closeCode: number): void;
 }
 
+/** Why an admitted, unauthenticated connection was dropped outright. */
+export type PreAuthDropReason = "unread_replies" | "inbound_budget";
+
 /** Which cap refused a connection. Carries nothing about the peer. */
 export type PreAuthRefusal = "connection_cap" | "address_cap";
 
@@ -346,8 +364,9 @@ export class PreAuthGate {
 
   /**
    * Drop the connection now, with no close handshake and no grace. For a
-   * peer that is not reading: it cannot be told anything, and every moment
-   * it stays is more of its replies held in memory.
+   * peer past the unread-reply bound or the inbound budget: it is either not
+   * listening or not worth answering, and every moment it stays costs
+   * memory.
    */
   drop(handle: PreAuthConnection): void {
     const connection = this.tracked(handle);

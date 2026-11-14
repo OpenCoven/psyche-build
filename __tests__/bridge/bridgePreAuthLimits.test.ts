@@ -43,6 +43,7 @@ const LIMITS: PreAuthLimits = {
   authDeadlineMs: 60_000,
   maxFrameBytes: 1_024,
   maxBufferedBytes: 16 * 1_024,
+  maxInboundBytes: 256 * 1_024,
   closeGraceMs: 500,
 };
 
@@ -231,12 +232,13 @@ async function idleTcp(port: number) {
 }
 
 /** A client-to-server WebSocket frame, masked as RFC 6455 requires. */
-function maskedFrame(payload: string, opcode = 1): Buffer {
+function maskedFrame(payload: string, opcode = 1, final = true): Buffer {
   const body = Buffer.from(payload, "utf8");
   const mask = randomBytes(4);
+  const first = (final ? 0x80 : 0) | opcode;
   const header = body.length < 126
-    ? Buffer.from([0x80 | opcode, 0x80 | body.length])
-    : Buffer.from([0x80 | opcode, 0x80 | 126, body.length >> 8, body.length & 0xff]);
+    ? Buffer.from([first, 0x80 | body.length])
+    : Buffer.from([first, 0x80 | 126, body.length >> 8, body.length & 0xff]);
   const masked = Buffer.alloc(body.length);
   for (let i = 0; i < body.length; i += 1) masked[i] = body[i] ^ mask[i % 4];
   return Buffer.concat([header, mask, masked]);
@@ -798,11 +800,93 @@ describe("LAN bridge pre-authentication frames", () => {
     // The drop leaves a trace on the host, without the peer's address.
     const lines = warn.mock.calls
       .map(([message]) => String(message))
-      .filter((message) => message.includes("was not reading"));
+      .filter((message) => message.includes("bridge dropped an unauthenticated connection"));
     expect(lines).toEqual([
-      "bridge dropped an unauthenticated connection that was not reading its replies; 1 dropped since start",
+      "bridge dropped an unauthenticated connection (unread_replies); 1 dropped since start",
     ]);
   }, 30_000);
+
+  it("drops an unauthenticated connection once it has sent more than the inbound budget, even though it reads", async () => {
+    // How much a peer may make the host parse, queue and answer before it has
+    // proved anything is bounded in total, not only per frame.
+    const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const budget = 8 * 1024;
+    const { port, listener } = await startDaemon({ maxInboundBytes: budget });
+    const client = await connect(port);
+
+    const frame = { type: "ping", payload: { token: "b".repeat(500) } };
+    const frameBytes = Buffer.byteLength(JSON.stringify(frame));
+    let sentBytes = 0;
+    while (client.closes.length === 0 && sentBytes < budget * 8) {
+      client.send(frame);
+      sentBytes += frameBytes;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await client.until(() => client.closes.length > 0, "over-budget close");
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "slot released");
+
+    // It was reading: it has its answers up to the point it was dropped.
+    const pongs = client.messages.filter((m) => m.type === "pong").length;
+    expect(pongs).toBeGreaterThan(0);
+    expect(pongs).toBeLessThanOrEqual(Math.ceil(budget / frameBytes) + 1);
+    const lines = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes("bridge dropped an unauthenticated connection"));
+    expect(lines).toEqual([
+      "bridge dropped an unauthenticated connection (inbound_budget); 1 dropped since start",
+    ]);
+  });
+
+  it("drops a peer that keeps a message unfinished to make the host hold what it sends", async () => {
+    // A message is only measured once it is complete. Fragments of one that
+    // never ends, padded with frames that need no answer, are held meanwhile.
+    const budget = 8 * 1024;
+    const { port, listener } = await startDaemon({ maxInboundBytes: budget });
+    const peer = await silentWebSocketPeer(port);
+
+    // Unsolicited pongs: valid, unanswered, and at most 125 bytes each.
+    const padding = Buffer.concat(Array.from({ length: 8 }, () => maskedFrame("u".repeat(120), 10)));
+    peer.socket.write(Buffer.concat([maskedFrame("x", 1, false), padding]));
+    let sent = 0;
+    while (listener.unauthenticatedConnectionCount > 0 && sent < budget * 16 && !peer.socket.destroyed) {
+      const chunk = Buffer.concat([maskedFrame("x", 0, false), padding]);
+      peer.socket.write(chunk);
+      sent += chunk.length;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    await waitFor(() => listener.unauthenticatedConnectionCount === 0, "peer dropped at the budget");
+    expect(sent).toBeLessThan(budget * 16);
+    await waitFor(() => listener.activeSessions.size === 0, "session removed");
+  });
+
+  it("holds an authenticated session to no inbound budget", async () => {
+    const budget = 8 * 1024;
+    const { port, pairing } = await startDaemon({ maxInboundBytes: budget });
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    for (let i = 0; i < 4; i += 1) await client.roundTrip(`${i}:${"a".repeat(budget * 4)}`);
+    expect(client.closes).toEqual([]);
+    expect(client.errors()).toEqual([]);
+  });
+
+  it("leaves a whole pairing conversation far inside the default budget", async () => {
+    const { port, pairing } = await startDaemon("defaults");
+    const window = pairing.open();
+    const wrong = window.code === "000000" ? "111111" : "000000";
+    const client = await connect(port);
+
+    client.send(CLIENT_FIXTURES.hello_noToken);
+    for (let i = 0; i < PAIR_MAX_ATTEMPTS - 1; i += 1) {
+      client.send({ type: "pair", payload: { code: wrong, clientId: "ios-device-1", clientName: "Psyche for iPhone" } });
+    }
+    for (let i = 0; i < 60; i += 1) client.send(CLIENT_FIXTURES.ping);
+    client.send({ type: "pair", payload: { code: window.code, clientId: "ios-device-1", clientName: "Psyche for iPhone" } });
+
+    await client.until(() => client.messages.some((m) => m.type === "pairAccepted"), "pairAccepted");
+    expect(client.closes).toEqual([]);
+  });
 
   it("delivers a revoked device's pending output and its closing reason", async () => {
     // Revocation demotes the session. Its backlog was earned while it was

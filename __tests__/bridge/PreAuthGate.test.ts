@@ -4,6 +4,7 @@ import {
   PRE_AUTH_DEADLINE_MS,
   PRE_AUTH_ERRORS,
   PRE_AUTH_MAX_BUFFERED_BYTES,
+  PRE_AUTH_MAX_INBOUND_BYTES,
   PRE_AUTH_MAX_CONNECTIONS,
   PRE_AUTH_MAX_CONNECTIONS_PER_ADDRESS,
   PRE_AUTH_MAX_FRAME_BYTES,
@@ -35,6 +36,7 @@ const LIMITS: PreAuthLimits = {
   authDeadlineMs: 60_000,
   maxFrameBytes: 512,
   maxBufferedBytes: 2_048,
+  maxInboundBytes: 4_096,
   closeGraceMs: 500,
 };
 
@@ -69,6 +71,7 @@ describe("pre-auth limits", () => {
       authDeadlineMs: PRE_AUTH_DEADLINE_MS,
       maxFrameBytes: PRE_AUTH_MAX_FRAME_BYTES,
       maxBufferedBytes: PRE_AUTH_MAX_BUFFERED_BYTES,
+      maxInboundBytes: PRE_AUTH_MAX_INBOUND_BYTES,
       closeGraceMs: expect.any(Number),
     });
     expect(Object.isFrozen(DEFAULT_PRE_AUTH_LIMITS)).toBe(true);
@@ -111,6 +114,7 @@ describe("pre-auth limits", () => {
     ["a frame bound above the transport cap", { maxFrameBytes: MAX_CLIENT_FRAME_BYTES + 1 }],
     ["a NaN grace", { closeGraceMs: Number.NaN }],
     ["a zero outbound buffer bound", { maxBufferedBytes: 0 }],
+    ["a zero inbound budget", { maxInboundBytes: 0 }],
   ])("refuses to start with %s", (_label, override) => {
     // A limit that silently means "no limit" is the failure this change
     // exists to remove, so a bad configuration must not construct.
@@ -360,49 +364,49 @@ describe("Session outbound bound before authentication", () => {
 
   it("stops sending to an unauthenticated peer whose replies are not being read", () => {
     const ws = socket(2_049);
-    const onUnresponsive = vi.fn();
+    const onDrop = vi.fn();
     const session = new Session({
       socket: ws as any,
       remoteAddress: "10.0.0.1",
-      preAuth: { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive },
+      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop },
     });
 
     session.send(pong);
     session.send(pong);
     expect(ws.send).not.toHaveBeenCalled();
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onDrop).toHaveBeenCalledTimes(1);
     // Refused, so frames it already queued are not handled either.
     expect(session.rejected).toBe(true);
   });
 
   it("sends while the unread backlog is within the bound", () => {
     const ws = socket(2_048);
-    const onUnresponsive = vi.fn();
+    const onDrop = vi.fn();
     const session = new Session({
       socket: ws as any,
       remoteAddress: "10.0.0.1",
-      preAuth: { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive },
+      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop },
     });
 
     session.send(pong);
     expect(ws.send).toHaveBeenCalledTimes(1);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onDrop).not.toHaveBeenCalled();
   });
 
   it("never applies the bound to an authenticated session", () => {
     const ws = socket(50 * 1024 * 1024);
-    const onUnresponsive = vi.fn();
+    const onDrop = vi.fn();
     const session = new Session({
       socket: ws as any,
       remoteAddress: "10.0.0.1",
-      preAuth: { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive },
+      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop },
     });
     session.state = "authenticated";
 
     session.send(pong);
     session.sendBinary("stream", 1, new Uint8Array([1]));
     expect(ws.send).toHaveBeenCalledTimes(2);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onDrop).not.toHaveBeenCalled();
     expect(session.rejected).toBe(false);
   });
 });
@@ -412,7 +416,7 @@ describe("Session backlog checks at the edges", () => {
     return { readyState, bufferedAmount, send: vi.fn(), close: vi.fn() };
   }
   function session(ws: ReturnType<typeof socket>) {
-    const preAuth = { maxBufferedBytes: 2_048, onRejected: vi.fn(), onUnresponsive: vi.fn() };
+    const preAuth = { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop: vi.fn() };
     return { preAuth, session: new Session({ socket: ws as any, remoteAddress: "10.0.0.1", preAuth }) };
   }
 
@@ -420,7 +424,7 @@ describe("Session backlog checks at the edges", () => {
     const { session: s, preAuth } = session(socket(2_049));
     expect(s.dropIfUnresponsive()).toBe(true);
     expect(s.dropIfUnresponsive()).toBe(true);
-    expect(preAuth.onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(preAuth.onDrop).toHaveBeenCalledTimes(1);
     expect(s.rejected).toBe(true);
   });
 
@@ -431,7 +435,7 @@ describe("Session backlog checks at the edges", () => {
     const paired = session(socket(50 * 1024 * 1024));
     paired.session.state = "authenticated";
     expect(paired.session.dropIfUnresponsive()).toBe(false);
-    expect(paired.preAuth.onUnresponsive).not.toHaveBeenCalled();
+    expect(paired.preAuth.onDrop).not.toHaveBeenCalled();
   });
 
   it("does not judge the backlog of a socket that is already closing", () => {
@@ -439,7 +443,7 @@ describe("Session backlog checks at the edges", () => {
     // queued for it was earned while it was authenticated.
     const closing = session(socket(50 * 1024 * 1024, 2));
     expect(closing.session.dropIfUnresponsive()).toBe(false);
-    expect(closing.preAuth.onUnresponsive).not.toHaveBeenCalled();
+    expect(closing.preAuth.onDrop).not.toHaveBeenCalled();
   });
 
   it("sends the closing reason to an authenticated session however much is queued for it", () => {
@@ -454,9 +458,38 @@ describe("Session backlog checks at the edges", () => {
       payload: { code: "closing", message: "revoked by host" },
     });
     expect(ws.close).toHaveBeenCalledWith(1000, "revoked by host");
-    expect(preAuth.onUnresponsive).not.toHaveBeenCalled();
+    expect(preAuth.onDrop).not.toHaveBeenCalled();
     expect(s.rejected).toBe(false);
     expect(s.state).toBe("unauthenticated");
+  });
+
+  it("drops a peer once it has sent more than the inbound budget, whether or not it reads", () => {
+    const { session: s, preAuth } = session(socket(0));
+    expect(s.noteInbound(4_096)).toBe(false);
+    expect(preAuth.onDrop).not.toHaveBeenCalled();
+
+    expect(s.noteInbound(1)).toBe(true);
+    expect(s.noteInbound(1_000)).toBe(true);
+    expect(preAuth.onDrop).toHaveBeenCalledTimes(1);
+    expect(preAuth.onDrop).toHaveBeenCalledWith("inbound_budget");
+    expect(s.rejected).toBe(true);
+  });
+
+  it("holds an authenticated session to no inbound budget, and does not judge a closing socket", () => {
+    const paired = session(socket(0));
+    paired.session.state = "authenticated";
+    expect(paired.session.noteInbound(50 * 1024 * 1024)).toBe(false);
+    expect(paired.preAuth.onDrop).not.toHaveBeenCalled();
+
+    const closing = session(socket(0, 2));
+    expect(closing.session.noteInbound(50 * 1024 * 1024)).toBe(false);
+    expect(closing.preAuth.onDrop).not.toHaveBeenCalled();
+  });
+
+  it("says which bound a drop was for", () => {
+    const { session: s, preAuth } = session(socket(2_049));
+    expect(s.dropIfUnresponsive()).toBe(true);
+    expect(preAuth.onDrop).toHaveBeenCalledWith("unread_replies");
   });
 
   it("drops at once, with no grace, when a rejection finds the peer already over the bound", () => {
@@ -465,7 +498,7 @@ describe("Session backlog checks at the edges", () => {
 
     s.reject(PRE_AUTH_ERRORS.helloRejected, 1008);
     expect(ws.send).not.toHaveBeenCalled();
-    expect(preAuth.onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(preAuth.onDrop).toHaveBeenCalledTimes(1);
   });
 });
 

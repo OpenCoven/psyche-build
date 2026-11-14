@@ -219,10 +219,10 @@ export class BridgeDaemon {
         );
       },
       // Reported on the 1st, 2nd, 4th, 8th… drop only, for the same reason.
-      onUnresponsivePeerDropped: (droppedTotal) => {
+      onPreAuthPeerDropped: (reason, droppedTotal) => {
         if ((droppedTotal & (droppedTotal - 1)) !== 0) return;
         LogService.getInstance().warn(
-          `bridge dropped an unauthenticated connection that was not reading its replies; ${droppedTotal} dropped since start`,
+          `bridge dropped an unauthenticated connection (${reason}); ${droppedTotal} dropped since start`,
           'bridge',
         );
       },

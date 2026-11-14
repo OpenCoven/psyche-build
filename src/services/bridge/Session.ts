@@ -7,6 +7,7 @@ import {
   type BridgeError,
   type SupportedProtocolVersion,
 } from "./wireProtocol.js";
+import type { PreAuthDropReason } from "./PreAuthGate.js";
 
 export type SessionState = "unauthenticated" | "authenticated";
 
@@ -21,13 +22,15 @@ export interface SessionContext {
   preAuth?: {
     /** Most reply bytes that may sit unread before authentication. */
     maxBufferedBytes: number;
+    /** Most bytes the peer may send, in total, before authentication. */
+    maxInboundBytes: number;
     /**
      * `reject` has asked the peer to close; the listener drops it if it
      * never completes the close handshake.
      */
     onRejected: () => void;
-    /** The peer is not reading its replies; the listener drops it now. */
-    onUnresponsive: () => void;
+    /** The peer is past one of the two bounds; the listener drops it now. */
+    onDrop: (reason: PreAuthDropReason) => void;
   };
 }
 
@@ -45,8 +48,10 @@ export class Session {
    * caused the rejection must not be handled: the peer has been refused.
    */
   rejected = false;
-  /** True once the listener has been told this peer is not reading. */
-  private unresponsive = false;
+  /** True once the listener has been told to drop this peer. */
+  private dropped = false;
+  /** Bytes received from the peer since the connection became a WebSocket. */
+  private inboundBytes = 0;
   subscribedPaneIds = new Set<string>();
   subscriptionTeardowns = new Map<string, () => void>();
   /**
@@ -136,13 +141,17 @@ export class Session {
     const preAuth = this.ctx.preAuth;
     if (!preAuth || this.state === "authenticated") return false;
     if (this.ctx.socket.bufferedAmount <= preAuth.maxBufferedBytes) return false;
-    if (!this.unresponsive) {
-      this.unresponsive = true;
-      this.rejected = true;
-      this.token = null;
-      preAuth.onUnresponsive();
-    }
+    this.drop("unread_replies");
     return true;
+  }
+
+  /** Tell the listener, once, to drop this peer; nothing more is handled for it. */
+  private drop(reason: PreAuthDropReason): void {
+    if (this.dropped) return;
+    this.dropped = true;
+    this.rejected = true;
+    this.token = null;
+    this.ctx.preAuth?.onDrop(reason);
   }
 
   /**
@@ -156,5 +165,21 @@ export class Session {
    */
   dropIfUnresponsive(): boolean {
     return this.isOpen() && this.refusesUnreadBacklog();
+  }
+
+  /**
+   * Count bytes received from the peer and drop it once it has sent more
+   * than an unauthenticated peer may. Returns true if it has been dropped.
+   *
+   * Counted for every connection but enforced only before authentication,
+   * and never on a socket that is already closing.
+   */
+  noteInbound(bytes: number): boolean {
+    this.inboundBytes += bytes;
+    const preAuth = this.ctx.preAuth;
+    if (!preAuth || this.state === "authenticated" || !this.isOpen()) return false;
+    if (this.inboundBytes <= preAuth.maxInboundBytes) return this.dropped;
+    this.drop("inbound_budget");
+    return true;
   }
 }
