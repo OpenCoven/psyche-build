@@ -40,15 +40,7 @@ What that means for a user or an agent:
   status), `psyche_control_action_status`, `psyche_list_panes`,
   `psyche_list_rituals`, and `psyche_list_worktrees`.
 
-One internal composition is not operator authority. When an authenticated
-client of the legacy v0 daemon WebSocket sends `orchestration.execute`, the
-handler requests and grants one lease for `pane.create` on its project root,
-inside the owner process, to launch the lanes of that request. It does not pass
-through the control socket, and it grants only the request it has just made,
-never an agent's pending request. No desktop or iOS source in this repository
-sends that message; `psyche_execute_task` goes through the control socket and
-needs a granted lease. The journal records that request and grant with a
-`human` actor kind; that is not evidence that a person approved it.
+One internal composition is not operator authority. When an authenticated client of the legacy v0 daemon WebSocket sends `orchestration.execute`, the handler requests and grants one lease for `pane.create` on its project root, inside the owner process, to launch the lanes of that request. It does not pass through the control socket, and it grants only the request it has just made, never an agent's pending request. No desktop or iOS source in this repository sends that message; `psyche_execute_task` goes through the control socket and needs a granted lease. The handler submits the lease request and grant commands with the `human` actor kind; that is not evidence that a person approved it.
 
 `trusted-test-only`, the other policy value, exists so tests can exercise the
 grant, approval, and provider paths. No flag, environment variable, or
