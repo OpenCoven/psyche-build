@@ -960,7 +960,10 @@ describe("LAN bridge pre-authentication frames", () => {
     peer.socket.write(maskedFrame("", 8));
     await waitFor(() => !session.isOpen(), "host saw the close frame");
     const unanswered = Buffer.concat(Array.from({ length: 256 }, () => maskedFrame("u".repeat(120), 10)));
-    await new Promise<void>((resolve) => peer.socket.write(unanswered, () => resolve()));
+    peer.socket.write(unanswered);
+    // The host has it all before the first look, so that look arms the grace
+    // and finds the budget passed in the same turn.
+    await waitFor(() => inboundBytes(listener) > budget, "the flood reached the host");
 
     // Dropped at a look, well inside the grace.
     await waitFor(() => {
@@ -990,7 +993,18 @@ describe("LAN bridge pre-authentication frames", () => {
       type: "hello",
       payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: "known-token" },
     });
-    for (let i = 0; i < 96; i += 1) {
+    // The lookup is in flight before the burst is sent, so it is the
+    // allowance, not the budget, that the burst is judged against.
+    await waitFor(() => tokens.validateCalls === 1, "token lookup started");
+    // Past the budget, inside the allowance: not dropped.
+    for (let i = 0; i < 24; i += 1) {
+      client.send({ type: "ping", payload: { token: `${i}:${"d".repeat(400)}` } });
+    }
+    await waitFor(() => inboundBytes(listener) > 8 * 1024, "the first burst reached the host");
+    await settle();
+    expect(client.closes).toEqual([]);
+    // Past the allowance: dropped, with the lookup still in flight.
+    for (let i = 24; i < 96; i += 1) {
       client.send({ type: "ping", payload: { token: `${i}:${"d".repeat(400)}` } });
     }
 
@@ -1421,6 +1435,26 @@ describe("LAN bridge authenticated sessions and transport errors", () => {
     await waitFor(() => session.state === "authenticated", "raw peer authenticated");
     return { peer, session };
   }
+
+  it("gives no pre-auth grace to a session the host is closing after it authenticated", async () => {
+    // The host demotes a session to close it. A transport error from it
+    // then must not be mistaken for one from a peer that never proved
+    // anything: it is still owed its output on the library's own timeout.
+    vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});
+    const { port, tokens, scheduler, listener } = await startDaemon();
+    tokens.register("known-token");
+    const { peer, session } = await authenticatedRawPeer(port, listener, "known-token");
+
+    session.close("revoked by host");
+    expect(session.state).toBe("unauthenticated");
+    // An unmasked frame is a protocol error.
+    peer.socket.write(Buffer.from([0x81, 0x01, 0x78]));
+    await settle();
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+    scheduler.advance(LIMITS.closeGraceMs);
+    await waitFor(() => listener.activeSessions.size < 1, "the connection dropped", 300).catch(() => {});
+    expect(listener.activeSessions.size).toBe(1);
+  });
 
   it("reports every transport error from an authenticated session and gives it no pre-auth grace", async () => {
     const warn = vi.spyOn(LogService.getInstance(), "warn").mockImplementation(() => {});

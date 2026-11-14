@@ -183,11 +183,11 @@ export class Session {
   }
 
   /**
-   * Drop this peer for a bound the listener enforces itself. Never applied
-   * to a session that has been authenticated.
+   * Drop this peer for a bound the listener's gate enforces itself. The gate
+   * does not look at a session that has been authenticated, so there is
+   * nothing here to decide.
    */
   dropFor(reason: PreAuthDropReason): void {
-    if (this.authenticatedOnce) return;
     this.drop(reason);
   }
 

@@ -52,8 +52,14 @@ function transport() {
 
 function peer(initiallyAuthenticated = false) {
   const state = {
-    authenticated: initiallyAuthenticated,
+    isAuthenticated: initiallyAuthenticated,
     wasAuthenticated: initiallyAuthenticated,
+    get authenticated() { return this.isAuthenticated; },
+    // Latches when set, as the real session's state does.
+    set authenticated(next: boolean) {
+      this.isAuthenticated = next;
+      if (next) this.wasAuthenticated = true;
+    },
     authenticating: false,
     open: true,
     rejections: [] as Array<{ error: unknown; closeCode: number }>,
@@ -62,8 +68,7 @@ function peer(initiallyAuthenticated = false) {
   return {
     state,
     isAuthenticated: () => state.authenticated,
-    // Latches, as the real session does when its state is set.
-    wasAuthenticated: () => { state.wasAuthenticated ||= state.authenticated; return state.wasAuthenticated; },
+    wasAuthenticated: () => state.wasAuthenticated,
     drop: (reason: string) => { state.drops.push(reason); },
     isAuthenticating: () => state.authenticating,
     isOpen: () => state.open,
@@ -137,7 +142,6 @@ describe("pre-auth limits", () => {
     ["a zero outbound buffer bound", { maxBufferedBytes: 0 }],
     ["a zero inbound budget", { maxInboundBytes: 0 }],
     ["a zero transport budget", { maxTransportBytes: 0 }],
-    ["a lookup allowance smaller than the transport budget", { maxTransportBytes: 8_192, maxLookupBytes: 8_191 }],
     ["a transport budget smaller than the inbound budget", { maxInboundBytes: 4_096, maxTransportBytes: 4_095 }],
   ])("refuses to start with %s", (_label, override) => {
     // A limit that silently means "no limit" is the failure this change
@@ -392,7 +396,7 @@ describe("Session outbound bound before authentication", () => {
     const session = new Session({
       socket: ws as any,
       remoteAddress: "10.0.0.1",
-      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop },
+      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, maxLookupBytes: 65_536, onRejected: vi.fn(), onDrop },
     });
 
     session.send(pong);
@@ -409,7 +413,7 @@ describe("Session outbound bound before authentication", () => {
     const session = new Session({
       socket: ws as any,
       remoteAddress: "10.0.0.1",
-      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop },
+      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, maxLookupBytes: 65_536, onRejected: vi.fn(), onDrop },
     });
 
     session.send(pong);
@@ -423,7 +427,7 @@ describe("Session outbound bound before authentication", () => {
     const session = new Session({
       socket: ws as any,
       remoteAddress: "10.0.0.1",
-      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, onRejected: vi.fn(), onDrop },
+      preAuth: { maxBufferedBytes: 2_048, maxInboundBytes: 4_096, maxLookupBytes: 65_536, onRejected: vi.fn(), onDrop },
     });
     session.state = "authenticated";
 
@@ -546,6 +550,13 @@ describe("Session backlog checks at the edges", () => {
     expect(s.wasAuthenticated).toBe(true);
   });
 
+  it("names the lookup allowance when it is smaller than the transport budget", () => {
+    // With every other limit at its default, so no other check can be the
+    // one that refuses.
+    expect(() => resolvePreAuthLimits({ maxLookupBytes: PRE_AUTH_MAX_TRANSPORT_BYTES - 1 }))
+      .toThrow("invalid pre-auth limit maxLookupBytes: below maxTransportBytes");
+  });
+
   it("can be dropped from outside, once, and handles nothing afterwards", () => {
     const { session: s, preAuth } = session(socket(0));
     s.dropFor("transport_budget");
@@ -653,6 +664,28 @@ describe("pre-auth transport budget", () => {
     expect(t.state.destroyed).toBe(0);
     expect(p.state.drops).toEqual([]);
     expect(drops).toEqual([]);
+  });
+
+  it("never applies a deadline, a grace or a disposal to a session the host is closing after it authenticated", () => {
+    // The host demotes a session in order to close it. It is still owed its
+    // output and the reason, on the WebSocket library's own timeout.
+    const { gate: g, scheduler } = gate();
+    const t = transport();
+    const p = peer();
+    const connection = g.admit("10.0.0.1", t)!;
+    g.attach(connection, p);
+    p.state.authenticated = true;
+    scheduler.advance(PRE_AUTH_TRANSPORT_POLL_MS);
+
+    p.state.authenticated = false;
+    p.state.open = false;
+    scheduler.advance(LIMITS.authDeadlineMs + LIMITS.closeGraceMs);
+    expect(p.state.rejections).toEqual([]);
+    expect(t.state.destroyed).toBe(0);
+    expect(scheduler.pending).toBe(0);
+
+    g.dispose();
+    expect(t.state.destroyed).toBe(0);
   });
 
   it("gives a never-authenticated connection that begins to close the short grace, and keeps looking meanwhile", () => {

@@ -276,7 +276,8 @@ export class WSSListener {
   }
 
   private handleSocketError(session: Session, connection: PreAuthConnection, err: Error): void {
-    if (session.state === "authenticated") {
+    // Including a session the host has demoted in order to close it.
+    if (session.wasAuthenticated) {
       this.events.onServerError?.(err);
       return;
     }

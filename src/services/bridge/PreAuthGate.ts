@@ -118,6 +118,12 @@ export const PRE_AUTH_TRANSPORT_POLL_MS = 250;
  * without waiting for the answer, so the two budgets above cannot apply
  * during it. Frames behind the hello wait for the lookup, though, so what
  * arrives meanwhile is held: this is the most that may be.
+ *
+ * It is a count of bytes, and the cost is per frame: a megabyte of empty
+ * frames queued behind a lookup that did not end was measured at about
+ * 43 MB of heap. The real lookup is a cached find or one file read, so a
+ * peer cannot hold it open, and each connection gets one. A store that can
+ * be slow would need a frame count or a lookup deadline as well.
  */
 export const PRE_AUTH_MAX_LOOKUP_BYTES = 1024 * 1024;
 
@@ -472,7 +478,7 @@ export class PreAuthGate {
     this.disposed = true;
     for (const connection of this.connections) {
       this.clearAll(connection);
-      if (!this.isAuthenticated(connection)) connection.transport.destroy();
+      if (!this.everAuthenticated(connection)) connection.transport.destroy();
     }
   }
 
@@ -505,7 +511,11 @@ export class PreAuthGate {
   private onTransportPoll(connection: TrackedConnection): void {
     connection.pollTimer = null;
     const peer = connection.peer;
-    if (peer?.wasAuthenticated()) return;
+    if (peer?.wasAuthenticated()) {
+      // Nor does the authentication deadline apply to it any more.
+      this.clear(connection, "authTimer");
+      return;
+    }
     if (peer && !peer.isOpen()) this.rejected(connection);
     const budget = peer?.isAuthenticating() ? this.limits.maxLookupBytes : this.limits.maxTransportBytes;
     if (connection.transport.bytesRead() > budget) {
@@ -529,7 +539,7 @@ export class PreAuthGate {
 
   private onAuthDeadline(connection: TrackedConnection): void {
     connection.authTimer = null;
-    if (this.isAuthenticated(connection)) return;
+    if (this.everAuthenticated(connection)) return;
     if (!connection.peer) {
       this.clearAll(connection);
       connection.transport.destroy();
@@ -541,6 +551,16 @@ export class PreAuthGate {
 
   private isAuthenticated(connection: TrackedConnection): boolean {
     return connection.peer?.isAuthenticated() ?? false;
+  }
+
+  /**
+   * True once the connection's session has been authenticated, including
+   * after the host demotes it in order to close it. Such a connection still
+   * counts toward the caps while it closes, but no deadline, grace or
+   * disposal here applies to it: it is owed its output and the reason.
+   */
+  private everAuthenticated(connection: TrackedConnection): boolean {
+    return connection.peer?.wasAuthenticated() ?? false;
   }
 
   private tracked(handle: PreAuthConnection): TrackedConnection | null {
