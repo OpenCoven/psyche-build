@@ -61,6 +61,19 @@ function ephemeralKey(): { pem: string; keyId: string; publicKey: string } {
   return { pem, ...publicKeyEntryFromPrivatePem(pem) };
 }
 
+/**
+ * A key whose id contains a hex letter. About one generated key in 1,800 has
+ * an id made of digits only; upper-casing that id changes nothing, so a case
+ * that relies on the upper-cased id being invalid would then test a valid file.
+ */
+function ephemeralKeyWithLetterInId(): ReturnType<typeof ephemeralKey> {
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const key = ephemeralKey();
+    if (/[a-f]/.test(key.keyId)) return key;
+  }
+  throw new Error('could not generate a key whose id contains a hex letter');
+}
+
 function keysText(current: { keyId: string; publicKey: string } | null, next: { keyId: string; publicKey: string } | null = null): string {
   const strip = (entry: typeof current) => (entry ? { keyId: entry.keyId, publicKey: entry.publicKey } : null);
   return JSON.stringify({ schema: 1, current: strip(current), next: strip(next) }, null, 2);
@@ -223,7 +236,7 @@ describe('keys file', () => {
   });
 
   it('rejects malformed, inconsistent, or duplicated entries', () => {
-    const a = ephemeralKey();
+    const a = ephemeralKeyWithLetterInId();
     const b = ephemeralKey();
     const malformed = [
       'not json',
