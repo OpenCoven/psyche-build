@@ -172,6 +172,15 @@ For task-scoped agent use, start it with a trusted task binding so the control
 server can derive scope from authenticated context instead of caller-supplied
 `task_id`.
 
+**Leased operations are unavailable today.** An agent can list resources,
+request a lease, and read action status. Nothing can grant the request: the
+project owner refuses operator lease grants and approvals with
+`operator_authority_unavailable`, and refuses browser provider registration
+with `provider_authority_unavailable`, because no native user-presence
+approval broker exists yet. Every tool below that takes a lease therefore
+cannot run. See
+[Agent surface control](./docs/AGENT-SURFACE-CONTROL.md#production-availability).
+
 ```json
 {
   "mcp_servers": [
@@ -276,7 +285,8 @@ result keeps the redacted journal resource shape (`resource.idDigest`) instead
 of inventing a live resource id.
 
 See [Agent surface control](./docs/AGENT-SURFACE-CONTROL.md) for the complete
-lease, approval, generation, browser-provider, redaction, and recovery model.
+lease, approval, generation, browser-provider, redaction, and recovery model,
+and for which parts of it production refuses.
 
 `psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
 both so you can inspect or merge the work; removing them stays an explicit
