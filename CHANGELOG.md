@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Known Limitations
+
+- For `claude`, `opencode`, `codex`, `gemini`, `qwen`, `pi`, `cursor`, and
+  `copilot`, the initial prompt is part of the agent's command line while the
+  agent runs, so any process of the same macOS user can read it. Do not put a
+  secret in an initial prompt for these agents. See
+  [Agent prompt transport](docs/AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta)
+  (#523).
+
 ## [0.0.3] - 2026-10-03
 
 ### Added
