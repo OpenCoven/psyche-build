@@ -213,6 +213,26 @@ gates.
 | [#197](https://github.com/OpenCoven/psyche-build/issues/197) | [PR #362](https://github.com/OpenCoven/psyche-build/pull/362) (`10eed172`), [PR #366](https://github.com/OpenCoven/psyche-build/pull/366) (`081d1f95`), [PR #369](https://github.com/OpenCoven/psyche-build/pull/369) (`4cee937f`), [PR #370](https://github.com/OpenCoven/psyche-build/pull/370) (`a7927dae`), [PR #371](https://github.com/OpenCoven/psyche-build/pull/371) (`5464c931`), [PR #372](https://github.com/OpenCoven/psyche-build/pull/372) (`60eeb6cc`) | Composition root, secure filesystem, path vocabulary, restore helpers, module cfg guards, and initial-workspace transaction finishing; source decomposition, not packaged acceptance |
 | [#197](https://github.com/OpenCoven/psyche-build/issues/197) | [PR #373](https://github.com/OpenCoven/psyche-build/pull/373) (`81a9c754`) | Initial stage/verify/publish function boundary and named `PublishedWorkspace` result; subsequent persistence extraction is recorded below |
 
+### Changes recorded after the November 11 snapshot
+
+Recorded on 2026-11-15. This is not a new reconciliation: Project #11, labels,
+and the alert inventory were not inspected again, and the snapshot below stands
+as written for its date. It corrects the statements there that later events
+made untrue.
+
+- [#505](https://github.com/OpenCoven/psyche-build/issues/505) closed on 2026-11-14 with an
+  [evidence comment](https://github.com/OpenCoven/psyche-build/issues/505#issuecomment-6875211406); PR #547 merged as `6941ac3`.
+- [#504](https://github.com/OpenCoven/psyche-build/issues/504) closed on 2026-11-14 with an
+  [evidence comment](https://github.com/OpenCoven/psyche-build/issues/504#issuecomment-6878418535); PR #568 merged as `b4e54ad`.
+- PRs #548 and #549 closed unmerged, superseded by PR #560 (`33cdd9b`). PR #559
+  (`199d1c4`) also merged under #554. #554 stays open.
+- The owner dispositioned #523 on 2026-11-15: the beta ships with final-agent
+  argv exposure published as a known limitation
+  ([decision](https://github.com/OpenCoven/psyche-build/issues/523#issuecomment-6902521158)). #523 stays open until
+  that publication merges.
+- Open on the beta milestone after these changes: #553, #554, #555, #556, and
+  #523.
+
 ### November 11 reconciliation
 
 This snapshot was inspected against `main`
@@ -627,8 +647,8 @@ claimed from it.
 
 ## Concurrency rules
 
-- #553 is the nearest release. #554, #556, #523, #504, and #505 proceed in
-  parallel; #555 follows #554, #556, and #523. #480 follows #553.
+- #553 is the nearest release. #504 and #505 closed on 2026-11-14. #554, #556,
+  and #523 proceed in parallel; #555 follows them. #480 follows #553.
 - #474 is the active P0 acceptance gate for production; #476, #477, and #478
   proceed in parallel and feed it. #480 follows #474.
 - #475 is closed at source; its failure scenarios and #476 diagnostics feed

@@ -201,7 +201,7 @@ macOS acceptance and recovery.
 | B1 | [#554 — critical and high alert disposition](https://github.com/OpenCoven/psyche-build/issues/554) (under #478) | R3 | Every critical and high code-scanning and Dependabot alert fixed or dismissed with a recorded reason |
 | B1 | [#556 — LAN bridge pre-authentication limits](https://github.com/OpenCoven/psyche-build/issues/556) (under #506) | R3 | Authentication deadline, unauthenticated connection cap, and bounded pre-auth frames, with real-socket negative tests |
 | B1 | [#523 — prompts in final agent argv](https://github.com/OpenCoven/psyche-build/issues/523) (under #478) | R3 | Fixed, or an explicit owner disposition as a published known limitation |
-| B1 | [#504](https://github.com/OpenCoven/psyche-build/issues/504) and [#505](https://github.com/OpenCoven/psyche-build/issues/505) — truthful security documentation | R3 | Agent-surface and bridge documents match production refusal behavior; #505 lands through PR #547 |
+| B1 | [#504](https://github.com/OpenCoven/psyche-build/issues/504) and [#505](https://github.com/OpenCoven/psyche-build/issues/505) — truthful security documentation | R3 | Agent-surface and bridge documents match production refusal behavior; #505 landed through PR #547 and #504 through PR #568; both closed on 2026-11-14 |
 | B2 | [#555 — beta acceptance pass](https://github.com/OpenCoven/psyche-build/issues/555) (under #474) | R3/R4 | G1–G4 observed on one packaged candidate in one sanitized manifest; needs an operator |
 | B3 | [#553 — macOS public beta](https://github.com/OpenCoven/psyche-build/issues/553) | R4 | B1 and B2 closed or dispositioned, known limitations published, and explicit owner authorization to tag and publish |
 
@@ -580,8 +580,8 @@ required checks on its exact final head.
 
 ## Concurrency rules
 
-- #553 is the nearest release. #554, #556, #523, #504, and #505 proceed in
-  parallel; #555 follows #554, #556, and #523. #480 follows #553.
+- #553 is the nearest release. #504 and #505 closed on 2026-11-14. #554, #556,
+  and #523 proceed in parallel; #555 follows them. #480 follows #553.
 - #474 is the active P0 acceptance gate for production; #476, #477, and #478
   proceed in parallel and feed it. #480 follows #474.
 - #475 is closed at source; its recovery scenarios and #476 diagnostics feed
