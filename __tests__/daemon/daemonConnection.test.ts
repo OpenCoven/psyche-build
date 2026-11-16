@@ -15,7 +15,9 @@ import { PaneOutputFanout } from '../../src/daemon/paneOutputFanout.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 import { ControlRuntime } from '../../src/control/runtime.js';
+import { canonicalizeProjectRoot } from '../../src/control/projectIdentity.js';
 import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
+import { createDaemonOrchestrator } from '../../src/daemon/orchestrationBackend.js';
 import type { BridgeSpawnRequest } from '../../src/daemon/bridge.js';
 import type { WorkspaceSnapshot } from '../../src/workspace/snapshot.js';
 
@@ -108,6 +110,9 @@ async function buildConnection(
         projectRoot,
         sessionName: 'psyche-test',
         spawnPane: opts.spawnPane,
+        orchestrator: opts.spawnPane ? createDaemonOrchestrator({
+          sessionName: 'psyche-test', spawnPane: opts.spawnPane,
+        }) : undefined,
         capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
       }),
       journal: createMemoryJournal(),
@@ -204,6 +209,35 @@ describe('daemon connection authentication', () => {
   });
 
   describe('daemon WebSocket orchestration routing', () => {
+    it('executes from a real long project root through the runtime and daemon handlers', async () => {
+      const parent = await projectWithPanes([]);
+      let root = parent;
+      while (Buffer.byteLength(root, 'utf8') <= 256) root = path.join(root, 'é'.repeat(30));
+      await mkdir(path.join(root, '.psyche'), { recursive: true });
+      await writeFile(path.join(root, '.psyche', 'psyche.config.json'), JSON.stringify({ panes: [] }));
+      root = await canonicalizeProjectRoot(root);
+      expect(Buffer.byteLength(root, 'utf8')).toBeGreaterThan(128);
+      const effects: string[] = [];
+      const { ws } = await buildConnection(root, {
+        spawnPane: async (projectRoot, _session, input) => {
+          effects.push(projectRoot);
+          expect(input.cwd).toBe(root);
+          return { id: '%1', pane: { id: '%1', cwd: root, title: 'fixture', branch: 'main' },
+            worktreePath: root, branch: 'main',
+            persistedPane: { id: 'fixture-pane', slug: 'fixture', paneId: '%1', worktreePath: root, branchName: 'main' } };
+        },
+      });
+      await request(ws, { type: 'orchestration.execute', requestId: 'long-root', task: {
+        taskId: 'long-root-task', projectRoot: root, prompt: 'synthetic fixture',
+        lanes: [{ id: 'terminal', mode: 'terminal' }],
+      } });
+      expect(ws.sent.filter((frame) => frame.type === 'error')).toEqual([]);
+      expect(ws.sent[0]).toMatchObject({ type: 'orchestration.execute.result', requestId: 'long-root',
+        result: { taskId: 'long-root-task', status: 'completed',
+          lanes: [{ id: 'terminal', status: 'completed' }] } });
+      expect(effects).toEqual([root]);
+    });
+
     it('requests a project lease and executes through the canonical runtime', async () => {
       const root = await projectWithPanes([]);
       const submitted: any[] = [];
