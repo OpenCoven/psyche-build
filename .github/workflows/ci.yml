@@ -515,7 +515,21 @@ jobs:
             -project native/ios/Psyche.xcodeproj \
             -scheme PsycheApp \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
-            -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data"
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data" \
+            -resultBundlePath "$RUNNER_TEMP/psyche-app-tests.xcresult"
+
+      # #510: a failed UI test leaves only its step log, which cannot show what
+      # was on screen when a tap did not take effect. The result bundle holds
+      # the accessibility hierarchy and screenshots of the fixture app at the
+      # failure. It is kept only for a failed attempt, and briefly.
+      - name: Keep the iOS test result bundle from a failed run
+        if: failure() && needs.changes.outputs.ios == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-app-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/psyche-app-tests.xcresult
+          if-no-files-found: warn
+          retention-days: 7
 
   ios:
     name: iOS

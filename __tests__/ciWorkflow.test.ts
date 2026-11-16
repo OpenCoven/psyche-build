@@ -222,6 +222,12 @@ describe('pull request CI workflow contract', () => {
     expect(typescriptRust).toContain('RUST_TEST_RESULT');
     expect(typescriptRust).toContain('DESKTOP_CHECK_RESULT');
     expect(typescriptRust).toContain('success|skipped');
+    // #510: a failed UI test run keeps its result bundle, for that attempt only.
+    expect(iosApp).toContain('-resultBundlePath "$RUNNER_TEMP/psyche-app-tests.xcresult"');
+    expect(iosApp).toMatch(
+      /if: failure\(\) && needs\.changes\.outputs\.ios == 'true'\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v[\d.]+\n\s+with:\n\s+name: ios-app-test-results-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\n\s+path: \$\{\{ runner\.temp \}\}\/psyche-app-tests\.xcresult/,
+    );
+    expect(iosApp).toContain('retention-days: 7');
     expect(ios).toContain('needs: [changes, ios-core, ios-app]');
     expect(ios).toContain('IOS_CORE_RESULT');
     expect(ios).toContain('IOS_APP_RESULT');
