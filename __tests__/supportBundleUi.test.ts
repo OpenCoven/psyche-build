@@ -4,6 +4,7 @@ import { createHelpModalController, createSupportBundleController } from '../nat
 class Element {
   hidden = false; disabled = false; visible = true; inert = false; textContent = ''; attributes = new Map();
   ownerDocument?: Element; defaultView?: Element; parentElement?: { children: Element[] };
+  querySelector?: (selector: string) => Element | null;
   listeners = new Map<string, ((event?: any) => unknown)[]>();
   constructor(readonly doc: { activeElement: Element | null }) {}
   setAttribute(key: string, value: string) { this.attributes.set(key, value); }
@@ -42,6 +43,29 @@ function setup(invoke: (name: string, args?: any) => Promise<any>, globalScope =
 }
 afterEach(() => vi.useRealTimers());
 describe('support bundle application controller', () => {
+  it.each(['help', 'support'])('yields %s keyboard/focus containment to a higher native modal and resumes afterward', surface => {
+    const ui = setup(async () => saved, true);
+    const nativeSave = new Element(ui.doc), nativeModal = new Element(ui.doc);
+    let higherModal: Element | null = nativeModal;
+    ui.events.querySelector = selector => selector === 'dialog:modal' ? higherModal : null;
+    const help = surface === 'help' ? createHelpModalController({ dialog: ui.dialog, trigger: ui.trigger,
+      action: ui.create, close: ui.close, getActiveElement: () => ui.doc.activeElement }) : null;
+    // Only the selected overlay owns the visible element in this fixture.
+    if (help) ui.controller.dispose();
+    if (help) help.setOpen(true); else ui.controller.open(ui.trigger);
+    nativeSave.focus(); ui.events.emit('focusin'); ui.activation.emit('focus');
+    expect(ui.doc.activeElement).toBe(nativeSave);
+    for (const key of ['Enter', 'Tab', 'Escape']) {
+      const event = ui.activation.key(key);
+      expect(event.immediateStopped).toBe(false); expect(event.defaultPrevented).toBe(false);
+      expect(ui.dialog.hidden).toBe(false);
+    }
+    higherModal = null; ui.doc.activeElement = ui.background; ui.events.emit('focusin');
+    expect(ui.doc.activeElement).toBe(ui.create);
+    expect(ui.activation.key('Tab', true).defaultPrevented).toBe(true);
+    expect(ui.doc.activeElement).toBe(ui.close);
+    if (help) help.dispose(); else ui.controller.dispose();
+  });
   it('contains focus after native reactivation and keeps background controls inert until closure', () => {
     const ui = setup(async () => saved, true); ui.controller.open(ui.trigger);
     expect(ui.background.inert).toBe(true); expect(ui.trigger.inert).toBe(true);

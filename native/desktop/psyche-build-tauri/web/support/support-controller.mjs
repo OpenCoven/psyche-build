@@ -3,20 +3,24 @@ function createModalFocusScope({ dialog, getActiveElement, getTargets, getPrefer
   const activation = owner.defaultView;
   const keyTarget = activation || owner;
   let background = null;
+  function ownsFocus() {
+    const nativeModal = owner.querySelector?.('dialog:modal');
+    return !dialog.hidden && (!nativeModal || nativeModal === dialog || Boolean(dialog.contains?.(nativeModal)));
+  }
   function targets() { return getTargets().filter(canFocus); }
   function inside() {
     const active = getActiveElement();
     return targets().includes(active) || Boolean(active && dialog.contains?.(active));
   }
   function recover() {
-    if (!dialog.hidden && !inside()) {
+    if (ownsFocus() && !inside()) {
       const preferred = getPreferred();
       const target = canFocus(preferred) ? preferred : targets()[0];
       target?.focus();
     }
   }
   function keydown(event) {
-    if (dialog.hidden) return;
+    if (!ownsFocus()) return;
     // Window capture runs before the cockpit's document shortcuts, including
     // when a native activation or backdrop interaction left focus on the body.
     event.stopImmediatePropagation();
