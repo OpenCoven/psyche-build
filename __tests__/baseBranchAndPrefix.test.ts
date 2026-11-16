@@ -185,62 +185,76 @@ describe('slug and branchName separation', () => {
   });
 });
 
-// ─── Test 3: Merge operations quote branch names ───
+// ─── Test 3: Merge operations pass branch names as argv ───
+//
+// A legal Git ref name can contain `$(…)`, so quoting it inside a shell line
+// is not enough. These operations run Git from an argument vector instead.
 
-describe('merge operations quote branch names', () => {
+describe('merge operations pass branch names as argv', () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it('mergeWorktreeIntoMain quotes branch name', async () => {
+  it('mergeWorktreeIntoMain passes the branch name as one argument', async () => {
     vi.mock('child_process', () => ({
       execSync: vi.fn().mockReturnValue(Buffer.from('')),
       execFileSync: vi.fn(() => ''),
     }));
 
     const { mergeWorktreeIntoMain } = await import('../src/utils/mergeExecution.js');
-    const { execSync } = await import('child_process');
+    const { execFileSync, execSync } = await import('child_process');
 
     mergeWorktreeIntoMain('/test/repo', 'feat/fix-auth');
 
-    expect(execSync).toHaveBeenCalledWith(
-      'git merge "feat/fix-auth" --no-edit',
-      expect.any(Object)
+    expect(execFileSync).toHaveBeenCalledWith(
+      'git',
+      ['merge', '--no-edit', '--end-of-options', 'feat/fix-auth'],
+      expect.objectContaining({ cwd: '/test/repo' })
     );
+    expect(execSync).not.toHaveBeenCalled();
   });
 
-  it('mergeMainIntoWorktree quotes branch name', async () => {
+  it('mergeMainIntoWorktree passes the branch name as one argument', async () => {
     vi.mock('child_process', () => ({
       execSync: vi.fn().mockReturnValue(Buffer.from('')),
       execFileSync: vi.fn(() => ''),
     }));
 
     const { mergeMainIntoWorktree } = await import('../src/utils/mergeExecution.js');
-    const { execSync } = await import('child_process');
+    const { execFileSync, execSync } = await import('child_process');
 
     mergeMainIntoWorktree('/test/worktree', 'main');
 
-    expect(execSync).toHaveBeenCalledWith(
-      'git merge "main" --no-edit',
-      expect.any(Object)
+    expect(execFileSync).toHaveBeenCalledWith(
+      'git',
+      ['merge', '--no-edit', '--end-of-options', 'main'],
+      expect.objectContaining({ cwd: '/test/worktree' })
     );
+    expect(execSync).not.toHaveBeenCalled();
   });
 
-  it('cleanupAfterMerge quotes branch name in git branch -d', async () => {
+  it('cleanupAfterMerge passes the worktree path and branch name as arguments', async () => {
     vi.mock('child_process', () => ({
       execSync: vi.fn().mockReturnValue(Buffer.from('')),
       execFileSync: vi.fn(() => ''),
     }));
 
     const { cleanupAfterMerge } = await import('../src/utils/mergeExecution.js');
-    const { execSync } = await import('child_process');
+    const { execFileSync, execSync } = await import('child_process');
 
     cleanupAfterMerge('/test/repo', '/test/worktree', 'feat/fix-auth');
 
-    expect(execSync).toHaveBeenCalledWith(
-      'git branch -d "feat/fix-auth"',
-      expect.any(Object)
+    expect(execFileSync).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '--', '/test/worktree'],
+      expect.objectContaining({ cwd: '/test/repo' })
     );
+    expect(execFileSync).toHaveBeenCalledWith(
+      'git',
+      ['branch', '-d', '--end-of-options', 'feat/fix-auth'],
+      expect.objectContaining({ cwd: '/test/repo' })
+    );
+    expect(execSync).not.toHaveBeenCalled();
   });
 });
 

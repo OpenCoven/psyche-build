@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
-import { execSync, exec } from 'child_process';
+import { execFileSync } from 'child_process';
 import CleanTextInput from '../inputs/CleanTextInput.js';
 import chalk from 'chalk';
 import { SettingsManager } from '../../utils/settingsManager.js';
@@ -67,9 +67,13 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
     }]);
   };
 
-  const runCommand = (command: string, cwd?: string): { success: boolean; output: string; error?: string } => {
+  // Git runs from an argument vector with no shell. The commit message comes
+  // back from a model and branch names come from Git, where `$(…)` is legal,
+  // so neither may be interpolated into a command line.
+  const runGit = (args: readonly string[], cwd?: string): { success: boolean; output: string; error?: string } => {
+    const command = `git ${args.join(' ')}`;
     try {
-      const output = execSync(command, {
+      const output = execFileSync('git', [...args], {
         cwd: cwd || pane.worktreePath,
         encoding: 'utf8',
         stdio: 'pipe'
@@ -84,7 +88,7 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
   };
 
   const checkForConflicts = (cwd?: string): boolean => {
-    const result = runCommand('git status --porcelain', cwd);
+    const result = runGit(['status', '--porcelain'], cwd);
     if (result.success) {
       const conflicts = result.output
         .split('\n')
@@ -106,7 +110,7 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
     }
 
     try {
-      const diff = runCommand('git diff --staged');
+      const diff = runGit(['diff', '--staged']);
       if (!diff.success) {
         return `chore: merge ${pane.slug} into ${mainBranch}`;
       }
@@ -139,7 +143,7 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
     setStatus('checking');
 
     // Step 1: Check for uncommitted changes in the worktree
-    const statusResult = runCommand('git status --porcelain');
+    const statusResult = runGit(['status', '--porcelain']);
     if (statusResult.success && statusResult.output.trim()) {
       setStatus('uncommitted-changes');
 
@@ -150,8 +154,8 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
       setCommitMessage(finalMessage);
 
       // Stage and commit changes in the worktree
-      runCommand('git add -A');
-      const commitResult = runCommand(`git commit -m "${finalMessage}"`);
+      runGit(['add', '-A']);
+      const commitResult = runGit(['commit', '-m', finalMessage]);
       if (!commitResult.success) {
         setError('Failed to commit changes');
         setStatus('error');
@@ -169,7 +173,7 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
 
     // Step 3: Switch to main repository and checkout main branch
     setStatus('switching-branch');
-    const checkoutResult = runCommand(`git checkout ${mainBranch}`, mainRepoPath);
+    const checkoutResult = runGit(['checkout', '--end-of-options', mainBranch], mainRepoPath);
     if (!checkoutResult.success) {
       // If main is already checked out, that's fine
       if (!checkoutResult.error?.includes('already on')) {
@@ -182,7 +186,7 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
     // Step 4: Attempt merge in the main repository
     setStatus('merging');
     const mergeBranch = pane.branchName || pane.slug;
-    const mergeResult = runCommand(`git merge "${mergeBranch}" --no-ff`, mainRepoPath);
+    const mergeResult = runGit(['merge', '--no-ff', '--end-of-options', mergeBranch], mainRepoPath);
 
     if (!mergeResult.success) {
       // Check if it's a merge conflict

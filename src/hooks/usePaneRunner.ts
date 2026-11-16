@@ -204,7 +204,7 @@ export default function usePaneRunner({
         getWindowPaneId: (windowId) => tmuxService.getWindowPaneId(windowId),
         sendCommand: (resource) => tmuxService.sendKeys(
           resource.paneId,
-          `'${fullCommand.replace(/'/g, "'\\''")}' Enter`,
+          [fullCommand, 'Enter'],
         ),
         tearDownResource,
         tearDownAllocatedWindow: tearDownWindowForGeneration,
