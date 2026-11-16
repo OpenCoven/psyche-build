@@ -36,13 +36,11 @@ not prove that a capability shipped.
 
 ## Development
 
-The docs site is a pnpm workspace member declared by `pnpm-workspace.yaml`.
-Run its scripts through pnpm from the repository root, matching
-[CONTRIBUTING.md](../CONTRIBUTING.md):
+The docs site is a standalone pnpm workspace declared by `docs/pnpm-workspace.yaml`, with `docs/pnpm-lock.yaml` as its sole lockfile. Run its scripts through the pinned pnpm from the repository root, matching [CONTRIBUTING.md](../CONTRIBUTING.md):
 
 ```bash
-# Install the locked workspace dependency graph (from the repository root)
-pnpm install --frozen-lockfile
+# Install the locked docs dependency graph (from the repository root)
+pnpm --dir docs install --frozen-lockfile --ignore-scripts
 
 # Start dev server
 pnpm --dir docs dev
@@ -54,10 +52,7 @@ pnpm --dir docs build
 pnpm --dir docs preview
 ```
 
-`bash ./scripts/agent-check full` runs `pnpm --dir docs build` as part of the
-repository gate. The nested `docs/pnpm-lock.yaml` serves the standalone Vercel
-deployment configured by `docs/vercel.json`; root workspace installation uses
-the root lockfile's `docs` importer.
+`bash ./scripts/agent-bootstrap` installs the product and docs graphs separately. `bash ./scripts/agent-check full` verifies the frozen docs install and runs `pnpm --dir docs build`. The standalone Vercel deployment configured by `docs/vercel.json` uses the same docs lockfile with install scripts disabled; root workspace installation does not include docs.
 
 ## Features
 
