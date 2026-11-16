@@ -9,6 +9,7 @@ import type { ControlTaskCredentialReference } from '../src/control/credentials.
 import { COMPACTED_OUTCOME_CODE, ControlJournal, exactCommandOutcomeDigest } from '../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../src/control/policy.js';
 import { SurfaceRegistry } from '../src/control/surfaces.js';
+import { canonicalizeProjectRoot } from '../src/control/projectIdentity.js';
 import type { ControlCommand } from '../src/control/types.js';
 import { Orchestrator } from '../src/orchestration/orchestrator.js';
 import { createDeferred } from './utils/deferred.js';
@@ -72,6 +73,13 @@ async function newJournalRoot(prefix: string): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   roots.push(root);
   return root;
+}
+
+async function longProjectRoot(prefix: string): Promise<string> {
+  let root = await newJournalRoot(prefix);
+  while (Buffer.byteLength(root, 'utf8') <= 256) root = path.join(root, 'é'.repeat(30));
+  await mkdir(root, { recursive: true });
+  return canonicalizeProjectRoot(root);
 }
 
 async function appendCompactionPressure(journal: ControlJournal, prefix: string): Promise<void> {
@@ -2328,6 +2336,66 @@ describe('ControlRuntime', () => {
     expect(runtime.snapshot().capabilityLeases).toHaveLength(1);
   });
 
+  it.each([
+    ['128-byte root', `/${'x'.repeat(127)}`],
+    ['129-byte root', `/${'x'.repeat(128)}`],
+    ['multibyte root', `/${'é'.repeat(64)}`],
+  ])('requests and grants pane creation for the exact %s', async (_label, projectRoot) => {
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    await expect(runtime.submit(command({
+      id: 'root-request', idempotencyKey: 'root-request', kind: 'lease.request', ownerEpoch: 7,
+      projectRoot, actor: { id: 'agent-root', kind: 'psyche' },
+      payload: { taskId: 'task-root', ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }] },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'succeeded' });
+    await expect(runtime.submit(command({
+      id: 'root-grant', idempotencyKey: 'root-grant', kind: 'lease.grant', ownerEpoch: 7,
+      projectRoot, payload: { requestId: 'root-request' },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'succeeded', value: { lease: {
+      actorId: 'agent-root', taskId: 'task-root',
+      grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
+    } } });
+  });
+
+  it.each(['request ID', 'actor ID', 'task ID', 'pane ID', 'browser ID', 'mismatched project ID'])
+  ('retains UTF-8 byte bounds for %s with a long project root', async (field) => {
+    const projectRoot = await longProjectRoot('lease-bounds');
+    const oversized = 'é'.repeat(65);
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    const input = command({
+      id: field === 'request ID' ? oversized : 'bounded-root-request',
+      idempotencyKey: 'bounded-root-request', kind: 'lease.request', ownerEpoch: 7, projectRoot,
+      actor: { id: field === 'actor ID' ? oversized : 'agent-root', kind: 'psyche' },
+      payload: { taskId: field === 'task ID' ? oversized : 'task-root', ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] },
+          ...(['pane ID', 'browser ID', 'mismatched project ID'].includes(field)
+            ? [{ target: { kind: field === 'pane ID' ? 'pane' : field === 'browser ID' ? 'browser_tab' : 'project',
+              id: oversized }, capabilities: ['pane.create'] }] : [])] },
+    }) as ControlCommand;
+    await expect(runtime.submit(input)).resolves.toMatchObject({ status: 'failed', code: 'lease_request_too_large' });
+    expect(runtime.snapshot().leaseRequests).toEqual([]);
+    expect(runtime.snapshot().capabilityLeases).toEqual([]);
+  });
+
+  it.each([
+    ['different project', '/other-project', ['pane.create']],
+    ['different project capability', null, ['browser.script']],
+  ])('does not grant a long-root request for %s', async (_label, targetId, capabilities) => {
+    const projectRoot = await longProjectRoot('lease-scope');
+    const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
+    await expect(runtime.submit(command({
+      id: 'scope-request', idempotencyKey: 'scope-request', kind: 'lease.request', ownerEpoch: 7,
+      projectRoot, actor: { id: 'agent-root', kind: 'psyche' },
+      payload: { taskId: 'task-root', ttlMs: 60_000,
+        grants: [{ target: { kind: 'project', id: targetId ?? projectRoot }, capabilities }] },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'succeeded' });
+    await expect(runtime.submit(command({
+      id: 'scope-grant', idempotencyKey: 'scope-grant', kind: 'lease.grant', ownerEpoch: 7,
+      projectRoot, payload: { requestId: 'scope-request' },
+    }) as ControlCommand)).resolves.toMatchObject({ status: 'failed', code: 'capability_denied' });
+    expect(runtime.snapshot().capabilityLeases).toEqual([]);
+  });
+
   it('rejects hidden lease authority beyond the operator display bounds', async () => {
     const runtime = await ControlRuntime.create({ ownerEpoch: 7, handlers, journal: createMemoryJournal() });
     const grants = Array.from({ length: 33 }, (_, index) => ({
@@ -2562,7 +2630,8 @@ describe('ControlRuntime', () => {
   });
 
   it('revalidates lease revocation before each orchestration lane effect', async () => {
-    const projectRoot = process.cwd();
+    const projectRoot = await longProjectRoot('orchestration-revoke');
+    expect(Buffer.byteLength(projectRoot, 'utf8')).toBeGreaterThan(128);
     const capabilityLeases = new CapabilityLeaseStore(
       () => new Date('2026-08-17T12:00:00.000Z'),
       7,
@@ -2599,6 +2668,7 @@ describe('ControlRuntime', () => {
         grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
       },
     }));
+    expect(granted.status).toBe('succeeded');
     const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
     leaseId = lease.id;
 
@@ -2667,7 +2737,8 @@ describe('ControlRuntime', () => {
   });
 
   it('revalidates lease expiry before each orchestration lane effect', async () => {
-    const projectRoot = process.cwd();
+    const projectRoot = await longProjectRoot('orchestration-expiry');
+    expect(Buffer.byteLength(projectRoot, 'utf8')).toBeGreaterThan(128);
     let now = new Date('2026-08-17T12:00:00.000Z');
     const capabilityLeases = new CapabilityLeaseStore(() => now, 7);
     const effects: string[] = [];
@@ -2702,6 +2773,7 @@ describe('ControlRuntime', () => {
         grants: [{ target: { kind: 'project', id: projectRoot }, capabilities: ['pane.create'] }],
       },
     }));
+    expect(granted.status).toBe('succeeded');
     const lease = (granted as { value: { lease: { id: string; revision: number } } }).value.lease;
 
     await expect(submit(runtime, command({

@@ -40,11 +40,7 @@ differ from the main checkout:
   Git and excluded in `vitest.config.ts`, so the main checkout's test run does
   not pick up the copy's tests.
 - **Bootstrap it.** A worktree has no `node_modules`, and the gate needs the product workspace dependencies (`frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`) plus the standalone docs dependencies. Run `bash ./scripts/agent-bootstrap` there to install both locked graphs.
-- **Keep its path short.** Two tests in `__tests__/controlRuntime.test.ts` fail
-  from a checkout whose path is longer than 128 bytes, because a lease request
-  refuses a longer project path
-  ([#565](https://github.com/OpenCoven/psyche-build/issues/565)). If those two
-  fail in a fresh worktree, check the path before the code.
+- **Preserve project identity.** Lease requests accept canonical project roots longer than 128 UTF-8 bytes when the target exactly matches the owner's root. Caller-controlled identifiers retain their display limits, and grants remain scoped to that exact project. The orchestration revocation and expiry regressions exercise real long project directories ([#565](https://github.com/OpenCoven/psyche-build/issues/565)).
 
 Run one full gate at a time on a machine. Two concurrent runs compete for the
 processor and time-sensitive tests can fail for that reason alone.
