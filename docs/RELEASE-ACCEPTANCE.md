@@ -150,6 +150,7 @@ the exact candidate:
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm --dir docs install --frozen-lockfile --ignore-scripts
 pnpm docs:focus:check
 pnpm --dir docs build
 pnpm test

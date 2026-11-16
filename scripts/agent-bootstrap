@@ -61,9 +61,14 @@ version_ge "$tmux_actual" "3.0.0" || die "tmux $tmux_actual is too old; require 
 
 [[ -f pnpm-lock.yaml ]] || die "pnpm-lock.yaml is missing"
 [[ -f pnpm-workspace.yaml ]] || die "pnpm-workspace.yaml is missing"
+[[ -f docs/pnpm-lock.yaml ]] || die "docs/pnpm-lock.yaml is missing"
+[[ -f docs/pnpm-workspace.yaml ]] || die "docs/pnpm-workspace.yaml is missing"
+docs_pnpm_pin="$(node -p "require('./docs/package.json').packageManager")"
+[[ "$docs_pnpm_pin" == "pnpm@$pnpm_pin" ]] || die "docs must pin the same pnpm version as the root"
 
 before_status="$(git status --porcelain=v1 --untracked-files=all)"
 pnpm install --frozen-lockfile
+pnpm --dir docs install --frozen-lockfile --ignore-scripts
 git diff --check
 
 after_status="$(git status --porcelain=v1 --untracked-files=all)"

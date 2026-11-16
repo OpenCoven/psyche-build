@@ -11,7 +11,7 @@
 version: 2
 updates:
   # Root pnpm workspace. The root pnpm-lock.yaml covers every member listed in
-  # pnpm-workspace.yaml (frontend, docs, packages/vim-core,
+  # pnpm-workspace.yaml (frontend, packages/vim-core,
   # native/desktop/psyche-build-tauri) for workspace installs.
   - package-ecosystem: npm
     directory: /
@@ -26,8 +26,8 @@ updates:
         update-types: [minor, patch]
 
   # Standalone docs deployment. docs/pnpm-lock.yaml is consumed by the Vercel
-  # build configured in docs/vercel.json, separately from the root workspace
-  # importer, so it needs its own entry to stay current.
+  # build configured in docs/vercel.json. docs/pnpm-workspace.yaml isolates this
+  # graph from the root workspace, so only this entry owns docs updates.
   - package-ecosystem: npm
     directory: /docs
     schedule:
