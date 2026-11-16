@@ -1,30 +1,87 @@
+function createModalFocusScope({ dialog, getActiveElement, getTargets, getPreferred, onEscape }) {
+  const owner = dialog.ownerDocument || dialog;
+  const activation = owner.defaultView;
+  const keyTarget = activation || owner;
+  let background = null;
+  function targets() { return getTargets().filter(canFocus); }
+  function inside() {
+    const active = getActiveElement();
+    return targets().includes(active) || Boolean(active && dialog.contains?.(active));
+  }
+  function recover() {
+    if (!dialog.hidden && !inside()) {
+      const preferred = getPreferred();
+      const target = canFocus(preferred) ? preferred : targets()[0];
+      target?.focus();
+    }
+  }
+  function keydown(event) {
+    if (dialog.hidden) return;
+    // Window capture runs before the cockpit's document shortcuts, including
+    // when a native activation or backdrop interaction left focus on the body.
+    event.stopImmediatePropagation();
+    if (event.key === 'Escape') { event.preventDefault(); onEscape(); return; }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      const buttons = targets(), index = buttons.indexOf(getActiveElement());
+      const next = index < 0 ? (event.shiftKey ? buttons.length - 1 : 0)
+        : (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    } else if (!inside()) {
+      event.preventDefault(); recover();
+    }
+  }
+  function release() {
+    const previous = background; background = null;
+    for (const [element, inert] of previous || []) element.inert = inert;
+  }
+  keyTarget.addEventListener('keydown', keydown, true);
+  owner.addEventListener('focusin', recover, true);
+  activation?.addEventListener('focus', recover);
+  return {
+    activate() {
+      if (!background) {
+        background = Array.from(dialog.parentElement?.children || [])
+          .filter(element => element !== dialog).map(element => [element, element.inert]);
+        for (const [element] of background) element.inert = true;
+      }
+      recover();
+    },
+    release,
+    dispose() {
+      release();
+      keyTarget.removeEventListener('keydown', keydown, true);
+      owner.removeEventListener('focusin', recover, true);
+      activation?.removeEventListener('focus', recover);
+    },
+  };
+}
+
 export function createHelpModalController({ dialog, trigger, action, close, getActiveElement, onVisibilityChange = () => {} }) {
   let previousFocus = null;
+  const scope = createModalFocusScope({ dialog, getActiveElement, getTargets: () => [action, close],
+    getPreferred: () => action.disabled ? close : action, onEscape: () => setOpen(false) });
   function setOpen(open) {
     const wasOpen = !dialog.hidden;
     if (open && !wasOpen) previousFocus = getActiveElement();
     dialog.hidden = !open;
     trigger.setAttribute('aria-expanded', String(open));
-    if (open) (action.disabled ? close : action).focus();
-    else if (wasOpen) {
+    if (open) { scope.activate(); (action.disabled ? close : action).focus(); }
+    else {
+      scope.release();
+      if (!wasOpen) { onVisibilityChange(); return; }
       const target = canFocus(previousFocus) ? previousFocus : trigger;
       if (canFocus(target)) target.focus();
     }
     onVisibilityChange();
   }
-  close.addEventListener('click', () => setOpen(false));
-  dialog.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); }
-    if (event.key === 'Tab') {
-      if (event.shiftKey && getActiveElement() === action) { event.preventDefault(); close.focus(); }
-      else if (!event.shiftKey && getActiveElement() === close) { event.preventDefault(); (action.disabled ? close : action).focus(); }
-    }
-  });
-  return { setOpen };
+  const closeHelp = () => setOpen(false);
+  close.addEventListener('click', closeHelp);
+  return { setOpen, dispose() { setOpen(false); scope.dispose(); close.removeEventListener('click', closeHelp); } };
 }
 
 function canFocus(element) {
-  return element && !element.disabled && element.isConnected !== false && typeof element.focus === 'function'
+  return element && !element.disabled && !element.inert && element.isConnected !== false && typeof element.focus === 'function'
     && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0);
 }
 
@@ -42,9 +99,12 @@ function failure(code) {
   return 'Support export could not finish. Check the project and runtime prerequisites, then try again. No private error details were copied.';
 }
 
-export function createSupportBundleController({ elements: e, invoke, getProject, getActiveElement = () => null }) {
+export function createSupportBundleController({ elements: e, invoke, getProject, getActiveElement = () => null, onVisibilityChange = () => {} }) {
   let busy = false, disposed = false, job = null, previousFocus = null, timer = null, cancelRequested = false;
   let generation = 0;
+  const preferred = () => busy ? (cancelRequested ? e.close : e.cancel) : e.create;
+  const scope = createModalFocusScope({ dialog: e.dialog, getActiveElement,
+    getTargets: () => [e.create, e.cancel, e.reveal, e.close], getPreferred: preferred, onEscape: close });
   e.cancel.disabled = true; e.reveal.disabled = true;
   function controls() {
     e.create.disabled = busy; e.cancel.disabled = !busy || cancelRequested;
@@ -131,21 +191,17 @@ export function createSupportBundleController({ elements: e, invoke, getProject,
     try { await invoke('support_bundle_reveal', { id }); }
     catch { if (!disposed && generation === run && job?.id === id) e.status.textContent = 'Could not reveal this bundle. Reopen its project and check that the saved file is still present.'; }
   }
-  function close() { e.dialog.hidden = true; if (canFocus(previousFocus)) previousFocus.focus(); }
-  function keydown(event) {
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
-    if (event.key === 'Tab') {
-      const buttons = [e.create, e.cancel, e.reveal, e.close].filter(button => !button.disabled);
-      const active = getActiveElement();
-      if (event.shiftKey && active === buttons[0]) { event.preventDefault(); buttons.at(-1).focus(); }
-      else if (!event.shiftKey && active === buttons.at(-1)) { event.preventDefault(); buttons[0].focus(); }
-    }
+  function close() {
+    const wasOpen = !e.dialog.hidden;
+    e.dialog.hidden = true; scope.release();
+    if (wasOpen && canFocus(previousFocus)) previousFocus.focus();
+    onVisibilityChange();
   }
-  const listeners = [[e.create, 'click', create], [e.cancel, 'click', cancel], [e.reveal, 'click', reveal], [e.close, 'click', close], [e.dialog, 'keydown', keydown]];
+  const listeners = [[e.create, 'click', create], [e.cancel, 'click', cancel], [e.reveal, 'click', reveal], [e.close, 'click', close]];
   for (const [element, name, handler] of listeners) element.addEventListener(name, handler);
   return {
-    open(returnFocus) { if (e.dialog.hidden) previousFocus = canFocus(returnFocus) ? returnFocus : getActiveElement(); else previousFocus ||= canFocus(returnFocus) ? returnFocus : getActiveElement(); e.dialog.hidden = false; (busy ? (cancelRequested ? e.close : e.cancel) : e.create).focus(); },
+    open(returnFocus) { if (disposed) return; if (e.dialog.hidden) previousFocus = canFocus(returnFocus) ? returnFocus : getActiveElement(); else previousFocus ||= canFocus(returnFocus) ? returnFocus : getActiveElement(); e.dialog.hidden = false; scope.activate(); preferred().focus(); onVisibilityChange(); },
     close,
-    dispose() { disposed = true; generation++; clearTimeout(timer); for (const [element, name, handler] of listeners) element.removeEventListener(name, handler); },
+    dispose() { disposed = true; generation++; clearTimeout(timer); close(); scope.dispose(); for (const [element, name, handler] of listeners) element.removeEventListener(name, handler); },
   };
 }

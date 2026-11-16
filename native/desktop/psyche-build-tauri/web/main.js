@@ -15315,12 +15315,11 @@
       return { root: project.root, panes: state.threads.filter(function (thread) { return thread.projectId === project.id && !thread.closing; }).length };
     },
     getActiveElement: function () { return document.activeElement; },
+    onVisibilityChange: scheduleBrowserBounds,
   });
   document.getElementById("support-bundle-open").addEventListener("click", function (event) {
     event.stopPropagation(); setHelpOpen(false); supportBundleController.open(document.getElementById("help-toggle")); syncBrowserBounds();
   });
-  document.getElementById("support-bundle-close").addEventListener("click", scheduleBrowserBounds);
-  document.getElementById("support-bundle-dialog").addEventListener("keydown", function (event) { if (event.key === "Escape") scheduleBrowserBounds(); });
 
   // `?` is only a shortcut when nothing text-like has focus.
   document.addEventListener("keydown", async function (event) {

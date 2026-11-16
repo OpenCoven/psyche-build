@@ -2,31 +2,80 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHelpModalController, createSupportBundleController } from '../native/desktop/psyche-build-tauri/web/support/support-controller.mjs';
 
 class Element {
-  hidden = false; disabled = false; visible = true; textContent = ''; attributes = new Map();
+  hidden = false; disabled = false; visible = true; inert = false; textContent = ''; attributes = new Map();
+  ownerDocument?: Element; defaultView?: Element; parentElement?: { children: Element[] };
   listeners = new Map<string, ((event?: any) => unknown)[]>();
   constructor(readonly doc: { activeElement: Element | null }) {}
   setAttribute(key: string, value: string) { this.attributes.set(key, value); }
   addEventListener(event: string, callback: (event?: any) => unknown) { this.listeners.set(event, [...this.listeners.get(event) ?? [], callback]); }
   removeEventListener(event: string, callback: (event?: any) => unknown) { this.listeners.set(event, (this.listeners.get(event) ?? []).filter(x => x !== callback)); }
-  focus() { if (!this.disabled && this.visible) this.doc.activeElement = this; }
+  focus() { if (!this.disabled && this.visible && !this.inert) this.doc.activeElement = this; }
   getClientRects() { return this.visible ? [{}] : []; }
   click() { if (!this.disabled) for (const callback of this.listeners.get('click') ?? []) void callback(); }
-  key(key: string, shiftKey = false) { for (const callback of this.listeners.get('keydown') ?? []) callback({ key, shiftKey, preventDefault() {}, stopPropagation() {} }); }
+  emit(type: string, event: any = {}) {
+    for (const callback of this.listeners.get(type) ?? []) { callback(event); if (event.immediateStopped) break; }
+    return event;
+  }
+  key(key: string, shiftKey = false) {
+    return this.emit('keydown', { key, shiftKey, defaultPrevented: false, immediateStopped: false,
+      preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, stopImmediatePropagation() { this.immediateStopped = true; } });
+  }
 }
 const saved = { id: '1', state: 'saved', result: { state: 'saved', code: 'saved', fileName: 'psyche-support-20261116T000000Z-111111111111.json',
   bundleStatus: 'partial', redactedFields: 2, omittedFields: 3, bytes: 2048, retentionFailures: 0,
   categories: [{ category: 'receipts', disposition: 'omitted', reason: 'owner_unavailable' }, { category: 'terminal', disposition: 'omitted', reason: 'content_excluded' }] } };
 async function flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
-function setup(invoke: (name: string, args?: any) => Promise<any>) {
+function setup(invoke: (name: string, args?: any) => Promise<any>, globalScope = false) {
   const doc: { activeElement: Element | null } = { activeElement: null };
   const names = ['dialog', 'status', 'summary', 'create', 'cancel', 'reveal', 'close'] as const;
   const elements = Object.fromEntries(names.map(name => [name, new Element(doc)])) as Record<typeof names[number], Element>;
   const trigger = new Element(doc); trigger.focus();
+  const events = new Element(doc), activation = new Element(doc), background = new Element(doc), locked = new Element(doc);
+  locked.inert = true;
+  if (globalScope) {
+    events.defaultView = activation; elements.dialog.ownerDocument = events;
+    elements.dialog.parentElement = { children: [trigger, background, locked, elements.dialog] };
+    elements.dialog.hidden = true;
+  }
   const controller = createSupportBundleController({ elements, invoke, getProject: () => ({ root: '/fixture', panes: 2 }), getActiveElement: () => doc.activeElement });
-  return { ...elements, controller, doc, trigger };
+  return { ...elements, controller, doc, trigger, events, activation, background, locked };
 }
 afterEach(() => vi.useRealTimers());
 describe('support bundle application controller', () => {
+  it('contains focus after native reactivation and keeps background controls inert until closure', () => {
+    const ui = setup(async () => saved, true); ui.controller.open(ui.trigger);
+    expect(ui.background.inert).toBe(true); expect(ui.trigger.inert).toBe(true);
+    ui.doc.activeElement = ui.background; ui.activation.emit('focus');
+    expect(ui.doc.activeElement).toBe(ui.create);
+    ui.doc.activeElement = ui.background; expect(ui.activation.key('Tab').defaultPrevented).toBe(true);
+    expect(ui.doc.activeElement).toBe(ui.create);
+    ui.activation.key('Tab', true); expect(ui.doc.activeElement).toBe(ui.close);
+    ui.activation.key('Escape');
+    expect(ui.dialog.hidden).toBe(true); expect(ui.background.inert).toBe(false);
+    expect(ui.locked.inert).toBe(true); expect(ui.doc.activeElement).toBe(ui.trigger);
+    ui.controller.dispose();
+  });
+  it('blocks background keyboard handlers while visible and removes global containment on disposal', () => {
+    const ui = setup(async () => saved, true); const backgroundKey = vi.fn();
+    ui.activation.addEventListener('keydown', backgroundKey); ui.controller.open(ui.trigger);
+    ui.activation.key('Enter'); expect(backgroundKey).not.toHaveBeenCalled();
+    ui.controller.dispose(); expect(ui.background.inert).toBe(false);
+    ui.background.focus(); ui.activation.emit('focus'); expect(ui.doc.activeElement).toBe(ui.background);
+    ui.activation.key('Enter'); expect(backgroundKey).toHaveBeenCalledTimes(1);
+  });
+  it('contains Help focus outside its overlay and restores pre-existing background inert state', () => {
+    const doc: { activeElement: Element | null } = { activeElement: null };
+    const dialog = new Element(doc), trigger = new Element(doc), action = new Element(doc), close = new Element(doc);
+    const events = new Element(doc), activation = new Element(doc), background = new Element(doc);
+    events.defaultView = activation; dialog.ownerDocument = events; dialog.parentElement = { children: [trigger, background, dialog] };
+    dialog.hidden = true; trigger.focus();
+    const controller = createHelpModalController({ dialog, trigger, action, close, getActiveElement: () => doc.activeElement });
+    controller.setOpen(true); expect(background.inert).toBe(true);
+    doc.activeElement = background; events.emit('focusin'); expect(doc.activeElement).toBe(action);
+    doc.activeElement = background; activation.key('Tab', true); expect(doc.activeElement).toBe(close);
+    activation.key('Escape'); expect(dialog.hidden).toBe(true); expect(background.inert).toBe(false); expect(doc.activeElement).toBe(trigger);
+  });
+
   it('does not steal focus when closing an already-closed Help dialog, and restores prior focus when its trigger is hidden', () => {
     const doc: { activeElement: Element | null } = { activeElement: null };
     const dialog = new Element(doc), trigger = new Element(doc), action = new Element(doc), close = new Element(doc), terminal = new Element(doc);
