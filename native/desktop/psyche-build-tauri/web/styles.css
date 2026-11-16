@@ -4576,6 +4576,13 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   animation: menu-rise 140ms ease-out;
 }
 .help-overlay[hidden] { display: none; }
+.support-overlay { z-index: 210; }
+.support-overlay h2 { font-size: 16px; margin: 0 0 12px; }
+.support-overlay p { line-height: 1.5; }
+.support-summary { white-space: pre-line; line-height: 1.6; overflow-wrap: anywhere; font-size: 12px; }
+.support-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.support-actions button:disabled { opacity: 0.5; }
+#support-bundle-open { margin-top: 16px; }
 .help-card {
   width: 620px;
   max-width: calc(100% - 60px);

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { collectSupportBundle, serializeSupportBundle, supportBundleDigest, type SupportCollector } from './supportBundle.js';
 import { createSupportCollectors, supportBundleArchitecture, supportBundlePlatform } from './supportBundleCollectors.js';
-import { supportBundleDirectory, supportBundleFilename, writeSupportBundleFile } from './supportBundleStore.js';
+import { assertScopedSupportDirectory, supportBundleDirectory, supportBundleFilename, writeSupportBundleFile } from './supportBundleStore.js';
 import { getAgentDefinitions } from '../utils/agentLaunch.js';
 
 export interface AppSupportRequest {
@@ -28,6 +28,11 @@ export interface AppSupportResult {
 }
 export async function createAppSupportBundle(request: AppSupportRequest, signal?: AbortSignal): Promise<AppSupportResult> {
   if (signal?.aborted) return { state: 'cancelled', code: 'cancelled' };
+  try {
+    // Refuse redirected runtime inputs before collection; the store repeats
+    // this check immediately before persistence.
+    await assertScopedSupportDirectory(request.projectRoot, supportBundleDirectory(request.projectRoot));
+  } catch { return { state: 'failed', code: 'write_failed' }; }
   const categories = [
     { category: 'provenance', disposition: 'collected', reason: 'unverified' },
     { category: 'persistence', disposition: 'collected', reason: 'project_recovery_only' },

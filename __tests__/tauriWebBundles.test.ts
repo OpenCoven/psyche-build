@@ -29,8 +29,10 @@ const steps: BundleStep[] = [
   { outfile: 'web/runtime.bundle.js' },
   { outfile: 'web/sessions.bundle.js' },
   { outfile: 'web/status.bundle.js' },
+  { outfile: 'web/support.bundle.js' },
   { outfile: 'web/update.bundle.js' },
   { outfile: 'web/workspace.bundle.js' },
+  { outfile: 'src-tauri/resources/support-bundle-worker.cjs' },
 ];
 const artifactRoot = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
 const releaseScratch = join(artifactRoot, 'release');
@@ -82,19 +84,9 @@ describe('committed web bundles', () => {
   it('builds every bundle index.html loads', () => {
     // If a bundle stops being produced, the freshness checks below would have
     // nothing to compare and would quietly pass.
-    expect(steps.map((step) => step.outfile).sort()).toEqual([
-      'web/control.bundle.js',
-      'web/diffs.bundle.js',
-      'web/editor.bundle.js',
-      'web/input.bundle.js',
-      'web/panes.bundle.js',
-      'web/runtime-debug.bundle.js',
-      'web/runtime.bundle.js',
-      'web/sessions.bundle.js',
-      'web/status.bundle.js',
-      'web/update.bundle.js',
-      'web/workspace.bundle.js',
-    ]);
+    const html = readFileSync(join(webRoot, 'index.html'), 'utf8');
+    const referenced = [...html.matchAll(/src="\.\/([^"/]+\.bundle\.js)"/g)].map(match => `web/${match[1]}`);
+    expect(steps.filter(step => step.outfile.startsWith('web/')).map(step => step.outfile).sort()).toEqual(referenced.sort());
   });
 
   it('ships every script index.html references', () => {

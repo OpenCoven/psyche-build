@@ -128,7 +128,7 @@ export async function writeSupportBundleFile(
   return written;
 }
 
-async function assertScopedSupportDirectory(projectRoot: string, directory: string): Promise<void> {
+export async function assertScopedSupportDirectory(projectRoot: string, directory: string): Promise<void> {
   const root = await realpath(projectRoot);
   if (root !== path.resolve(projectRoot) || path.resolve(directory) !== supportBundleDirectory(root)) {
     throw new Error('support directory is outside the canonical project');

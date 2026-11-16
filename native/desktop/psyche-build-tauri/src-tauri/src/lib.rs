@@ -74,6 +74,10 @@ mod pty_reader;
 
 pub mod pty_transport;
 mod runtime_diagnostics;
+mod support_bundle;
+use support_bundle::{
+    support_bundle_cancel, support_bundle_reveal, support_bundle_start, support_bundle_status,
+};
 mod update_check;
 mod update_manifest;
 

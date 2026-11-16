@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,11 +35,16 @@ async function run(input: string): Promise<Record<string, any>> {
 }
 describe('embedded support worker', () => {
   it('runs outside a source checkout with no installed CLI and saves a bounded private bundle', async () => {
+    const provider = path.join(directory, '.local/bin/claude');
+    await mkdir(path.dirname(provider), { recursive: true });
+    await writeFile(provider, '#!/bin/sh\nprintf executed > "$0.executed"\n', { mode: 0o755 });
     const result = await run(JSON.stringify({ projectRoot: await root(), sourceSha: '2'.repeat(40), releaseVersion: '0.0.3' }) + '\n');
     expect(result.state).toBe('saved');
     const text = await readFile(result.path, 'utf8');
     expect(JSON.parse(text).schema).toBe('psyche.diagnostics/v1');
     expect(text).not.toContain(directory);
+    expect(JSON.parse(text).providers.count).toBeGreaterThanOrEqual(1);
+    await expect(access(provider + '.executed')).rejects.toHaveProperty('code', 'ENOENT');
   });
   it.each([{ name: 'malformed JSON', input: '{not json}\n' }, { name: 'oversized input', input: 'x'.repeat(16385) }, { name: 'relative root', input: JSON.stringify({ projectRoot: 'relative' }) + '\n' }])('refuses $name', async ({ input }) => {
     expect(await run(input)).toEqual({ state: 'failed', code: 'invalid_request' });

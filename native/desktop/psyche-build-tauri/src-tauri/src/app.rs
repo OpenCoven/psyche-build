@@ -74,6 +74,7 @@ pub fn run() {
     };
     builder
         .manage(runtime_diagnostics_state)
+        .manage(support_bundle::SupportBundleJobs::default())
         .manage(native_project_authority)
         .manage(UpdateCheck::from_startup())
         .manage(MetricsState::default())
@@ -147,6 +148,10 @@ pub fn run() {
                 control_state,
                 runtime_diagnostics,
                 runtime_process_metrics,
+                support_bundle_start,
+                support_bundle_status,
+                support_bundle_cancel,
+                support_bundle_reveal,
                 update_status,
                 update_skip_version,
                 update_dismiss,
