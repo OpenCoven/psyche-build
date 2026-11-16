@@ -7,6 +7,10 @@ This runbook advances the remaining packaged Tauri/tmux acceptance gate with one
 bounded disposable workspace. It does not reopen or repeat release construction,
 signing, notarization, checksum, publication, or Homebrew packaging work.
 
+This runbook and its manifest are pinned to the published `v0.0.1` release. To
+record gates G1–G4 on a macOS public beta release candidate, use the
+[beta acceptance pass](./BETA-ACCEPTANCE.md) and its own manifest instead.
+
 ## Evidence subjects
 
 Keep these subjects separate throughout collection:
