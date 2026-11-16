@@ -146,6 +146,72 @@ impl ScopedStore {
             Err("write_failed".into())
         }
     }
+    fn retire(&self, child: &str) -> Result<(), String> {
+        // Claim the actual leaf before inspecting its ownership. A replacement
+        // at the public name must never be unlinked on the earlier inspection.
+        self.verify_links()?;
+        let mut random = [0u8; 16];
+        getrandom::getrandom(&mut random).map_err(|_| "write_failed")?;
+        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let quarantine_name = name(OsStr::new(&format!(".retention-{suffix}")))?;
+        if unsafe { libc::mkdirat(self.directory.as_raw_fd(), quarantine_name.as_ptr(), 0o700) }
+            != 0
+        {
+            return Err("write_failed".into());
+        }
+        let quarantine = directory_at(&self.directory, &quarantine_name, false)?;
+        let original = name(OsStr::new(child))?;
+        let candidate = name(OsStr::new("candidate"))?;
+        let result = (|| {
+            if unsafe {
+                libc::renameat(
+                    self.directory.as_raw_fd(),
+                    original.as_ptr(),
+                    quarantine.as_raw_fd(),
+                    candidate.as_ptr(),
+                )
+            } != 0
+            {
+                return Err("write_failed".into());
+            }
+            if !Self::owned_at(&quarantine, "candidate") {
+                // linkat is exclusive: restoration never overwrites a newer
+                // public leaf. If restoration cannot proceed, retain the object
+                // in quarantine and report a failure rather than deleting it.
+                self.restore_unrecognized(&quarantine, &candidate, &original);
+                return Err("write_failed".into());
+            }
+            if unsafe { libc::unlinkat(quarantine.as_raw_fd(), candidate.as_ptr(), 0) } != 0 {
+                return Err("write_failed".into());
+            }
+            Ok(())
+        })();
+        // Empty only. Unknown or un-restorable contents are always preserved.
+        unsafe {
+            libc::unlinkat(
+                self.directory.as_raw_fd(),
+                quarantine_name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            );
+        }
+        result
+    }
+    fn restore_unrecognized(&self, quarantine: &File, candidate: &CString, original: &CString) {
+        if unsafe {
+            libc::linkat(
+                quarantine.as_raw_fd(),
+                candidate.as_ptr(),
+                self.directory.as_raw_fd(),
+                original.as_ptr(),
+                0,
+            )
+        } == 0
+        {
+            unsafe {
+                libc::unlinkat(quarantine.as_raw_fd(), candidate.as_ptr(), 0);
+            }
+        }
+    }
     fn prepare(&self, filename: &str, bytes: &[u8], cancel: &AtomicBool) -> Result<String, String> {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -260,12 +326,15 @@ impl ScopedStore {
         Ok((entries, truncated))
     }
     fn owned(&self, child: &str) -> bool {
+        Self::owned_at(&self.directory, child)
+    }
+    fn owned_at(directory: &File, child: &str) -> bool {
         let Ok(child) = name(OsStr::new(child)) else {
             return false;
         };
         let fd = unsafe {
             libc::openat(
-                self.directory.as_raw_fd(),
+                directory.as_raw_fd(),
                 child.as_ptr(),
                 libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
             )
@@ -316,7 +385,7 @@ impl ScopedStore {
                 failures += 1;
                 break;
             }
-            if !self.owned(&child) || self.remove(&child).is_err() {
+            if !self.owned(&child) || self.retire(&child).is_err() {
                 failures += 1;
             } else {
                 removed.push(child);
@@ -363,7 +432,7 @@ pub(crate) fn persist(
     })
 }
 
-pub(crate) fn inspect(root: &Path, filename: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn inspect_file(root: &Path, filename: &str) -> Result<(File, Vec<u8>), String> {
     use std::os::unix::fs::PermissionsExt;
     if !valid_bundle_name(filename) {
         return Err("support_file_unavailable".into());
@@ -381,7 +450,7 @@ pub(crate) fn inspect(root: &Path, filename: &str) -> Result<Vec<u8>, String> {
     if fd < 0 {
         return Err("support_file_unavailable".into());
     }
-    let file = unsafe { File::from_raw_fd(fd) };
+    let mut file = unsafe { File::from_raw_fd(fd) };
     let metadata = file.metadata().map_err(|_| "support_file_unavailable")?;
     if !metadata.is_file()
         || metadata.len() > 65536
@@ -390,13 +459,14 @@ pub(crate) fn inspect(root: &Path, filename: &str) -> Result<Vec<u8>, String> {
         return Err("support_file_unavailable".into());
     }
     let mut bytes = Vec::new();
-    file.take(65537)
+    (&mut file)
+        .take(65537)
         .read_to_end(&mut bytes)
         .map_err(|_| "support_file_unavailable")?;
     if bytes.len() > 65536 {
         return Err("support_file_unavailable".into());
     }
-    Ok(bytes)
+    Ok((file, bytes))
 }
 
 #[cfg(test)]
@@ -450,6 +520,38 @@ mod tests {
             b"outside-sentinel"
         );
         assert!(!outside.join("support-bundles").join(NAME).exists());
+    }
+    #[test]
+    fn support_store_retention_preserves_a_leaf_replaced_after_selection() {
+        let (_owner, root, _outside) = fixture();
+        let store = ScopedStore::open(&root).unwrap();
+        let output = root.join(".psyche/runtime/support-bundles").join(NAME);
+        std::fs::write(&output, br#"{"schema":"psyche.diagnostics/v1"}"#).unwrap();
+        assert!(store.owned(NAME));
+        std::fs::write(&output, b"unrelated-work").unwrap();
+        assert!(store.retire(NAME).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"unrelated-work");
+    }
+    #[test]
+    fn support_store_retention_restoration_never_overwrites_a_concurrent_leaf() {
+        let (_owner, root, _outside) = fixture();
+        let store = ScopedStore::open(&root).unwrap();
+        let directory = root.join(".psyche/runtime/support-bundles");
+        let quarantine_path = directory.join(".retention-fixture");
+        std::fs::create_dir(&quarantine_path).unwrap();
+        std::fs::write(quarantine_path.join("candidate"), b"preserved-unknown").unwrap();
+        std::fs::write(directory.join(NAME), b"newer-work").unwrap();
+        let quarantine = File::open(&quarantine_path).unwrap();
+        store.restore_unrecognized(
+            &quarantine,
+            &name(OsStr::new("candidate")).unwrap(),
+            &name(OsStr::new(NAME)).unwrap(),
+        );
+        assert_eq!(std::fs::read(directory.join(NAME)).unwrap(), b"newer-work");
+        assert_eq!(
+            std::fs::read(quarantine_path.join("candidate")).unwrap(),
+            b"preserved-unknown"
+        );
     }
     #[test]
     fn support_store_retention_refuses_a_replaced_directory() {

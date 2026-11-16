@@ -1,6 +1,6 @@
 //! Headless helper. Potentially blocking filesystem work stays in this process,
 //! under the GUI parent's deadline, cancellation grace and process-group fence.
-use super::{decode_result, private_result, terminal, WorkerResult, WORKER};
+use super::{decode_file_result, decode_result, private_result, terminal, WorkerResult, WORKER};
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -11,6 +11,49 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+pub(super) struct ParentControl {
+    finished: Arc<AtomicBool>,
+    cancellation: Option<std::sync::mpsc::Receiver<()>>,
+}
+impl Drop for ParentControl {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Release);
+    }
+}
+fn supervise_parent(
+    mut input: BufReader<std::io::Stdin>,
+    cancel: Arc<AtomicBool>,
+) -> ParentControl {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let finished = Arc::new(AtomicBool::new(false));
+    let completion = finished.clone();
+    std::thread::spawn(move || loop {
+        match line(&mut input, 32) {
+            Ok(message) if message == b"cancel\n" => {
+                cancel.store(true, Ordering::Release);
+                // Never block EOF supervision on a Node pipe. The separate
+                // relay starts only after Node's initial request is written.
+                let _ = sender.try_send(());
+            }
+            _ => {
+                if !completion.load(Ordering::Acquire) {
+                    unsafe {
+                        if libc::getpgrp() == libc::getpid() {
+                            libc::kill(-libc::getpgrp(), libc::SIGKILL);
+                        }
+                    }
+                    std::process::exit(74);
+                }
+                break;
+            }
+        }
+    });
+    ParentControl {
+        finished,
+        cancellation: Some(receiver),
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -32,19 +75,22 @@ fn line(reader: &mut impl BufRead, limit: usize) -> Result<Vec<u8>, ()> {
 }
 
 pub(super) fn entry() -> i32 {
+    // A helper is valid only in the fresh process group owned by its supervisor.
+    if unsafe { libc::getpgrp() != libc::getpid() } {
+        return 64;
+    }
     let mut input = BufReader::new(std::io::stdin());
     let result = (|| {
         let request: Request = serde_json::from_slice(&line(&mut input, 32768)?).map_err(|_| ())?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Install before discovery, setup, inspection or reveal can block.
+        let mut control = supervise_parent(input, cancel.clone());
         match request {
-            Request::Create { request } => Ok(create(
-                request,
-                Arc::new(AtomicBool::new(false)),
-                Some(input),
-            )),
+            Request::Create { request } => Ok(create(request, cancel, Some(&mut control))),
             Request::Reveal { root, result } => {
                 // All validation and opener preparation remain inside this
                 // killable helper; the parent never blocks on project storage.
-                let checked = decode_result(
+                let (checked, inspected) = decode_file_result(
                     Path::new(&root),
                     &serde_json::to_vec(&result).map_err(|_| ())?,
                 )
@@ -52,7 +98,14 @@ pub(super) fn entry() -> i32 {
                 if checked.state != "saved" {
                     return Err(());
                 }
-                tauri_plugin_opener::reveal_item_in_dir(checked.path.ok_or(())?).map_err(|_| ())?;
+                let inspected = inspected.ok_or(())?;
+                #[cfg(target_os = "macos")]
+                super::reveal::show(&inspected).map_err(|_| ())?;
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = inspected;
+                    return Err(());
+                }
                 Ok(terminal("revealed", "revealed"))
             }
         }
@@ -66,7 +119,7 @@ pub(super) fn entry() -> i32 {
 pub(super) fn create(
     request: Value,
     cancel: Arc<AtomicBool>,
-    control: Option<BufReader<std::io::Stdin>>,
+    control: Option<&mut ParentControl>,
 ) -> WorkerResult {
     if cancel.load(Ordering::Acquire) {
         return terminal("cancelled", "cancelled");
@@ -111,6 +164,7 @@ pub(super) fn create(
     };
     let Some(stdin) = child.stdin.take() else {
         let _ = child.kill();
+        let _ = child.wait();
         return terminal("recovery_required", "worker_failed");
     };
     let stdin = Arc::new(Mutex::new(stdin));
@@ -134,35 +188,17 @@ pub(super) fn create(
         let _ = child.wait();
         return terminal("recovery_required", "worker_failed");
     }
-    let finished = Arc::new(AtomicBool::new(false));
-    if let Some(mut control) = control {
-        let child_input = stdin.clone();
-        let cancel = cancel.clone();
-        let finished = finished.clone();
-        let pid = child.id();
-        std::thread::spawn(move || loop {
-            match line(&mut control, 32) {
-                Ok(message) if message == b"cancel\n" => {
-                    cancel.store(true, Ordering::Release);
-                    let _ = child_input.lock().write_all(b"cancel\n");
-                }
-                _ => {
-                    if !finished.load(Ordering::Acquire) {
-                        // Parent disappearance must not leave an orphaned IO
-                        // helper or Node worker. Never signal a caller's group
-                        // when the helper was invoked outside our supervisor.
-                        unsafe {
-                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                            if libc::getpgrp() == libc::getpid() {
-                                libc::kill(-libc::getpgrp(), libc::SIGKILL);
-                            }
-                        }
-                        std::process::exit(74);
+    if let Some(control) = control {
+        if let Some(cancellation) = control.cancellation.take() {
+            let child_input = stdin.clone();
+            std::thread::spawn(move || {
+                for () in cancellation {
+                    if child_input.lock().write_all(b"cancel\n").is_err() {
+                        break;
                     }
-                    break;
                 }
-            }
-        });
+            });
+        }
     }
     let result = (|| -> Result<WorkerResult, ()> {
         let mut output = BufReader::new(child.stdout.take().ok_or(())?);
@@ -189,8 +225,51 @@ pub(super) fn create(
             }
         }
     })().unwrap_or_else(|_| terminal("recovery_required", "worker_failed"));
-    finished.store(true, Ordering::Release);
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn support_bundle_parent_eof_probe() {
+        if std::env::var_os("PSYCHE_SUPPORT_EOF_PROBE").is_none() {
+            return;
+        }
+        let _guard = supervise_parent(
+            BufReader::new(std::io::stdin()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        // Models an operation blocked before Node discovery or during reveal.
+        std::thread::park();
+    }
+    #[test]
+    fn support_bundle_parent_eof_stops_helper_before_node_or_reveal_work() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "support_bundle::io::tests::support_bundle_parent_eof_probe",
+            ])
+            .env("PSYCHE_SUPPORT_EOF_PROBE", "1")
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+        for _ in 0..100 {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("parent EOF did not stop the helper's blocked work");
+    }
 }

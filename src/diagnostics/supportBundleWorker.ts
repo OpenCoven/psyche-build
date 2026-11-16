@@ -57,12 +57,17 @@ async function collect(value: unknown): Promise<void> {
 function invalid(): void {
   badControl = true;
   controller.abort();
+  const waiting = persistence; persistence = undefined;
+  waiting?.reject(new Error('invalid persistence control'));
   if (!running) finish(invalidResult);
 }
 process.stdin.on('data', (chunk: Buffer) => {
   if (done) return;
   received += chunk.length;
-  if (received > 16384) { invalid(); return; }
+  // The initial request is small. A valid native acknowledgement can contain
+  // up to 4096 retention names; bound that separate phase without stranding it.
+  const budget = nativeMode && running ? 300 * 1024 : 16384;
+  if (received > budget) { invalid(); return; }
   pending = Buffer.concat([pending, chunk]);
   while (pending.includes(10)) {
     const end = pending.indexOf(10);
@@ -87,5 +92,5 @@ process.stdin.on('data', (chunk: Buffer) => {
     }
   }
 });
-process.stdin.on('end', () => { if (!running || pending.length) invalid(); });
+process.stdin.on('end', () => { if (!running || pending.length || persistence) invalid(); });
 process.stdin.on('error', invalid);

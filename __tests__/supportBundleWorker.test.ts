@@ -21,7 +21,7 @@ async function root() {
   const result = await mkdtemp(path.join(os.tmpdir(), 'psyche-support-worker-project-'));
   projects.push(result); return realpath(result);
 }
-async function run(input: string): Promise<Record<string, any>> {
+async function run(input: string, responseMode: 'normal' | 'maximum' | 'malformed' | 'oversized' | 'closed' = 'normal'): Promise<Record<string, any>> {
   const child = spawn(process.execPath, [worker, '--native-store'], { cwd: directory,
     env: { PATH: path.dirname(process.execPath), HOME: directory }, stdio: ['pipe', 'pipe', 'pipe'] });
   let pending = ''; let errors = ''; let output = '';
@@ -33,8 +33,14 @@ async function run(input: string): Promise<Record<string, any>> {
     for (let end = pending.indexOf('\n'); end !== -1; end = pending.indexOf('\n')) {
       const message = JSON.parse(pending.slice(0, end)); pending = pending.slice(end + 1);
       if (message.kind === 'persist') {
+        if (responseMode !== 'normal' && responseMode !== 'maximum') {
+          child.stdin.end(responseMode === 'malformed' ? '{bad}\n' : responseMode === 'oversized' ? 'x'.repeat(300 * 1024 + 1) : '');
+          continue;
+        }
         try {
           const written = await fixtureStore(requestedRoot)(message.request);
+          if (responseMode === 'maximum') written.removed = Array.from({ length: 4096 }, (_, index) =>
+            `psyche-support-20250101T000000Z-${String(index).padStart(12, '0')}.json`);
           child.stdin.write(JSON.stringify({ kind: 'persisted', ok: true, written }) + '\n');
         } catch { child.stdin.write(JSON.stringify({ kind: 'persisted', ok: false, code: 'write_failed' }) + '\n'); }
       } else {
@@ -45,7 +51,9 @@ async function run(input: string): Promise<Record<string, any>> {
   child.stderr.on('data', chunk => { errors += String(chunk); });
   child.stdin.on('error', error => { if ((error as NodeJS.ErrnoException).code !== 'EPIPE') errors += 'stdin_failed'; });
   child.stdin.write(input);
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 2500);
   const code = await new Promise<number | null>((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  clearTimeout(timeout);
   expect(errors).toBe('');
   expect(code).toBe(0);
   expect(Buffer.byteLength(output)).toBeLessThan(16384);
@@ -66,6 +74,27 @@ describe('embedded support worker', () => {
   });
   it.each([{ name: 'malformed JSON', input: '{not json}\n' }, { name: 'oversized input', input: 'x'.repeat(16385) }, { name: 'relative root', input: JSON.stringify({ projectRoot: 'relative' }) + '\n' }])('refuses $name', async ({ input }) => {
     expect(await run(input)).toEqual({ state: 'failed', code: 'invalid_request' });
+  });
+  it('settles after a valid native retention acknowledgement exceeds the initial request budget', async () => {
+    const project = await root();
+    const bundles = path.join(project, '.psyche/runtime/support-bundles');
+    await mkdir(bundles, { recursive: true });
+    for (let index = 0; index < 350; index += 1) {
+      await writeFile(path.join(bundles, `psyche-support-20250101T${String(index).padStart(6, '0')}Z-${String(index).padStart(12, '0')}.json`),
+        JSON.stringify({ schema: 'psyche.diagnostics/v1', status: 'partial' }));
+    }
+    const result = await run(JSON.stringify({ projectRoot: project, sourceSha: '2'.repeat(40), releaseVersion: '0.0.3' }) + '\n');
+    expect(result.state).toBe('saved');
+    expect(result.retentionFailures).toBe(0);
+    expect(JSON.parse(await readFile(result.path, 'utf8')).schema).toBe('psyche.diagnostics/v1');
+  });
+  it('accepts the largest bounded native retention list without losing the saved result', async () => {
+    const result = await run(JSON.stringify({ projectRoot: await root(), sourceSha: '2'.repeat(40), releaseVersion: '0.0.3' }) + '\n', 'maximum');
+    expect(result.state).toBe('saved');
+  });
+  it.each(['malformed', 'oversized', 'closed'] as const)('settles when native persistence control is %s', async responseMode => {
+    const result = await run(JSON.stringify({ projectRoot: await root(), sourceSha: '2'.repeat(40), releaseVersion: '0.0.3' }) + '\n', responseMode);
+    expect(result).toEqual({ state: 'failed', code: 'invalid_request' });
   });
   it('honors cooperative cancellation received while collection starts', async () => {
     const input = JSON.stringify({ projectRoot: await root(), sourceSha: '2'.repeat(40), releaseVersion: '0.0.3' });

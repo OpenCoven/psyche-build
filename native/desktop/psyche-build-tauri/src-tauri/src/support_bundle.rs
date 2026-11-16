@@ -13,6 +13,9 @@ use tokio::sync::watch;
 #[cfg(unix)]
 #[path = "support_bundle_io.rs"]
 mod io;
+#[cfg(target_os = "macos")]
+#[path = "support_reveal.rs"]
+mod reveal;
 
 const WORKER: &[u8] = include_bytes!("../resources/support-bundle-worker.cjs");
 const MAX_RESULT_BYTES: u64 = 16384;
@@ -343,33 +346,41 @@ fn decode_metadata(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
 // Called only by the isolated helper (and focused tests), under its parent's
 // process deadline. Descriptor-relative inspection never follows a replacement.
 fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
-    let result = decode_metadata(root, bytes)?;
-    if result.state != "saved" {
-        return Ok(result);
-    }
     #[cfg(unix)]
     {
-        let data = crate::support_store::inspect(
-            root,
-            result.file_name.as_deref().ok_or("worker_failed")?,
-        )?;
-        if result.bytes != Some(data.len() as u64)
-            || result.digest.as_deref() != Some(format!("{:x}", Sha256::digest(&data)).as_str())
-        {
-            return Err("worker_failed".into());
-        }
-        let bundle: serde_json::Value =
-            serde_json::from_slice(&data).map_err(|_| "worker_failed")?;
-        if bundle.get("schema").and_then(|value| value.as_str()) != Some("psyche.diagnostics/v1")
-            || bundle.get("status").and_then(|value| value.as_str())
-                != result.bundle_status.as_deref()
-        {
-            return Err("worker_failed".into());
-        }
-        Ok(result)
+        decode_file_result(root, bytes).map(|(result, _file)| result)
     }
     #[cfg(not(unix))]
-    Err("worker_failed".into())
+    {
+        let _ = (root, bytes);
+        Err("worker_failed".into())
+    }
+}
+#[cfg(unix)]
+fn decode_file_result(
+    root: &Path,
+    bytes: &[u8],
+) -> Result<(WorkerResult, Option<std::fs::File>), String> {
+    let result = decode_metadata(root, bytes)?;
+    if result.state != "saved" {
+        return Ok((result, None));
+    }
+    let (file, data) = crate::support_store::inspect_file(
+        root,
+        result.file_name.as_deref().ok_or("worker_failed")?,
+    )?;
+    if result.bytes != Some(data.len() as u64)
+        || result.digest.as_deref() != Some(format!("{:x}", Sha256::digest(&data)).as_str())
+    {
+        return Err("worker_failed".into());
+    }
+    let bundle: serde_json::Value = serde_json::from_slice(&data).map_err(|_| "worker_failed")?;
+    if bundle.get("schema").and_then(|value| value.as_str()) != Some("psyche.diagnostics/v1")
+        || bundle.get("status").and_then(|value| value.as_str()) != result.bundle_status.as_deref()
+    {
+        return Err("worker_failed".into());
+    }
+    Ok((result, Some(file)))
 }
 
 fn ensure_main(label: &str) -> Result<(), String> {
@@ -404,7 +415,7 @@ fn scoped_output(root: &Path, output: &Path) -> Result<PathBuf, String> {
     let output = scope_path(root, output)?;
     #[cfg(unix)]
     {
-        crate::support_store::inspect(
+        crate::support_store::inspect_file(
             root,
             output
                 .file_name()
