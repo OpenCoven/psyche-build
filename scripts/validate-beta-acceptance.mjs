@@ -106,6 +106,8 @@ const ISO_TIMESTAMP =
 // must not carry personal paths (AGENTS.md, protected data).
 const PERSONAL_PATH = /(?:\/Users\/|\/home\/|\/var\/folders\/|~\/|[A-Za-z]:\\)/;
 const MAX_TEXT = 280;
+// A person is named by GitHub login only, so a name field cannot carry prose.
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 
 function object(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -137,6 +139,13 @@ function boundedText(value, path, errors) {
     errors.push(`${path} must be one line of at most ${MAX_TEXT} characters`);
   }
   if (PERSONAL_PATH.test(value)) errors.push(`${path} must not contain a personal path`);
+}
+
+/** A field that names a person: a GitHub login, or null while unfilled. */
+function githubLogin(value, path, errors) {
+  if (value !== null && (typeof value !== 'string' || !GITHUB_LOGIN.test(value))) {
+    errors.push(`${path} must be a GitHub login or null`);
+  }
 }
 
 function sha256(text) {
@@ -499,14 +508,16 @@ export function validateBetaAcceptanceManifest(
     }
   }
 
-  if (
-    exactKeys(manifest.operator, ['githubLogin', 'observedAt'], 'operator', errors) &&
-    manifest.operator.observedAt !== null &&
-    (typeof manifest.operator.observedAt !== 'string' ||
-      !ISO_TIMESTAMP.test(manifest.operator.observedAt) ||
-      Number.isNaN(Date.parse(manifest.operator.observedAt)))
-  ) {
-    errors.push('operator.observedAt must be an ISO-8601 timestamp');
+  if (exactKeys(manifest.operator, ['githubLogin', 'observedAt'], 'operator', errors)) {
+    githubLogin(manifest.operator.githubLogin, 'operator.githubLogin', errors);
+    if (
+      manifest.operator.observedAt !== null &&
+      (typeof manifest.operator.observedAt !== 'string' ||
+        !ISO_TIMESTAMP.test(manifest.operator.observedAt) ||
+        Number.isNaN(Date.parse(manifest.operator.observedAt)))
+    ) {
+      errors.push('operator.observedAt must be an ISO-8601 timestamp');
+    }
   }
 
   if (
@@ -517,6 +528,14 @@ export function validateBetaAcceptanceManifest(
       errors,
     )
   ) {
+    if (typeof manifest.sanitization.reviewed !== 'boolean') {
+      errors.push('sanitization.reviewed must be true or false');
+    }
+    githubLogin(
+      manifest.sanitization.reviewerGitHubLogin,
+      'sanitization.reviewerGitHubLogin',
+      errors,
+    );
     if (!Array.isArray(manifest.sanitization.omissions)) {
       errors.push('sanitization.omissions must be an array');
     } else {

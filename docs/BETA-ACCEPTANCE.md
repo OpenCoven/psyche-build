@@ -90,16 +90,18 @@ known, and `promptInArgv`. The validator requires `promptInArgv` to agree with
 the [published prompt-exposure limitation](./AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta),
 so the manifest and the limitation cannot disagree.
 
-Free-text fields (`safeNextAction`, `gapReason`, `host.machineClass`,
-`sanitization.omissions`) are one line of at most 280 characters, and the
-validator refuses anything that looks like a home-directory path.
+Free-text fields (`safeNextAction`, `gapReason`, `host.macOS`,
+`host.machineClass`, the agent version, and `sanitization.omissions`) are one
+line of at most 280 characters, and the validator refuses anything that looks
+like a home-directory path.
 
 ## Finish
 
 1. List what you deliberately left out of the evidence in
    `sanitization.omissions`.
-2. Have a second person review the retained evidence for protected data, and
-   record them in `sanitization`.
+2. Have the retained evidence reviewed for protected data, by a second person
+   where one is available, and record the reviewer's GitHub login in
+   `sanitization`. People are named by GitHub login only.
 3. Set `terminalState`:
    - `accepted` when every row is `succeeded`;
    - `not_accepted` when every row has an outcome other than `pending` and at

@@ -347,6 +347,29 @@ describe('beta acceptance manifest', () => {
     }
   });
 
+  it('accepts only a GitHub login, or null, where a person is named', async () => {
+    const cases: Array<[(manifest: Manifest) => void, RegExp]> = [
+      [(m) => (m.operator.githubLogin = 'see /Users/someone/notes'), /operator\.githubLogin must be a GitHub login or null/],
+      [(m) => (m.operator.githubLogin = 'two words'), /operator\.githubLogin must be a GitHub login or null/],
+      [(m) => (m.operator.githubLogin = 42), /operator\.githubLogin must be a GitHub login or null/],
+      [(m) => (m.operator.githubLogin = 'a'.repeat(40)), /operator\.githubLogin must be a GitHub login or null/],
+      [(m) => (m.sanitization.reviewerGitHubLogin = '-leading'), /sanitization\.reviewerGitHubLogin must be a GitHub login or null/],
+      [(m) => (m.sanitization.reviewed = 'yes'), /sanitization\.reviewed must be true or false/],
+    ];
+    // The rule holds before a terminal state too: an incomplete manifest is retained evidence.
+    for (const base of [identified, accepted]) {
+      for (const [mutate, expected] of cases) {
+        const manifest = await base();
+        mutate(manifest);
+        expect(validateBetaAcceptanceManifest(manifest).join('\n')).toMatch(expected);
+      }
+    }
+
+    const hyphenated = await accepted();
+    hyphenated.operator.githubLogin = 'octo-cat-9';
+    expect(validateBetaAcceptanceManifest(hyphenated)).toEqual([]);
+  });
+
   it('cross-checks the manifest against the candidate provenance and checksum files', async () => {
     const files = () => ({ provenanceText: JSON.stringify(provenance()), sha256sumsText: sha256sums() });
     expect(validateBetaAcceptanceManifest(await accepted(), files())).toEqual([]);
