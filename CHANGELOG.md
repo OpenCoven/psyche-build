@@ -84,7 +84,7 @@
   key, so it makes no update request and shows no update notice. Update with
   `brew upgrade --cask psyche-build`, or download the new DMG and check it
   against the release's `SHA256SUMS` (#477).
-- Creating a support bundle from Help requires the supported Node.js prerequisite. Missing Node produces visible guidance. Terminal content and authoritative receipt data are omitted, and snapshots remain unverified (#476).
+- In current source builds, creating a support bundle from Help requires the supported Node.js prerequisite. Missing Node produces visible guidance. Terminal content and authoritative receipt data are omitted, and snapshots remain unverified. This source capability does not change previously released artifacts (#476).
 
 ## [0.0.2] - 2026-08-28
 
