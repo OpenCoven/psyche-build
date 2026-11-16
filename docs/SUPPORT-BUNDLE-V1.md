@@ -224,7 +224,38 @@ is reported as `recovery_required`. On cancellation the collector rejects
 instead of reporting a zero count, and the collection turns that into
 `collection_timeout_or_cancelled` and `recovery_required`.
 
-The CLI does not collect graphics, receipt or terminal facts; those sections remain empty rather than fabricated. The application surface below adds a bounded native graphics projection and explicit category accounting.
+The CLI does not collect graphics, receipt or terminal facts; those sections remain empty rather than fabricated. The application surface below adds a bounded native graphics projection and explicit category accounting. The CLI omission reasons are listed under [Not collected, and why](#not-collected-and-why).
+
+The project identity digest hashes the canonical project root, resolved the way
+the recovery readers resolve it, so one project reached through a symlink
+digests to one identity rather than one per spelling of its path.
+
+The recovery scan is bounded and cancellable like the rest of collection: at
+most 256 files, none larger than 64 KiB, stopping on the collector's abort
+signal. A file over that size is quarantined unread, and a scan that hits its
+bound reports `state: 'partial'` so partial counts are not read as a whole
+directory. `psyche recover` passes no bounds, because the operator surface must
+report everything.
+
+Collector fields must use the contract's closed key and value vocabulary. A key
+outside `SAFE_STATE_KEYS`, or a string outside `SAFE_DIAGNOSTIC_VALUES`, is
+dropped during normalization and counted in `redaction.omittedFields` — the
+bundle still serializes, so a collector with the wrong vocabulary silently
+reports nothing. Tests assert `omittedFields === 0` for the shipped collectors
+to keep that failure visible.
+
+### Not collected, and why
+
+The command leaves these sections of the bundle empty. An empty section here means "not looked at", not "nothing to report". The command's summary names them on its `not collected:` line.
+
+| Category | Bundle fields | Reason |
+|---|---|---|
+| Control receipts | `receipts`, `ownerEpoch` | No collector reads the control plane, so a bundle has no action receipts and no owner epoch. |
+| Diagnostic records | `records` | No collector emits diagnostic records. |
+| Graphics | `graphics` | The command has no graphics surface; graphics facts exist only in the desktop app. |
+| Terminal content | `terminalTail` | Terminal content is never collected; the sanitizer drops any terminal line a collector supplies. |
+
+These omissions describe the CLI collectors. The application action below supplies bounded native graphics facts and category-accounting records, while authoritative receipts remain explicitly unavailable. Terminal content is never collected in either surface.
 
 ## Application Help action
 
@@ -248,24 +279,6 @@ Unavailable native projections are explicitly omitted, and omission records are 
 Cancellation is cooperative until the store's atomic rename commit point. Before commit, cancellation removes the temporary file and reports cancelled; after commit, it returns the saved file. A native worker timeout, crash or invalid output without a verified terminal result is `recovery_required`, because it is not proof that no file was written. The existing 30-second collection deadline, 64 KiB payload cap, `0600` exclusive temporary-file creation and ten-bundle retention remain in force; the complete helper operation has a 35-second budget, a two-second cancellation grace period and a one-second reap allowance. The parent terminates the helper process group, releases the project lease and reports recovery if verification cannot finish. An unreaped helper fences further attempts so retries cannot accumulate blocked workers. Native admission uses an already-open exact project key, cached runtime facts and a nonblocking updater snapshot; unavailable snapshots are omitted. Native retention scans at most 4,096 directory entries and reports a retention warning if that bound is reached. Ordinary write failures preserve prior bundles and show safe guidance without copying exception text or personal paths.
 
 Source tests and standalone-worker execution do not establish packaged-app acceptance. #476 requires observation of the actual Help action and resulting file on an immutable local package, retained under #474; that observation does not establish release, signing, distribution or broader support acceptance.
-
-The project identity digest hashes the canonical project root, resolved the way
-the recovery readers resolve it, so one project reached through a symlink
-digests to one identity rather than one per spelling of its path.
-
-The recovery scan is bounded and cancellable like the rest of collection: at
-most 256 files, none larger than 64 KiB, stopping on the collector's abort
-signal. A file over that size is quarantined unread, and a scan that hits its
-bound reports `state: 'partial'` so partial counts are not read as a whole
-directory. `psyche recover` passes no bounds, because the operator surface must
-report everything.
-
-Collector fields must use the contract's closed key and value vocabulary. A key
-outside `SAFE_STATE_KEYS`, or a string outside `SAFE_DIAGNOSTIC_VALUES`, is
-dropped during normalization and counted in `redaction.omittedFields` — the
-bundle still serializes, so a collector with the wrong vocabulary silently
-reports nothing. Tests assert `omittedFields === 0` for the shipped collectors
-to keep that failure visible.
 
 ## Rollback and recovery
 

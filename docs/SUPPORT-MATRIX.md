@@ -198,6 +198,15 @@ or a generated artifact alone is insufficient.
   owner's decision to ship the macOS public beta with it are in
   [Agent prompt transport](./AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta)
   ([#523](https://github.com/OpenCoven/psyche-build/issues/523)).
+- **The macOS app does not check for updates.** The app is built with no update
+  signing key, so it makes no update request, shows no update notice, and hides
+  the **Check for updates** setting. You will not be told when a newer release
+  exists. To update, run `brew upgrade --cask psyche-build`, or download the new
+  DMG from the [releases page](https://github.com/OpenCoven/psyche-build/releases)
+  and check it against that release's `SHA256SUMS`. How the check behaves once a
+  key exists is in [Release](./RELEASE.md#desktop-update-check); activating it is
+  [#477](https://github.com/OpenCoven/psyche-build/issues/477).
+- **Creating a support bundle from Help requires Node.js.** The source action needs the supported Node.js prerequisite and shows visible guidance when it is unavailable. Raw terminal content and authoritative receipt data are explicitly omitted; snapshots remain unverified. The CLI remains available from a source checkout with its own documented omissions. See [Support bundle v1](./SUPPORT-BUNDLE-V1.md#application-help-action) and [#476](https://github.com/OpenCoven/psyche-build/issues/476) for the contract and exact-source packaged evidence. This source capability does not change what previously released artifacts contain.
 
 ## Current known deferrals
 

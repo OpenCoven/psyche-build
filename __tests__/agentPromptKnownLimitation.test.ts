@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readReleaseNotes } from '../scripts/release-notes.mjs';
 import {
   AGENT_IDS,
   AGENT_REGISTRY,
@@ -100,11 +101,14 @@ describe('published prompt argv limitation', () => {
     const matrix = read('docs/SUPPORT-MATRIX.md')
       .split('\n## Current known limitations\n')[1]
       ?.split('\n## ')[0];
-    const changelog = read('CHANGELOG.md')
-      .split('\n## Unreleased\n')[1]
-      ?.split('\n## [')[0];
+    // The release notes for the embedded version, cut by the extractor the
+    // release workflow uses: text anywhere else in the changelog is not published.
+    const version = (JSON.parse(read('package.json')) as { version: string }).version;
+    const releaseNotes = `${readReleaseNotes(process.cwd(), version).github}\n### `
+      .split('\n### Known Limitations\n')[1]
+      ?.split('\n### ')[0];
 
-    for (const [name, text] of [['support matrix', matrix], ['changelog', changelog]] as const) {
+    for (const [name, text] of [['support matrix', matrix], ['release notes', releaseNotes]] as const) {
       expect(text, name).toBeDefined();
       expect(text, name).toContain(ANCHOR);
       const named = backticked(text!).filter((agent) =>
