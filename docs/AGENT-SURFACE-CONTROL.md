@@ -54,6 +54,8 @@ that only the test policy reaches today.
 
 ## Owner and project scope
 
+Lease requests bound caller-controlled identifiers to 128 UTF-8 bytes. A project target identical to the owner-selected canonical root is exempt from that display-text limit, so long project paths remain usable. Other target IDs retain the limit; granting still requires the exact project root and permits only `pane.create` for a project target. Grant counts, capability counts and capability-text bounds also remain enforced.
+
 `psyche mcp` connects to the canonical project root's local control socket. If
 the owner is absent it starts `psyche daemon --port 0 --project-root <root>`,
 then waits for authenticated health. A project has one owner epoch. A restart

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { exactNpmPin } from './support/dependencyPins.js';
 import { withFilesScopeSelectionHelper } from './tauriMainHarness';
 
 const repoRoot = process.cwd();
@@ -162,7 +163,7 @@ describe('native CodeMirror workspace editor surface', () => {
   });
 
   it('overrides the default token colors with a dark workspace highlight style', () => {
-    expect(tauriPackage.dependencies['@lezer/highlight']).toBe('1.2.3');
+    expect(() => exactNpmPin(tauriPackage, '@lezer/highlight')).not.toThrow();
     expect(editorEntry).toMatch(
       /import \{[^}]*HighlightStyle[^}]*syntaxHighlighting[^}]*\} from '@codemirror\/language'/
     );
@@ -299,7 +300,7 @@ describe('native CodeMirror workspace editor surface', () => {
   );
 
   it('starts every loaded document with isolated undo history', async () => {
-    expect(tauriPackage.dependencies['@codemirror/commands']).toBe('6.10.4');
+    expect(() => exactNpmPin(tauriPackage, '@codemirror/commands')).not.toThrow();
 
     const editorModule = await import(
       pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href

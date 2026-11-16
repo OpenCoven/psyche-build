@@ -41,11 +41,7 @@ differ from the main checkout:
   dependencies of the root and of every workspace package (`docs/`,
   `frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`).
   Run `bash ./scripts/agent-bootstrap` there.
-- **Keep its path short.** Two tests in `__tests__/controlRuntime.test.ts` fail
-  from a checkout whose path is longer than 128 bytes, because a lease request
-  refuses a longer project path
-  ([#565](https://github.com/OpenCoven/psyche-build/issues/565)). If those two
-  fail in a fresh worktree, check the path before the code.
+- **Preserve project identity.** Lease requests accept canonical project roots longer than 128 UTF-8 bytes when the target exactly matches the owner's root. Caller-controlled identifiers retain their display limits, and grants remain scoped to that exact project. The orchestration revocation and expiry regressions exercise real long project directories ([#565](https://github.com/OpenCoven/psyche-build/issues/565)).
 
 Run one full gate at a time on a machine. Two concurrent runs compete for the
 processor and time-sensitive tests can fail for that reason alone.
@@ -133,8 +129,9 @@ the transition. Do not keep an umbrella issue open solely to duplicate maintenan
 Every product or maintenance PR names one owning outcome, owner, train, and
 acceptance gate. A focused maintenance result may be described in the PR without
 creating a duplicate issue; an existing unresolved public outcome retains its
-owning issue. The active macOS rollout is release-candidate acceptance (#474)
-and the observed recovery gaps (#475) toward `v0.1.0`. iOS and future
+owning issue. The active macOS rollout is the public beta (#553), then
+release-candidate acceptance (#474) toward `v0.1.0`; the observed recovery
+gaps (#475) are closed at source. iOS and future
 architecture/input expansion are not prerequisites.
 
 For any change to scope, priority, dependency, support, or closure:
