@@ -39,10 +39,7 @@ differ from the main checkout:
 - **Put it under `.worktrees/` or `.claude/worktrees/`.** Both are ignored by
   Git and excluded in `vitest.config.ts`, so the main checkout's test run does
   not pick up the copy's tests.
-- **Bootstrap it.** A worktree has no `node_modules`, and the gate needs the
-  dependencies of the root and of every workspace package (`docs/`,
-  `frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`).
-  Run `bash ./scripts/agent-bootstrap` there.
+- **Bootstrap it.** A worktree has no `node_modules`, and the gate needs the product workspace dependencies (`frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`) plus the standalone docs dependencies. Run `bash ./scripts/agent-bootstrap` there to install both locked graphs.
 - **Keep its path short.** Two tests in `__tests__/controlRuntime.test.ts` fail
   from a checkout whose path is longer than 128 bytes, because a lease request
   refuses a longer project path

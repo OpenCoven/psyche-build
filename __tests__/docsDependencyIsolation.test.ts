@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -79,7 +79,13 @@ describe('standalone docs dependency resolution', () => {
     await cp('scripts/agent-bootstrap', path.join(root, 'scripts/agent-bootstrap'));
     await cp('.gitignore', path.join(root, '.gitignore'));
     execFileSync('git', ['init', '--quiet'], { cwd: root });
+    // This fixture tests dependency installation, independently of system tmux provisioning.
+    const tools = path.join(root, 'fixture-tools');
+    await mkdir(tools);
+    await writeFile(path.join(tools, 'tmux'), '#!/bin/sh\n[ "$1" = "-V" ] || exit 64\nprintf "tmux 3.0.0\\n"\n');
+    await chmod(path.join(tools, 'tmux'), 0o755);
     execFileSync('bash', ['scripts/agent-bootstrap'], { cwd: root, timeout: 15_000,
+      env: { ...process.env, PATH: `${tools}${path.delimiter}${process.env.PATH ?? ''}` },
       stdio: ['ignore', 'pipe', 'pipe'] });
     expect(JSON.parse(await readFile(path.join(root, 'docs/node_modules/docs-update-fixture/package.json'), 'utf8'))
       .version).toBe('2.0.0');
