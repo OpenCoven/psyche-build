@@ -29,6 +29,8 @@ bash ./scripts/agent-bootstrap
 
 Bootstrap installs the locked dependency graph and must leave repository state unchanged. If it cannot satisfy the pinned environment without mutating the checkout, it fails instead of silently repairing source state.
 
+The product workspace uses the root `pnpm-lock.yaml`. The documentation application is a separate workspace with `docs/pnpm-lock.yaml` as its sole lockfile, the same pinned pnpm, and the same release-age and dependency-script policy. Bootstrap installs both graphs with frozen lockfiles; the docs install also disables lifecycle scripts, matching its hosted build. For docs-only work, run `pnpm --dir docs install --frozen-lockfile --ignore-scripts` before `pnpm --dir docs build`. Update docs dependencies and their lockfile together from `docs/`; root dependency updates must not add a docs importer to the root lockfile.
+
 ### Working in a second worktree
 
 One branch per outcome usually means a second `git worktree`. Three things
@@ -37,10 +39,7 @@ differ from the main checkout:
 - **Put it under `.worktrees/` or `.claude/worktrees/`.** Both are ignored by
   Git and excluded in `vitest.config.ts`, so the main checkout's test run does
   not pick up the copy's tests.
-- **Bootstrap it.** A worktree has no `node_modules`, and the gate needs the
-  dependencies of the root and of every workspace package (`docs/`,
-  `frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`).
-  Run `bash ./scripts/agent-bootstrap` there.
+- **Bootstrap it.** A worktree has no `node_modules`, and the gate needs the product workspace dependencies (`frontend/`, `native/desktop/psyche-build-tauri/`, `packages/vim-core/`) plus the standalone docs dependencies. Run `bash ./scripts/agent-bootstrap` there to install both locked graphs.
 - **Preserve project identity.** Lease requests accept canonical project roots longer than 128 UTF-8 bytes when the target exactly matches the owner's root. Caller-controlled identifiers retain their display limits, and grants remain scoped to that exact project. The orchestration revocation and expiry regressions exercise real long project directories ([#565](https://github.com/OpenCoven/psyche-build/issues/565)).
 
 Run one full gate at a time on a machine. Two concurrent runs compete for the

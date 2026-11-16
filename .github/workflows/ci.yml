@@ -329,6 +329,7 @@ jobs:
         if: needs.changes.outputs.typescript == 'true'
         run: |
           set -euo pipefail
+          pnpm --dir docs install --frozen-lockfile --ignore-scripts
           pnpm docs:focus:check
           pnpm --dir docs build
           pnpm typecheck
