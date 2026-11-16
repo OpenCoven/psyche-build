@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { actionUses, escapeRegExp, rustToolchainChannel } from './support/dependencyPins.js';
 
 const workflowPath = path.resolve('.github/workflows/release.yml');
 const rustToolchainPath = path.resolve('rust-toolchain.toml');
@@ -111,9 +112,16 @@ describe('macOS release workflow contract', () => {
   it('documents the exact download-artifact release behind its immutable pin', () => {
     const workflow = workflowSource();
 
-    expect(workflow).toContain(
-      'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1',
+    const downloads = actionUses([[workflowPath, workflow]]).filter(
+      ({ action }) => action === 'actions/download-artifact',
     );
+
+    expect(downloads.length).toBeGreaterThan(0);
+    for (const { ref, comment } of downloads) {
+      expect(ref).toMatch(/^[0-9a-f]{40}$/);
+      // The full release, not a moving major tag such as `v8`.
+      expect(comment).toMatch(/^v\d+\.\d+\.\d+$/);
+    }
   });
 
   it('builds the exact stable tag on native Apple Silicon and Intel runners', () => {
@@ -691,9 +699,11 @@ describe('macOS release workflow contract', () => {
     const workflow = workflowSource();
     const rustToolchain = readFileSync(rustToolchainPath, 'utf8');
 
-    expect(rustToolchain).toContain('channel = "1.95.0"');
+    // rust-toolchain.toml owns the release; the workflow must repeat it exactly.
+    const channel = rustToolchainChannel(rustToolchain);
     expect(rustToolchain).toContain('components = ["rustfmt"]');
-    expect(workflow.match(/toolchain: 1\.95\.0/g)).toHaveLength(2);
+    expect(workflow.match(new RegExp(`toolchain: ${escapeRegExp(channel)}$`, 'gm'))).toHaveLength(2);
+    expect(workflow.match(/^\s*toolchain: /gm)).toHaveLength(2);
     expect(workflow).not.toMatch(/^\s*toolchain:\s*stable\s*$/m);
   });
 });
