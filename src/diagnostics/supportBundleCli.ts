@@ -8,6 +8,7 @@ import {
 } from './supportBundle.js';
 import {
   createSupportCollectors,
+  SUPPORT_SECTIONS_NOT_COLLECTED,
   supportBundleArchitecture,
   supportBundlePlatform,
 } from './supportBundleCollectors.js';
@@ -168,6 +169,9 @@ export function formatSupportBundleSummary(
       categories.map(([name, count]) => `${name}×${count}`).join(', ')
     }`);
   }
+  // What this command's collectors never supply, so an empty section is not
+  // read as "nothing to report".
+  lines.push(`  not collected: ${SUPPORT_SECTIONS_NOT_COLLECTED.map((entry) => entry.label).join(', ')}`);
   if (bundle.errors.length > 0) {
     lines.push(`  collector errors: ${bundle.errors.map((error) => `${error.collector}/${error.code}`).join(', ')}`);
   }

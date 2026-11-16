@@ -25,6 +25,25 @@ Psyche Build does **not** own the durable OpenCoven identity or orchestration pr
 
 GitHub Issues and the Psyche Build Project (#11) are the only planning store; there is no generated mirror. Follow [Tracking work](docs/TRACKER.md): outcomes close by hand with an evidence comment, and a PR references an outcome with `Refs #N`, never a closing keyword. Beads was retired under [#473](https://github.com/OpenCoven/psyche-build/issues/473); do not run `bd` against this repository.
 
+## Finding the current work
+
+The nearest release and its work items are a milestone, not a document. Do not
+infer the active work from dated plans.
+
+```bash
+gh issue list --milestone "macOS public beta" --search "-label:parked -label:owner-action"
+gh api repos/OpenCoven/psyche-build/issues/<N>/dependencies/blocked_by --jq '.[] | "#\(.number) \(.state) \(.title)"'
+```
+
+- Start only an open issue with no open `blocked_by` entry, and read its parent
+  outcome for the exit gate.
+- `parked` means off the active path: do not start it without explicit owner
+  direction. `owner-action` means the next step needs the owner's credentials,
+  settings access, people, or publication authority: prepare, do not perform.
+- Check for an existing open PR on the issue before starting a competing one.
+- [Tracking work](docs/TRACKER.md#finding-work) has the full query set and the
+  label and milestone vocabulary.
+
 ## Canonical routing
 
 Read only the documents needed for the change, but start here rather than reconstructing policy from historical plans:

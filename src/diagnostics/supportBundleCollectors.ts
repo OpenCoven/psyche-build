@@ -106,6 +106,43 @@ export function projectIdentityDigest(projectRoot: string): string {
 }
 
 /**
+ * The sections of a v1 bundle that no collector below fills, and why.
+ *
+ * A bundle leaves these empty rather than fabricating them. The list is the
+ * single statement of what is missing: the command's summary prints the labels,
+ * docs/SUPPORT-BUNDLE-V1.md prints the reasons, and
+ * __tests__/supportBundleCoverage.test.ts holds it equal to what the collectors
+ * really leave empty. Wiring a collector for one of these means removing its
+ * entry here in the same change.
+ */
+export const SUPPORT_SECTIONS_NOT_COLLECTED: ReadonlyArray<{
+  readonly label: string;
+  readonly sections: readonly string[];
+  readonly reason: string;
+}> = Object.freeze([
+  Object.freeze({
+    label: 'control receipts',
+    sections: Object.freeze(['receipts', 'ownerEpoch']),
+    reason: 'No collector reads the control plane, so a bundle has no action receipts and no owner epoch.',
+  }),
+  Object.freeze({
+    label: 'diagnostic records',
+    sections: Object.freeze(['records']),
+    reason: 'No collector emits diagnostic records.',
+  }),
+  Object.freeze({
+    label: 'graphics',
+    sections: Object.freeze(['graphics']),
+    reason: 'The command has no graphics surface; graphics facts exist only in the desktop app.',
+  }),
+  Object.freeze({
+    label: 'terminal content',
+    sections: Object.freeze(['terminalTail']),
+    reason: 'Terminal content is never collected; the sanitizer drops any terminal line a collector supplies.',
+  }),
+]);
+
+/**
  * The collectors `psyche support-bundle` runs.
  *
  * Every one is read-only and answers a question an operator actually asks of a
