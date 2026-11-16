@@ -44,7 +44,6 @@
             </svg>
           </button>
           <span class="titlebar-spacer" data-tauri-drag-region></span>
-          <button id="help-toggle" class="chrome-btn" type="button" aria-haspopup="dialog" aria-controls="help-overlay">Help</button>
           <button
             id="agent-control-toggle"
             class="chrome-btn agent-control-toggle"
@@ -135,6 +134,7 @@
           </div>
 
           <div class="sidebar-foot">
+            <button id="help-toggle" class="chrome-btn" type="button" aria-haspopup="dialog" aria-controls="help-overlay">Help</button>
             <details class="sidebar-settings" id="sidebar-settings">
               <summary title="Theme and background">
                 <span class="appearance-swatch" aria-hidden="true"></span>
@@ -528,6 +528,7 @@
           <div class="help-head">
             <span class="help-title" id="help-title">Help</span>
             <span class="help-sub">press esc to close</span>
+            <button id="help-close" class="chrome-btn" type="button">Close Help</button>
           </div>
           <div class="help-grid" id="help-grid"></div>
           <button id="support-bundle-open" class="chrome-btn" type="button" aria-haspopup="dialog" aria-controls="support-bundle-dialog">Create support bundle</button>

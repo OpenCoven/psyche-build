@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, readdir, realpath, rm, symlink, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createAppSupportBundle } from '../src/diagnostics/supportBundleApp.js';
+import { createAppSupportBundle } from './helpers/appSupportFixture.js';
 
 const injected = vi.hoisted(() => ({ fault: '', abort: null as AbortController | null, configRead: false }));
 vi.mock('node:fs/promises', async importOriginal => {
@@ -11,6 +11,7 @@ vi.mock('node:fs/promises', async importOriginal => {
     ...actual,
     readdir: async (...args: Parameters<typeof actual.readdir>) => {
       if (injected.fault === 'scope' && String(args[0]).endsWith('worktree-recovery')) injected.configRead = true;
+      if (injected.fault === 'collector' && String(args[0]).endsWith('worktree-recovery')) throw Object.assign(new Error('PRIVATE_SYNTHETIC_476'), { code: 'EACCES' });
       return actual.readdir(...args);
     },
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
@@ -41,6 +42,15 @@ afterEach(async () => {
 });
 function request(projectRoot: string) { return { projectRoot, releaseVersion: '0.0.3', sourceSha: '3'.repeat(40) }; }
 describe('support storage failures at the real persistence boundary', () => {
+  it('exports a truthful omission when a collector fails but the rest of the bundle can be saved', async () => {
+    const root = await project(); injected.fault = 'collector';
+    const result = await createAppSupportBundle(request(root));
+    expect(result.state).toBe('saved');
+    expect(result.categories).toContainEqual({ category: 'persistence', disposition: 'omitted', reason: 'collection_failed' });
+    const bundle = JSON.parse(await readFile(result.path!, 'utf8'));
+    expect(bundle.errors).toContainEqual(expect.objectContaining({ collector: 'persistence', code: 'collection_failed' }));
+    expect(bundle.records).toContainEqual(expect.objectContaining({ component: 'persistence', event: 'omitted', attributes: { state: 'unavailable' } }));
+  });
   it('refuses a symlinked runtime boundary before reading project diagnostic inputs', async () => {
     const root = await project(), outside = await project();
     await mkdir(path.join(outside, 'runtime'));

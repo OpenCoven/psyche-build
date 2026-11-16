@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { realpath, stat } from 'node:fs/promises';
 import { createAppSupportBundle, type AppSupportRequest, type AppSupportResult } from './supportBundleApp.js';
+import type { NativeSupportStore, WrittenSupportBundle } from './supportBundleStore.js';
 
 // The embedded worker accepts one bounded request and fixed cancellation
 // messages. No executable, destination, environment or raw content is accepted.
@@ -11,10 +12,17 @@ let running = false;
 let done = false;
 let badControl = false;
 const invalidResult = { state: 'failed', code: 'invalid_request' } as const;
+const nativeMode = process.argv.includes('--native-store');
+let persistence: { resolve: (written: WrittenSupportBundle) => void; reject: (error: Error) => void } | undefined;
+const nativeStore: NativeSupportStore = (request) => new Promise((resolve, reject) => {
+  if (!nativeMode || persistence) { reject(new Error('secure store unavailable')); return; }
+  persistence = { resolve, reject };
+  process.stdout.write(JSON.stringify({ kind: 'persist', request }) + '\n');
+});
 function finish(result: AppSupportResult): void {
   if (done) return;
   done = true;
-  process.stdout.write(JSON.stringify(result) + '\n');
+  process.stdout.write(JSON.stringify(nativeMode ? { kind: 'result', result } : result) + '\n');
   process.stdin.destroy();
 }
 function record(value: unknown): value is Record<string, unknown> {
@@ -41,7 +49,7 @@ async function collect(value: unknown): Promise<void> {
     if (!valid(value) || await realpath(value.projectRoot) !== value.projectRoot || !(await stat(value.projectRoot)).isDirectory()) {
       finish(invalidResult); return;
     }
-    const result = await createAppSupportBundle(value, controller.signal);
+    const result = await createAppSupportBundle(value, controller.signal, nativeMode ? nativeStore : undefined);
     // A committed write remains saved if a later cancellation races with it.
     finish(badControl && result.state !== 'saved' ? invalidResult : result);
   } catch { finish(invalidResult); }
@@ -62,6 +70,14 @@ process.stdin.on('data', (chunk: Buffer) => {
     pending = pending.subarray(end + 1);
     if (running) {
       if (line === 'cancel') controller.abort();
+      else if (nativeMode && persistence) {
+        let response: unknown;
+        try { response = JSON.parse(line); } catch { invalid(); return; }
+        const waiting = persistence; persistence = undefined;
+        if (!record(response) || response.kind !== 'persisted') { waiting.reject(new Error('invalid persistence response')); invalid(); return; }
+        if (response.ok === true && record(response.written)) waiting.resolve(response.written as unknown as WrittenSupportBundle);
+        else waiting.reject(new Error(response.code === 'cancelled' ? 'cancelled' : 'write_failed'));
+      }
       else invalid();
     } else {
       let value: unknown;

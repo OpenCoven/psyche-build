@@ -310,7 +310,7 @@ const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
   ...SAFE_DIAGNOSTIC_VALUES,
   'a', 'b', 'alpha', 'beta', 'c', 'captured', 'collector', 'diagnostics',
   'provenance', 'persistence', 'providers', 'lifecycle', 'updater', 'graphics',
-  'receipts', 'terminal', 'omitted',
+  'receipts', 'terminal', 'omitted', 'native', 'accounting',
   'disk', 'event', 'failed', 'first', 'fixture', 'four', 'gamma', 'later',
   'malformed', 'no_collectors', 'one', 'oversized-graph', 'path', 'path-test',
   'sample', 'slow-recovery', 'support-bundle', 'test', 'three', 'two', 'warning-two',

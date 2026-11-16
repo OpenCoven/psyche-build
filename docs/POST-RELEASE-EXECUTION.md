@@ -357,19 +357,7 @@ through PRs #354-#359: twelve scenarios driving the real production paths, a
 Quality CI step that retains each run's report as a build artifact. Every
 invariant was proved load-bearing by reintroducing the defect it guards.
 
-The merged bundle contract is versioned, deterministic, bounded by
-time/count/record/total size, cancellable, and automatically redacts
-credentials, raw prompts, unrestricted terminal output, repository contents,
-environment variables, infrastructure details, and full user paths. It now has
-a first production surface: `psyche support-bundle` wires bounded collectors,
-writes a `0600` bundle under the project runtime directory with retention, and
-prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md).
-That surface covers provenance, project identity, recovery state, pane
-lifecycle and updater state; PR #467 added the last two, both read from
-persisted state without starting a process or needing a running server.
-The installed-provider collector is delivered through #483. #476 adds Help → Create support bundle through the existing v1 pipeline, safe native projections and explicit receipt/terminal omissions; both CLI and app snapshots remain unverified, and exact-package observation remains distinct from source verification. This diagnostics outcome adds no beta prerequisite. PR #281 delivered the
-debug-authorized rendering stress harness and PR #283 delivered visible pane
-recovery reporting under #199.
+The merged bundle contract is versioned, deterministic, bounded by time/count/record/total size, cancellable, and automatically redacts credentials, raw prompts, unrestricted terminal output, repository contents, environment variables, infrastructure details, and full user paths. It now has a first production surface: `psyche support-bundle` wires bounded collectors, writes a `0600` bundle under the project runtime directory with retention, and prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md). That surface covers provenance, project identity, recovery state, pane lifecycle and updater state; PR #467 added the last two, both read from persisted state without starting a process or needing a running server. The installed-provider collector is delivered through #483. #476 adds Help → Create support bundle through the existing v1 pipeline, safe native projections and explicit receipt/terminal omissions; both CLI and app snapshots remain unverified, and exact-package observation remains distinct from source verification. This diagnostics outcome adds no beta prerequisite. PR #281 delivered the debug-authorized rendering stress harness and PR #283 delivered visible pane recovery reporting under #199.
 
 #475, #476, and #474 now own the observed operator cases the harness cannot supply —
 application restart and upgrade recovery across two real installed builds —

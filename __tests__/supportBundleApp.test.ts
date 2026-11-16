@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createAppSupportBundle, type AppSupportRequest } from '../src/diagnostics/supportBundleApp.js';
-import { isSupportBundleV1 } from '../src/diagnostics/supportBundle.js';
+import { createHash } from 'node:crypto';
+import { createAppSupportBundle as directCreate, type AppSupportRequest } from '../src/diagnostics/supportBundleApp.js';
+import { createAppSupportBundle } from './helpers/appSupportFixture.js';
+import { collectSupportBundle, isSupportBundleV1 } from '../src/diagnostics/supportBundle.js';
 import { writeSupportBundleFile } from '../src/diagnostics/supportBundleStore.js';
 
 const roots: string[] = [];
@@ -21,6 +23,16 @@ function request(root: string): AppSupportRequest {
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 describe('application support bundle', () => {
+  it.each(['native', 'accounting'])('keeps the bounded %s collector failure identifiable without exporting its exception', async name => {
+    const bundle = await collectSupportBundle([{ name, collect: async () => { throw new Error('PRIVATE_SYNTHETIC_476'); } }]);
+    expect(bundle.errors[0]).toMatchObject({ collector: name, code: 'collection_failed' });
+    expect(JSON.stringify(bundle)).not.toContain('PRIVATE_SYNTHETIC_476');
+  });
+  it('fails closed without the native descriptor store rather than falling back to pathname writes', async () => {
+    const root = await project();
+    expect(await directCreate(request(root))).toEqual({ state: 'failed', code: 'write_failed' });
+    expect(await readdir(root)).toEqual([]);
+  });
   it('writes the real v1 bundle at 0600 with native facts and explicit category accounting', async () => {
     const root = await project();
     const result = await createAppSupportBundle(request(root));
@@ -32,6 +44,7 @@ describe('application support bundle', () => {
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(65536);
     expect((await stat(result.path!)).mode & 0o777).toBe(0o600);
     expect(bundle.provenance).toMatchObject({ sourceSha: '1'.repeat(40), verification: 'unverified' });
+    expect(bundle.project).toEqual({ idDigest: createHash('sha256').update(root).digest('hex') });
     expect(bundle.status).toBe('partial');
     expect(bundle.lifecycle).toEqual({ panes: 2, state: 'available' });
     expect(bundle.updater).toEqual({ mode: 'disabled', state: 'disabled' });

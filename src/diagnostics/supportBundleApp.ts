@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { collectSupportBundle, serializeSupportBundle, supportBundleDigest, type SupportCollector } from './supportBundle.js';
-import { createSupportCollectors, supportBundleArchitecture, supportBundlePlatform } from './supportBundleCollectors.js';
-import { assertScopedSupportDirectory, supportBundleDirectory, supportBundleFilename, writeSupportBundleFile } from './supportBundleStore.js';
+import { createSupportCollectors, projectIdentityDigest, supportBundleArchitecture, supportBundlePlatform } from './supportBundleCollectors.js';
+import { assertScopedSupportDirectory, supportBundleDirectory, supportBundleFilename, writeSupportBundleFile, type NativeSupportStore } from './supportBundleStore.js';
 import { getAgentDefinitions } from '../utils/agentLaunch.js';
 
 export interface AppSupportRequest {
@@ -26,7 +26,7 @@ export interface AppSupportResult {
   truncated?: boolean;
   retentionFailures?: number;
 }
-export async function createAppSupportBundle(request: AppSupportRequest, signal?: AbortSignal): Promise<AppSupportResult> {
+export async function createAppSupportBundle(request: AppSupportRequest, signal?: AbortSignal, nativeStore?: NativeSupportStore): Promise<AppSupportResult> {
   if (signal?.aborted) return { state: 'cancelled', code: 'cancelled' };
   try {
     // Refuse redirected runtime inputs before collection; the store repeats
@@ -44,6 +44,7 @@ export async function createAppSupportBundle(request: AppSupportRequest, signal?
     { category: 'terminal', disposition: 'omitted', reason: 'content_excluded' },
   ];
   const collectedAt = new Date().toISOString();
+  const outcomes = new Map<string, boolean>();
   // Desktop lifecycle/updater facts come from their actual native composition,
   // not the TUI's project configuration. No snapshot gains authority here.
   const collectors: SupportCollector[] = createSupportCollectors({
@@ -54,17 +55,41 @@ export async function createAppSupportBundle(request: AppSupportRequest, signal?
   collectors.push({ name: 'native', collect: async () => ({
     provenance: { application: 'psyche-build', releaseVersion: request.releaseVersion, sourceSha: request.sourceSha,
       platform: supportBundlePlatform(process.platform), architecture: supportBundleArchitecture(process.arch) },
+    project: { idDigest: projectIdentityDigest(request.projectRoot) },
     ...(request.lifecycle ? { lifecycle: { panes: request.lifecycle.panes, state: 'available' } } : {}),
     ...(request.updater ? { updater: { mode: request.updater.checksEnabled ? 'enabled' : 'disabled', state: request.updater.state } } : {}),
     ...(request.graphics ? { graphics: { ...request.graphics, state: 'partial' } } : {}),
-    records: categories.filter(category => category.disposition === 'omitted').map((category, index) => ({
-      sequence: index, at: collectedAt, component: category.category, event: 'omitted',
-      attributes: { state: category.category === 'terminal' ? 'unsupported' : 'unavailable' },
-    })),
   }) });
+  const owner = (category: string) => ['persistence', 'providers'].includes(category) ? category : 'native';
+  const accounting = (normalized?: Awaited<ReturnType<typeof collectSupportBundle>>) => categories.map(category => {
+    if (category.disposition === 'omitted') return category;
+    const collector = owner(category.category);
+    const failed = outcomes.get(collector) === false || normalized?.errors.some(error => error.collector === collector);
+    const field = normalized?.[category.category as 'provenance' | 'persistence' | 'providers' | 'lifecycle' | 'updater' | 'graphics'];
+    const absent = normalized !== undefined && (!field || Object.keys(field).length === 0);
+    return failed || absent ? { ...category, disposition: 'omitted', reason: failed ? 'collection_failed'
+      : normalized?.truncation.stateFieldsOmitted ? 'truncated' : 'owner_unavailable' } : category;
+  });
+  const settled: Promise<void>[] = [];
+  const wrapped = collectors.map(collector => {
+    let finish!: () => void;
+    settled.push(new Promise<void>(resolve => { finish = resolve; }));
+    return { name: collector.name, collect: async (collectionSignal: AbortSignal) => {
+      try { const value = await collector.collect(collectionSignal); outcomes.set(collector.name, true); return value; }
+      catch (error) { outcomes.set(collector.name, false); throw error; }
+      finally { finish(); }
+    } };
+  });
+  wrapped.push({ name: 'accounting', collect: async (collectionSignal: AbortSignal) => {
+    await Promise.all(settled); collectionSignal.throwIfAborted();
+    return { records: accounting().map((category, sequence) => ({
+      sequence, at: collectedAt, component: category.category, event: category.disposition === 'omitted' ? 'omitted' : 'captured',
+      attributes: { state: category.disposition === 'collected' ? 'available' : category.category === 'terminal' ? 'unsupported' : 'unavailable' },
+    })) };
+  } });
   let bundle;
   try {
-    bundle = await collectSupportBundle(collectors, { signal });
+    bundle = await collectSupportBundle(wrapped, { signal });
   } catch {
     return signal?.aborted ? { state: 'cancelled', code: 'cancelled' } : { state: 'failed', code: 'collection_failed' };
   }
@@ -74,13 +99,13 @@ export async function createAppSupportBundle(request: AppSupportRequest, signal?
     const digest = supportBundleDigest(bundle);
     const written = await writeSupportBundleFile({
       directory: supportBundleDirectory(request.projectRoot), projectRoot: request.projectRoot,
-      filename: supportBundleFilename(bundle.generatedAt, digest), serialized, signal,
+      filename: supportBundleFilename(bundle.generatedAt, digest), serialized, signal, nativeStore,
     });
     return { state: 'saved', code: 'saved', path: written.path, fileName: path.basename(written.path),
       bytes: written.bytes, digest, bundleStatus: bundle.status,
       redactedFields: bundle.redaction.redactedFields, omittedFields: bundle.redaction.omittedFields,
       truncated: Object.entries(bundle.truncation).some(([key, value]) => key !== 'totalPayloadBounded' && typeof value === 'number' && value > 0),
-      retentionFailures: written.retentionFailures, categories };
+      retentionFailures: written.retentionFailures, categories: accounting(bundle) };
   } catch {
     return signal?.aborted ? { state: 'cancelled', code: 'cancelled' } : { state: 'failed', code: 'write_failed' };
   }

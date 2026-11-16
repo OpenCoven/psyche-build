@@ -14335,6 +14335,7 @@
     updateBrowserControls();
   }
   function visibleBrowserBounds() {
+    if (helpOverlayEl && !helpOverlayEl.hidden) return null;
     var supportDialog = document.getElementById("support-bundle-dialog");
     if (supportDialog && !supportDialog.hidden) return null;
     var project = activeProject();
@@ -15287,8 +15288,13 @@
   function setHelpOpen(open) {
     if (!helpOverlayEl) return;
     if (open) renderHelpRows();
-    helpOverlayEl.hidden = !open;
+    helpModalController.setOpen(open);
   }
+  var helpModalController = window.PsycheSupport.createHelpModalController({
+    dialog: helpOverlayEl, trigger: document.getElementById("help-toggle"), action: document.getElementById("support-bundle-open"),
+    close: document.getElementById("help-close"), getActiveElement: function () { return document.activeElement; },
+    onVisibilityChange: scheduleBrowserBounds,
+  });
   function toggleHelp() { setHelpOpen(helpOverlayEl ? helpOverlayEl.hidden : false); }
   onRailClick("help-toggle", toggleHelp);
   if (helpOverlayEl) {

@@ -23,6 +23,12 @@ export interface WrittenSupportBundle {
   /** Candidates retention could not delete or could not confirm as ours. */
   retentionFailures: number;
 }
+export interface NativeSupportStoreRequest {
+  filename: string;
+  serialized: string;
+  maxRetained: number;
+}
+export type NativeSupportStore = (request: NativeSupportStoreRequest, signal?: AbortSignal) => Promise<WrittenSupportBundle>;
 
 export function supportBundleDirectory(projectRoot: string): string {
   return path.join(projectRoot, '.psyche', 'runtime', 'support-bundles');
@@ -59,11 +65,17 @@ export async function writeSupportBundleFile(
     signal?: AbortSignal;
     /** App exports may write only into this canonical project's owned directory. */
     projectRoot?: string;
+    nativeStore?: NativeSupportStore;
   },
 ): Promise<WrittenSupportBundle> {
   options.signal?.throwIfAborted();
   if (options.projectRoot !== undefined) {
     await assertScopedSupportDirectory(options.projectRoot, options.directory);
+    // Pathname checks alone cannot close a concurrent directory-replacement
+    // race. App exports require the native descriptor-relative backend.
+    if (!options.nativeStore) throw new Error('secure support store is unavailable');
+    return options.nativeStore({ filename: options.filename, serialized: options.serialized,
+      maxRetained: options.maxRetained ?? MAX_RETAINED_BUNDLES }, options.signal);
   }
   await mkdir(options.directory, { recursive: true });
   options.signal?.throwIfAborted();

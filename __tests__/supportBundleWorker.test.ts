@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, access } from 'node:
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { fixtureStore } from './helpers/appSupportFixture.js';
 
 const { build } = createRequire(path.join(process.cwd(), 'native/desktop/psyche-build-tauri/package.json'))('esbuild') as { build: (options: Record<string, unknown>) => Promise<unknown> };
 let directory: string;
@@ -21,12 +22,29 @@ async function root() {
   projects.push(result); return realpath(result);
 }
 async function run(input: string): Promise<Record<string, any>> {
-  const child = spawn(process.execPath, [worker], { cwd: directory,
+  const child = spawn(process.execPath, [worker, '--native-store'], { cwd: directory,
     env: { PATH: path.dirname(process.execPath), HOME: directory }, stdio: ['pipe', 'pipe', 'pipe'] });
-  let output = ''; let errors = '';
-  child.stdout.on('data', chunk => { output += String(chunk); });
+  let pending = ''; let errors = ''; let output = '';
+  let requestedRoot = '';
+  try { requestedRoot = JSON.parse(input.split('\n')[0]).projectRoot; } catch { /* malformed-request fixture */ }
+  child.stdout.on('data', async chunk => {
+    pending += String(chunk);
+    expect(Buffer.byteLength(pending)).toBeLessThan(256 * 1024);
+    for (let end = pending.indexOf('\n'); end !== -1; end = pending.indexOf('\n')) {
+      const message = JSON.parse(pending.slice(0, end)); pending = pending.slice(end + 1);
+      if (message.kind === 'persist') {
+        try {
+          const written = await fixtureStore(requestedRoot)(message.request);
+          child.stdin.write(JSON.stringify({ kind: 'persisted', ok: true, written }) + '\n');
+        } catch { child.stdin.write(JSON.stringify({ kind: 'persisted', ok: false, code: 'write_failed' }) + '\n'); }
+      } else {
+        expect(message.kind).toBe('result'); output = JSON.stringify(message.result); child.stdin.end();
+      }
+    }
+  });
   child.stderr.on('data', chunk => { errors += String(chunk); });
-  child.stdin.end(input);
+  child.stdin.on('error', error => { if ((error as NodeJS.ErrnoException).code !== 'EPIPE') errors += 'stdin_failed'; });
+  child.stdin.write(input);
   const code = await new Promise<number | null>((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
   expect(errors).toBe('');
   expect(code).toBe(0);

@@ -4,3 +4,8 @@ export function createSupportBundleController(options: {
   getProject: () => { root: string; panes: number } | null;
   getActiveElement?: () => any;
 }): { open(returnFocus?: any): void; close(): void; dispose(): void };
+export function createHelpModalController(options: {
+  dialog: any; trigger: any; action: any; close: any;
+  getActiveElement: () => any;
+  onVisibilityChange?: () => void;
+}): { setOpen(open: boolean): void };

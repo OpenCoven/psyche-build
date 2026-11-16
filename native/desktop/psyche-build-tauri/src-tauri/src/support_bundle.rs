@@ -2,7 +2,6 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -10,6 +9,10 @@ use std::time::Duration;
 use tauri::State;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
+
+#[cfg(unix)]
+#[path = "support_bundle_io.rs"]
+mod io;
 
 const WORKER: &[u8] = include_bytes!("../resources/support-bundle-worker.cjs");
 const MAX_RESULT_BYTES: u64 = 16384;
@@ -55,14 +58,62 @@ struct Job {
 struct Inner {
     next: u64,
     job: Option<Job>,
+    helper_active: bool,
+    lingering: Option<PendingHelper>,
 }
-#[derive(Clone, Default)]
+struct PendingHelper {
+    child: Option<tokio::process::Child>,
+    group: Option<u32>,
+}
+fn group_alive(group: Option<u32>) -> bool {
+    #[cfg(unix)]
+    if let Some(group) = group {
+        let answer = unsafe { libc::kill(-(group as libc::pid_t), 0) };
+        return answer == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+    false
+}
+impl PendingHelper {
+    fn pending(&mut self) -> bool {
+        let leader = self
+            .child
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_none());
+        if !leader {
+            self.child = None;
+        }
+        leader || group_alive(self.group)
+    }
+}
+#[derive(Clone)]
 pub(crate) struct SupportBundleJobs {
     inner: Arc<Mutex<Inner>>,
+    executable: Option<PathBuf>,
+}
+impl Default for SupportBundleJobs {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner::default())),
+            executable: std::env::current_exe().ok(),
+        }
+    }
 }
 impl SupportBundleJobs {
+    fn helper_available(inner: &mut Inner) -> Result<(), String> {
+        if inner.helper_active {
+            return Err("export_in_progress".into());
+        }
+        if let Some(child) = inner.lingering.as_mut() {
+            if child.pending() {
+                return Err("export_recovery_in_progress".into());
+            }
+            inner.lingering = None;
+        }
+        Ok(())
+    }
     fn begin(&self, root: PathBuf) -> Result<(String, watch::Receiver<bool>), String> {
         let mut inner = self.inner.lock();
+        Self::helper_available(&mut inner)?;
         if inner.job.as_ref().is_some_and(|job| job.result.is_none()) {
             return Err("export_in_progress".into());
         }
@@ -75,6 +126,7 @@ impl SupportBundleJobs {
             cancel,
             result: None,
         });
+        inner.helper_active = true;
         Ok((id, receiver))
     }
     fn cancel(&self, id: &str) -> Result<JobView, String> {
@@ -115,10 +167,43 @@ impl SupportBundleJobs {
             result: job.result.clone(),
         })
     }
-    fn finish(&self, id: &str, result: WorkerResult) {
-        if let Some(job) = self.inner.lock().job.as_mut().filter(|job| job.id == id) {
+    fn finish(&self, id: &str, result: WorkerResult, lingering: Option<PendingHelper>) {
+        let mut inner = self.inner.lock();
+        inner.helper_active = false;
+        inner.lingering = lingering;
+        if let Some(job) = inner.job.as_mut().filter(|job| job.id == id) {
             job.result = Some(result);
         }
+    }
+    fn begin_reveal(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock();
+        Self::helper_available(&mut inner)?;
+        inner.helper_active = true;
+        Ok(())
+    }
+    fn end_reveal(&self, lingering: Option<PendingHelper>) {
+        let mut inner = self.inner.lock();
+        inner.helper_active = false;
+        inner.lingering = lingering;
+    }
+}
+
+pub(crate) fn helper_entry() -> Option<i32> {
+    if std::env::args_os().nth(1).as_deref()
+        != Some(std::ffi::OsStr::new("--support-bundle-helper"))
+    {
+        return None;
+    }
+    if std::env::args_os().count() != 2 {
+        return Some(64);
+    }
+    #[cfg(unix)]
+    {
+        Some(io::entry())
+    }
+    #[cfg(not(unix))]
+    {
+        Some(64)
     }
 }
 fn terminal(state: &str, code: &str) -> WorkerResult {
@@ -137,7 +222,38 @@ fn terminal(state: &str, code: &str) -> WorkerResult {
         categories: None,
     }
 }
-fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
+fn private_result(result: &WorkerResult) -> serde_json::Value {
+    let mut value = serde_json::to_value(result).unwrap_or_else(
+        |_| serde_json::json!({"state":"recovery_required","code":"worker_failed"}),
+    );
+    if let Some(path) = &result.path {
+        value["path"] = path.clone().into();
+    }
+    value
+}
+fn scope_path(root: &Path, output: &Path) -> Result<PathBuf, String> {
+    if !root.is_absolute()
+        || output.parent() != Some(root.join(".psyche/runtime/support-bundles").as_path())
+    {
+        return Err("support_file_unavailable".into());
+    }
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("support_file_unavailable")?;
+    #[cfg(unix)]
+    if !crate::support_store::valid_bundle_name(name) {
+        return Err("support_file_unavailable".into());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = name;
+        return Err("support_file_unavailable".into());
+    }
+    Ok(output.to_path_buf())
+}
+// Pure protocol checks only: the GUI executor never opens project files.
+fn decode_metadata(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
     let invalid = || "worker_failed".to_string();
     if bytes.len() > MAX_RESULT_BYTES as usize {
         return Err(invalid());
@@ -149,8 +265,14 @@ fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
             ("cancelled", "cancelled")
                 | (
                     "failed",
-                    "invalid_request" | "write_failed" | "collection_failed"
+                    "invalid_request"
+                        | "write_failed"
+                        | "collection_failed"
+                        | "node_unavailable"
+                        | "worker_failed"
                 )
+                | ("recovery_required", "worker_failed")
+                | ("revealed", "revealed")
         ) || result.path.is_some()
             || result.file_name.is_some()
             || result.categories.is_some()
@@ -159,10 +281,20 @@ fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
         }
         return Ok(result);
     }
-    let candidate = result.path.as_deref().ok_or_else(invalid)?;
-    let output = scoped_output(root, Path::new(candidate))?;
+    let output = scope_path(root, Path::new(result.path.as_deref().ok_or_else(invalid)?))?;
+    let digest = result.digest.as_deref().ok_or_else(invalid)?;
     if result.code != "saved"
         || result.file_name.as_deref() != output.file_name().and_then(|name| name.to_str())
+        || result.bytes.is_none_or(|bytes| bytes > MAX_BUNDLE_BYTES)
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !result
+            .file_name
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with(&format!("-{}.json", &digest[..12]))
         || !matches!(
             result.bundle_status.as_deref(),
             Some("partial" | "unknown" | "recovery_required")
@@ -174,31 +306,6 @@ fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
     {
         return Err(invalid());
     }
-    let file = std::fs::File::open(&output).map_err(|_| invalid())?;
-    let mut data = Vec::new();
-    Read::take(file, MAX_BUNDLE_BYTES + 1)
-        .read_to_end(&mut data)
-        .map_err(|_| invalid())?;
-    if data.len() > MAX_BUNDLE_BYTES as usize || result.bytes != Some(data.len() as u64) {
-        return Err(invalid());
-    }
-    let digest = format!("{:x}", Sha256::digest(&data));
-    if result.digest.as_deref() != Some(digest.as_str())
-        || !result
-            .file_name
-            .as_deref()
-            .unwrap_or_default()
-            .ends_with(&format!("-{}.json", &digest[..12]))
-    {
-        return Err(invalid());
-    }
-    let bundle: serde_json::Value = serde_json::from_slice(&data).map_err(|_| invalid())?;
-    if bundle.get("schema").and_then(|value| value.as_str()) != Some("psyche.diagnostics/v1")
-        || bundle.get("status").and_then(|value| value.as_str()) != result.bundle_status.as_deref()
-    {
-        return Err(invalid());
-    }
-    let categories = result.categories.as_ref().ok_or_else(invalid)?;
     let expected = [
         "provenance",
         "persistence",
@@ -219,7 +326,9 @@ fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
         "owner_unavailable",
         "content_excluded",
         "collection_failed",
+        "truncated",
     ];
+    let categories = result.categories.as_ref().ok_or_else(invalid)?;
     if categories.len() != expected.len()
         || categories.iter().zip(expected).any(|(category, name)| {
             category.category != name
@@ -230,6 +339,37 @@ fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
         return Err(invalid());
     }
     Ok(result)
+}
+// Called only by the isolated helper (and focused tests), under its parent's
+// process deadline. Descriptor-relative inspection never follows a replacement.
+fn decode_result(root: &Path, bytes: &[u8]) -> Result<WorkerResult, String> {
+    let result = decode_metadata(root, bytes)?;
+    if result.state != "saved" {
+        return Ok(result);
+    }
+    #[cfg(unix)]
+    {
+        let data = crate::support_store::inspect(
+            root,
+            result.file_name.as_deref().ok_or("worker_failed")?,
+        )?;
+        if result.bytes != Some(data.len() as u64)
+            || result.digest.as_deref() != Some(format!("{:x}", Sha256::digest(&data)).as_str())
+        {
+            return Err("worker_failed".into());
+        }
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&data).map_err(|_| "worker_failed")?;
+        if bundle.get("schema").and_then(|value| value.as_str()) != Some("psyche.diagnostics/v1")
+            || bundle.get("status").and_then(|value| value.as_str())
+                != result.bundle_status.as_deref()
+        {
+            return Err("worker_failed".into());
+        }
+        Ok(result)
+    }
+    #[cfg(not(unix))]
+    Err("worker_failed".into())
 }
 
 fn ensure_main(label: &str) -> Result<(), String> {
@@ -249,124 +389,125 @@ fn claim_root(
     if root.len() > 8192 {
         return Err("invalid_request".into());
     }
-    let root = crate::canonical_project_root(root).map_err(|_| "project_unavailable")?;
-    crate::acceptance::require_local_project(&root).map_err(|_| "project_unavailable")?;
+    let root = Path::new(root);
+    if !root.is_absolute() {
+        return Err("invalid_request".into());
+    }
+    crate::acceptance::require_local_project(root).map_err(|_| "project_unavailable")?;
     let lease = authority
-        .claim_submission(&root)
+        .claim_admitted_submission(root)
         .map_err(|_| "project_unavailable")?;
-    Ok((root, lease))
+    Ok((lease.root.clone(), lease))
 }
+#[cfg(test)]
 fn scoped_output(root: &Path, output: &Path) -> Result<PathBuf, String> {
-    let invalid = || "support_file_unavailable".to_string();
-    let root = root.canonicalize().map_err(|_| invalid())?;
-    let directory = root.join(".psyche/runtime/support-bundles");
-    if output.parent() != Some(directory.as_path()) {
-        return Err(invalid());
-    }
-    let name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(invalid)?;
-    let stem = name
-        .strip_prefix("psyche-support-")
-        .and_then(|name| name.strip_suffix(".json"))
-        .ok_or_else(invalid)?;
-    let (stamp, digest) = stem.split_once('-').ok_or_else(invalid)?;
-    if stamp.len() != 16
-        || stamp.as_bytes()[8] != b'T'
-        || stamp.as_bytes()[15] != b'Z'
-        || !stamp
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
-        || digest.len() != 12
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(invalid());
-    }
-    let mut current = root;
-    for part in [".psyche", "runtime", "support-bundles"] {
-        current.push(part);
-        let metadata = std::fs::symlink_metadata(&current).map_err(|_| invalid())?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(invalid());
-        }
-    }
-    let metadata = std::fs::symlink_metadata(output).map_err(|_| invalid())?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_BUNDLE_BYTES
-    {
-        return Err(invalid());
-    }
+    let output = scope_path(root, output)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            return Err(invalid());
-        }
+        crate::support_store::inspect(
+            root,
+            output
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("support_file_unavailable")?,
+        )?;
     }
-    Ok(output.to_path_buf())
+    Ok(output)
 }
 
-async fn run_worker(
-    node: &Path,
-    script: &[u8],
+async fn run_helper(
+    executable: &Path,
+    args: &[&str],
     request: serde_json::Value,
     root: &Path,
     mut cancel: watch::Receiver<bool>,
     budget: Duration,
-) -> WorkerResult {
+) -> (WorkerResult, Option<PendingHelper>) {
     if *cancel.borrow() {
-        return terminal("cancelled", "cancelled");
+        return (terminal("cancelled", "cancelled"), None);
     }
     let failed = || terminal("recovery_required", "worker_failed");
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .args(args)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // Copy only explicit runtime settings; perform Node/path discovery in the
+    // supervised helper, never on the application executor.
+    for key in [
+        "PATH",
+        "HOME",
+        "CFFIXED_USER_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+        "TMPDIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+    let Ok(mut child) = command.spawn() else {
+        return (failed(), None);
+    };
+    let pid = child.id();
     let work = async {
-        let directory = tempfile::Builder::new().prefix("psyche-support-worker-").tempdir().map_err(|_| ())?;
-        let worker = directory.path().join("worker.cjs");
-        let mut options = std::fs::OpenOptions::new(); options.write(true).create_new(true);
-        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
-        options.open(&worker).and_then(|mut file| file.write_all(script)).map_err(|_| ())?;
-        let mut command = tokio::process::Command::new(node);
-        command.arg(&worker).current_dir(directory.path()).env_clear().env("PATH", crate::platform::augmented_path())
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
-        if let Some(home) = crate::platform::home_directory() { command.env("HOME", home); }
-        #[cfg(windows)] if let Some(system_root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", system_root); }
-        let mut child = command.spawn().map_err(|_| ())?;
         let mut stdin = child.stdin.take().ok_or(())?;
         let mut input = serde_json::to_vec(&request).map_err(|_| ())?;
-        if input.len() + 1 > 16384 { return Err(()); }
+        if input.len() + 1 > 32768 { return Err(()); }
         input.push(b'\n');
-        tokio::time::timeout(Duration::from_secs(1), stdin.write_all(&input)).await.map_err(|_| ())?.map_err(|_| ())?;
+        tokio::time::timeout_at(deadline, stdin.write_all(&input)).await.map_err(|_| ())?.map_err(|_| ())?;
         let stdout = child.stdout.take().ok_or(())?;
-        let deadline = tokio::time::Instant::now() + budget;
-        let output = {
-            let read = async { let mut data = Vec::new(); stdout.take(MAX_RESULT_BYTES + 1).read_to_end(&mut data).await.map(|_| data) };
-            tokio::pin!(read);
-            let mut cancellation_seen = false;
-            let mut cancel_deadline = deadline;
-            loop {
-                tokio::select! {
-                    result = &mut read => break result.map_err(|_| ()),
-                    _ = tokio::time::sleep_until(deadline) => break Err(()),
-                    _ = tokio::time::sleep_until(cancel_deadline), if cancellation_seen => break Err(()),
-                    _ = cancel.changed(), if !cancellation_seen => {
-                        cancellation_seen = true;
-                        cancel_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-                        // EPIPE can mean the worker already committed and exited.
-                        // Read its result before deciding whether it cancelled.
-                        let _ = tokio::time::timeout(Duration::from_millis(200), stdin.write_all(b"cancel\n")).await;
-                    }
+        let read = async { let mut bytes = Vec::new(); stdout.take(MAX_RESULT_BYTES + 1).read_to_end(&mut bytes).await.map(|_| bytes) };
+        tokio::pin!(read);
+        let mut cancellation_seen = false;
+        let mut cancel_deadline = deadline;
+        let output = loop {
+            tokio::select! {
+                value = &mut read => break value.map_err(|_| ()),
+                _ = tokio::time::sleep_until(deadline) => break Err(()),
+                _ = tokio::time::sleep_until(cancel_deadline), if cancellation_seen => break Err(()),
+                _ = cancel.changed(), if !cancellation_seen => {
+                    cancellation_seen = true;
+                    cancel_deadline = std::cmp::min(deadline, tokio::time::Instant::now() + Duration::from_secs(2));
+                    let _ = tokio::time::timeout_at(cancel_deadline, stdin.write_all(b"cancel\n")).await;
                 }
             }
-        };
-        drop(stdin);
-        let result = output.ok().and_then(|bytes| decode_result(root, &bytes).ok());
-        if result.is_none() { let _ = child.start_kill(); }
-        if tokio::time::timeout(Duration::from_secs(1), child.wait()).await.is_err() { let _ = child.start_kill(); }
-        result.ok_or(())
+        }?;
+        // Only bounded protocol parsing happens here. Filesystem validation,
+        // persistence and reveal preparation all ran inside the helper.
+        decode_metadata(root, &output).map_err(|_| ())
     }.await;
-    work.unwrap_or_else(|_| failed())
+    // The helper and its Node child share a fresh process group. Never leave
+    // a blocked descendant behind after a timeout or parent cancellation.
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
+    let reaped = tokio::time::timeout(Duration::from_secs(1), child.wait())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some();
+    let lingering = if !reaped || group_alive(pid) {
+        Some(PendingHelper {
+            child: (!reaped).then_some(child),
+            group: pid,
+        })
+    } else {
+        None
+    };
+    (work.unwrap_or_else(|_| failed()), lingering)
 }
 
 #[tauri::command]
@@ -376,6 +517,7 @@ pub(crate) async fn support_bundle_start(
     jobs: State<'_, SupportBundleJobs>,
     authority: State<'_, crate::NativeProjectAuthority>,
     updater: State<'_, crate::UpdateCheck>,
+    runtime: State<'_, crate::RuntimeDiagnosticsState>,
     root: String,
     panes: u32,
 ) -> Result<JobView, String> {
@@ -384,42 +526,53 @@ pub(crate) async fn support_bundle_start(
         return Err("invalid_request".into());
     }
     let (root, lease) = claim_root(webview.label(), &authority, &root)?;
-    let node = crate::which_on_path("node").ok_or("node_unavailable")?;
+    #[cfg(not(unix))]
+    return Err("secure_support_export_unavailable".into());
+    let executable = jobs
+        .executable
+        .clone()
+        .ok_or("native_runtime_unavailable")?;
     let source = env!("PSYCHE_SUPPORT_SOURCE_SHA");
     if source.len() != 40 {
         return Err("build_identity_unavailable".into());
     }
-    let engine = match crate::platform::runtime_info().webview_engine {
+    let engine = match runtime.support_engine() {
         "WKWebView" => "wkwebview",
         "WebView2" => "webview2",
         _ => "webkitgtk",
     };
-    let update = updater.status();
-    let update_state = match update.state {
-        crate::update_check::CheckState::Disabled | crate::update_check::CheckState::Off => {
+    let update = updater.support_state();
+    let update_state = match update.map(|(_, state)| state) {
+        Some(crate::update_check::CheckState::Disabled | crate::update_check::CheckState::Off) => {
             "disabled"
         }
-        crate::update_check::CheckState::Available => "available",
-        crate::update_check::CheckState::Unavailable => "unavailable",
+        Some(crate::update_check::CheckState::Available) => "available",
+        Some(crate::update_check::CheckState::Unavailable) => "unavailable",
         _ => "unknown",
     };
-    let request = serde_json::json!({ "projectRoot": root, "releaseVersion": app.package_info().version.to_string(), "sourceSha": source,
-        "graphics": { "engine": engine, "accelerated": "unknown" }, "lifecycle": { "panes": panes },
-        "updater": { "checksEnabled": update.checks_enabled, "state": update_state } });
+    let mut request = serde_json::json!({ "projectRoot": root, "releaseVersion": app.package_info().version.to_string(), "sourceSha": source,
+        "graphics": { "engine": engine, "accelerated": "unknown" }, "lifecycle": { "panes": panes } });
+    if let Some((enabled, _)) = update {
+        request["updater"] = serde_json::json!({ "checksEnabled": enabled, "state": update_state });
+    }
+    let request = serde_json::json!({ "operation": "create", "request": request });
     let (id, cancel) = jobs.begin(root.clone())?;
     let view = jobs.view(&id)?;
     let jobs = jobs.inner().clone();
     tauri::async_runtime::spawn(async move {
-        let result = run_worker(
-            Path::new(&node),
-            WORKER,
+        let (mut result, lingering) = run_helper(
+            &executable,
+            &["--support-bundle-helper"],
             request,
             &root,
             cancel,
             Duration::from_secs(35),
         )
         .await;
-        jobs.finish(&id, result);
+        if result.state == "revealed" {
+            result = terminal("recovery_required", "worker_failed");
+        }
+        jobs.finish(&id, result, lingering);
         drop(lease);
     });
     Ok(view)
@@ -466,28 +619,32 @@ pub(crate) async fn support_bundle_reveal(
         (job.root.clone(), result.clone())
     };
     let lease = authority
-        .claim_submission(&root)
+        .claim_admitted_submission(&root)
         .map_err(|_| "project_unavailable")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        // Recheck file identity, privacy and digest immediately before reveal.
-        let encoded = serde_json::to_value(&result).map_err(|_| "support_file_unavailable")?;
-        let mut encoded = encoded;
-        encoded["path"] =
-            serde_json::Value::String(result.path.clone().ok_or("support_file_unavailable")?);
-        let checked = decode_result(
-            &root,
-            &serde_json::to_vec(&encoded).map_err(|_| "support_file_unavailable")?,
-        )
-        .map_err(|_| "support_file_unavailable")?;
-        let answer = tauri_plugin_opener::reveal_item_in_dir(
-            checked.path.ok_or("support_file_unavailable")?,
-        )
-        .map_err(|_| "reveal_failed");
-        drop(lease);
-        answer.map_err(String::from)
-    })
-    .await
-    .map_err(|_| "reveal_failed".to_string())?
+    let executable = jobs
+        .executable
+        .clone()
+        .ok_or("native_runtime_unavailable")?;
+    jobs.begin_reveal()?;
+    let (cancel_owner, cancel) = watch::channel(false);
+    let request = serde_json::json!({ "operation": "reveal", "root": root, "result": private_result(&result) });
+    let (answer, lingering) = run_helper(
+        &executable,
+        &["--support-bundle-helper"],
+        request,
+        &root,
+        cancel,
+        Duration::from_secs(35),
+    )
+    .await;
+    jobs.end_reveal(lingering);
+    drop(cancel_owner);
+    drop(lease);
+    if answer.state == "revealed" {
+        Ok(())
+    } else {
+        Err("reveal_failed".into())
+    }
 }
 
 #[cfg(test)]
@@ -498,6 +655,24 @@ mod tests {
     }
     fn node() -> PathBuf {
         PathBuf::from(crate::which_on_path("node").expect("contributor Node prerequisite"))
+    }
+    #[tokio::test]
+    async fn support_bundle_group_fence_outlives_a_reaped_helper_leader() {
+        let mut command = tokio::process::Command::new(node());
+        command
+            .args(["--eval", "setInterval(()=>{},1000)"])
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut pending = PendingHelper {
+            child: None,
+            group: child.id(),
+        };
+        let was_pending = pending.pending();
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        assert!(was_pending);
+        assert!(!pending.pending());
     }
     #[test]
     fn support_bundle_refuses_browser_callers() {
@@ -588,15 +763,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let root = project.path().canonicalize().unwrap();
         let (_sender, cancel) = watch::channel(false);
-        let result = run_worker(
-            &node(),
-            WORKER,
+        let result = io::create(
             request(&root),
-            &root,
-            cancel,
-            Duration::from_secs(10),
-        )
-        .await;
+            Arc::new(std::sync::atomic::AtomicBool::new(*cancel.borrow())),
+            None,
+        );
         assert_eq!(result.state, "saved");
         let path = Path::new(result.path.as_ref().unwrap());
         assert!(scoped_output(&root, path).is_ok());
@@ -613,7 +784,7 @@ mod tests {
         let jobs = SupportBundleJobs::default();
         let (id, _) = jobs.begin(root).unwrap();
         jobs.cancel(&id).unwrap();
-        jobs.finish(&id, result);
+        jobs.finish(&id, result, None);
         assert_eq!(jobs.cancel(&id).unwrap().state, "saved");
     }
     #[tokio::test]
@@ -621,15 +792,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let root = project.path().canonicalize().unwrap();
         let (_sender, cancel) = watch::channel(true);
-        let result = run_worker(
-            &node(),
-            WORKER,
+        let result = io::create(
             request(&root),
-            &root,
-            cancel,
-            Duration::from_secs(10),
-        )
-        .await;
+            Arc::new(std::sync::atomic::AtomicBool::new(*cancel.borrow())),
+            None,
+        );
         assert_eq!(result.state, "cancelled");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
@@ -646,7 +813,17 @@ mod tests {
             let project = tempfile::tempdir().unwrap();
             let root = project.path().canonicalize().unwrap();
             let (_sender, cancel) = watch::channel(false);
-            let result = run_worker(&node(), script, request(&root), &root, cancel, budget).await;
+            let script = std::str::from_utf8(script).unwrap();
+            let (result, lingering) = run_helper(
+                &node(),
+                &["--eval", script],
+                request(&root),
+                &root,
+                cancel,
+                budget,
+            )
+            .await;
+            assert!(lingering.is_none());
             assert_eq!(result.state, "recovery_required");
             assert!(result.path.is_none());
         }
@@ -659,15 +836,11 @@ mod tests {
                 let project = tempfile::tempdir().unwrap();
                 let root = project.path().canonicalize().unwrap();
                 let (_sender, cancel) = watch::channel(false);
-                let result = run_worker(
-                    &node(),
-                    WORKER,
+                let result = io::create(
                     request(&root),
-                    &root,
-                    cancel,
-                    Duration::from_secs(10),
-                )
-                .await;
+                    Arc::new(std::sync::atomic::AtomicBool::new(*cancel.borrow())),
+                    None,
+                );
                 assert_eq!(result.state, "saved");
             });
             return;
@@ -685,5 +858,65 @@ mod tests {
             output.status.success(),
             "worker must clear inherited Node injection settings"
         );
+    }
+    #[tokio::test]
+    async fn support_bundle_supervisor_bounds_all_helper_phases_and_releases_project_lease() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        let authority = crate::NativeProjectAuthority::default();
+        authority
+            .authorize_canonical_native_open(root.clone())
+            .unwrap();
+        authority
+            .reconcile_startup_roots(&[root.to_string_lossy().to_string()])
+            .unwrap();
+        let (_, lease) = claim_root("main", &authority, &root.to_string_lossy()).unwrap();
+        let (_sender, cancel) = watch::channel(false);
+        let (result, lingering) = run_helper(&node(), &["--eval", "process.stdin.on('data',()=>{process.stdout.write('validation started');setInterval(()=>{},1000);});"], request(&root), &root, cancel, Duration::from_millis(50)).await;
+        assert_eq!(result.state, "recovery_required");
+        assert!(lingering.is_none());
+        drop(lease);
+        assert!(authority.revoke_native_open(&root).unwrap());
+    }
+    #[tokio::test]
+    async fn support_bundle_pending_worker_fence_prevents_accumulating_blocked_helpers() {
+        let jobs = SupportBundleJobs::default();
+        let root = tempfile::tempdir().unwrap();
+        let child = tokio::process::Command::new(node())
+            .args(["--eval", "setInterval(()=>{},1000)"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        jobs.inner.lock().lingering = Some(PendingHelper {
+            child: Some(child),
+            group: None,
+        });
+        assert!(
+            matches!(jobs.begin(root.path().into()), Err(code) if code == "export_recovery_in_progress")
+        );
+        let mut child = jobs.inner.lock().lingering.take().unwrap().child.unwrap();
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        jobs.inner.lock().lingering = Some(PendingHelper {
+            child: Some(child),
+            group: None,
+        });
+        assert!(jobs.begin(root.path().into()).is_ok());
+    }
+    #[test]
+    fn support_bundle_claim_does_not_touch_project_storage_before_helper_deadline() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        let authority = crate::NativeProjectAuthority::default();
+        authority
+            .authorize_canonical_native_open(root.clone())
+            .unwrap();
+        authority
+            .reconcile_startup_roots(&[root.to_string_lossy().to_string()])
+            .unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        let (_, lease) = claim_root("main", &authority, &root.to_string_lossy()).unwrap();
+        drop(lease);
+        assert!(authority.revoke_native_open(&root).unwrap());
     }
 }

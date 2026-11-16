@@ -4,7 +4,7 @@
 
 **Goal:** Complete #476 with an application Help action, bounded v1 category accounting, packaged macOS observation and protected delivery.
 
-**Architecture:** An embedded, generated Node worker reuses the existing TypeScript v1 collectors, sanitizer and store. A trusted-main native adapter selects an already-open canonical project, runs one bounded worker without a shell or inherited Node injection settings, supports cooperative cancellation, and reveals only its own verified output. The accessible browser controller presents native job states and truthful omissions; it holds no control-plane authority.
+**Architecture:** An embedded, generated Node worker reuses the existing TypeScript v1 collectors, sanitizer and store interface, with a descriptor-relative native filesystem adapter preserving v1 policy. A supervised self-helper contains all potentially blocking filesystem and Node-discovery work; the parent owns deadlines and project leases. A trusted-main native adapter selects an already-open canonical project, runs one bounded helper process group without a shell or inherited Node injection settings, supports cooperative cancellation, and reveals only its own verified output. The accessible browser controller presents native job states and truthful omissions; it holds no control-plane authority.
 
 **Tech Stack:** Existing TypeScript/Node pipeline, esbuild, Tauri/Rust/Tokio and DOM UI. No new dependencies or signing credentials.
 
@@ -16,7 +16,7 @@
 - Omit raw terminal content, prompts, private paths, credentials and unrestricted logs. No uploads or provider execution.
 - Do not invent receipt authority or complete/proof status. The unavailable native receipt integration is an explicit omission.
 - Node is resolved by the application's existing executable lookup; unavailable Node is an actionable failure. The worker is embedded in the package, independent of a source checkout or installed CLI.
-- Preserve exact project scope, restrictive file permissions, cancellation, prior work and active app sessions. Native worker hard timeout is a recovery-required outcome, not proof no file was written.
+- Preserve exact project scope, restrictive file permissions, cancellation, prior work and active app sessions. Native helper hard timeout is a recovery-required outcome, not proof no file was written.
 - User authorizes scoped protected delivery, local non-distributing packaging and Project/evidence updates. No security publication, settings changes, signing credentials, releases or destructive cleanup.
 
 ## Review focus
@@ -40,7 +40,7 @@
 
 ## Task 2: Native job boundary and Help action
 
-**Files:** Add native `src/support_bundle.rs`, scoped permissions/capability and browser `web/support/` controller; update native composition/build registration, `web/index.html`, `web/main.js`, styles and generated bundles. Add native behavior tests and `__tests__/supportBundleUi.test.ts`.
+**Files:** Add native `src/support_bundle.rs`, `src/support_bundle_io.rs`, `src/support_store.rs`, scoped permissions/capability and browser `web/support/` controller; update native composition/build registration, `web/index.html`, `web/main.js`, styles and generated bundles. Add native behavior tests and `__tests__/supportBundleUi.test.ts`.
 
 **Interfaces:** Native start/status/cancel/reveal commands accept only the trusted main WebView. Native state owns one job, canonical project and output; the UI receives safe state, accounting and basename only, never caller-selected reveal paths.
 
