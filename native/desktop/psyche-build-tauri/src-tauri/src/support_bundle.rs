@@ -667,6 +667,7 @@ mod tests {
     fn node() -> PathBuf {
         PathBuf::from(crate::which_on_path("node").expect("contributor Node prerequisite"))
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn support_bundle_group_fence_outlives_a_reaped_helper_leader() {
         let mut command = tokio::process::Command::new(node());
@@ -769,6 +770,7 @@ mod tests {
         assert!(decode_result(root.path(), &serde_json::to_vec(&forged).unwrap()).is_err());
         assert!(decode_result(root.path(), &vec![b'x'; 16385]).is_err());
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn support_bundle_native_runner_uses_the_embedded_pipeline_and_hides_private_paths() {
         let project = tempfile::tempdir().unwrap();
@@ -798,6 +800,7 @@ mod tests {
         jobs.finish(&id, result, None);
         assert_eq!(jobs.cancel(&id).unwrap().state, "saved");
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn support_bundle_native_runner_cancels_before_launch_without_files() {
         let project = tempfile::tempdir().unwrap();
@@ -839,6 +842,7 @@ mod tests {
             assert!(result.path.is_none());
         }
     }
+    #[cfg(unix)]
     #[test]
     fn support_bundle_worker_clears_node_injection_environment() {
         const CHILD: &str = "PSYCHE_SUPPORT_NODE_ENV_TEST";
