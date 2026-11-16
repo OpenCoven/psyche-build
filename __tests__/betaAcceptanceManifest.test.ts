@@ -428,6 +428,25 @@ describe('beta acceptance manifest', () => {
       expect(runbook, outcome).toContain(`\`${outcome}\``);
     }
     expect(await readFile('docs/RELEASE-ACCEPTANCE.md', 'utf8')).toContain('./BETA-ACCEPTANCE.md');
+
+    // The runbook sends the operator to existing procedures for each gate.
+    // Every such link must land on a heading that exists.
+    const slug = (heading: string) =>
+      heading
+        .toLowerCase()
+        .replace(/[^a-z0-9 \-]/g, '')
+        .replace(/ /g, '-');
+    for (const [file, anchors] of [
+      ['docs/RELEASE-ACCEPTANCE.md', [...runbook.matchAll(/\.\/RELEASE-ACCEPTANCE\.md#([a-z0-9-]+)/g)]],
+      ['docs/RELEASE.md', [...runbook.matchAll(/\.\/RELEASE\.md#([a-z0-9-]+)/g)]],
+    ] as const) {
+      const headings = (await readFile(file, 'utf8'))
+        .split('\n')
+        .filter((line) => /^#{2,4} /.test(line))
+        .map((line) => slug(line.replace(/^#+ /, '')));
+      for (const [, anchor] of anchors) expect(headings, `${file}#${anchor}`).toContain(anchor);
+    }
+    expect(runbook.match(/\.\/RELEASE-ACCEPTANCE\.md#/g)?.length).toBeGreaterThanOrEqual(5);
     expect(await readFile('docs/OPERATOR-ACCEPTANCE-SLICE.md', 'utf8')).toContain('./BETA-ACCEPTANCE.md');
   });
 

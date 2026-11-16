@@ -72,6 +72,17 @@ case ledger on #555; their ids and titles are `BETA_ACCEPTANCE_ROWS` in
 | G3 Failure paths | `G3.1`–`G3.6` | Absent agent, interrupted Git mutation, kill mid-transition, full storage, unwritable storage, repository intact afterwards |
 | G4 Upgrade and rollback | `G4.1`–`G4.4` | Candidate over `v0.0.2`, state preserved or quarantined, rollback, state after rollback |
 
+This runbook fixes which rows are recorded and how. The checks themselves, and
+the invariant each failure case must hold, are in
+[Release acceptance](./RELEASE-ACCEPTANCE.md):
+
+| Gate | Procedure or invariant |
+|---|---|
+| G1 | [Installation and first launch](./RELEASE-ACCEPTANCE.md#installation-and-first-launch) |
+| G2 | [Clean-machine and ordinary lifecycle](./RELEASE-ACCEPTANCE.md#clean-machine-and-ordinary-lifecycle--239) and its subsections |
+| G3 | [Failure-oriented acceptance](./RELEASE-ACCEPTANCE.md#failure-oriented-acceptance--239) |
+| G4 | [Update, uninstall, and reinstall](./RELEASE-ACCEPTANCE.md#update-uninstall-and-reinstall), and the "Upgrade and rollback" row of the failure table |
+
 Give every row one outcome:
 
 | Outcome | Meaning | Also required |
