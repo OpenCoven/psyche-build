@@ -271,6 +271,11 @@ or owner restart fails closed. The product does not substitute whole-desktop,
 accessibility, coordinate, raw tmux, or shell control when a typed provider is
 unavailable. See [Agent surface control](./AGENT-SURFACE-CONTROL.md).
 
+This is the target contract. Production currently refuses lease grants,
+approvals, and browser provider registration, so leased operations are
+unavailable until a native user-presence approval broker exists; see
+[Production availability](./AGENT-SURFACE-CONTROL.md#production-availability).
+
 ## Capability targets
 
 Psyche Build should keep the core user promise sharp:

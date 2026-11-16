@@ -82,7 +82,8 @@ for the source, workflow, and pinned Cask distinction.
 | File browsing and bounded diff inspection | Supported / source-supported | Not a first mobile-beta claim unless separately accepted | Large content must remain bounded |
 | Ritual discovery and launch | Supported from source where current paths are accepted | Blocked pending #242 execution and capability-gated controls; PR #322 publishes bounded ritual metadata on `main` only | Fixtures, simulator menus, or a merged publication slice do not establish production mobile support |
 | Merge, pull request, and cleanup workflows | Supported / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
-| Pane/browser control over MCP | Source-supported bounded interface | Not a direct mobile claim | Requires project scope, exact generations, leases, approvals where necessary, receipts, and revocation |
+| Pane/browser control over MCP: list resources, request a lease, read action status | Source-supported bounded interface | Not a direct mobile claim | Requires project scope and an authenticated task binding |
+| Pane/browser control over MCP: lease grant, approve-once, browser provider registration, and every leased pane or browser operation | **Unavailable** | Not a direct mobile claim | The production owner refuses operator commands with `operator_authority_unavailable` and provider registration with `provider_authority_unavailable`, so no lease is ever granted. The source and tests implement the contract; a native user-presence approval broker is a prerequisite. See [Agent surface control](./AGENT-SURFACE-CONTROL.md#production-availability) |
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
 | Bonjour host discovery | Not a desktop product claim | Parser/discovery adapter source only; production connect flow planned under i7c.11/#200 | Validates advertised identity metadata for local discovery; it is not identity, authority, a production caller, or the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
@@ -186,6 +187,17 @@ A public claim may move from planned to supported only when:
 
 Documentation, source presence, compile success, simulator success, test count,
 or a generated artifact alone is insufficient.
+
+## Current known limitations
+
+- **Initial prompts are visible in the process list for eight agents.** For
+  `claude`, `opencode`, `codex`, `gemini`, `qwen`, `pi`, `cursor`, and
+  `copilot`, the initial prompt is part of the agent's command line while the
+  agent runs, and any process of the same macOS user can read it. Do not put a
+  secret in an initial prompt for these agents. The per-agent record and the
+  owner's decision to ship the macOS public beta with it are in
+  [Agent prompt transport](./AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta)
+  ([#523](https://github.com/OpenCoven/psyche-build/issues/523)).
 
 ## Current known deferrals
 

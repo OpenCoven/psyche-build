@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build && rm -rf client && cp -R src/dist client",
@@ -11,6 +12,6 @@
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",
     "tailwindcss": "4.3.3",
-    "vite": "8.2.1"
+    "vite": "8.2.4"
   }
 }
