@@ -8,7 +8,7 @@ Use GitHub's private vulnerability reporting flow:
 
 **[Report a vulnerability privately](https://github.com/OpenCoven/psyche-build/security/advisories/new)**
 
-Do not open a public issue, pull request, discussion, or Bead for a suspected vulnerability. If GitHub does not show the private-report form, contact an OpenCoven maintainer through an already established private channel and ask them to enable or initiate a private GitHub Security Advisory. Do not send exploit details until the private channel and recipient are verified.
+Do not open a public issue, pull request, or discussion for a suspected vulnerability. If GitHub does not show the private-report form, contact an OpenCoven maintainer through an already established private channel and ask them to enable or initiate a private GitHub Security Advisory. Do not send exploit details until the private channel and recipient are verified.
 
 A useful private report contains only the minimum necessary evidence:
 
