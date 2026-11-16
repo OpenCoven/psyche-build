@@ -5,6 +5,7 @@
 **Active acceptance owner:** [#474](https://github.com/OpenCoven/psyche-build/issues/474) (succeeds [#196](https://github.com/OpenCoven/psyche-build/issues/196) and [#239](https://github.com/OpenCoven/psyche-build/issues/239), closed)  
 **Production release:** [#480](https://github.com/OpenCoven/psyche-build/issues/480), milestone `v0.1.0 — macOS production`  
 **Bounded operator runbook:** [OPERATOR-ACCEPTANCE-SLICE.md](./OPERATOR-ACCEPTANCE-SLICE.md)  
+**Beta candidate pass (G1–G4):** [BETA-ACCEPTANCE.md](./BETA-ACCEPTANCE.md)  
 **Graphics evidence procedure:** [GPU-VERIFICATION-MATRIX.md](./GPU-VERIFICATION-MATRIX.md) (#232 under #476; no physical acceptance asserted)<br>
 **Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
