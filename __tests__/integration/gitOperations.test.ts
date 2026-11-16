@@ -347,9 +347,10 @@ describe('Git Operations Integration Tests', () => {
       const result = mergeMainIntoWorktree('/test/.psyche/worktrees/feature', 'main');
 
       expect(result.success).toBe(true);
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git merge "main"'),
-        expect.any(Object)
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'git',
+        ['merge', '--no-edit', '--end-of-options', 'main'],
+        expect.objectContaining({ cwd: '/test/.psyche/worktrees/feature' })
       );
     });
 
@@ -359,16 +360,17 @@ describe('Git Operations Integration Tests', () => {
       const result = mergeWorktreeIntoMain('/test', 'feature-branch');
 
       expect(result.success).toBe(true);
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git merge "feature-branch"'),
-        expect.any(Object)
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'git',
+        ['merge', '--no-edit', '--end-of-options', 'feature-branch'],
+        expect.objectContaining({ cwd: '/test' })
       );
     });
 
     it('should detect conflicts during merge', async () => {
       // Mock merge conflict
-      mockExecSync.mockImplementation((cmd: string, options?: any) => {
-        if (cmd.includes('merge') && !cmd.includes('merge-base')) {
+      mockExecFileSync.mockImplementation((_file: string, args: string[], options?: any) => {
+        if (args[0] === 'merge') {
           const error: any = new Error('CONFLICT (content): Merge conflict in file.ts');
           error.status = 1;
           error.stdout = Buffer.from('');
@@ -390,8 +392,8 @@ describe('Git Operations Integration Tests', () => {
 
     it('should detect conflicting files', async () => {
       // Mock merge conflict with file list
-      mockExecSync.mockImplementation((cmd: string, options?: any) => {
-        if (cmd.includes('merge')) {
+      mockExecFileSync.mockImplementation((_file: string, args: string[], options?: any) => {
+        if (args[0] === 'merge') {
           const error: any = new Error('Merge conflict');
           error.status = 1;
           error.stderr = Buffer.from(
@@ -399,7 +401,7 @@ describe('Git Operations Integration Tests', () => {
           );
           throw error;
         }
-        if (cmd.includes('diff --name-only --diff-filter=U')) {
+        if (args.join(' ') === 'diff --name-only --diff-filter=U') {
           return options?.encoding === 'utf-8'
             ? 'src/file1.ts\nsrc/file2.ts'
             : Buffer.from('src/file1.ts\nsrc/file2.ts');
@@ -451,10 +453,16 @@ describe('Git Operations Integration Tests', () => {
 
       expect(result.success).toBe(true);
 
-      // Verify worktree remove was called
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git worktree remove'),
-        expect.any(Object)
+      // Verify worktree remove and branch deletion were called with argv
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'git',
+        ['worktree', 'remove', '--', '/test/.psyche/worktrees/feature'],
+        expect.objectContaining({ cwd: '/test' })
+      );
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'git',
+        ['branch', '-d', '--end-of-options', 'feature-branch'],
+        expect.objectContaining({ cwd: '/test' })
       );
     });
   });

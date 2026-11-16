@@ -119,8 +119,7 @@ export class PaneWorkerManager {
       return false;
     }
 
-    const escapedKeys = keys.replace(/'/g, "'\\''");
-    const sent = await this.tmux.sendKeys(expectedTmuxPaneId, `'${escapedKeys}'`, {
+    const sent = await this.tmux.sendKeys(expectedTmuxPaneId, [keys], {
       signal,
       isCurrent: ownsExpectedPane,
     });
@@ -237,9 +236,8 @@ export class PaneWorkerManager {
     const tmuxPaneId = this.panes.get(paneId)?.tmuxPaneId;
     if (!tmuxPaneId) return;
 
-    // Escape single quotes in keys
-    const escapedKeys = keys.replace(/'/g, "'\\''");
-    await this.tmux.sendKeys(tmuxPaneId, `'${escapedKeys}'`);
+    // The keys are one tmux argument; no shell parses them.
+    await this.tmux.sendKeys(tmuxPaneId, [keys]);
     this.poller.onKeysSent(paneId);
   }
 

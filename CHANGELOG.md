@@ -61,6 +61,10 @@
   (#556, #558, #562).
 - Fixed four code-scanning findings in control-plane logging and hooks-guide
   generation (#559).
+- Git and tmux now run from argument vectors and never through a shell in
+  pane creation, pane restore, merge, hooks setup, and the tmux service, so a
+  branch name, pane title, commit message, path, or typed text is passed as
+  data and is not parsed as a command (#554).
 
 ### Documentation
 
