@@ -39,8 +39,16 @@ describe('bridge security documentation truthfulness', () => {
     assert.match(security, /Bonjour/);
   });
   it('does not mistake frame limits for unauthenticated connection bounds', () => {
-    assert.match(security, /no application-level idle authentication deadline/);
-    assert.match(security, /no pre-authentication connection cap/);
+    // #556 gave the LAN listener a deadline and connection caps of its own.
+    // They are stated as limits with their constants, apart from the frame
+    // limits, and still not as complete protection.
+    assert.match(security, /\| Unauthenticated connections, all addresses \| 32 \| `PRE_AUTH_MAX_CONNECTIONS` \|/);
+    assert.match(security, /\| Unauthenticated connections, one remote address \| 4 \| `PRE_AUTH_MAX_CONNECTIONS_PER_ADDRESS` \|/);
+    assert.match(security, /\| Time to authenticate, counted from accept \| 5 min \(`PAIR_WINDOW_MS`\) \| `PRE_AUTH_DEADLINE_MS` \|/);
+    assert.match(security, /do not\s+describe them as complete pre-authentication denial-of-service protection/);
+    assert.match(security, /They do not bound everything one of them can cost/);
+    assert.doesNotMatch(security, /no application-level idle authentication deadline/);
+    assert.doesNotMatch(security, /no pre-authentication connection cap/);
     assert.match(security, /4 MiB.*128 frames.*8 MiB/);
   });
 });
