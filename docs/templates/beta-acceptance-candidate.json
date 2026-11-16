@@ -1,0 +1,260 @@
+{
+  "schema": "psyche-build.beta-acceptance.v1",
+  "terminalState": "incomplete",
+  "candidate": {
+    "id": null,
+    "sha": null,
+    "version": null,
+    "provenanceSha256": null,
+    "sha256sumsSha256": null
+  },
+  "artifacts": [],
+  "host": {
+    "macOS": null,
+    "architecture": null,
+    "machineClass": null
+  },
+  "upgradeBaseline": {
+    "version": "0.0.2",
+    "sourceSha": "a4546f45bb0ee05cfbb388a0fc5f9e951596be51",
+    "filename": null,
+    "sha256": null
+  },
+  "rows": [
+    {
+      "id": "G1.1",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G1.2",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G1.3",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G1.4",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G1.5",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G1.6",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.1",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.2",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.3",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.4",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": [],
+      "agent": null
+    },
+    {
+      "id": "G2.5",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.6",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.7",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.8",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G2.9",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G3.1",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G3.2",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G3.3",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G3.4",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G3.5",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G3.6",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G4.1",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G4.2",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G4.3",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    },
+    {
+      "id": "G4.4",
+      "outcome": "pending",
+      "messageClass": null,
+      "safeNextAction": null,
+      "gapReason": null,
+      "workPreserved": null,
+      "evidenceDigests": []
+    }
+  ],
+  "operator": {
+    "githubLogin": null,
+    "observedAt": null
+  },
+  "sanitization": {
+    "reviewed": false,
+    "reviewerGitHubLogin": null,
+    "omissions": []
+  }
+}
