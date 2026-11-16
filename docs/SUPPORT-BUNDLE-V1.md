@@ -236,7 +236,8 @@ instead of reporting a zero count, and the collection turns that into
 `collection_timeout_or_cancelled` and `recovery_required`.
 
 Graphics, receipt, and terminal facts remain uncollected; those sections are
-empty rather than fabricated.
+empty rather than fabricated. The reasons are listed under
+[Not collected, and why](#not-collected-and-why).
 
 The project identity digest hashes the canonical project root, resolved the way
 the recovery readers resolve it, so one project reached through a symlink
@@ -255,6 +256,22 @@ dropped during normalization and counted in `redaction.omittedFields` — the
 bundle still serializes, so a collector with the wrong vocabulary silently
 reports nothing. Tests assert `omittedFields === 0` for the shipped collectors
 to keep that failure visible.
+
+### Not collected, and why
+
+The command leaves these sections of the bundle empty. An empty section here
+means "not looked at", not "nothing to report". The command's summary names
+them on its `not collected:` line.
+
+| Category | Bundle fields | Reason |
+|---|---|---|
+| Control receipts | `receipts`, `ownerEpoch` | No collector reads the control plane, so a bundle has no action receipts and no owner epoch. |
+| Diagnostic records | `records` | No collector emits diagnostic records. |
+| Graphics | `graphics` | The command has no graphics surface; graphics facts exist only in the desktop app. |
+| Terminal content | `terminalTail` | Terminal content is never collected; the sanitizer drops any terminal line a collector supplies. |
+
+Terminal content stays omitted. The other three are open work under
+[#476](https://github.com/OpenCoven/psyche-build/issues/476).
 
 ## Rollback and recovery
 
