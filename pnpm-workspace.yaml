@@ -4,7 +4,6 @@
 packages:
   - packages/vim-core
   - frontend
-  - docs
   - native/desktop/psyche-build-tauri
 minimumReleaseAge: 1440
 allowBuilds:

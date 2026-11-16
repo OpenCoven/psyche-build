@@ -29,6 +29,8 @@ bash ./scripts/agent-bootstrap
 
 Bootstrap installs the locked dependency graph and must leave repository state unchanged. If it cannot satisfy the pinned environment without mutating the checkout, it fails instead of silently repairing source state.
 
+The product workspace uses the root `pnpm-lock.yaml`. The documentation application is a separate workspace with `docs/pnpm-lock.yaml` as its sole lockfile, the same pinned pnpm, and the same release-age and dependency-script policy. Bootstrap installs both graphs with frozen lockfiles; the docs install also disables lifecycle scripts, matching its hosted build. For docs-only work, run `pnpm --dir docs install --frozen-lockfile --ignore-scripts` before `pnpm --dir docs build`. Update docs dependencies and their lockfile together from `docs/`; root dependency updates must not add a docs importer to the root lockfile.
+
 ### Working in a second worktree
 
 One branch per outcome usually means a second `git worktree`. Three things
