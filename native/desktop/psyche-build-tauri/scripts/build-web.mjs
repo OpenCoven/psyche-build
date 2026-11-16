@@ -44,3 +44,13 @@ await Promise.all(bundles.map(([entryPoint, globalName, outfile]) => build({
   globalName,
   outfile: resolve(outdir, outfile),
 })));
+
+// Embedded by Rust rather than loaded from a checkout or installed CLI.
+// Keep the app's support path on the same v1 implementation as the CLI.
+const workerDirectory = resolve(outdir, 'src-tauri/resources');
+mkdirSync(workerDirectory, { recursive: true });
+await build({
+  entryPoints: ['../../../src/diagnostics/supportBundleWorker.ts'],
+  outfile: resolve(workerDirectory, 'support-bundle-worker.cjs'),
+  platform: 'node', target: 'node20', format: 'cjs', bundle: true, minify: true,
+});
