@@ -44,6 +44,7 @@
     "README.md",
     "docs/README.md",
     "docs/AGENT-SURFACE-CONTROL.md",
+    "docs/BETA-ACCEPTANCE.md",
     "docs/BREAKING-CHANGES.md",
     "docs/BRIDGE-SECURITY.md",
     "docs/CONTROL-PLANE.md",
@@ -91,6 +92,7 @@
     "prepack": "pnpm run build && pnpm run docs:focus:check",
     "smoke:pack": "node scripts/smoke-pack-install.js",
     "acceptance:validate": "node scripts/validate-operator-acceptance.mjs",
+    "acceptance:validate:beta": "node scripts/validate-beta-acceptance.mjs",
     "acceptance:preflight": "node scripts/operator-preflight.mjs"
   },
   "bin": {
