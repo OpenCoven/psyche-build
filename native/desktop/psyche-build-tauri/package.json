@@ -1,7 +1,7 @@
 {
   "name": "psyche-build-tauri",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
     "build:web:debug": "node scripts/build-web.mjs --debug",
@@ -35,6 +35,6 @@
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
     "esbuild": "0.28.2",
-    "vite": "8.2.1"
+    "vite": "8.2.4"
   }
 }

@@ -74,6 +74,8 @@ mod pty_reader;
 
 pub mod pty_transport;
 mod runtime_diagnostics;
+mod update_check;
+mod update_manifest;
 
 // Re-exported so `main.rs` keeps calling
 // `psyche_build_tauri_lib::run()` unchanged.
@@ -151,6 +153,9 @@ use pty_transport::{
 #[cfg(debug_assertions)]
 use runtime_diagnostics::{fixture_start_request, DiagnosticsFixture};
 use runtime_diagnostics::{runtime_diagnostics, runtime_process_metrics, RuntimeDiagnosticsState};
+use update_check::{
+    update_dismiss, update_set_checks_enabled, update_skip_version, update_status, UpdateCheck,
+};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis(100);
@@ -1987,6 +1992,8 @@ fn browser_shortcut_initialization_script(initial_secret: &str) -> Result<String
                   shortcut = "agent-pane";
                 } else if (primary && key === "f") {
                   shortcut = "composer";
+                } else if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === "k") {
+                  shortcut = "composer-toggle";
                 } else {
                   return;
                 }
@@ -2020,6 +2027,7 @@ fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static 
         "terminal-pane" => Ok("browser:shortcut-terminal-pane"),
         "agent-pane" => Ok("browser:shortcut-agent-pane"),
         "composer" => Ok("browser:shortcut-composer"),
+        "composer-toggle" => Ok("browser:shortcut-composer-toggle"),
         _ => Err(format!("unknown browser app shortcut: {shortcut}")),
     }
 }
@@ -5007,6 +5015,10 @@ mod browser_app_shortcut_tests {
         assert_eq!(
             resolve_browser_app_shortcut(label, "composer").unwrap(),
             "browser:shortcut-composer"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "composer-toggle").unwrap(),
+            "browser:shortcut-composer-toggle"
         );
     }
 

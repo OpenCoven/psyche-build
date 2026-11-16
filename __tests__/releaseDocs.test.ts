@@ -150,7 +150,7 @@ describe('release documentation contract', () => {
   it('pins the tracked generated agent documentation to the release version', async () => {
     const generated = await readFile(generatedAgentsDoc, 'utf8');
 
-    expect(generated).toContain('*Version: 0.0.2*');
+    expect(generated).toContain('*Version: 0.0.3*');
     expect(generated).not.toContain('*Version: 0.1.0*');
   });
 

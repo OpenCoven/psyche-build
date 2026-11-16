@@ -283,7 +283,7 @@ describe('Tauri footer status bar shell', () => {
       /\.app\[data-sidebar="collapsed"\]\s+\.titlebar\s*\{[^}]*grid-template-columns:\s*var\(--mini-rail-w\)\s+minmax\(0,\s*1fr\);/s
     );
     expect(stylesCss).toMatch(
-      /\.app\s*\{[^}]*grid-template-rows:\s*var\(--titlebar-h\)\s+minmax\(0,\s*1fr\)\s+auto;/s
+      /\.app\s*\{[^}]*grid-template-rows:\s*var\(--titlebar-h\)\s+minmax\(0,\s*1fr\)\s+auto\s+auto;/s
     );
     expect(stylesCss).toMatch(
       /\.footer-stack\s*\{[^}]*grid-template-rows:\s*var\(--composer-h\)\s+(?:minmax\(0,\s*auto\)|auto)\s+var\(--status-h\);/s

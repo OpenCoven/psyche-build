@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/macOS-schema.json",
+  "identifier": "main-update-check",
+  "description": "Allows only the main app webview to read the notify-only update status and record skip, dismiss and the checks setting",
+  "local": true,
+  "webviews": ["main"],
+  "permissions": [
+    "allow-update-status",
+    "allow-update-skip-version",
+    "allow-update-dismiss",
+    "allow-update-set-checks-enabled"
+  ]
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-skip-version"
+description = "Enables the update_skip_version command without any pre-configured scope."
+commands.allow = ["update_skip_version"]
+
+[[permission]]
+identifier = "deny-update-skip-version"
+description = "Denies the update_skip_version command without any pre-configured scope."
+commands.deny = ["update_skip_version"]

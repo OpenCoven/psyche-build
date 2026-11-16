@@ -2305,9 +2305,48 @@
   var legacyWorkspaceMigration = { projectsPreserved: false };
   var saveWorkspaceTimer = 0;
 
-  function terminalTheme() {
+  // The canvas background stays fully transparent (alpha 0) so the pane's CSS
+  // tint shows through, but its RGB channels carry the colour the pane really
+  // looks like. xterm answers an OSC 11 background query with those channels,
+  // and TUIs such as Claude Code and Codex derive their prompt and text
+  // shading from the answer; a bare transparent black made them shade for a
+  // black terminal. The visible colour is the stack of translucent CSS
+  // backgrounds behind the terminal (its pane frame, the terminal area and the
+  // workspace chrome, sampled from the terminal's own container so a pane that
+  // paints itself is included) composited over the window material,
+  // which WebKit cannot report, so it is approximated by the dark HUD tone.
+  var VIBRANCY_BASE_RGB = [30, 30, 32];
+  function parseCssRgba(value) {
+    var match = /rgba?\(([^)]*)\)/.exec(String(value || ""));
+    if (!match) return null;
+    var parts = match[1].split(/[\s,\/]+/).filter(Boolean).map(Number);
+    if (parts.length < 3 || parts.some(function (n) { return !Number.isFinite(n); })) return null;
+    return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
+  }
+  function terminalSurfaceRgb(start) {
+    var host = start && start.isConnected ? start : document.getElementById("terminal-host");
+    var layers = [];
+    for (var node = host; node && node.nodeType === 1; node = node.parentElement) {
+      var colour = parseCssRgba(window.getComputedStyle(node).backgroundColor);
+      if (!colour || colour.a <= 0) continue;
+      layers.push(colour);
+      if (colour.a >= 1) break;
+    }
+    var rgb = VIBRANCY_BASE_RGB.slice();
+    for (var i = layers.length - 1; i >= 0; i -= 1) {
+      var layer = layers[i];
+      var alpha = Math.min(1, layer.a);
+      rgb = rgb.map(function (channel, k) {
+        return channel * (1 - alpha) + layer.rgb[k] * alpha;
+      });
+    }
+    return rgb.map(function (channel) {
+      return Math.max(0, Math.min(255, Math.round(channel)));
+    });
+  }
+  function terminalTheme(start) {
     return {
-      background: "rgba(0, 0, 0, 0)",
+      background: "rgba(" + terminalSurfaceRgb(start).join(", ") + ", 0)",
       foreground: "#ece9f5",
       cursor: "#a78bfa",
       selectionBackground: "rgba(167,139,250,0.30)",
@@ -2406,10 +2445,17 @@
     settings.theme = t;
     document.documentElement.setAttribute("data-theme", t);
     if (themeSelectEl && themeSelectEl.value !== t) themeSelectEl.value = t;
-    state.threads.forEach(function (thread) {
-      if (thread.terminalController) thread.terminalController.setTheme(terminalTheme());
-    });
+    refreshTerminalThemes();
     if (!opts || opts.persist !== false) saveSettings();
+  }
+  // Re-run whenever anything that changes the pane's visible colour changes,
+  // so the colour reported to TUIs follows the theme, solid mode and opacity.
+  function refreshTerminalThemes() {
+    state.threads.forEach(function (thread) {
+      if (thread.terminalController) {
+        thread.terminalController.setTheme(terminalTheme(thread.host));
+      }
+    });
   }
   function applySolidBg(on, opts) {
     var v = on === true;
@@ -2420,6 +2466,7 @@
     if (solidBgEl && solidBgEl.checked !== v) solidBgEl.checked = v;
     // The opacity slider only bites against the vibrancy material.
     if (bgOpacityInput) bgOpacityInput.disabled = v;
+    refreshTerminalThemes();
     if (!opts || opts.persist !== false) saveSettings();
   }
   function applyBgOpacity(value, opts) {
@@ -2430,6 +2477,7 @@
       "--bg-opacity", String(settings.solidBg ? SOLID_BG_MULTIPLIER : v));
     if (bgOpacityInput && bgOpacityInput.value !== String(v)) bgOpacityInput.value = String(v);
     if (bgOpacityValueEl) bgOpacityValueEl.textContent = Math.round(v * 100) + "%";
+    refreshTerminalThemes();
     if (!opts || opts.persist !== false) saveSettings();
   }
 
@@ -2919,6 +2967,40 @@
   }
 
   statusController = buildStatusController();
+
+  // ---- Update notice (notify only) ----
+  // Shows the native update_status when a verified newer release exists. It
+  // never installs, downloads, or restarts anything.
+  function buildUpdateBanner() {
+    var PsycheUpdate = window.PsycheUpdate;
+    var container = document.getElementById("update-banner");
+    if (!PsycheUpdate || typeof PsycheUpdate.createUpdateBannerController !== "function" || !container) {
+      return null;
+    }
+    var controller = PsycheUpdate.createUpdateBannerController({
+      invoke: invokeNative,
+      listen: listen,
+      container: container,
+      checksToggle: document.getElementById("update-checks"),
+      checksRow: document.getElementById("update-checks-row"),
+      writeText: clipboardManager && typeof clipboardManager.writeText === "function"
+        ? function (text) { return clipboardManager.writeText(text); }
+        : null,
+      openUrl: openUrl,
+      announce: function (message) { toast(message); },
+      // Used when the element focused before the banner is gone.
+      restoreFocus: function () {
+        var thread = state.threads.find(function (candidate) {
+          return candidate.id === state.activeThreadId;
+        });
+        if (thread && thread.terminalController) thread.terminalController.focus();
+      },
+    });
+    controller.refresh();
+    return controller;
+  }
+
+  buildUpdateBanner();
 
   function noteStatusActivity(at) {
     if (!statusController || typeof statusController.noteActivity !== "function") return;
@@ -5325,7 +5407,7 @@
         // Fully transparent canvas: the terminal's tint comes from
         // .terminal-area's CSS background, which already tracks --bg-opacity.
         allowTransparency: true,
-        theme: terminalTheme(),
+        theme: terminalTheme(container),
         cursorBlink: true,
         convertEol: false,
         allowProposedApi: true,
@@ -12094,6 +12176,80 @@
     }
   }
 
+  // The composer row stays collapsed until it is summoned with ⌘K (or any
+  // path that focuses the input, such as ⌘F or the "/" palette). Collapsing
+  // keeps the input in layout at zero height rather than display:none, so a
+  // programmatic focus() still lands and the focusin below reveals the row.
+  // An active voice call keeps it open because the call bar lives inside it.
+  var composerEl = document.getElementById("composer");
+  var footerStackEl = document.getElementById("footer-stack");
+  function composerIsOpen() {
+    return !!footerStackEl && footerStackEl.classList.contains("composer-open");
+  }
+  function setComposerOpen(open) {
+    if (!footerStackEl) return;
+    var next = !!open || callState.active;
+    if (next === composerIsOpen()) return;
+    footerStackEl.classList.toggle("composer-open", next);
+    if (!next) hidePalette();
+    scheduleTerminalPaneFits();
+  }
+  // Collapsing must not leave keyboard focus inside the hidden row: typing
+  // would land in an invisible input, and a later focus() on the already
+  // focused input fires no focusin to reveal it again.
+  function releaseComposerFocus() {
+    if (composerEl && composerEl.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
+  }
+  // Returns false when an active call keeps the row open, so callers can let
+  // the event continue to the call-ending cascade.
+  function dismissComposer() {
+    setComposerOpen(false);
+    if (composerIsOpen()) return false;
+    releaseComposerFocus();
+    if (filesPaneHasCanvasFocus()) {
+      restoreFileEditorFocus();
+    } else if (state.activeThreadId) {
+      focusThread(state.activeThreadId).catch(function () {});
+    }
+    return true;
+  }
+  function toggleComposer() {
+    if (composerIsOpen() && composerEl && composerEl.contains(document.activeElement)) {
+      dismissComposer();
+      return;
+    }
+    setComposerOpen(true);
+    commandInput.focus();
+  }
+  if (composerEl) {
+    composerEl.addEventListener("focusin", function () { setComposerOpen(true); });
+    // Keyboard focus moving elsewhere names its destination; a pointer press
+    // on a non-focusable surface does not, so that case is handled below.
+    composerEl.addEventListener("focusout", function (event) {
+      var to = event.relatedTarget;
+      if (to && !composerEl.contains(to)) setComposerOpen(false);
+    });
+    // Some targets (pane dividers) cancel pointerdown, which also cancels the
+    // focus transfer, so focus is released explicitly after collapsing.
+    document.addEventListener("pointerdown", function (event) {
+      if (!composerIsOpen() || composerEl.contains(event.target)) return;
+      setComposerOpen(false);
+      if (!composerIsOpen()) releaseComposerFocus();
+    }, true);
+    // Escape from any composer control (mic, call, send), not only the input.
+    // The input's own handler runs first and consumes the palette and
+    // dismissal cases; anything left is handled here.
+    composerEl.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (dismissComposer()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    });
+  }
+
   if (composerSendEl) {
     composerSendEl.addEventListener("click", function () {
       var line = commandInput.value;
@@ -12536,6 +12692,13 @@
         e.preventDefault();
         return;
       }
+    }
+    if (e.key === "Escape") {
+      if (dismissComposer()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
     }
     if (e.key === "Enter") {
       var line = commandInput.value;
@@ -13910,6 +14073,9 @@
     }
     var adopted = adoptBrowserDocumentEvent(context);
     markActiveSurface("browser");
+    // Presses inside the native preview never reach this document, so the
+    // composer's outside-press close cannot see them.
+    setComposerOpen(false);
     if (state.activeThreadId !== context.pane.id) focusThread(context.pane.id);
     if (typeof publishBrowserControlResource === "function") {
       publishBrowserControlResource(context.pair).catch(function () {});
@@ -14129,6 +14295,9 @@
   listen("browser:shortcut-composer", function () {
     commandInput.focus();
     openPalette("/", true);
+  }).catch(function () {});
+  listen("browser:shortcut-composer-toggle", function () {
+    toggleComposer();
   }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
@@ -14720,6 +14889,13 @@
       if (state.activeProjectId) await removeProject(state.activeProjectId);
       return;
     }
+    // ⌘K summons (or dismisses) the composer. Meta only: ⌃K stays the
+    // terminal's kill-line.
+    if (e.metaKey && !e.ctrlKey && e.code === "KeyK" && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      toggleComposer();
+      return;
+    }
     if (String(e.key).toLowerCase() === "f" && !e.altKey && !e.shiftKey) {
       commandInput.focus();
       openPalette("/", true);
@@ -15077,6 +15253,7 @@
 
   // ---- Keyboard shortcuts overlay ----
   var HELP_ROWS = [
+    ["Show or hide the composer", "⌘K"],
     ["Open the composer", "⌘F"],
     ["Toggle the sessions sidebar", "⌘B"],
     ["Focus a pane on the canvas", "⌃1–9"],

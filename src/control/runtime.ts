@@ -1943,8 +1943,11 @@ export class ControlRuntime {
     try {
       await this.persistTerminalOutcome(idempotencyKey, sequence, outcome);
     } catch (error) {
+      // The key is client-supplied, so it is an argument to a constant format
+      // string and never part of the format itself.
       console.error(
-        `[control-runtime] durable outcome persistence failed for ${idempotencyKey}`,
+        '[control-runtime] durable outcome persistence failed for %s',
+        idempotencyKey,
         error,
       );
     } finally {

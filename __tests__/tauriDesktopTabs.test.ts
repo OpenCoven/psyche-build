@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { desktopCargoPin } from './support/dependencyPins.js';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
@@ -64,6 +65,13 @@ const mainRuntimeDiagnosticsCapabilityPath = join(
 );
 const mainRuntimeDiagnosticsCapability = existsSync(mainRuntimeDiagnosticsCapabilityPath)
   ? JSON.parse(readFileSync(mainRuntimeDiagnosticsCapabilityPath, 'utf8'))
+  : null;
+const mainUpdateCheckCapabilityPath = join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/src-tauri/capabilities/main-update-check.json',
+);
+const mainUpdateCheckCapability = existsSync(mainUpdateCheckCapabilityPath)
+  ? JSON.parse(readFileSync(mainUpdateCheckCapabilityPath, 'utf8'))
   : null;
 const debugRuntimeStressCapabilityPath = join(
   repoRoot,
@@ -175,7 +183,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
 
-  it('lets embedded browser webviews forward exact T/D/F app shortcuts', () => {
+  it('lets embedded browser webviews forward exact T/D/F and meta-only K app shortcuts', () => {
     const injection = browserShortcutInjectionSource();
     const invokeCapture = injection.indexOf('var invoke = core.invoke;');
     const promiseCapture = injection.indexOf('var promiseThen = Promise.prototype.then;');
@@ -203,6 +211,10 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(injection).toContain('shortcut = "terminal-pane"');
     expect(injection).toContain('shortcut = "agent-pane"');
     expect(injection).toContain('shortcut = "composer"');
+    expect(injection).toContain(
+      'event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === "k"',
+    );
+    expect(injection).toContain('shortcut = "composer-toggle"');
     expect(injection).toContain('url: location.href');
     expect(injection).toContain('secret: secret');
     expect(injection).toContain('reflectApply(promiseThen, pending, [');
@@ -228,7 +240,8 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(injection).toContain('else if (primary && key === "d") {');
     expect(injection).toContain('else if (primary && key === "f") {');
     expect(injection).not.toContain('key === "p"');
-    expect(injection).not.toContain('key === "k"');
+    // ⌘K is meta-only so ⌃K stays the page's own shortcut.
+    expect(injection).not.toContain('(primary && key === "k")');
     expect(injection).toContain('function(initialSecret)');
     expect(tauriLib).toMatch(/\.initialization_script\(shortcut_script\)/);
     const ensureBrowserStart = tauriLib.indexOf('fn ensure_browser(');
@@ -252,6 +265,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(/"terminal-pane"\s*=>\s*Ok\("browser:shortcut-terminal-pane"\)/);
     expect(tauriLib).toMatch(/"agent-pane"\s*=>\s*Ok\("browser:shortcut-agent-pane"\)/);
     expect(tauriLib).toMatch(/"composer"\s*=>\s*Ok\("browser:shortcut-composer"\)/);
+    expect(tauriLib).toMatch(/"composer-toggle"\s*=>\s*Ok\("browser:shortcut-composer-toggle"\)/);
     expect(tauriLib).toMatch(/unknown browser app shortcut/);
 
     const commandStart = tauriLib.indexOf('fn browser_app_shortcut(');
@@ -338,6 +352,25 @@ describe('Tauri desktop tab shortcuts', () => {
     });
     expect(mainRuntimeDiagnosticsCapability.permissions).toHaveLength(2);
     expect(mainRuntimeDiagnosticsCapability.windows).toBeUndefined();
+
+    // The notify-only update status is readable only by the main webview,
+    // never by an embedded browser, and never through the default capability.
+    expect(mainUpdateCheckCapability).toMatchObject({
+      identifier: 'main-update-check',
+      local: true,
+      webviews: ['main'],
+      permissions: [
+        'allow-update-status',
+        'allow-update-skip-version',
+        'allow-update-dismiss',
+        'allow-update-set-checks-enabled',
+      ],
+    });
+    expect(mainUpdateCheckCapability.windows).toBeUndefined();
+    expect(mainUpdateCheckCapability.remote).toBeUndefined();
+    for (const permission of mainUpdateCheckCapability.permissions) {
+      expect(defaultCapability.permissions).not.toContain(permission);
+    }
     expect(JSON.stringify(mainRuntimeDiagnosticsCapability)).not.toContain('psyche-browser-*');
 
     expect(debugRuntimeStressCapability).toEqual({
@@ -358,6 +391,7 @@ describe('Tauri desktop tab shortcuts', () => {
     const mainAppPermissions = [
       ...mainWindowPermissions,
       ...mainRuntimeDiagnosticsCapability.permissions,
+      ...mainUpdateCheckCapability.permissions,
       ...debugRuntimeStressCapability.permissions,
     ];
     expect([...mainAppPermissions].sort()).toEqual([...generatedPermissions].sort());
@@ -416,7 +450,7 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('manages per-webview shortcut authorization across navigation and destruction', () => {
-    expect(tauriCargo).toMatch(/^getrandom\s*=\s*"0\.2"/m);
+    expect(() => desktopCargoPin('getrandom')).not.toThrow();
     expect(tauriLib).toMatch(
       /const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis\((?:75|80|90|100)\);/,
     );

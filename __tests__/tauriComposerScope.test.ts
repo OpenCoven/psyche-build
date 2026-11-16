@@ -188,4 +188,56 @@ describe('Tauri composer target', () => {
       ['sync'],
     ]);
   });
+
+  describe('summoned composer', () => {
+    it('collapses the composer row until it is opened', () => {
+      expect(stylesCss).toMatch(
+        /\.footer-stack:not\(\.composer-open\)\s*\{\s*grid-template-rows:\s*0 auto var\(--status-h\);/,
+      );
+      const collapsed = /\.footer-stack:not\(\.composer-open\) > \.composer\s*\{([^}]*)\}/.exec(stylesCss);
+      expect(collapsed?.[1]).toContain('height: 0;');
+      // Zero height, not display:none, so focus() still reaches the input.
+      expect(collapsed?.[1]).not.toContain('display: none');
+    });
+
+    it('opens on Command-K only, leaving Control-K to the terminal', () => {
+      expect(mainJs).toContain(
+        'if (e.metaKey && !e.ctrlKey && e.code === "KeyK" && !e.altKey && !e.shiftKey) {',
+      );
+      expect(functionSource(mainJs, 'toggleComposer')).toContain('commandInput.focus()');
+    });
+
+    it('opens whenever the input gains focus and stays open during a call', () => {
+      expect(mainJs).toContain('composerEl.addEventListener("focusin", function () { setComposerOpen(true); });');
+      expect(functionSource(mainJs, 'setComposerOpen')).toContain('!!open || callState.active');
+    });
+
+    it('returns focus to the active pane when dismissed', () => {
+      const dismiss = functionSource(mainJs, 'dismissComposer');
+      expect(dismiss).toContain('setComposerOpen(false)');
+      expect(dismiss).toContain('focusThread(state.activeThreadId)');
+    });
+
+    it('consumes Escape only when dismissal succeeds, from any composer control', () => {
+      expect(mainJs).toMatch(/if \(e\.key === "Escape"\) \{\s*if \(dismissComposer\(\)\) \{\s*e\.preventDefault\(\);\s*e\.stopPropagation\(\);/);
+      expect(mainJs).toContain('composerEl.addEventListener("keydown", function (event) {');
+      expect(functionSource(mainJs, 'dismissComposer')).toContain('if (composerIsOpen()) return false;');
+    });
+
+    it('restores the Files editor before falling back to the active pane', () => {
+      const dismiss = functionSource(mainJs, 'dismissComposer');
+      expect(dismiss.indexOf('restoreFileEditorFocus()')).toBeGreaterThan(-1);
+      expect(dismiss.indexOf('restoreFileEditorFocus()')).toBeLessThan(dismiss.indexOf('focusThread('));
+    });
+
+    it('never leaves focus inside the collapsed row', () => {
+      expect(functionSource(mainJs, 'releaseComposerFocus')).toContain('document.activeElement.blur()');
+      expect(mainJs).toContain('if (!composerIsOpen()) releaseComposerFocus();');
+    });
+
+    it('closes when a native browser preview takes focus and toggles from browser panes', () => {
+      expect(functionSource(mainJs, 'handleBrowserFocus')).toContain('setComposerOpen(false);');
+      expect(mainJs).toContain('listen("browser:shortcut-composer-toggle", function () {\n    toggleComposer();');
+    });
+  });
 });

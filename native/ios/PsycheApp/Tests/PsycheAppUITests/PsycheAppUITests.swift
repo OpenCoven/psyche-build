@@ -316,23 +316,23 @@ final class PsycheAppUITests: XCTestCase {
     func testADraftStaysWithItsOwnPane() throws {
         let app = launchApp()
         openWebHomePane(in: app)
+        XCTAssertTrue(
+            element("terminal-focus-badge-web-home", in: app).waitForExistence(timeout: 10),
+            "The opened pane never took composer focus"
+        )
 
-        let field = app.textViews["pane-composer-field"].exists
-            ? app.textViews["pane-composer-field"]
-            : app.textFields["pane-composer-field"]
+        let field = textInput("pane-composer-field", in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
         field.typeText("rm -rf build")
+        XCTAssertTrue(
+            waitForValue(of: field, containing: "rm -rf build"),
+            "The draft never reached the composer"
+        )
 
         // Switch to another pane: its composer must be empty.
-        let other = row("pane-chip-ios-cockpit", in: app)
-        XCTAssertTrue(other.waitForExistence(timeout: 10))
-        other.tap()
-        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
-
-        let otherField = app.textViews["pane-composer-field"].exists
-            ? app.textViews["pane-composer-field"]
-            : app.textFields["pane-composer-field"]
+        switchToPane("ios-cockpit", in: app)
+        let otherField = textInput("pane-composer-field", in: app)
         XCTAssertTrue(otherField.waitForExistence(timeout: 10))
         XCTAssertFalse(
             (otherField.value as? String ?? "").contains("rm -rf build"),
@@ -340,17 +340,11 @@ final class PsycheAppUITests: XCTestCase {
         )
 
         // Back again: the original draft is still there.
-        let back = row("pane-chip-web-home", in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 10))
-        back.tap()
-        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
-
-        let restored = app.textViews["pane-composer-field"].exists
-            ? app.textViews["pane-composer-field"]
-            : app.textFields["pane-composer-field"]
+        switchToPane("web-home", in: app)
+        let restored = textInput("pane-composer-field", in: app)
         XCTAssertTrue(restored.waitForExistence(timeout: 10))
         XCTAssertTrue(
-            (restored.value as? String ?? "").contains("rm -rf build"),
+            waitForValue(of: restored, containing: "rm -rf build"),
             "The draft did not come back with its pane"
         )
     }
@@ -1135,6 +1129,73 @@ final class PsycheAppUITests: XCTestCase {
     private func row(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         let cell = app.cells.matching(identifier: identifier).firstMatch
         return cell.exists ? cell : element(identifier, in: app)
+    }
+
+    /// Switches panes through the chip and waits for each transition the
+    /// composer depends on, not for elapsed time (#510).
+    ///
+    /// The terminal view appears as soon as the chip changes the primary pane,
+    /// but the composer follows `registry.focusedPaneID`, which moves only
+    /// after the registry has re-attached sessions. Reading the field before
+    /// the focus badge moves reads the previous pane's draft. Asserting the
+    /// chip's selected trait separately means a tap that never took effect
+    /// reports itself instead of surfacing as a draft leak.
+    private func switchToPane(
+        _ paneID: String,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let chip = element("pane-chip-\(paneID)", in: app)
+        XCTAssertTrue(
+            waitFor(chip, toSatisfy: "exists == true AND hittable == true"),
+            "The \(paneID) chip never became hittable",
+            file: file,
+            line: line
+        )
+        chip.tap()
+        XCTAssertTrue(
+            waitFor(chip, toSatisfy: "isSelected == true"),
+            "Tapping the \(paneID) chip did not make it the shown pane",
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            element("terminal-pane-\(paneID)", in: app).waitForExistence(timeout: 10),
+            "The \(paneID) terminal never appeared",
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            element("terminal-focus-badge-\(paneID)", in: app).waitForExistence(timeout: 10),
+            "The composer never moved its focus to \(paneID)",
+            file: file,
+            line: line
+        )
+    }
+
+    private func waitFor(
+        _ target: XCUIElement,
+        toSatisfy format: String,
+        timeout: TimeInterval = 10
+    ) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: format),
+            object: target
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForValue(
+        of target: XCUIElement,
+        containing text: String,
+        timeout: TimeInterval = 10
+    ) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", text),
+            object: target
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
     private func textInput(_ identifier: String, in app: XCUIApplication) -> XCUIElement {

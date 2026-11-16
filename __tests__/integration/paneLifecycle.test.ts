@@ -584,7 +584,15 @@ describe('Pane Lifecycle Integration Tests', () => {
     });
 
     it('cancels blocked cleanup before awaited existing-worktree setup can persist the pane', async () => {
-      vi.useFakeTimers();
+      // Ordering is driven only by the explicit gates below: the reuse
+      // reservation cancels cleanup, `before_pane_create` parks creation until
+      // the test releases it, and the queued cleanup runs while creation is
+      // parked. No fake timers: `vi.runAllTimersAsync()` drains every fake
+      // timer in the worker, including fire-and-forget launch watchers and
+      // trust-prompt pollers that earlier tests in this file leave running.
+      // A watcher whose real-clock deadline outlives the drain re-arms forever
+      // and aborts the run after 10000 timers (#531). The product's own short
+      // waits (pane readiness, the post-`cd` settle) run on real timers.
       const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
       let worktreeExists = true;
       let cleanupCanceled = false;
@@ -627,38 +635,39 @@ describe('Pane Lifecycle Integration Tests', () => {
         return Promise.resolve();
       });
 
-      try {
-        const { createPane } = await import('../../src/utils/paneCreation.js');
-        const createPromise = createPane(
-          {
-            prompt: '',
-            projectName: 'test-project',
-            existingPanes: [],
-            skipAgentSelection: true,
-            existingWorktree: {
-              slug: 'resume-me',
-              worktreePath: existingWorktreePath,
-              branchName: 'feature/resume-me',
-            },
-            persistReusedPane: mockPersistReusedPane,
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      const createPromise = createPane(
+        {
+          prompt: '',
+          projectName: 'test-project',
+          existingPanes: [],
+          skipAgentSelection: true,
+          existingWorktree: {
+            slug: 'resume-me',
+            worktreePath: existingWorktreePath,
+            branchName: 'feature/resume-me',
           },
-          []
-        );
+          persistReusedPane: mockPersistReusedPane,
+        },
+        []
+      );
 
-        await paneCreationStarted;
-        expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+      await paneCreationStarted;
+      expect(cleanupCanceled).toBe(true);
+      expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+      expect(mockPersistReusedPane).not.toHaveBeenCalled();
 
-        releaseCleanup();
-        await queuedCleanup;
-        expect(worktreeExists).toBe(true);
-        expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+      releaseCleanup();
+      await queuedCleanup;
+      expect(worktreeExists).toBe(true);
+      expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+      expect(mockPersistReusedPane).not.toHaveBeenCalled();
 
-        releasePaneCreation();
-        await vi.runAllTimersAsync();
-        await createPromise;
-      } finally {
-        vi.useRealTimers();
-      }
+      releasePaneCreation();
+      const result = await createPromise;
+      expect(worktreeExists).toBe(true);
+      expect(mockPersistReusedPane).toHaveBeenCalledTimes(1);
+      expect('pane' in result && result.pane.worktreePath).toBe(existingWorktreePath);
     });
 
     it('should split tmux pane', async () => {

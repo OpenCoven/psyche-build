@@ -2662,6 +2662,7 @@ describe('Tauri agent picker', () => {
     expect(mainJs).toMatch(/\["New terminal pane", "⌘T"\]/);
     expect(mainJs).toMatch(/\["New shell pane", "⌃T"\]/);
     expect(mainJs).toMatch(/\["Open the composer", "⌘F"\]/);
+    expect(mainJs).toMatch(/\["Show or hide the composer", "⌘K"\]/);
     expect(mainJs).toMatch(/\["Choose an agent", "⌘D"\]/);
     expect(mainJs).toMatch(/\["New agent pane \(Coven CLI\)", "⌃A"\]/);
     expect(mainJs).toMatch(/\["New browser tab", "Web pane \+"\]/);
