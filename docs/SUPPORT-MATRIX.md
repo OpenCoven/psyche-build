@@ -188,6 +188,17 @@ A public claim may move from planned to supported only when:
 Documentation, source presence, compile success, simulator success, test count,
 or a generated artifact alone is insufficient.
 
+## Current known limitations
+
+- **Initial prompts are visible in the process list for eight agents.** For
+  `claude`, `opencode`, `codex`, `gemini`, `qwen`, `pi`, `cursor`, and
+  `copilot`, the initial prompt is part of the agent's command line while the
+  agent runs, and any process of the same macOS user can read it. Do not put a
+  secret in an initial prompt for these agents. The per-agent record and the
+  owner's decision to ship the macOS public beta with it are in
+  [Agent prompt transport](./AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta)
+  ([#523](https://github.com/OpenCoven/psyche-build/issues/523)).
+
 ## Current known deferrals
 
 The following were not prerequisites for `v0.0.1` and remain post-release work

@@ -118,7 +118,7 @@ provider fails closed instead of degrading silently.
 Psyche Build creates a tmux pane for each task. Every work pane gets its own git worktree and branch so agents work in complete isolation. When a task is done, open the pane menu with `m` and choose Merge to bring it back into your main branch, or Create GitHub PR to push the branch and file a pull request.
 
 - **Worktree isolation** — each pane is a full working copy, so parallel lanes do not edit the same checkout
-- **Agent support** — [Coven CLI](https://github.com/OpenCoven/coven), Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, and Crush CLI
+- **Agent support** — [Coven CLI](https://github.com/OpenCoven/coven), Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, and Crush CLI. For eight of them the initial prompt is visible in the process list; see the [known limitation](docs/AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta) before you put a secret in a prompt
 - **Multi-select launches** — choose any combination of enabled agents per prompt
 - **AI naming** — branches, pane labels, and commit messages can be generated automatically
 - **Smart merging** — review, auto-commit, merge, PR, and cleanup flows stay explicit
