@@ -10,6 +10,13 @@
   secret in an initial prompt for these agents. See
   [Agent prompt transport](docs/AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta)
   (#523).
+- The macOS app does not check for updates. It is built with no update signing
+  key, so it makes no update request and shows no update notice. Update with
+  `brew upgrade --cask psyche-build`, or download the new DMG and check it
+  against the release's `SHA256SUMS` (#477).
+- The macOS app cannot create a support bundle. `psyche support-bundle` runs
+  only from a source checkout, and it does not collect graphics, terminal, or
+  receipt state (#476).
 
 ## [0.0.3] - 2026-10-03
 
