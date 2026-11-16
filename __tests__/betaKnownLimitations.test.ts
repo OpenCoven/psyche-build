@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readReleaseNotes } from '../scripts/release-notes.mjs';
 import { createSupportCollectors } from '../src/diagnostics/supportBundleCollectors.js';
 
 // #553: the macOS public beta publishes its known limitations with the release
@@ -19,6 +20,23 @@ function between(text: string, start: string, end: string, what: string): string
   return after.split(end)[0];
 }
 
+const VERSION = (JSON.parse(read('package.json')) as { version: string }).version;
+
+/**
+ * The Known Limitations section of the release notes for the version this
+ * source embeds, cut by the same extractor the release workflow uses. A
+ * limitation written anywhere else in the changelog does not reach a release.
+ */
+function releaseNoteLimitations(): string {
+  const notes = readReleaseNotes(process.cwd(), VERSION).github;
+  return between(
+    `${notes}\n### `,
+    '\n### Known Limitations\n',
+    '\n### ',
+    `the Known Limitations section of the ${VERSION} release notes`,
+  );
+}
+
 /** Each place the limitations are published, as a list of bullets. */
 function published(): Array<[string, string[]]> {
   const bullets = (section: string) =>
@@ -32,18 +50,28 @@ function published(): Array<[string, string[]]> {
     '\n## ',
     'the support matrix known-limitations section',
   );
-  const unreleased = between(read('CHANGELOG.md'), '\n## Unreleased\n', '\n## ', 'the Unreleased changelog entry');
-  const changelog = between(
-    `${unreleased}\n### `,
-    '\n### Known Limitations\n',
-    '\n### ',
-    'the Unreleased known-limitations list',
-  );
   return [
     ['docs/SUPPORT-MATRIX.md', bullets(matrix)],
-    ['CHANGELOG.md', bullets(changelog)],
+    [`release notes for ${VERSION}`, bullets(releaseNoteLimitations())],
   ];
 }
+
+describe('published beta limitations reach the release notes', () => {
+  it('are in the notes cut for the embedded version, with the same count as the support matrix', () => {
+    const [[, matrix], [, notes]] = published();
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes.length).toBe(matrix.length);
+  });
+
+  it('are not left in an Unreleased entry, which no release publishes', () => {
+    const unreleased = read('CHANGELOG.md').split('\n## Unreleased\n')[1]?.split('\n## [')[0] ?? '';
+    expect(unreleased).not.toContain('### Known Limitations');
+  });
+
+  it('do not leak into the TestFlight text', () => {
+    expect(readReleaseNotes(process.cwd(), VERSION).testFlight).not.toMatch(/Known Limitations|support bundle/i);
+  });
+});
 
 const DESKTOP = 'native/desktop/psyche-build-tauri';
 
