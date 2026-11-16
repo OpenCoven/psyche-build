@@ -133,8 +133,9 @@ the transition. Do not keep an umbrella issue open solely to duplicate maintenan
 Every product or maintenance PR names one owning outcome, owner, train, and
 acceptance gate. A focused maintenance result may be described in the PR without
 creating a duplicate issue; an existing unresolved public outcome retains its
-owning issue. The active macOS rollout is release-candidate acceptance (#474)
-and the observed recovery gaps (#475) toward `v0.1.0`. iOS and future
+owning issue. The active macOS rollout is the public beta (#553), then
+release-candidate acceptance (#474) toward `v0.1.0`; the observed recovery
+gaps (#475) are closed at source. iOS and future
 architecture/input expansion are not prerequisites.
 
 For any change to scope, priority, dependency, support, or closure:
