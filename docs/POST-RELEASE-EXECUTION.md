@@ -367,9 +367,7 @@ prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md).
 That surface covers provenance, project identity, recovery state, pane
 lifecycle and updater state; PR #467 added the last two, both read from
 persisted state without starting a process or needing a running server.
-Provider, graphics, receipt and terminal collectors, and any UI, remain absent,
-and an operator-invoked bundle is always `unverified` because the CLI holds no
-control-plane authority. PR #281 delivered the
+The installed-provider collector is delivered through #483. #476 adds Help → Create support bundle through the existing v1 pipeline, safe native projections and explicit receipt/terminal omissions; both CLI and app snapshots remain unverified, and exact-package observation remains distinct from source verification. This diagnostics outcome adds no beta prerequisite. PR #281 delivered the
 debug-authorized rendering stress harness and PR #283 delivered visible pane
 recovery reporting under #199.
 

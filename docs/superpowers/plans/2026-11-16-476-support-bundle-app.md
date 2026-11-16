@@ -33,10 +33,10 @@
 
 **Interfaces:** `createAppSupportBundle(request, signal)` returns a bounded summary plus native-only saved path; request has canonical root, safe native graphics/updater/lifecycle projections and immutable build source identity. Worker stdin is bounded line-delimited control data; stdout contains one bounded terminal result. No raw errors cross the boundary.
 
-- [ ] Write and run focused tests that fail before the adapter exists: real filesystem bundle creation/0600, schema/category accounting, sensitive synthetic inputs, explicit receipt/terminal omissions, corrupt configuration, cancellation before commit and scoped symlink refusal.
-- [ ] Implement the adapter through real `createSupportCollectors`, `collectSupportBundle`, `serializeSupportBundle` and `writeSupportBundleFile`; preserve CLI behavior and public signatures.
-- [ ] Build and execute the actual standalone worker without a checkout/CLI or optional providers; test malformed/oversized input and cooperative cancellation.
-- [ ] Run new and existing support-bundle suites plus test typecheck; commit the independently testable adapter.
+- [x] Write and run focused tests that fail before the adapter exists: real filesystem bundle creation/0600, schema/category accounting, sensitive synthetic inputs, explicit receipt/terminal omissions, corrupt configuration, cancellation before commit and scoped symlink refusal.
+- [x] Implement the adapter through real `createSupportCollectors`, `collectSupportBundle`, `serializeSupportBundle` and `writeSupportBundleFile`; preserve CLI behavior and public signatures.
+- [x] Build and execute the actual standalone worker without a checkout/CLI or optional providers; test malformed/oversized input and cooperative cancellation.
+- [x] Run new and existing support-bundle suites plus test typecheck; commit the independently testable adapter.
 
 ## Task 2: Native job boundary and Help action
 
@@ -44,10 +44,10 @@
 
 **Interfaces:** Native start/status/cancel/reveal commands accept only the trusted main WebView. Native state owns one job, canonical project and output; the UI receives safe state, accounting and basename only, never caller-selected reveal paths.
 
-- [ ] Establish RED for unauthorized caller/root, repeated starts, cancellation/commit races, worker failure/output bounds and reveal validation using real worker/filesystem where feasible.
-- [ ] Implement fixed worker launch, scrubbed environment, pinned project lease, cooperative cancellation, timeout and bounded result validation; wire only safe native runtime facts and explicit unavailable-owner omissions.
-- [ ] Establish UI RED using actual DOM/controller behavior for Help discovery, progress, cancellation, failure/retry, summary/reveal, focus restoration and stale responses.
-- [ ] Wire the real app, regenerate outputs and run owning JS/Rust gates; commit the production composition.
+- [x] Establish RED for unauthorized caller/root, repeated starts, cancellation/commit races, worker failure/output bounds and reveal validation using real worker/filesystem where feasible.
+- [x] Implement fixed worker launch, scrubbed environment, pinned project lease, cooperative cancellation, timeout and bounded result validation; wire only safe native runtime facts and explicit unavailable-owner omissions.
+- [x] Establish UI RED using actual DOM/controller behavior for Help discovery, progress, cancellation, failure/retry, summary/reveal, focus restoration and stale responses.
+- [x] Wire the real app, regenerate outputs and run owning JS/Rust gates; commit the production composition.
 
 ## Task 3: Packaged acceptance and protected closeout
 
