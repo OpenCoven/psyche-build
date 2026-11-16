@@ -43,6 +43,8 @@ if [[ "$mode" == "fast" ]]; then
 else
   command -v cargo >/dev/null 2>&1 || die "Cargo is required for the full gate"
 
+  run "Locked documentation dependencies" pnpm --dir docs install --frozen-lockfile --ignore-scripts
+
   cargo_target_dir="$(mktemp -d "${TMPDIR:-/tmp}/psyche-build-agent-check-cargo.XXXXXX")"
   trap 'rm -rf "$cargo_target_dir"' EXIT
   export CARGO_TARGET_DIR="$cargo_target_dir"
