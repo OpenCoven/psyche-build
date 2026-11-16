@@ -1,0 +1,6 @@
+# Standalone docs graph: this boundary keeps /docs Dependabot updates out of
+# the root lockfile. Keep supply-chain policy aligned with the root workspace.
+packages: []
+minimumReleaseAge: 1440
+allowBuilds:
+  esbuild: false
