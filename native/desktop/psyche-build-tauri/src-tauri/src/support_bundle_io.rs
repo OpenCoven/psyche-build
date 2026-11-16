@@ -243,7 +243,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         // Models an operation blocked before Node discovery or during reveal.
-        std::thread::park();
+        let (_sender, blocked) = std::sync::mpsc::sync_channel::<()>(0);
+        let _ = blocked.recv();
     }
     #[test]
     fn support_bundle_parent_eof_stops_helper_before_node_or_reveal_work() {
@@ -263,7 +264,17 @@ mod tests {
         drop(child.stdin.take());
         for _ in 0..100 {
             if let Some(status) = child.try_wait().unwrap() {
-                assert_eq!(status.signal(), Some(libc::SIGKILL));
+                // Group SIGKILL and the guard's fixed exit can race. Both are
+                // valid termination paths; the actual cleanup invariant is that
+                // no owned process group remains, not one exact wait status.
+                assert!(
+                    status.signal() == Some(libc::SIGKILL) || status.code() == Some(74),
+                    "unexpected helper status: {status:?}"
+                );
+                assert!(
+                    !super::super::group_alive(Some(child.id())),
+                    "parent EOF left the helper group alive"
+                );
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
