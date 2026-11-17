@@ -148,7 +148,7 @@ pub(crate) fn open_profile(root: &Path) -> Result<Profile, String> {
     let marker = root.join("profile.v1");
     let mut nonce = [0u8; 32];
     if fresh {
-        getrandom::getrandom(&mut nonce).map_err(|_| "acceptance entropy unavailable")?;
+        getrandom::fill(&mut nonce).map_err(|_| "acceptance entropy unavailable")?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
