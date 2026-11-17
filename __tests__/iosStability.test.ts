@@ -36,6 +36,7 @@ describe('bounded iOS stability qualification', () => {
     expect(result.status, result.stderr).toBe(0);
     const plan = JSON.parse(result.stdout);
     expect(plan.build.args[0]).toBe('build-for-testing');
+    expect(plan.build.args).toContain('-resultBundlePath');
     expect(plan.phases).toHaveLength(2);
     for (const [index, phase] of plan.phases.entries()) {
       expect(phase.args[0]).toBe('test-without-building');
@@ -107,6 +108,39 @@ describe('bounded iOS stability qualification', () => {
     expect(result.cases).toHaveLength(6);
     expect(result.cases.every((entry: { missing: number }) => entry.missing === 25)).toBe(true);
     expect(result.complete).toBe(false);
+  });
+
+  it('rejects contradictory aggregate and repetition results', () => {
+    const result = summarize([testCase([{ nodeType: 'Repetition', nodeIdentifier: '1', result: 'Passed' }], 'Failed')], 1);
+    expect(result.accountingErrors).toContain('contradictory_aggregate_result');
+    expect(result.clean).toBe(false);
+    expect(result.complete).toBe(false);
+  });
+
+  it('retains bounded compiler locations and digests without publishing diagnostic text', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'psyche-ios-diagnostics-'));
+    directories.push(directory);
+    const file = join(directory, 'build.log');
+    writeFileSync(file, 'unrestricted private output\n' + Array(30).fill('/Users/private/native/ios/PsycheCore/Sources/Example.swift:12:3: error: private prompt value').join('\n'));
+    const result = cli('diagnostics', file);
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(result.stdout);
+    expect(report.entries).toHaveLength(20);
+    expect(report.entries[0]).toMatchObject({ file: 'native/ios/PsycheCore/Sources/Example.swift', line: 12, column: 3 });
+    expect(report.entries[0].sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.stdout).not.toContain('private');
+    expect(result.stdout).not.toContain('prompt');
+  });
+
+  it('does not finalize an interrupted command as a complete measurement', () => {
+    const { directory } = phaseFixture();
+    const file = join(directory, 'summary.json');
+    const report = JSON.parse(readFileSync(file, 'utf8'));
+    report.phases = [{ outcome: 'incomplete', observations: { complete: true } }, { outcome: 'succeeded', observations: { complete: true } }];
+    writeFileSync(file, JSON.stringify(report));
+    const result = cli('finalize', directory);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ complete: false, clean: false });
   });
 
   it('keeps a nonzero command with passing test leaves classified as infrastructure failure', () => {

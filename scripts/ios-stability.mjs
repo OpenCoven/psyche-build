@@ -26,7 +26,7 @@ function plan(directory, iterations, budgetSeconds) {
   const base = ['-project', 'native/ios/Psyche.xcodeproj', '-scheme', 'PsycheApp', '-destination', destination, '-derivedDataPath', join(directory, 'derived-data')];
   return {
     iterations, budgetSeconds, cases,
-    build: { command: 'xcodebuild', args: ['build-for-testing', ...base, 'CODE_SIGNING_ALLOWED=NO'] },
+    build: { command: 'xcodebuild', args: ['build-for-testing', ...base, '-resultBundlePath', join(directory, 'bundles', 'build.xcresult'), 'CODE_SIGNING_ALLOWED=NO'] },
     phases: ['fresh', 'reused'].map((mode) => ({
       mode, command: 'xcodebuild',
       args: ['test-without-building', ...base, '-parallel-testing-enabled', 'NO', '-test-iterations', String(iterations), '-test-repetition-relaunch-enabled', mode === 'fresh' ? 'YES' : 'NO', ...cases.map((id) => `-only-testing:${id}`), '-resultBundlePath', join(directory, 'bundles', `${mode}.xcresult`), 'CODE_SIGNING_ALLOWED=NO'],
@@ -70,6 +70,8 @@ function summarize(document, requested) {
       }
       row.missing = Math.max(0, requested - row.executions.length);
       if (row.executions.length > requested) accountingErrors.push('excess_executions');
+      if (!['Passed', 'Failed', 'Skipped'].includes(node.result)) accountingErrors.push('unknown_aggregate_result');
+      else if (node.result === 'Passed' && row.failed > 0 || node.result === 'Failed' && row.failed === 0 || node.result === 'Skipped' && row.passed + row.failed > 0) accountingErrors.push('contradictory_aggregate_result');
       return;
     }
     for (const child of node.children ?? []) visit(child);
@@ -140,9 +142,28 @@ function bundleDigest(directory) {
   return { sha256: hash.digest('hex'), bytes, files };
 }
 
+function diagnostics(file) {
+  // Keep bounded compiler locations and fingerprints. The original diagnostic is
+  // available in the fixture-only xcresult, never in this public JSON summary.
+  const fd = openSync(file, 'r');
+  const size = statSync(file).size;
+  const buffer = Buffer.alloc(Math.min(size, 65536));
+  try { readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length)); }
+  finally { closeSync(fd); }
+  const entries = [];
+  for (const line of buffer.toString('utf8').split('\n')) {
+    if (!/(?:^|: )(?:error|fatal error):/.test(line) && !/^xcodebuild: error:/.test(line)) continue;
+    const location = line.match(/(?:^|\/)(native\/ios\/[A-Za-z0-9_./ -]+\.swift):(\d+):(\d+):/);
+    entries.push({ kind: 'build_error', ...(location ? { file: location[1], line: Number(location[2]), column: Number(location[3]) } : {}), sha256: sha256(line) });
+    if (entries.length === 20) break;
+  }
+  return { entries, diagnosticTextOmitted: true, inspectedTailBytes: buffer.length };
+}
+
 async function main() {
   const [command, input, arg = '25', seconds = '12600'] = process.argv.slice(2);
   if (!input) throw new Error('missing_input');
+  if (command === 'diagnostics') return console.log(JSON.stringify(diagnostics(input)));
   if (command === 'summarize') return console.log(JSON.stringify(summarize(JSON.parse(readFileSync(input, 'utf8')), integer(arg, 25, 'invalid_iterations'))));
   const directory = resolve(input);
   if (command === 'plan') return console.log(JSON.stringify(plan(directory, integer(arg, 25, 'invalid_iterations'), integer(seconds, 12600, 'invalid_budget'))));
@@ -161,6 +182,8 @@ async function main() {
     save(directory, report);
     const result = await execute(configuration.build.command, configuration.build.args, join(directory, 'private-logs', 'build.log'), Date.parse(report.startedAt) + report.budgetSeconds * 1000);
     report.build = { ...result, outcome: result.timedOut ? 'incomplete' : result.exitCode === 0 ? 'succeeded' : 'infrastructure_failure' };
+    if (existsSync(join(directory, 'private-logs', 'build.log'))) report.build.diagnostics = diagnostics(join(directory, 'private-logs', 'build.log'));
+    if (existsSync(join(directory, 'bundles', 'build.xcresult'))) report.build.bundle = { path: 'bundles/build.xcresult', ...bundleDigest(join(directory, 'bundles', 'build.xcresult')) };
     save(directory, report);
     console.log(JSON.stringify({ sourceSha, build: report.build }));
     process.exitCode = report.build.outcome === 'succeeded' ? 0 : 1;
@@ -190,7 +213,7 @@ async function main() {
     return;
   }
   if (command === 'finalize') {
-    report.complete = report.phases.length === 2 && report.phases.every((phase) => phase.observations.complete);
+    report.complete = report.build.outcome === 'succeeded' && report.phases.length === 2 && report.phases.every((phase) => ['succeeded', 'test_failure'].includes(phase.outcome) && phase.observations.complete);
     report.clean = report.complete && report.phases.every((phase) => phase.outcome === 'succeeded');
     report.finishedAt = new Date().toISOString();
     save(directory, report);

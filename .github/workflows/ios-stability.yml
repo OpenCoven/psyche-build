@@ -72,6 +72,15 @@ jobs:
         id: fresh
         run: node scripts/ios-stability.mjs measure "$QUALIFICATION_DIR" fresh
 
+      - name: Retain a failing build's fixture result bundle
+        if: always() && steps.build.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-stability-build-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_DIR }}/bundles/build.xcresult
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Retain the first phase's enumerated observations
         if: always() && steps.build.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
