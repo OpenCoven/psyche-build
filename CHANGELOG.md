@@ -2,21 +2,24 @@
 
 ## Unreleased
 
-## [0.0.3] - 2026-10-03
+## [0.0.3] - 2026-11-16
 
 ### Added
 
-- The desktop app checks a signed update manifest on launch and at most once a
-  day, verifies its Ed25519 signature against the embedded key set, and shows a
+- The desktop app can check a signed update manifest on launch and at most once
+  a day, verify its Ed25519 signature against the embedded key set, and show a
   notify-only banner when a newer release exists. It never downloads or
-  installs anything (#529, #530).
+  installs anything (#529, #530). This release embeds no update signing key, so
+  the check is off; see Known Limitations.
 - Releases sign `update-manifest.json` when a current signing key is
   provisioned, and open the Homebrew Cask bump as a verified tap pull request
   instead of pushing to the tap (#527, #528).
 - A non-publishing release-candidate build exercises the release workflow on
   any branch (#526).
 - Support bundles collect installed-provider, pane-lifecycle, and updater state
-  (#467, #483), and have a production CLI with persistence (#462).
+  (#467, #483), and have a production CLI with persistence (#462). The command
+  lists what a bundle does not collect, and the support-bundle document gives
+  the reason for each (#584).
 - The persisted project config is versioned and its read path is gated (#464).
 
 - The desktop composer row is hidden until summoned with ⌘K (or any path that
@@ -43,14 +46,32 @@
 - iOS keeps a lost consequential-action outcome explicitly unknown and
   separates an undispatched control request from an in-flight one (#466,
   #469).
+- A project lease request is no longer refused because the project's canonical
+  root is longer than 128 bytes (#565, #578).
 
 ### Security
 
 - Added Dependabot, CodeQL, and dependency review (#481), and CI now fails any
   change whose release versions disagree (#482).
+- The LAN bridge limits connections that have not authenticated: each must
+  authenticate within five minutes, at most 32 are held at once and 4 from one
+  address, and a frame sent before authentication may be at most 4 KiB.
+  Authenticated sessions are not counted or closed by these limits. See
+  [Bridge security](docs/BRIDGE-SECURITY.md) for what the limits do not cover
+  (#556, #558, #562).
+- Fixed four code-scanning findings in control-plane logging and hooks-guide
+  generation (#559).
+- Git and tmux now run from argument vectors and never through a shell in
+  pane creation, pane restore, merge, hooks setup, and the tmux service, so a
+  branch name, pane title, commit message, path, or typed text is passed as
+  data and is not parsed as a command (#554).
 
 ### Documentation
 
+- The bridge security and agent-surface documents now state what production
+  enforces and refuses (#547, #568).
+- Added the acceptance manifest contract and runbook for the beta candidate
+  pass, [Beta acceptance](docs/BETA-ACCEPTANCE.md) (#582).
 - Planning moved from Beads to GitHub Issues and the Psyche Build Project
   (#473). `docs/TRACKER.md` is the new tracker contract; the Beads archive is
   recorded in `docs/working-records/beads-retirement-2026-10.md`.

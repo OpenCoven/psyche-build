@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { PsychePane } from '../src/types.js';
 
 const tmuxServiceMock = vi.hoisted(() => ({
@@ -74,6 +78,29 @@ describe('pane restoration', () => {
     }));
   });
 
+  it('preserves a literal restored working directory through the pane shell', async () => {
+    const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'restore-shell-')));
+    const worktree = path.join(sandbox, "worktree-$(touch SIDE_EFFECT)-'quoted");
+    fs.mkdirSync(worktree);
+    try {
+      const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+      await recreateMissingPanes([{
+        id: 'restored', slug: 'restored', prompt: '', paneId: '%2',
+        worktreePath: worktree, projectRoot: sandbox,
+      }], path.join(sandbox, '.psyche', 'psyche.config.json'));
+      expect(splitPaneMock).toHaveBeenCalledWith({ cwd: worktree });
+      const calls = tmuxServiceMock.sendKeys.mock.calls as unknown as Array<[string, string[]]>;
+      const commands = calls.flatMap(([, keys]) => keys.filter((key) => key !== 'Enter'));
+      const output = execFileSync('/bin/sh', ['-c', `${commands.join('\n')}\npwd -P`], {
+        cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      expect(fs.existsSync(path.join(worktree, 'SIDE_EFFECT'))).toBe(false);
+      expect(output.trim().split('\n').at(-1)).toBe(worktree);
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it('resumes restored worktree panes with their original agent command', async () => {
     const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
 
@@ -110,6 +137,37 @@ describe('pane restoration', () => {
       )
     );
     expect(tmuxServiceMock.sendTmuxKeys).toHaveBeenCalledWith('%9', 'Enter');
+  });
+
+  // The restore banner is typed into the new pane's shell. The prompt is
+  // stored data (and can arrive from a paired device), so it must reach tmux
+  // as one argument and stay inert inside the banner's single quotes.
+  it('types the restore banner as whole tmux arguments with an inert prompt preview', async () => {
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+
+    const pane: PsychePane = {
+      id: 'psyche-1',
+      slug: 'feature-codex',
+      prompt: "x'; $(touch /tmp/p) `id` \\\u0003rm -rf ~\n",
+      paneId: '%2',
+      worktreePath: '/repo/.psyche/worktrees/feature-codex',
+      projectRoot: '/repo',
+      agent: 'codex',
+    };
+
+    await recreateMissingPanes([pane], '/repo/.psyche/psyche.config.json');
+
+    expect(tmuxServiceMock.sendKeys.mock.calls).toEqual([
+      ['%9', ["echo '# Pane restored: feature-codex'", 'Enter']],
+      ['%9', ["echo '# Original prompt: x ; $(touch /tmp/p) `id`  rm -rf ~ ...'", 'Enter']],
+    ]);
+  });
+
+  it('leaves no quote, backslash or control character in banner text', async () => {
+    const { inertEchoText } = await import('../src/hooks/usePaneLoading.js');
+
+    expect(inertEchoText("it's a\\b\u0000c\u001bd\u007fe\r\nf")).toBe('it s a b c d e f');
+    expect(inertEchoText('plain prompt: fix #12 (v2) & ship')).toBe('plain prompt: fix #12 (v2) & ship');
   });
 
   it('retains destructive protection when stale-pane recovery cannot persist', async () => {
