@@ -56,6 +56,19 @@ describe('bounded iOS stability qualification', () => {
     expect(result.stderr).toContain('invalid_iterations');
   });
 
+  it('uses an ordinary single pass when one sample is requested', () => {
+    const result = cli('plan', '/qualification', '1', '600');
+    expect(result.status, result.stderr).toBe(0);
+    const plan = JSON.parse(result.stdout);
+    expect(plan.iterations).toBe(1);
+    for (const phase of plan.phases) {
+      expect(phase.args[0]).toBe('test-without-building');
+      expect(phase.args).not.toContain('-test-iterations');
+      expect(phase.args).not.toContain('-test-repetition-relaunch-enabled');
+      expect(phase.args.filter((arg: string) => arg.startsWith('-only-testing:'))).toHaveLength(6);
+    }
+  });
+
   it.each(['0', '12601', 'NaN'])('refuses an out-of-bound total duration %s', (seconds) => {
     const result = cli('plan', '/qualification', '25', seconds);
     expect(result.status).toBe(64);

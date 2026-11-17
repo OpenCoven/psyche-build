@@ -29,7 +29,9 @@ function plan(directory, iterations, budgetSeconds) {
     build: { command: 'xcodebuild', args: ['build-for-testing', ...base, '-resultBundlePath', join(directory, 'bundles', 'build.xcresult'), 'CODE_SIGNING_ALLOWED=NO'] },
     phases: ['fresh', 'reused'].map((mode) => ({
       mode, command: 'xcodebuild',
-      args: ['test-without-building', ...base, '-parallel-testing-enabled', 'NO', '-test-iterations', String(iterations), '-test-repetition-relaunch-enabled', mode === 'fresh' ? 'YES' : 'NO', ...cases.map((id) => `-only-testing:${id}`), '-resultBundlePath', join(directory, 'bundles', `${mode}.xcresult`), 'CODE_SIGNING_ALLOWED=NO'],
+      // Xcode rejects -test-iterations 1 before running any test. A single-pass
+      // diagnostic probe uses the ordinary invocation, without repetition flags.
+      args: ['test-without-building', ...base, '-parallel-testing-enabled', 'NO', ...(iterations > 1 ? ['-test-iterations', String(iterations), '-test-repetition-relaunch-enabled', mode === 'fresh' ? 'YES' : 'NO'] : []), ...cases.map((id) => `-only-testing:${id}`), '-resultBundlePath', join(directory, 'bundles', `${mode}.xcresult`), 'CODE_SIGNING_ALLOWED=NO'],
     })),
   };
 }
