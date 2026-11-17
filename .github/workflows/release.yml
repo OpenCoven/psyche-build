@@ -145,6 +145,12 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt
 
+      - name: Install tmux
+        # `pnpm test` drives a real tmux server (the recovery harness and the
+        # production daemon test). The hosted macOS image does not ship tmux,
+        # and ci.yml installs it before the same suite.
+        run: brew install tmux
+
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 

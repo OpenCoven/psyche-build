@@ -93,6 +93,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 const SHARED_VERIFY_STEPS = [
+  'Install tmux',
   'Install locked dependencies',
   'Require pinned Xcode',
   'Verify shared TypeScript, protocol, and package surfaces',
@@ -150,6 +151,7 @@ const RELEASE_VERIFY_ORDER = [
   'uses: pnpm/action-setup',
   'uses: actions/setup-node',
   'uses: dtolnay/rust-toolchain',
+  'Install tmux',
   'Install locked dependencies',
   'Require pinned Xcode',
   'Set up XcodeGen for iOS verification',
@@ -167,6 +169,7 @@ const CANDIDATE_VERIFY_ORDER = [
   'uses: pnpm/action-setup',
   'uses: actions/setup-node',
   'uses: dtolnay/rust-toolchain',
+  'Install tmux',
   'Install locked dependencies',
   'Require pinned Xcode',
   'Require coherent release versions',
@@ -447,6 +450,31 @@ describe('release candidate workflow contract', () => {
       names.indexOf('Verify shared TypeScript, protocol, and package surfaces'),
     );
     expect(candidateSource()).not.toMatch(/continue-on-error/);
+  });
+
+  // The first candidate dispatch (run 44014751162) failed in `pnpm test` with
+  // `tmux: command not found`: the recovery harness and the production daemon
+  // test drive a real tmux server, and the hosted macOS image ships none.
+  // ci.yml installs it; these two workflows run the same suite and did not.
+  it('installs tmux before the repository tests in both verify jobs', () => {
+    for (const [file, workflow] of [
+      ['release-candidate.yml', candidateSource()],
+      ['release.yml', releaseSource()],
+    ] as const) {
+      const verify = jobSource(workflow, 'verify');
+      const install = stepSource(verify, 'Install tmux');
+      expect(install, file).toContain('        run: brew install tmux\n');
+      expect(install, file).not.toMatch(/\n\s+if:|continue-on-error/);
+      const names = stepNames(verify);
+      expect(names.indexOf('Install tmux'), file).toBeGreaterThanOrEqual(0);
+      expect(names.indexOf('Install tmux'), file).toBeLessThan(
+        names.indexOf('Verify shared TypeScript, protocol, and package surfaces'),
+      );
+      expect(
+        stepSource(verify, 'Verify shared TypeScript, protocol, and package surfaces'),
+        file,
+      ).toContain('pnpm test');
+    }
   });
 
   it('forces an explicit share-or-exclude decision for every mirrored release.yml step', () => {
