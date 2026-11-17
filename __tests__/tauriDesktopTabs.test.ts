@@ -449,7 +449,7 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('manages per-webview shortcut authorization across navigation and destruction', () => {
-    expect(tauriCargo).toMatch(/^getrandom\s*=\s*"0\.2"/m);
+    expect(tauriCargo).toMatch(/^getrandom\s*=\s*"0\.4"/m);
     expect(tauriLib).toMatch(
       /const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis\((?:75|80|90|100)\);/,
     );
