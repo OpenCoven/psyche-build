@@ -1179,11 +1179,7 @@ final class PsycheAppUITests: XCTestCase {
         toSatisfy format: String,
         timeout: TimeInterval = 10
     ) -> Bool {
-        let expectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: format),
-            object: target
-        )
-        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+        waitUntil(NSPredicate(format: format), holdsFor: target, timeout: timeout)
     }
 
     private func waitForValue(
@@ -1191,11 +1187,31 @@ final class PsycheAppUITests: XCTestCase {
         containing text: String,
         timeout: TimeInterval = 10
     ) -> Bool {
-        let expectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value CONTAINS %@", text),
-            object: target
+        waitUntil(
+            NSPredicate(format: "value CONTAINS %@", text),
+            holdsFor: target,
+            timeout: timeout
         )
-        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    /// Waits for a state, not for the test runner's query speed (#510).
+    ///
+    /// The waiter polls by taking an accessibility snapshot. On the hosted
+    /// runner one snapshot has taken about nine seconds, so a ten-second wait
+    /// can expire after a single evaluation that began before the state was
+    /// reached, and report "never" for something true a moment later. When the
+    /// waiter times out, the predicate is evaluated once more, directly. The
+    /// condition asserted is unchanged: it must hold. No action is repeated.
+    private func waitUntil(
+        _ predicate: NSPredicate,
+        holdsFor target: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: target)
+        if XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed {
+            return true
+        }
+        return predicate.evaluate(with: target)
     }
 
     private func textInput(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
