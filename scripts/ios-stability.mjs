@@ -66,9 +66,12 @@ function summarize(document, requested) {
         const identity = repetitions.length ? execution.nodeIdentifier : '1';
         if (!identity || identities.has(identity)) { accountingErrors.push('invalid_repetition_identity'); continue; }
         identities.add(identity);
-        const result = ['Passed', 'Failed', 'Skipped'].includes(execution.result) ? execution.result : 'unknown';
+        const executionFailures = failures(execution);
+        const contradictory = execution.result !== 'Failed' && executionFailures.length > 0;
+        if (contradictory) accountingErrors.push('contradictory_execution_result');
+        const result = !contradictory && ['Passed', 'Failed', 'Skipped'].includes(execution.result) ? execution.result : 'unknown';
         row[{ Passed: 'passed', Failed: 'failed', Skipped: 'skipped', unknown: 'unknown' }[result]] += 1;
-        row.executions.push({ ordinal: row.executions.length + 1, result, failures: failures(execution) });
+        row.executions.push({ ordinal: row.executions.length + 1, result, failures: executionFailures });
       }
       row.missing = Math.max(0, requested - row.executions.length);
       if (row.executions.length > requested) accountingErrors.push('excess_executions');

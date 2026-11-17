@@ -147,6 +147,28 @@ describe('bounded iOS stability qualification', () => {
     expect(result.complete).toBe(false);
   });
 
+  it.each([false, true])('rejects a nested failed run inside a passed execution (repeated=%s)', (repeated) => {
+    const ids = [
+      'ConnectionManagerTests/testDisconnectDuringReadyHostSelectionCannotLeaveReadinessLive()',
+      'ConnectionManagerTests/testDisconnectAfterReadyHostSelectionFinalizesKeepsTheNewHost()',
+      caseID,
+      'PsycheAppUITests/testADraftStaysWithItsOwnPane()',
+      'PsycheAppUITests/testComposerAndKeyRowAreAvailableOnAnOpenPane()',
+      'PsycheAppUITests/testRenamingAPaneUsesTheRemoteActionSheet()',
+    ];
+    const nodes = ids.map((id) => {
+      const nested = id === caseID ? [{ nodeType: 'Test Case Run', result: 'Failed', name: 'nested assertion failed' }] : [];
+      return { nodeType: 'Test Case', nodeIdentifier: id, result: 'Passed', children: repeated ? [{ nodeType: 'Repetition', nodeIdentifier: '1', result: 'Passed', children: nested }] : nested };
+    });
+    const result = summarize(nodes, 1);
+    const row = result.cases.find((entry: { id: string }) => entry.id.includes('testCorrelates'));
+    expect(row).toMatchObject({ passed: 0, failed: 0, unknown: 1 });
+    expect(row.executions).toHaveLength(1);
+    expect(result.accountingErrors).toContain('contradictory_execution_result');
+    expect(result.complete).toBe(false);
+    expect(result.clean).toBe(false);
+  });
+
   it('retains bounded compiler locations and digests without publishing diagnostic text', () => {
     const directory = mkdtempSync(join(tmpdir(), 'psyche-ios-diagnostics-'));
     directories.push(directory);

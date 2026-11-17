@@ -29,12 +29,14 @@ jobs:
       (contains(github.event.pull_request.body, '<!-- ios-stability: run -->') ||
       contains(github.event.pull_request.body, '<!-- ios-stability: probe -->'))
     runs-on: macos-15
-    timeout-minutes: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && 20 || 260 }}"
+    timeout-minutes: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && 20 || 100 }}"
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
       TEST_ITERATIONS: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && '1' || '25' }}"
-      OBSERVATION_SECONDS: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && '600' || '12600' }}"
+      # Keep 25 + 25 as the target while reserving this overnight allocation for
+      # ordinary CI, Swift analysis, setup, result export and cancellation.
+      OBSERVATION_SECONDS: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && '600' || '5100' }}"
     steps:
       - name: Checkout exact proposed source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
