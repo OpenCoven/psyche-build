@@ -83,9 +83,17 @@ function summarize(document, requested) {
   return { cases: rows, accountingErrors, complete, clean: complete && rows.every((row) => row.failed === 0) };
 }
 
-function textCommand(command, args) {
+function textCommand(command, args, operation) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
-  if (result.status !== 0) throw new Error('metadata_command_failed');
+  if (result.status !== 0) {
+    console.error(JSON.stringify({ metadataFailure: {
+      operation, exitCode: result.status, signal: result.signal,
+      errorCode: result.error?.code ?? null,
+      stdoutBytes: Buffer.byteLength(result.stdout ?? ''), stderrBytes: Buffer.byteLength(result.stderr ?? ''),
+      stdoutSha256: sha256(result.stdout ?? ''), stderrSha256: sha256(result.stderr ?? ''),
+    } }));
+    throw new Error('metadata_command_failed');
+  }
   return result.stdout.trim();
 }
 
@@ -172,11 +180,11 @@ async function main() {
   if (command === 'build') {
     if (existsSync(directory)) throw new Error('output_already_exists');
     const configuration = plan(directory, integer(arg, 25, 'invalid_iterations'), integer(seconds, 12600, 'invalid_budget'));
-    const sourceSha = textCommand('git', ['rev-parse', 'HEAD']);
+    const sourceSha = textCommand('git', ['rev-parse', 'HEAD'], 'checkout-source');
     if (!/^[a-f0-9]{40}$/.test(sourceSha) || process.env.SOURCE_SHA && sourceSha !== process.env.SOURCE_SHA) throw new Error('source_identity_mismatch');
-    const version = textCommand('xcodebuild', ['-version']);
+    const version = textCommand('xcodebuild', ['-version'], 'xcode-version');
     if (version !== 'Xcode 26.2\nBuild version 17C52') throw new Error('wrong_xcode');
-    const devices = JSON.parse(textCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json']));
+    const devices = JSON.parse(textCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 'simulator-list'));
     if (!devices.devices?.['com.apple.CoreSimulator.SimRuntime.iOS-26-2']?.some((device) => device.name === 'iPhone 16 Pro' && device.isAvailable)) throw new Error('pinned_simulator_missing');
     mkdirSync(join(directory, 'bundles'), { recursive: true });
     mkdirSync(join(directory, 'private-logs'));
@@ -192,7 +200,7 @@ async function main() {
     return;
   }
   const report = JSON.parse(readFileSync(join(directory, 'summary.json'), 'utf8'));
-  if (report.sourceSha !== textCommand('git', ['rev-parse', 'HEAD'])) throw new Error('source_identity_mismatch');
+  if (report.sourceSha !== textCommand('git', ['rev-parse', 'HEAD'], 'checkout-source')) throw new Error('source_identity_mismatch');
   if (command === 'measure') {
     if (!['fresh', 'reused'].includes(arg) || report.phases.some((phase) => phase.mode === arg)) throw new Error('invalid_or_repeated_phase');
     if (report.build.outcome !== 'succeeded') throw new Error('build_not_successful');
@@ -204,7 +212,7 @@ async function main() {
     Object.assign(phase, result);
     const bundle = join(directory, 'bundles', `${arg}.xcresult`);
     if (result.started) try {
-      const tree = JSON.parse(textCommand('xcrun', ['xcresulttool', 'get', 'test-results', 'tests', '--path', bundle, '--compact']));
+      const tree = JSON.parse(textCommand('xcrun', ['xcresulttool', 'get', 'test-results', 'tests', '--path', bundle, '--compact'], 'result-tree'));
       phase.observations = summarize(tree, report.requestedPerPhase);
       phase.bundle = { path: `bundles/${arg}.xcresult`, ...bundleDigest(bundle) };
       phase.outcome = result.timedOut ? 'incomplete' : phase.observations.cases.some((row) => row.failed) ? 'test_failure' : result.exitCode !== 0 ? 'infrastructure_failure' : phase.observations.clean ? 'succeeded' : 'incomplete';

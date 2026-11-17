@@ -107,9 +107,12 @@ final class ControlRequestClientTests: XCTestCase {
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
-        // #510 reproduction: registration can finish while the separately
-        // scheduled send has not recorded a message. Hold that ordering open.
+        // Registration precedes the separately scheduled transport send. The
+        // fake host may reply only after observing that send, just as a real
+        // host must. The gate keeps the previously failing ordering explicit.
         await transport.waitForSendEntry()
+        await transport.allowSend()
+        await transport.waitForRecordedSend()
         await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
 
         let value = try await response
@@ -121,8 +124,6 @@ final class ControlRequestClientTests: XCTestCase {
         )
         let remaining = await client.pendingRequestCount
         XCTAssertEqual(remaining, 0)
-        await transport.allowSend()
-        await transport.waitForRecordedSend()
     }
 
     func testAnswersOnlyTheRequestThatAsked() async throws {
@@ -662,8 +663,8 @@ final class ControlRequestClientTests: XCTestCase {
     }
 
     /// The request registers on the actor before `send` suspends, but the
-    /// caller reaches this line first. Poll rather than sleep so the test
-    /// stays deterministic.
+    /// caller reaches this line first. This observes registration only, not
+    /// transport emission; a fake host reply must observe the send separately.
     private func waitForPendingRequest(
         on client: ControlRequestClient,
         count: Int = 1,

@@ -69,6 +69,23 @@ describe('bounded iOS stability qualification', () => {
     }
   });
 
+  it('identifies a failed preflight command without exposing its output', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'psyche-ios-preflight-'));
+    directories.push(directory);
+    const bin = join(directory, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'git'), '#!/usr/bin/env node\nprocess.stderr.write("private-fixture /Users/example");process.exit(128);\n');
+    chmodSync(join(bin, 'git'), 0o755);
+    const result = spawnSync(process.execPath, [script, 'build', join(directory, 'output'), '1', '600'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8' });
+    expect(result.status).toBe(64);
+    const diagnostic = result.stderr.split('\n').find((line) => line.startsWith('{'));
+    expect(diagnostic, result.stderr).toBeDefined();
+    expect(JSON.parse(diagnostic!).metadataFailure).toMatchObject({ operation: 'checkout-source', exitCode: 128 });
+    expect(JSON.parse(diagnostic!).metadataFailure.stderrSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.stderr).not.toContain('private-fixture');
+    expect(result.stderr).not.toContain('/Users/example');
+  });
+
   it.each(['0', '12601', 'NaN'])('refuses an out-of-bound total duration %s', (seconds) => {
     const result = cli('plan', '/qualification', '25', seconds);
     expect(result.status).toBe(64);

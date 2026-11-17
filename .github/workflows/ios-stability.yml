@@ -62,6 +62,20 @@ jobs:
 
       - uses: ./.github/actions/setup-xcodegen
 
+      - name: Require iOS 26.2 iPhone 16 Pro simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/available-simulators.json"
+          if ! jq -e '
+            .devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"]
+            | any(.name == "iPhone 16 Pro" and .isAvailable == true)
+          ' "$RUNNER_TEMP/available-simulators.json" >/dev/null; then
+            echo "::error::iOS 26.2 iPhone 16 Pro simulator is unavailable"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
       - name: Generate and verify the iOS project
         run: pnpm ios:project:check
 
