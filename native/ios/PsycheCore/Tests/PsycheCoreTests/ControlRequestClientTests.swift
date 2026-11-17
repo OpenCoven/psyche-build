@@ -99,13 +99,17 @@ final class ControlRequestClientTests: XCTestCase {
     }
 
     func testCorrelatesAResponseBackToItsCaller() async throws {
-        let transport = FakeTransport()
+        let transport = CorrelationRecordingTransport()
+        defer { Task { await transport.allowSend() } }
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
         _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
+        // #510 reproduction: registration can finish while the separately
+        // scheduled send has not recorded a message. Hold that ordering open.
+        await transport.waitForSendEntry()
         await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
 
         let value = try await response
@@ -117,6 +121,8 @@ final class ControlRequestClientTests: XCTestCase {
         )
         let remaining = await client.pendingRequestCount
         XCTAssertEqual(remaining, 0)
+        await transport.allowSend()
+        await transport.waitForRecordedSend()
     }
 
     func testAnswersOnlyTheRequestThatAsked() async throws {
@@ -749,6 +755,63 @@ private actor CompletionProbe {
 
     func markComplete() {
         isComplete = true
+    }
+}
+
+/// Makes the recorded #510 ordering deterministic without changing the real
+/// client's scheduling or the shared fixture transport. Only this test owns it.
+private actor CorrelationRecordingTransport: PsycheTransport {
+    private let base = FakeTransport()
+    private var entered = false
+    private var allowed = false
+    private var recorded = false
+    private var entryWaiter: CheckedContinuation<Void, Never>?
+    private var sendGate: CheckedContinuation<Void, Never>?
+    private var recordedWaiter: CheckedContinuation<Void, Never>?
+
+    var sentMessages: [MobileClientMessage] {
+        get async { await base.sentMessages }
+    }
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        try await base.connect(to: endpoint)
+    }
+
+    func disconnect() async { await base.disconnect() }
+
+    func send(_ message: MobileClientMessage) async throws {
+        entered = true
+        entryWaiter?.resume()
+        entryWaiter = nil
+        if !allowed {
+            await withCheckedContinuation { sendGate = $0 }
+        }
+        try await base.send(message)
+        recorded = true
+        recordedWaiter?.resume()
+        recordedWaiter = nil
+    }
+
+    func waitForSendEntry() async {
+        if !entered { await withCheckedContinuation { entryWaiter = $0 } }
+    }
+
+    func allowSend() {
+        allowed = true
+        sendGate?.resume()
+        sendGate = nil
+    }
+
+    func waitForRecordedSend() async {
+        if !recorded { await withCheckedContinuation { recordedWaiter = $0 } }
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        await base.incomingMessages()
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        await base.incomingBinaryFrames()
     }
 }
 

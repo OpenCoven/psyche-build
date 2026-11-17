@@ -13,7 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-stability-${{ github.event.pull_request.number }}
+  group: >-
+    ios-stability-${{ github.event.pull_request.number }}-${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && 'probe' || 'cohort' }}
   # Preserve an earlier measurement and its first failure when a new head arrives.
   cancel-in-progress: false
 
@@ -25,12 +26,15 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'qualify/510-ios-stability' &&
-      contains(github.event.pull_request.body, '<!-- ios-stability: run -->')
+      (contains(github.event.pull_request.body, '<!-- ios-stability: run -->') ||
+      contains(github.event.pull_request.body, '<!-- ios-stability: probe -->'))
     runs-on: macos-15
-    timeout-minutes: 260
+    timeout-minutes: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && 20 || 260 }}"
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      TEST_ITERATIONS: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && '1' || '25' }}"
+      OBSERVATION_SECONDS: "${{ contains(github.event.pull_request.body, '<!-- ios-stability: probe -->') && '600' || '12600' }}"
     steps:
       - name: Checkout exact proposed source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,9 +70,9 @@ jobs:
 
       - name: Build the selected test scheme once
         id: build
-        run: node scripts/ios-stability.mjs build "$QUALIFICATION_DIR" 25 12600
+        run: node scripts/ios-stability.mjs build "$QUALIFICATION_DIR" "$TEST_ITERATIONS" "$OBSERVATION_SECONDS"
 
-      - name: Observe 25 repetitions with fresh test-runner processes
+      - name: Observe the fresh-runner repetitions
         id: fresh
         run: node scripts/ios-stability.mjs measure "$QUALIFICATION_DIR" fresh
 
@@ -99,7 +103,7 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      - name: Observe 25 repetitions in reused test-runner processes
+      - name: Observe the reused-runner repetitions
         id: reused
         # A previous failed observation remains failed; this is the separately
         # planned second mode, never a retry to replace its first outcome.
