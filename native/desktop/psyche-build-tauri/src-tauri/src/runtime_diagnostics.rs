@@ -351,6 +351,9 @@ pub(crate) struct RuntimeDiagnosticsState {
 }
 
 impl RuntimeDiagnosticsState {
+    pub(crate) fn support_engine(&self) -> &'static str {
+        self.platform_info.webview_engine
+    }
     pub(crate) fn from_startup() -> Self {
         let debug_build = cfg!(debug_assertions);
         let startup_stress_value = std::env::var("PSYCHE_RENDER_DIAGNOSTICS").ok();

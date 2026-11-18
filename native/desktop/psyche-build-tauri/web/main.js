@@ -14335,6 +14335,9 @@
     updateBrowserControls();
   }
   function visibleBrowserBounds() {
+    if (helpOverlayEl && !helpOverlayEl.hidden) return null;
+    var supportDialog = document.getElementById("support-bundle-dialog");
+    if (supportDialog && !supportDialog.hidden) return null;
     var project = activeProject();
     var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
     if (!pane || pane.hidden || !pane.pane || !pane.pane.isConnected ||
@@ -15285,13 +15288,38 @@
   function setHelpOpen(open) {
     if (!helpOverlayEl) return;
     if (open) renderHelpRows();
-    helpOverlayEl.hidden = !open;
+    helpModalController.setOpen(open);
   }
+  var helpModalController = window.PsycheSupport.createHelpModalController({
+    dialog: helpOverlayEl, trigger: document.getElementById("help-toggle"), action: document.getElementById("support-bundle-open"),
+    close: document.getElementById("help-close"), getActiveElement: function () { return document.activeElement; },
+    onVisibilityChange: scheduleBrowserBounds,
+  });
   function toggleHelp() { setHelpOpen(helpOverlayEl ? helpOverlayEl.hidden : false); }
   onRailClick("help-toggle", toggleHelp);
   if (helpOverlayEl) {
-    helpOverlayEl.addEventListener("click", function () { setHelpOpen(false); });
+    helpOverlayEl.addEventListener("click", function (event) { if (event.target === helpOverlayEl) setHelpOpen(false); });
   }
+
+  var supportBundleController = window.PsycheSupport.createSupportBundleController({
+    elements: {
+      dialog: document.getElementById("support-bundle-dialog"), status: document.getElementById("support-bundle-status"),
+      summary: document.getElementById("support-bundle-summary"), create: document.getElementById("support-bundle-create"),
+      cancel: document.getElementById("support-bundle-cancel"), reveal: document.getElementById("support-bundle-reveal"),
+      close: document.getElementById("support-bundle-close"),
+    },
+    invoke: invokeNative,
+    getProject: function () {
+      var project = activeProject();
+      if (!project || project.closing || !project.nativeAuthorityReady) return null;
+      return { root: project.root, panes: state.threads.filter(function (thread) { return thread.projectId === project.id && !thread.closing; }).length };
+    },
+    getActiveElement: function () { return document.activeElement; },
+    onVisibilityChange: scheduleBrowserBounds,
+  });
+  document.getElementById("support-bundle-open").addEventListener("click", function (event) {
+    event.stopPropagation(); setHelpOpen(false); supportBundleController.open(document.getElementById("help-toggle")); syncBrowserBounds();
+  });
 
   // `?` is only a shortcut when nothing text-like has focus.
   document.addEventListener("keydown", async function (event) {
