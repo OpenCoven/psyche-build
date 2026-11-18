@@ -1,7 +1,7 @@
 # Psyche Build post-release execution contract
 
 **Status:** Active delivery plan  
-**Last reconciled:** 2026-10-01
+**Last reconciled:** 2026-11-11
 
 **Portfolio owner:** [@BunsDev](https://github.com/BunsDev)  
 **Roadmap control:** [Standing register](./ROADMAP.md#standing-roadmap-control)
@@ -21,8 +21,14 @@ dependencies on the [Psyche Build Project](https://github.com/orgs/OpenCoven/pro
 own internal task ordering, not product identity or public support status; see
 [Tracking work](./TRACKER.md).
 
+The [November 11 reconciliation](./ROADMAP.md#november-11-reconciliation) is
+the current snapshot at source `97db32c4378aded6ba99ef6c20a16c1cfc1816f0`: the
+nearest release is the macOS public beta
+([#553](https://github.com/OpenCoven/psyche-build/issues/553)), #475 is closed at source with its packaged observations moved to
+#555 and #474, and Project #11 fields were reconciled the same day.
+
 The [October 1 reconciliation](./ROADMAP.md#october-1-reconciliation) is the
-current snapshot at source `c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1`: #196 and
+previous snapshot at source `c32dae7414ad9d5d4ee37bac0c9302c24bf1e6c1`: #196 and
 #199 closed on 2026-09-16 with their open scope moved to #474, #475, and #476;
 #239 is superseded by #474; #246 is not planned; and Beads was retired under
 [#473](https://github.com/OpenCoven/psyche-build/issues/473). The production
@@ -47,9 +53,21 @@ assignment, integration commitment, or P0/P1 prerequisite is claimed.
 
 ## macOS-first rollout focus
 
-The active delivery order is release-candidate operator acceptance
+The nearest release is the **macOS public beta**
+([#553](https://github.com/OpenCoven/psyche-build/issues/553), milestone `macOS public beta`): a signed build published ahead of
+the production claim on a reduced gate set. Its exit gate is disposition of
+every critical and high security alert ([#554](https://github.com/OpenCoven/psyche-build/issues/554)), a fix or published owner
+disposition for prompt exposure in final agent argv ([#523](https://github.com/OpenCoven/psyche-build/issues/523)), LAN bridge
+pre-authentication limits ([#556](https://github.com/OpenCoven/psyche-build/issues/556)), truthful security documentation
+([#504](https://github.com/OpenCoven/psyche-build/issues/504), [#505](https://github.com/OpenCoven/psyche-build/issues/505)), and gates G1–G4 observed on the packaged candidate
+([#555](https://github.com/OpenCoven/psyche-build/issues/555)). The signed update channel (#477), the in-app support bundle (#476),
+independent review capacity (#479), and the four-week triage record gate the
+production claim, not the beta. A beta is not a support-status change until it
+is published and the [support matrix](./SUPPORT-MATRIX.md) is updated.
+
+The production delivery order is release-candidate operator acceptance
 ([#474](https://github.com/OpenCoven/psyche-build/issues/474)), with the
-observed recovery gaps ([#475](https://github.com/OpenCoven/psyche-build/issues/475)),
+observed recovery gaps ([#475](https://github.com/OpenCoven/psyche-build/issues/475), closed at source 2026-11-11),
 the signed update channel ([#477](https://github.com/OpenCoven/psyche-build/issues/477)),
 and the security baseline ([#478](https://github.com/OpenCoven/psyche-build/issues/478))
 in parallel, toward `v0.1.0` ([#480](https://github.com/OpenCoven/psyche-build/issues/480)).
@@ -178,10 +196,23 @@ The numbered order below is the macOS rollout delivery order. Independent
 trains retain their internal dependency order but are not steps between
 macOS acceptance and recovery.
 
+| Beta order | Work | Risk | Exit gate |
+|---:|---|---:|---|
+| B1 | [#554 — critical and high alert disposition](https://github.com/OpenCoven/psyche-build/issues/554) (under #478) | R3 | Every critical and high code-scanning and Dependabot alert fixed or dismissed with a recorded reason |
+| B1 | [#556 — LAN bridge pre-authentication limits](https://github.com/OpenCoven/psyche-build/issues/556) (under #506) | R3 | Authentication deadline, unauthenticated connection cap, and bounded pre-auth frames, with real-socket negative tests |
+| B1 | [#523 — prompts in final agent argv](https://github.com/OpenCoven/psyche-build/issues/523) (under #478) | R3 | Fixed, or an explicit owner disposition as a published known limitation |
+| B1 | [#504](https://github.com/OpenCoven/psyche-build/issues/504) and [#505](https://github.com/OpenCoven/psyche-build/issues/505) — truthful security documentation | R3 | Agent-surface and bridge documents match production refusal behavior; #505 landed through PR #547 and #504 through PR #568; both closed on 2026-11-14 |
+| B2 | [#555 — beta acceptance pass](https://github.com/OpenCoven/psyche-build/issues/555) (under #474) | R3/R4 | G1–G4 observed on one packaged candidate in one sanitized manifest; needs an operator |
+| B3 | [#553 — macOS public beta](https://github.com/OpenCoven/psyche-build/issues/553) | R4 | B1 and B2 closed or dispositioned, known limitations published, and explicit owner authorization to tag and publish |
+
+B1 items are independent and may proceed in parallel. B2 follows #554, #556,
+and #523 so the candidate it observes is the one that ships. The production
+order below is unchanged in substance and follows the beta.
+
 | Order | Outcome | Priority | Current state and exit gate |
 |---:|---|---:|---|
 | 1 | [#474 — release-candidate acceptance](https://github.com/OpenCoven/psyche-build/issues/474) (successor to [#196](https://github.com/OpenCoven/psyche-build/issues/196) and [#239](https://github.com/OpenCoven/psyche-build/issues/239)) | P0 | One sanitized manifest proves install, ordinary lifecycle, representative recovery, Git, cleanup, optional-provider, and `v0.0.2` upgrade/rollback paths on the packaged release candidate |
-| 2 | [#475 — observed recovery gaps](https://github.com/OpenCoven/psyche-build/issues/475) (successor to [#199](https://github.com/OpenCoven/psyche-build/issues/199); [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P0 | Agent launch failure, Git-mutation interruption, crash and live-pane restart, and full storage reach defined states; #243 delivered the schema only, with no production collector wiring, and PRs #462 and #467 later added the CLI, persistence, and lifecycle/updater collectors |
+| 2 | [#475 — observed recovery gaps](https://github.com/OpenCoven/psyche-build/issues/475) (successor to [#199](https://github.com/OpenCoven/psyche-build/issues/199); [#243 — support bundle v1](https://github.com/OpenCoven/psyche-build/issues/243) delivered) | P0 | **Closed at source 2026-11-11**; packaged observations moved to #555 and #474. Agent launch failure, Git-mutation interruption, crash and live-pane restart, and full storage reach defined states; #243 delivered the schema only, with no production collector wiring, and PRs #462 and #467 later added the CLI, persistence, and lifecycle/updater collectors |
 | 3 | [#477 — signed update channel](https://github.com/OpenCoven/psyche-build/issues/477) and [#478 — security baseline](https://github.com/OpenCoven/psyche-build/issues/478) | P0 | Signed update path and verified Cask automation; Dependabot, CodeQL, dependency review, and no open critical or high alerts |
 | 4 | [#480 — `v0.1.0` release](https://github.com/OpenCoven/psyche-build/issues/480) | P0 | Signed tag on the accepted candidate and an updated support contract |
 
@@ -197,82 +228,9 @@ and [#244 — minimum community floor](https://github.com/OpenCoven/psyche-build
 
 ## Stage 0 — delivered control-state closure wave
 
-**Owners:** #238, #31, #237, and #240.
-
-#238 remains delivered through PR #245 / `5f4b7b05`. #31, #237, and #240 are
-closed with the evidence linked in their owning issues: the proof PR, sanitized
-policy evidence (later corrected by PR #351), the first apply, and the zero-operation run. Preserve the
-deployed single-writer lease, protected `main`-only environments, canonical
-target mapping, deterministic drift validation, and bounded GraphQL behavior.
-Direct pushes remain platform-blocked; ordinary PR merges require exact-head
-checks and resolved conversations, with no standing bypass.
-
-**Exit state:** reached. Roadmap, support claims, branch policy, Beads, GitHub
-mirrors, and live PR disposition agree on what is delivered, active, blocked,
-and deferred as of this reconciliation.
-
-**Resolved control-state regression:** the scheduled Beads Project sync failed
-on every scheduled run from 2026-08-30 until 2026-09-02 because a checkout
-running the accidental Beads v1.2.1 release migrated the shared Dolt schema to
-v65 and pushed it; the pinned 1.2.2 CLI could not open it. The recovery retained
-the Git sidecar at `9c85d2b79e3da16c283278824866a5ba1217950a` and the published
-Dolt transition
-`0at1pk83ng4ogm45svvp7ip122acgt4h` →
-`go64gshichpnsj3islhl6pmv5lgi2teb`. That state restored schema v53,
-re-tracked the versioned `events` table, and preserved all 111 Beads. Its 1,362
-event rows comprise the last durable pre-ignore snapshot of 1,361 rows plus the
-publication transition. Three known post-ignore writes retain their commits and
-final source state, but their clone-local event rows are unavailable; this is a
-bounded three-write audit gap, not an uninterrupted journal.
-
-The retained qualifying proof begins with scheduled apply
-[33880014833](https://github.com/OpenCoven/psyche-build/actions/runs/33880014833)
-executed source head `9e4a9cf383a1993ca2c2099e3d296acb3dd3c5b4` on 2026-09-04. It
-performed seven operations; from the authoritative
-`psyche-z7c.4.4` source, the synchronizer regenerated mirror #230 and ran the
-live read-only validator to exit `0`: 111 sources, 27 managed mirrors, 24 canonical
-outcomes, and 0 findings. The following scheduled apply
-[33953178586](https://github.com/OpenCoven/psyche-build/actions/runs/33953178586)
-executed source head `23cace08fdc5e35e3ee0cd46200b4ed3bbd94131` on 2026-09-05,
-planned and applied 0 operations, completed every step, reported no warnings or
-visibility drift, and retained schema v53.
-
-Mirror #230 was regenerated after its authoritative source entered closed state.
-It was last updated by the first run and was never manually edited afterward;
-generated-body repair did not supply the proof.
-
-The audit also records two deviations rather than treating them as proof. PR
-#346 reviewed unpublished candidate `l3c2l93j2iogl4h3ai947qls2vr10tbp`, while a
-different checkout published `go64gshichpnsj3islhl6pmv5lgi2teb`; the intended
-logical state agreed, but the exact-candidate gate did not hold. At that PR's
-merge, mirror #230 first entered the closed state through GitHub keyword syntax,
-not through the synchronizer. PR #350 then documented the recovery before the
-second qualifying scheduled run and omitted this documentation contract
-assertion. Neither deviation is counted as closeout evidence.
-
-Two contract improvements came out of it and are enforced now: the synchronizer
-reports schema skew as a bounded `Beads schema version skew` diagnostic instead
-of an unclassified failure, and the drift validator scopes missing-mirror drift
-to active Beads so it stops reporting findings the synchronizer cannot repair.
-The Beads CLI fleet rule and the closing-keyword rule in
-[`.beads/README.md`](../.beads/README.md) record the two recurrence risks:
-any clone running a non-pinned CLI can re-migrate the shared schema, and a
-GitHub closing keyword before a mirror reference can change mirror state
-outside the synchronizer.
-[#342](https://github.com/OpenCoven/psyche-build/issues/342) holds the full
-evidence under #195.
-
-The later [#420 recovery](https://github.com/OpenCoven/psyche-build/issues/420#issuecomment-5616402711)
-is complete: protected apply and normal no-op at source
-`73039d5c3827e2f49cf28c7ad7db74cc3b5a5247`, original survivors preserved,
-25 approved operations, no newly created issues, then zero operations and a
-zero-finding authenticated drift report. The
-[roadmap evidence record](./ROADMAP.md#stage-0--delivered-control-state-closure-wave)
-also retains September 13 scheduled runs 34747362154 and 34761084154 at
-`8650344ce560ffcfe190ea99acc2010921409753`: both successful, zero planned/applied
-operations, all 14 active sources mapped, and no warnings or visibility drift.
-Recent sync health is not exact-current-head execution proof. No Beads or
-generated mirror mutation is part of this closeout.
+Delivered. The execution record for this stage is in the
+[roadmap history record](./working-records/roadmap-history-2026-11.md#execution-contract-stage-0--delivered-control-state-closure-wave).
+It is history, not a queue: nothing in it is open work.
 
 ## Stage 1 — close the `v0.0.1` stabilization baseline
 
@@ -399,21 +357,7 @@ through PRs #354-#359: twelve scenarios driving the real production paths, a
 Quality CI step that retains each run's report as a build artifact. Every
 invariant was proved load-bearing by reintroducing the defect it guards.
 
-The merged bundle contract is versioned, deterministic, bounded by
-time/count/record/total size, cancellable, and automatically redacts
-credentials, raw prompts, unrestricted terminal output, repository contents,
-environment variables, infrastructure details, and full user paths. It now has
-a first production surface: `psyche support-bundle` wires bounded collectors,
-writes a `0600` bundle under the project runtime directory with retention, and
-prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md).
-That surface covers provenance, project identity, recovery state, pane
-lifecycle and updater state; PR #467 added the last two, both read from
-persisted state without starting a process or needing a running server.
-Provider, graphics, receipt and terminal collectors, and any UI, remain absent,
-and an operator-invoked bundle is always `unverified` because the CLI holds no
-control-plane authority. PR #281 delivered the
-debug-authorized rendering stress harness and PR #283 delivered visible pane
-recovery reporting under #199.
+The merged bundle contract is versioned, deterministic, bounded by time/count/record/total size, cancellable, and automatically redacts credentials, raw prompts, unrestricted terminal output, repository contents, environment variables, infrastructure details, and full user paths. It now has a first production surface: `psyche support-bundle` wires bounded collectors, writes a `0600` bundle under the project runtime directory with retention, and prints a redaction summary. See [SUPPORT-BUNDLE-V1.md](SUPPORT-BUNDLE-V1.md). That surface covers provenance, project identity, recovery state, pane lifecycle and updater state; PR #467 added the last two, both read from persisted state without starting a process or needing a running server. The installed-provider collector is delivered through #483. #476 adds Help → Create support bundle through the existing v1 pipeline, safe native projections and explicit receipt/terminal omissions; both CLI and app snapshots remain unverified, and exact-package observation remains distinct from source verification. This diagnostics outcome adds no beta prerequisite. PR #281 delivered the debug-authorized rendering stress harness and PR #283 delivered visible pane recovery reporting under #199.
 
 #475, #476, and #474 now own the observed operator cases the harness cannot supply —
 application restart and upgrade recovery across two real installed builds —
@@ -622,10 +566,14 @@ required checks on its exact final head.
 
 ## Concurrency rules
 
-- #474 is the active P0 acceptance gate; #475, #477, and #478 proceed in
-  parallel and feed it. #480 follows #474.
-- #475 recovery scenarios and #476 diagnostics feed observed #474 cases; the
-  #243 schema slice is delivered.
+- #553 is the nearest release. #504 and #505 closed on 2026-11-14. #554, #556,
+  and #523 proceed in parallel; #555 follows them. #480 follows #553.
+- #474 is the active P0 acceptance gate for production; #476, #477, and #478
+  proceed in parallel and feed it. #480 follows #474.
+- #475 is closed at source; its recovery scenarios and #476 diagnostics feed
+  observed #555 and #474 cases. The #243 schema slice is delivered.
+- Issues labelled `parked` do not start without explicit owner direction;
+  issues labelled `owner-action` wait on the owner, not on an agent.
 - iOS work is paused for rollout focus. On resumption:
 - The accepted #241 readiness implementation precedes later iOS composition;
   #280 does not wait for closure of shared physical acceptance.

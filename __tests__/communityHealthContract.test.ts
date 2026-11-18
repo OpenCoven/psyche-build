@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -40,7 +40,9 @@ describe('community health contract', () => {
     expect(config).toContain(privateRoute);
     expect(config).toMatch(/blank_issues_enabled:\s*false/);
     expect(config).toMatch(/Never disclose vulnerability details in a public issue/i);
-    expect(security).toMatch(/Do not open a public issue, pull request, discussion, or Bead/i);
+    expect(security).toMatch(/Do not open a public issue, pull request, or discussion/i);
+    // Beads was retired under #473; the policy must not name a tracker that no longer exists.
+    expect(security).not.toMatch(/\bBeads?\b/);
   });
 
   it('keeps the bug-form recovery-impact question optional and recovery-focused', () => {
@@ -82,6 +84,14 @@ describe('community health contract', () => {
       expect(form).toMatch(/^body:/m);
       expect(form).toMatch(/public/i);
       expect(form).toMatch(/support matrix|SUPPORT\.md|roadmap/i);
+    }
+
+    // Every form a reporter can pick has a route in SUPPORT.md.
+    const forms = readdirSync(resolve(root, '.github/ISSUE_TEMPLATE'))
+      .filter((name) => name.endsWith('.yml') && name !== 'config.yml');
+    expect(forms.length).toBeGreaterThanOrEqual(4);
+    for (const form of forms) {
+      expect(support, `SUPPORT.md should route to ${form}`).toContain(`issues/new?template=${form}`);
     }
   });
 

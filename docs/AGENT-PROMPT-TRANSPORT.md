@@ -7,6 +7,47 @@ AGENTS.md treats raw prompts as protected data. Every launch path keeps the prom
 1. The `positional` and `option` transports read the prompt file into `$PSYCHE_PROMPT_CONTENT`, then expand it into the agent's argv (`claude "<prompt>"`). The prompt is visible in `ps` to any same-user process for as long as the agent runs.
 2. The `send-keys` transport (cline, crush) loaded its tmux buffer with `tmux set-buffer -- '<prompt>'` through `/bin/sh -c`. The prompt was briefly in the argv of `sh` and `tmux`. It was also written to the debug log whenever that command failed.
 
+## Known limitation in the macOS public beta
+
+The owner decided on 2026-11-15, on
+[#523](https://github.com/OpenCoven/psyche-build/issues/523), that the macOS
+public beta ships with the exposure described in point 1 above, published here,
+rather than waiting for a fix.
+
+**What is exposed.** When you start one of the agents below with an initial
+prompt, that prompt is part of the agent's command line for as long as the agent
+runs. Any process running as the same macOS user can read it, for example with
+`ps`.
+
+| Agent | How the prompt is passed |
+|---|---|
+| `claude` | positional argument |
+| `opencode` | `--prompt` option |
+| `codex` | positional argument |
+| `gemini` | `--prompt-interactive` option |
+| `qwen` | `-i` option |
+| `pi` | positional argument |
+| `cursor` | positional argument |
+| `copilot` | `-i` option |
+
+The same applies to the agent that MergePane starts to resolve a merge
+conflict, which is `claude` and then `opencode`.
+
+**What is not exposed.** `cline` and `crush` receive the prompt by paste, and
+`amp` on standard input; none of the three has it in its command line.
+`coven-code` is started without a prompt. For every agent, the prompt stays out
+of the command line of the processes Psyche Build itself starts and off the
+typed line in the pane, as the rest of this document describes.
+
+**What to do.** Do not put a secret, such as a token, a password, or private
+data, in the initial prompt of an agent in the table. Start the agent, then give
+it that material in its own interface. Or use one of the three agents that
+receive the prompt off the command line.
+
+**What would remove it.** A private transport verified against each real CLI;
+see [Why the argv agents were not switched to paste](#why-the-argv-agents-were-not-switched-to-paste).
+Until that is done and observed, this limitation stands for every release.
+
 ## Transports
 
 | Transport | Prompt path | In agent argv? |

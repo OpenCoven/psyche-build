@@ -74,6 +74,15 @@ mod pty_reader;
 
 pub mod pty_transport;
 mod runtime_diagnostics;
+mod support_bundle;
+pub fn support_bundle_helper_entry() -> Option<i32> {
+    support_bundle::helper_entry()
+}
+#[cfg(unix)]
+mod support_store;
+use support_bundle::{
+    support_bundle_cancel, support_bundle_reveal, support_bundle_start, support_bundle_status,
+};
 mod update_check;
 mod update_manifest;
 
@@ -393,10 +402,25 @@ impl NativeProjectAuthority {
     fn claim_submission(&self, root: &Path) -> Result<NativeProjectSubmissionLease, String> {
         let root = canonical_project_root(&root.to_string_lossy())
             .map_err(|_| "Coven launch project root is unavailable".to_string())?;
+        self.claim_admitted_submission(&root)
+    }
+
+    // The support helper performs filesystem admission inside its supervised
+    // process. Claim only an already-admitted exact key here, without touching
+    // potentially stalled project storage on the application executor.
+    fn claim_admitted_submission(
+        &self,
+        root: &Path,
+    ) -> Result<NativeProjectSubmissionLease, String> {
         let mut roots = self.inner.roots.lock();
         if !self.inner.startup_reconciled.load(Ordering::Acquire) {
             return Err("native project authority startup reconciliation is pending".to_string());
         }
+        let root = roots
+            .get_key_value(root)
+            .filter(|(known, _)| known.as_os_str() == root.as_os_str())
+            .map(|(known, _)| known.clone())
+            .ok_or_else(|| "Coven launch project is not open in Psyche".to_string())?;
         let authority = roots
             .get_mut(&root)
             .filter(|authority| !authority.revoking)

@@ -5,6 +5,7 @@
 **Active acceptance owner:** [#474](https://github.com/OpenCoven/psyche-build/issues/474) (succeeds [#196](https://github.com/OpenCoven/psyche-build/issues/196) and [#239](https://github.com/OpenCoven/psyche-build/issues/239), closed)  
 **Production release:** [#480](https://github.com/OpenCoven/psyche-build/issues/480), milestone `v0.1.0 — macOS production`  
 **Bounded operator runbook:** [OPERATOR-ACCEPTANCE-SLICE.md](./OPERATOR-ACCEPTANCE-SLICE.md)  
+**Beta candidate pass (G1–G4):** [BETA-ACCEPTANCE.md](./BETA-ACCEPTANCE.md)  
 **Graphics evidence procedure:** [GPU-VERIFICATION-MATRIX.md](./GPU-VERIFICATION-MATRIX.md) (#232 under #476; no physical acceptance asserted)<br>
 **Completed publication outcomes:** [#194](https://github.com/OpenCoven/psyche-build/issues/194) and [#203](https://github.com/OpenCoven/psyche-build/issues/203)  
 **Support contract:** [SUPPORT-MATRIX.md](./SUPPORT-MATRIX.md)  
@@ -30,7 +31,7 @@ operate, recover, and remove the application.
 | Operator-observed first-run, ordinary lifecycle, persistence/recovery, Git/cleanup, and optional-provider isolation | **Open post-release stabilization debt** | #474, against the `v0.1.0` release candidate (succeeding #196 and #239) |
 | Administrator-enforced required checks and resolved review threads, with no bypass actors | **Complete; corrected 2026-09-05** | [#31](https://github.com/OpenCoven/psyche-build/issues/31) correction and PR #351 (`23cace08`); historical `GH013` direct-push proof remains valid |
 | iOS distributed-build and physical-device acceptance | **Not part of the macOS `v0.0.1` claim** | Planned under #200 |
-| Versioned bounded support bundle | **Schema complete; production surface partial** | Schema #243 via PR #278 (`69769cc5`); CLI and bounded persistence via PR #462; provenance, persistence, lifecycle and updater collectors via PRs #462 and #467; installed-provider collector via PR #483. Graphics, receipt and terminal collectors, and any UI, remain absent. All of it postdates `v0.0.1`, which contains none of it |
+| Versioned bounded support bundle | **Source application surface; packaged evidence required** | Schema #243 via PR #278 (`69769cc5`); CLI and bounded persistence via PR #462; collectors via PRs #467/#483. #476 adds Help → Create support bundle using the existing v1 pipeline, native engine/updater/pane-count projections and explicit receipt/terminal omissions. Exact-package observation remains required under #474; none of this is retroactive acceptance of `v0.0.1` |
 | Reusable recovery harness | **Delivered on source only** | #199 via PRs #354-#359, extended by #475; twelve bounded scenarios in the default run plus the opt-in `pnpm recovery:restart` observation, with CI-retained reports. Source coverage, not a `v0.0.1` feature and not the observed operator case |
 | Operator-observed failure scenarios | **Open post-release stabilization debt** | #474 (succeeding #196/#239); source harness results do not establish packaged GUI or provider acceptance |
 
@@ -150,6 +151,7 @@ the exact candidate:
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm --dir docs install --frozen-lockfile --ignore-scripts
 pnpm docs:focus:check
 pnpm --dir docs build
 pnpm test

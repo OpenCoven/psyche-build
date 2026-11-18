@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -38,6 +38,11 @@ describe('contributor repository map', () => {
       'docs/',
       '__tests__/',
       'agent/',
+      'script/',
+      'release/',
+      'packages/vim-core/',
+      'frontend/',
+      'docs/superpowers/',
     ]) {
       expect(map, `repository map should classify ${path}`).toContain(path);
     }
@@ -64,5 +69,26 @@ describe('contributor repository map', () => {
     ]) {
       expect(map).toContain(phrase);
     }
+  });
+
+  it('keeps every relative link in the top-level documents pointing at a file that exists', () => {
+    // The dated records under docs/superpowers/ are history and are not
+    // edited to follow later moves, so they are not checked.
+    const documents = [
+      ...readdirSync(root).filter((name) => name.endsWith('.md')),
+      ...readdirSync(resolve(root, 'docs'))
+        .filter((name) => name.endsWith('.md'))
+        .map((name) => `docs/${name}`),
+    ];
+    const broken = documents.flatMap((document) =>
+      [...read(document).matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)]
+        .map(([, target]) => target.split('#')[0])
+        .filter((target) => target !== '' && !/^[a-z][a-z0-9+.-]*:/i.test(target))
+        .filter((target) => !existsSync(resolve(root, dirname(document), decodeURIComponent(target))))
+        .map((target) => `${document} -> ${target}`),
+    );
+
+    expect(documents.length).toBeGreaterThan(20);
+    expect(broken).toEqual([]);
   });
 });

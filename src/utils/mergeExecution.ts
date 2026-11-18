@@ -4,7 +4,7 @@
  * Handles the actual merge operations with proper error handling
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { cleanupPromptFilesForSlug } from './promptStore.js';
 import {
   describeLiveTmuxWorktreeGuard,
@@ -19,6 +19,19 @@ export interface MergeResult {
 }
 
 /**
+ * Runs Git with an argument vector and no shell. Branch names, paths and
+ * commit messages are Git data: a legal ref name can contain `$(…)`, and a
+ * commit message can contain anything, so none of them may reach a shell.
+ */
+function runGit(args: readonly string[], cwd: string): string {
+  return execFileSync('git', [...args], {
+    cwd,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+  });
+}
+
+/**
  * Merge main branch into worktree branch
  * This is step 1 of the two-phase merge: get latest changes from main
  */
@@ -27,10 +40,7 @@ export function mergeMainIntoWorktree(
   mainBranch: string
 ): MergeResult {
   try {
-    execSync(`git merge "${mainBranch}" --no-edit`, {
-      cwd: worktreePath,
-      stdio: 'pipe',
-    });
+    runGit(['merge', '--no-edit', '--end-of-options', mainBranch], worktreePath);
 
     return { success: true };
   } catch (error) {
@@ -74,10 +84,7 @@ export function mergeWorktreeIntoMain(
   worktreeBranch: string
 ): MergeResult {
   try {
-    execSync(`git merge "${worktreeBranch}" --no-edit`, {
-      cwd: mainRepoPath,
-      stdio: 'pipe',
-    });
+    runGit(['merge', '--no-edit', '--end-of-options', worktreeBranch], mainRepoPath);
 
     return { success: true };
   } catch (error) {
@@ -107,11 +114,7 @@ export function mergeWorktreeIntoMain(
  */
 export function getConflictingFiles(repoPath: string): string[] {
   try {
-    const output = execSync('git diff --name-only --diff-filter=U', {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-    });
+    const output = runGit(['diff', '--name-only', '--diff-filter=U'], repoPath);
 
     return output
       .trim()
@@ -127,10 +130,7 @@ export function getConflictingFiles(repoPath: string): string[] {
  */
 export function abortMerge(repoPath: string): { success: boolean; error?: string } {
   try {
-    execSync('git merge --abort', {
-      cwd: repoPath,
-      stdio: 'pipe',
-    });
+    runGit(['merge', '--abort'], repoPath);
     return { success: true };
   } catch (error) {
     return {
@@ -145,11 +145,7 @@ export function abortMerge(repoPath: string): { success: boolean; error?: string
  */
 export function isInMergeState(repoPath: string): boolean {
   try {
-    const output = execSync('git status', {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-    });
+    const output = runGit(['status'], repoPath);
 
     return output.includes('You have unmerged paths') ||
            output.includes('All conflicts fixed but you are still merging');
@@ -176,10 +172,7 @@ export function completeMerge(repoPath: string, message?: string): MergeResult {
 
     // Complete the merge
     const commitMsg = message || 'Merge branch with resolved conflicts';
-    execSync(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, {
-      cwd: repoPath,
-      stdio: 'pipe',
-    });
+    runGit(['commit', '-m', commitMsg], repoPath);
 
     return { success: true };
   } catch (error) {
@@ -207,16 +200,10 @@ export function cleanupAfterMerge(
       };
     }
     // Remove worktree
-    execSync(`git worktree remove "${worktreePath}"`, {
-      cwd: mainRepoPath,
-      stdio: 'pipe',
-    });
+    runGit(['worktree', 'remove', '--', worktreePath], mainRepoPath);
 
     // Delete branch (use -d for safety, it will fail if not merged)
-    execSync(`git branch -d "${branchName}"`, {
-      cwd: mainRepoPath,
-      stdio: 'pipe',
-    });
+    runGit(['branch', '-d', '--end-of-options', branchName], mainRepoPath);
 
     // Best-effort cleanup for any prompt artifacts associated with this branch.
     void cleanupPromptFilesForSlug(mainRepoPath, branchName);
@@ -235,11 +222,7 @@ export function cleanupAfterMerge(
  */
 export function getMergeStatus(repoPath: string): string {
   try {
-    const output = execSync('git status --short', {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-    });
+    const output = runGit(['status', '--short'], repoPath);
 
     return output.trim();
   } catch {

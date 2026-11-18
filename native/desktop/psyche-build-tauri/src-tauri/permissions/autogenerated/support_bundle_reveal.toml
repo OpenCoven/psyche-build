@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-bundle-reveal"
+description = "Enables the support_bundle_reveal command without any pre-configured scope."
+commands.allow = ["support_bundle_reveal"]
+
+[[permission]]
+identifier = "deny-support-bundle-reveal"
+description = "Denies the support_bundle_reveal command without any pre-configured scope."
+commands.deny = ["support_bundle_reveal"]

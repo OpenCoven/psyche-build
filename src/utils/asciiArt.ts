@@ -5,6 +5,8 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { resolveDistPath } from "./runtimePaths.js"
 import { getActivePsycheTheme } from "../theme/colors.js"
+import { resolvePaneShell } from "./paneShellDialect.js"
+import { fishQuote, shellQuote } from "./promptStore.js"
 
 export interface RenderAsciiArtOptions {
   paneId: string
@@ -47,6 +49,14 @@ export async function renderAsciiArt(
     }
   }
 
+  const absolutePath = path.isAbsolute(scriptPath)
+    ? scriptPath
+    : path.resolve(scriptPath)
+  // Shell quoting does not stop the pane's terminal from interpreting keys.
+  if (/[\u0000-\u001f\u007f]/u.test(absolutePath)) {
+    throw new Error("Cannot launch decorative pane: installation path contains terminal control characters")
+  }
+
   // Verify the script exists
   if (!fs.existsSync(scriptPath)) {
     throw new Error(
@@ -58,19 +68,22 @@ export async function renderAsciiArt(
 
   // Kill any existing process in the pane
   try {
-    await tmuxService.sendKeys(paneId, 'C-c')
+    await tmuxService.sendKeys(paneId, ['C-c'])
   } catch {
     // Pane might not have a running process, that's okay
   }
   await new Promise((resolve) => setTimeout(resolve, ASCII_ART_RENDER_DELAY))
 
+  const shell = await resolvePaneShell(() => tmuxService.getPaneCurrentCommand(paneId))
+  if (!shell.dialect) {
+    throw new Error("Cannot launch decorative pane: supported pane shell unavailable")
+  }
+  const quote = shell.dialect === "fish" ? fishQuote : shellQuote
+
   // Run the decorative pane script with absolute path
-  const absolutePath = path.isAbsolute(scriptPath)
-    ? scriptPath
-    : path.resolve(scriptPath)
   await tmuxService.sendKeys(
     paneId,
-    `'PSYCHE_THEME=${getActivePsycheTheme()} node "${absolutePath}"' Enter`
+    [`PSYCHE_THEME=${quote(getActivePsycheTheme())} node ${quote(absolutePath)}`, 'Enter']
   )
   await new Promise((resolve) => setTimeout(resolve, 150))
 }

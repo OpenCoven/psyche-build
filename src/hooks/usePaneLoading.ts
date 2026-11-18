@@ -189,6 +189,18 @@ async function restoreAgentSessionForPane(
   await tmuxService.sendTmuxKeys(paneId, 'Enter');
 }
 
+/**
+ * Text for a decorative `echo '…'` line typed into a pane's shell. Inside the
+ * single quotes a quote would end the string, a backslash can escape the
+ * closing quote in fish, and a control character is a keystroke (`^C`, Enter)
+ * rather than text. Each becomes a space, so what is left stays inert in both
+ * POSIX shells and fish.
+ */
+export function inertEchoText(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f'\\]+/g, ' ');
+}
+
 class RestoreReservationRetentionError extends Error {}
 
 /**
@@ -483,10 +495,19 @@ async function restoreMissingPaneWithLease(
     await reservation.complete();
     reservationSettled = true;
 
-    await tmuxService.sendKeys(newPaneId, `"echo '# Pane restored: ${missingPane.slug}'" Enter`);
-    const promptPreview = missingPane.prompt?.substring(0, 50) || '';
-    await tmuxService.sendKeys(newPaneId, `"echo '# Original prompt: ${promptPreview}...'" Enter`);
-    await tmuxService.sendKeys(newPaneId, `"cd ${worktreePath}" Enter`);
+    // Each line below is typed into the restored pane's shell as one tmux
+    // argument, so no shell on this side parses the slug, prompt or path.
+    await tmuxService.sendKeys(
+      newPaneId,
+      [`echo '# Pane restored: ${inertEchoText(missingPane.slug)}'`, 'Enter'],
+    );
+    const promptPreview = inertEchoText(missingPane.prompt?.substring(0, 50) || '');
+    await tmuxService.sendKeys(
+      newPaneId,
+      [`echo '# Original prompt: ${promptPreview}...'`, 'Enter'],
+    );
+    // splitPane already starts the pane in the reserved canonical directory.
+    // Do not re-interpret that filesystem identity as source in its shell.
     await restoreAgentSessionForPane(tmuxService, missingPane, newPaneId);
   } catch (error) {
     if (error instanceof RestoreReservationRetentionError) {
