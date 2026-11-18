@@ -1,4 +1,4 @@
-import { execFile, execFileSync, execSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
@@ -63,6 +63,9 @@ const RETRY_CONFIGS: Record<RetryStrategy, RetryConfig> = {
 const PERMANENT_ERRORS = [
   'tmux not found',
   'command not found',
+  // What `execFile` reports when there is no tmux binary to run. A shell
+  // reported the same condition as `command not found`.
+  'enoent',
   'permission denied',
   'no such session',
   'no session found',
@@ -95,20 +98,41 @@ function sleepUntilRetry(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function quoteShellArgument(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+/** Separator between tmux commands in one invocation. */
+const TMUX_COMMAND_SEPARATOR = ';';
+
+/**
+ * tmux reads a trailing `;` on any argument as a command separator, and a
+ * trailing `\;` as a literal semicolon. Escaping it keeps an argument that
+ * carries data (keys, a title, an option value) whole, and stops text that
+ * ends in a semicolon from starting a second tmux command.
+ */
+function escapeTmuxArgument(value: string): string {
+  return value.endsWith(';') ? `${value.slice(0, -1)}\\;` : value;
 }
 
-function buildSelectPaneCommand(paneId: string): string {
-  return `tmux select-pane -t ${quoteShellArgument(paneId)}`;
+/**
+ * Builds the argument vector for one tmux invocation from one or more tmux
+ * commands. Every argument of every command is escaped; only the separators
+ * this function inserts between commands are left for tmux to act on.
+ */
+function buildTmuxArgv(commands: ReadonlyArray<readonly string[]>): string[] {
+  return commands.flatMap((command, index) => [
+    ...(index === 0 ? [] : [TMUX_COMMAND_SEPARATOR]),
+    ...command.map(escapeTmuxArgument),
+  ]);
 }
 
-function buildSetPaneTitleCommand(paneId: string, title: string): string {
-  return `${buildSelectPaneCommand(paneId)} -T ${quoteShellArgument(title)}`;
+function selectPaneArgs(paneId: string): string[] {
+  return ['select-pane', '-t', paneId];
 }
 
-function buildKillPaneCommand(paneId: string): string {
-  return `tmux kill-pane -t ${quoteShellArgument(paneId)}`;
+function setPaneTitleArgs(paneId: string, title: string): string[] {
+  return [...selectPaneArgs(paneId), '-T', title];
+}
+
+function killPaneArgs(paneId: string): string[] {
+  return ['kill-pane', '-t', paneId];
 }
 
 function isPermanentError(error: unknown): boolean {
@@ -206,37 +230,80 @@ export class TmuxService {
   }
 
   /**
-   * Execute a synchronous tmux command (most common case)
+   * Execute one synchronous tmux command (most common case).
+   *
+   * tmux runs from an argument vector and never through a shell: pane titles,
+   * typed keys, paths and option values are data, and a shell would parse
+   * `$(…)`, backticks and quotes inside them.
+   *
    * @deprecated Use executeNonBlocking for new code
    */
   private execute(
-    command: string,
-    options: {
-      encoding?: BufferEncoding;
-      stdio?: 'pipe' | 'inherit';
-      silent?: boolean;
-      timeout?: number;
-    } = {}
+    args: readonly string[],
+    options: { silent?: boolean; timeout?: number } = {}
   ): string {
-    const { encoding = 'utf-8', stdio = 'pipe', silent = false, timeout } = options;
+    return this.executeSequence([args], options);
+  }
+
+  /**
+   * Execute several tmux commands in one synchronous tmux invocation.
+   */
+  private executeSequence(
+    commands: ReadonlyArray<readonly string[]>,
+    options: { silent?: boolean; timeout?: number } = {}
+  ): string {
+    const { silent = false, timeout } = options;
+    const argv = buildTmuxArgv(commands);
 
     try {
-      const result = execSync(command, {
-        encoding,
-        stdio,
+      const result = execFileSync('tmux', argv, {
+        encoding: 'utf-8',
+        stdio: 'pipe',
         ...(timeout !== undefined ? { timeout } : {}),
       });
       return typeof result === 'string' ? result.trim() : '';
     } catch (error) {
       if (!silent) {
         this.logger.debug(
-          `tmux command failed: ${command}`,
+          `tmux command failed: tmux ${argv.join(' ')}`,
           'error',
           error instanceof Error ? error.message : String(error)
         );
       }
       throw error;
     }
+  }
+
+  /**
+   * Execute one tmux command asynchronously from an argument vector, for
+   * commands that carry data and so cannot use the shell-string
+   * `executeNonBlocking`.
+   */
+  private executeArgvNonBlocking(
+    args: readonly string[],
+    options: { timeout?: number } = {}
+  ): Promise<string> {
+    const { timeout = 5000 } = options;
+    const argv = buildTmuxArgv([args]);
+    return new Promise<string>((resolve, reject) => {
+      execFile(
+        'tmux',
+        argv,
+        { encoding: 'utf8', timeout },
+        (error, stdout) => {
+          if (error) {
+            this.logger.debug(
+              `tmux command failed: tmux ${argv.join(' ')}`,
+              'error',
+              error instanceof Error ? error.message : String(error)
+            );
+            reject(error);
+            return;
+          }
+          resolve(String(stdout).trim());
+        },
+      );
+    });
   }
 
   /**
@@ -271,12 +338,12 @@ export class TmuxService {
     scope: PaneListScope = 'window'
   ): string[] {
     if (scope === 'window') {
-      const output = this.execute(`tmux list-panes -F '${format}'`);
+      const output = this.execute(['list-panes', '-F', format]);
       return output.split('\n').filter((line) => line.trim());
     }
 
-    const currentSession = this.execute(`tmux display-message -p "#{session_name}"`);
-    const output = this.execute(`tmux list-panes -a -F '#{session_name}|${format}'`);
+    const currentSession = this.execute(['display-message', '-p', '#{session_name}']);
+    const output = this.execute(['list-panes', '-a', '-F', `#{session_name}|${format}`]);
 
     return output
       .split('\n')
@@ -388,7 +455,7 @@ export class TmuxService {
   async getCurrentPaneId(): Promise<string> {
     return this.executeWithRetry(
       () => {
-        return this.execute('tmux display-message -p "#{pane_id}"');
+        return this.execute(['display-message', '-p', '#{pane_id}']);
       },
       RetryStrategy.IDEMPOTENT,
       'getCurrentPaneId'
@@ -402,12 +469,14 @@ export class TmuxService {
    */
   getServerIdentity(target?: string): TmuxServerIdentity | undefined {
     try {
-      const targetArg = target
-        ? ` -t '${target.replace(/'/g, "'\\''")}'`
-        : '';
       return parseTmuxServerIdentity(
         this.execute(
-          `tmux display-message${targetArg} -p "#{pid}\t#{socket_path}\t#{session_id}"`,
+          [
+            'display-message',
+            ...(target ? ['-t', target] : []),
+            '-p',
+            '#{pid}\t#{socket_path}\t#{session_id}',
+          ],
           { silent: true, timeout: 1_000 },
         ),
       );
@@ -440,7 +509,7 @@ export class TmuxService {
   async getCurrentWindowId(): Promise<string> {
     return this.executeWithRetry(
       () => {
-        return this.execute('tmux display-message -p "#{window_id}"');
+        return this.execute(['display-message', '-p', '#{window_id}']);
       },
       RetryStrategy.IDEMPOTENT,
       'getCurrentWindowId'
@@ -453,7 +522,7 @@ export class TmuxService {
   async getPaneWindowId(paneId: string): Promise<string> {
     return this.executeWithRetry(
       () => {
-        return this.execute(`tmux display-message -t '${paneId}' -p '#{window_id}'`);
+        return this.execute(['display-message', '-t', paneId, '-p', '#{window_id}']);
       },
       RetryStrategy.IDEMPOTENT,
       `getPaneWindowId(${paneId})`
@@ -467,7 +536,7 @@ export class TmuxService {
   async getWindowPaneId(windowId: string): Promise<string> {
     return this.executeWithRetry(
       () => this.execute(
-        `tmux display-message -t '${windowId}' -p '#{pane_id}'`,
+        ['display-message', '-t', windowId, '-p', '#{pane_id}'],
       ).trim(),
       RetryStrategy.IDEMPOTENT,
       `getWindowPaneId(${windowId})`,
@@ -481,7 +550,7 @@ export class TmuxService {
     return this.executeWithRetry(
       () => {
         const output = this.execute(
-          'tmux display-message -p "#{window_width} #{window_height}"'
+          ['display-message', '-p', '#{window_width} #{window_height}']
         );
         const [width, height] = output.split(' ').map(n => parseInt(n, 10));
         return { width, height };
@@ -498,7 +567,7 @@ export class TmuxService {
     return this.executeWithRetry(
       () => {
         const output = this.execute(
-          'tmux display-message -p "#{client_width} #{client_height}"'
+          ['display-message', '-p', '#{client_width} #{client_height}']
         );
         const [width, height] = output.split(' ').map(n => parseInt(n, 10));
         return { width, height };
@@ -527,8 +596,8 @@ export class TmuxService {
   async getPaneCount(): Promise<number> {
     return this.executeWithRetry(
       () => {
-        const output = this.execute('tmux list-panes | wc -l');
-        return parseInt(output, 10);
+        const output = this.execute(['list-panes']);
+        return output.split('\n').filter((line) => line.trim()).length;
       },
       RetryStrategy.IDEMPOTENT,
       'getPaneCount'
@@ -542,7 +611,7 @@ export class TmuxService {
     return this.executeWithRetry(
       () => {
         const output = this.execute(
-          `tmux list-panes -F '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}'`
+          ['list-panes', '-F', '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}']
         );
 
         return output.split('\n').map(line => {
@@ -568,7 +637,7 @@ export class TmuxService {
     return this.executeWithRetry(
       () => {
         return this.execute(
-          `tmux display-message -t '${paneId}' -p '#{pane_title}'`
+          ['display-message', '-t', paneId, '-p', '#{pane_title}']
         );
       },
       RetryStrategy.IDEMPOTENT,
@@ -582,14 +651,14 @@ export class TmuxService {
   async getPaneContent(paneId: string, options?: { start?: number; end?: number }): Promise<string> {
     return this.executeWithRetry(
       () => {
-        let cmd = `tmux capture-pane -t '${paneId}' -p`;
+        const args = ['capture-pane', '-t', paneId, '-p'];
         if (options?.start !== undefined) {
-          cmd += ` -S ${options.start}`;
+          args.push('-S', String(options.start));
         }
         if (options?.end !== undefined) {
-          cmd += ` -E ${options.end}`;
+          args.push('-E', String(options.end));
         }
-        return this.execute(cmd);
+        return this.execute(args);
       },
       RetryStrategy.IDEMPOTENT,
       `getPaneContent(${paneId})`
@@ -603,7 +672,7 @@ export class TmuxService {
     try {
       const result = await this.executeWithRetry(
         () => {
-          const output = this.execute(`tmux display-message -t '${paneId}' -p '#{pane_id}'`, { silent: true });
+          const output = this.execute(['display-message', '-t', paneId, '-p', '#{pane_id}'], { silent: true });
           return output;
         },
         RetryStrategy.FAST,
@@ -626,7 +695,7 @@ export class TmuxService {
   async probePanePresence(paneId: string): Promise<TmuxPanePresence> {
     try {
       const output = this.execute(
-        `tmux list-panes -a -F '#{pane_id}'`,
+        ['list-panes', '-a', '-F', '#{pane_id}'],
         { silent: true, timeout: 5000 },
       );
       return output
@@ -648,7 +717,7 @@ export class TmuxService {
   async probeWindowPresence(windowId: string): Promise<TmuxPanePresence> {
     try {
       const output = this.execute(
-        `tmux list-windows -a -F '#{window_id}'`,
+        ['list-windows', '-a', '-F', '#{window_id}'],
         { silent: true, timeout: 5000 },
       );
       return output
@@ -698,24 +767,29 @@ export class TmuxService {
     command?: string;
   } = {}): Promise<string> {
     return this.executeWithRetry(
-      () => {
-        let cmd = 'tmux split-window -h -P -F \'#{pane_id}\'';
-
-        if (options.targetPane) {
-          cmd += ` -t '${options.targetPane}'`;
-        }
-        if (options.cwd) {
-          cmd += ` -c "${options.cwd}"`;
-        }
-        if (options.command) {
-          cmd += ` "${options.command}"`;
-        }
-
-        return this.execute(cmd);
-      },
+      () => this.execute(this.splitWindowArgs(options)),
       RetryStrategy.FAST, // UI operation, fast retry
       'splitPane'
     );
+  }
+
+  private splitWindowArgs(options: {
+    targetPane?: string;
+    cwd?: string;
+    command?: string;
+  }): string[] {
+    const args = ['split-window', '-h', '-P', '-F', '#{pane_id}'];
+    if (options.targetPane) {
+      args.push('-t', options.targetPane);
+    }
+    if (options.cwd) {
+      args.push('-c', options.cwd);
+    }
+    if (options.command) {
+      // `--` ends tmux's flags, so a command is never read as one.
+      args.push('--', options.command);
+    }
+    return args;
   }
 
   /**
@@ -732,10 +806,10 @@ export class TmuxService {
     await this.executeWithRetry(
       () => {
         if (width !== undefined) {
-          this.execute(`tmux resize-pane -t '${target}' -x ${width}`);
+          this.execute(['resize-pane', '-t', target, '-x', String(width)]);
         }
         if (height !== undefined) {
-          this.execute(`tmux resize-pane -t '${target}' -y ${height}`);
+          this.execute(['resize-pane', '-t', target, '-y', String(height)]);
         }
       },
       RetryStrategy.FAST,
@@ -756,7 +830,13 @@ export class TmuxService {
   async resizeWindow(dimensions: { width: number; height: number }): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux resize-window -x ${dimensions.width} -y ${dimensions.height}`);
+        this.execute([
+          'resize-window',
+          '-x',
+          String(dimensions.width),
+          '-y',
+          String(dimensions.height),
+        ]);
       },
       RetryStrategy.FAST,
       'resizeWindow'
@@ -769,8 +849,7 @@ export class TmuxService {
   async selectLayout(layoutString: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        const escapedLayoutString = layoutString.replace(/'/g, `'\\''`);
-        this.execute(`tmux select-layout '${escapedLayoutString}'`);
+        this.execute(['select-layout', layoutString]);
       },
       RetryStrategy.FAST,
       'selectLayout'
@@ -783,7 +862,7 @@ export class TmuxService {
   async setPaneTitle(paneId: string, title: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(buildSetPaneTitleCommand(paneId, title));
+        this.execute(setPaneTitleArgs(paneId, title));
       },
       RetryStrategy.FAST,
       `setPaneTitle(${paneId})`
@@ -796,7 +875,7 @@ export class TmuxService {
   async selectPane(paneId: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(buildSelectPaneCommand(paneId));
+        this.execute(selectPaneArgs(paneId));
       },
       RetryStrategy.FAST,
       `selectPane(${paneId})`
@@ -872,7 +951,7 @@ export class TmuxService {
   async setOption(option: string, value: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux set-option -g ${option} ${value}`);
+        this.execute(['set-option', '-g', option, value]);
       },
       RetryStrategy.FAST,
       `setOption(${option})`
@@ -880,19 +959,22 @@ export class TmuxService {
   }
 
   /**
-   * Send keys to a pane
+   * Send keys to a pane. Each element of `keys` is one tmux argument: either
+   * text to type or a tmux key name (`Enter`, `C-c`). Text is passed whole, so
+   * it needs no quoting and nothing in it is parsed by a shell.
+   *
    * @deprecated Use sendShellCommand() for shell commands or sendTmuxKeys() for tmux keys
    */
-  async sendKeys(paneId: string, keys: string): Promise<void>;
-  async sendKeys(paneId: string, keys: string, guard: TmuxRetryGuard): Promise<boolean>;
+  async sendKeys(paneId: string, keys: readonly string[]): Promise<void>;
+  async sendKeys(paneId: string, keys: readonly string[], guard: TmuxRetryGuard): Promise<boolean>;
   async sendKeys(
     paneId: string,
-    keys: string,
+    keys: readonly string[],
     guard?: TmuxRetryGuard
   ): Promise<void | boolean> {
     const result = await this.executeWithRetry(
       () => {
-        this.execute(`tmux send-keys -t '${paneId}' ${keys}`);
+        this.execute(this.sendKeysArgs(paneId, keys));
       },
       RetryStrategy.FAST,
       `sendKeys(${paneId})`,
@@ -903,25 +985,32 @@ export class TmuxService {
   }
 
   /**
-   * Send a shell command to a pane (auto-quotes to preserve spaces)
+   * `--` ends tmux's flags, so typed text that starts with a dash is never
+   * read as a `send-keys` flag.
+   */
+  private sendKeysArgs(paneId: string, keys: readonly string[]): string[] {
+    return ['send-keys', '-t', paneId, '--', ...keys];
+  }
+
+  /**
+   * Send a shell command to a pane as one piece of typed text
    *
    * Use this for shell commands like: `claude "my prompt"`, `git status`, etc.
-   * The command will be automatically quoted to prevent tmux from splitting on spaces.
+   * The command is one tmux argument, so tmux never splits it on spaces and no
+   * shell on this side parses it.
    *
    * @example
    * await tmuxService.sendShellCommand(paneId, 'claude "fix the bug" --permission-mode acceptEdits');
    * await tmuxService.sendTmuxKeys(paneId, 'Enter'); // Then send Enter key
    *
    * @param paneId The tmux pane ID (e.g., "%1")
-   * @param command The shell command to execute (will be auto-quoted)
+   * @param command The shell command to type into the pane
    * @see sendTmuxKeys For sending tmux key sequences (Enter, C-l, etc.)
    */
   async sendShellCommand(paneId: string, command: string): Promise<void> {
-    // Quote the command to preserve spaces, escaping any single quotes
-    const quotedCommand = `'${command.replace(/'/g, "'\\''")}'`;
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux send-keys -t '${paneId}' ${quotedCommand}`);
+        this.execute(this.sendKeysArgs(paneId, [command]));
       },
       RetryStrategy.FAST,
       `sendShellCommand(${paneId})`
@@ -929,10 +1018,11 @@ export class TmuxService {
   }
 
   /**
-   * Send tmux key sequences to a pane (no quoting)
+   * Send tmux key sequences to a pane
    *
    * Use this for tmux keys like: Enter, C-l, Escape, Tab, C-c, etc.
-   * Keys are sent as-is without quoting.
+   * Several keys may be given separated by whitespace (`C-c Enter`); each
+   * becomes one tmux argument.
    *
    * @example
    * await tmuxService.sendShellCommand(paneId, 'git status');
@@ -946,9 +1036,10 @@ export class TmuxService {
    * @see sendShellCommand For sending shell commands (auto-quoted)
    */
   async sendTmuxKeys(paneId: string, keys: string): Promise<void> {
+    const keyNames = keys.split(/\s+/).filter(Boolean);
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux send-keys -t '${paneId}' ${keys}`);
+        this.execute(this.sendKeysArgs(paneId, keyNames));
       },
       RetryStrategy.FAST,
       `sendTmuxKeys(${paneId})`
@@ -1015,13 +1106,12 @@ export class TmuxService {
 
   /**
    * Load a tmux buffer directly from a file path.
-   * This avoids shell-escaping large or control-character-heavy payloads.
+   * This keeps large or control-character-heavy payloads out of argv.
    */
   async loadBufferFromFile(bufferName: string, filePath: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        const quotedPath = `'${filePath.replace(/'/g, "'\\''")}'`;
-        this.execute(`tmux load-buffer -b '${bufferName}' ${quotedPath}`);
+        this.execute(['load-buffer', '-b', bufferName, filePath]);
       },
       RetryStrategy.FAST,
       `loadBufferFromFile(${bufferName})`
@@ -1034,7 +1124,7 @@ export class TmuxService {
   async pasteBuffer(bufferName: string, paneId: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux paste-buffer -b '${bufferName}' -t '${paneId}'`);
+        this.execute(['paste-buffer', '-b', bufferName, '-t', paneId]);
       },
       RetryStrategy.FAST,
       `pasteBuffer(${bufferName})`
@@ -1055,7 +1145,7 @@ export class TmuxService {
     try {
       await this.executeWithRetry(
         () => {
-          this.execute('tmux refresh-client', { silent: true });
+          this.execute(['refresh-client'], { silent: true });
         },
         RetryStrategy.FAST,
         'refreshClient'
@@ -1075,17 +1165,16 @@ export class TmuxService {
   async breakPaneToWindow(paneId: string, windowName: string): Promise<string> {
     await this.executeWithRetry(
       () => {
-        const escapedWindowName = windowName.replace(/'/g, `'\\''`);
         return this.execute(
-          `tmux break-pane -d -P -F '#{window_id}' -s '${paneId}' -n '${escapedWindowName}'`
+          ['break-pane', '-d', '-P', '-F', '#{window_id}', '-s', paneId, '-n', windowName]
         );
       },
       RetryStrategy.FAST,
       `breakPaneToWindow(${paneId})`
     );
 
-    const output = await this.executeNonBlocking(
-      `tmux display-message -t '${paneId}' -p '#{window_id}'`
+    const output = await this.executeArgvNonBlocking(
+      ['display-message', '-t', paneId, '-p', '#{window_id}']
     );
     return output.trim();
   }
@@ -1102,7 +1191,7 @@ export class TmuxService {
       () => {
         const direction = horizontal ? '-h' : '-v';
         this.execute(
-          `tmux join-pane -d ${direction} -s '${sourcePaneId}' -t '${targetPaneId}'`
+          ['join-pane', '-d', direction, '-s', sourcePaneId, '-t', targetPaneId]
         );
       },
       RetryStrategy.FAST,
@@ -1118,7 +1207,7 @@ export class TmuxService {
     try {
       await this.executeWithRetry(
         () => {
-          this.execute(buildKillPaneCommand(paneId));
+          this.execute(killPaneArgs(paneId));
         },
         RetryStrategy.NONE, // Destructive operation
         `killPane(${paneId})`
@@ -1142,8 +1231,8 @@ export class TmuxService {
   async respawnPane(paneId: string, command: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        const quotedCommand = `'${command.replace(/'/g, "'\\''")}'`;
-        this.execute(`tmux respawn-pane -k -t '${paneId}' ${quotedCommand}`);
+        // `--` ends tmux's flags, so the command is never read as one.
+        this.execute(['respawn-pane', '-k', '-t', paneId, '--', command]);
       },
       RetryStrategy.NONE,
       `respawnPane(${paneId})`
@@ -1156,7 +1245,7 @@ export class TmuxService {
   async killWindow(windowId: string): Promise<void> {
     await this.executeWithRetry(
       () => {
-        this.execute(`tmux kill-window -t '${windowId}'`);
+        this.execute(['kill-window', '-t', windowId]);
       },
       RetryStrategy.NONE, // Destructive operation
       `killWindow(${windowId})`
@@ -1173,15 +1262,15 @@ export class TmuxService {
   } = {}): Promise<string> {
     return this.executeWithRetry(
       () => {
-        let cmd = 'tmux new-window';
+        const args = ['new-window'];
         if (options.detached) {
-          cmd += ' -d';
+          args.push('-d');
         }
         if (options.name) {
-          cmd += ` -n '${options.name}'`;
+          args.push('-n', options.name);
         }
-        cmd += " -P -F '#{window_id}'";
-        return this.execute(cmd);
+        args.push('-P', '-F', '#{window_id}');
+        return this.execute(args);
       },
       RetryStrategy.FAST,
       'newWindow'
@@ -1196,7 +1285,7 @@ export class TmuxService {
     await this.executeWithRetry(
       () => {
         const direction = horizontal ? '-h' : '-v';
-        this.execute(`tmux join-pane ${direction} -s '${sourceWindowId}'`);
+        this.execute(['join-pane', direction, '-s', sourceWindowId]);
       },
       RetryStrategy.FAST,
       `joinPane(${sourceWindowId})`
@@ -1211,7 +1300,12 @@ export class TmuxService {
     try {
       await this.executeWithRetry(
         () => {
-          this.execute(`tmux list-windows -F '#{window_id}' | grep -q '${windowId}'`, { silent: true });
+          const windowIds = this.execute(['list-windows', '-F', '#{window_id}'], { silent: true })
+            .split('\n')
+            .map((line) => line.trim());
+          if (!windowIds.includes(windowId)) {
+            throw new Error(`can't find window: ${windowId}`);
+          }
           return true;
         },
         RetryStrategy.FAST,
@@ -1231,7 +1325,7 @@ export class TmuxService {
   getWindowDimensionsSync(): WindowDimensions {
     try {
       const output = this.execute(
-        'tmux display-message -p "#{window_width} #{window_height}"'
+        ['display-message', '-p', '#{window_width} #{window_height}']
       );
       const [width, height] = output.split(' ').map(n => parseInt(n, 10));
       return { width, height };
@@ -1247,7 +1341,7 @@ export class TmuxService {
   getTerminalDimensionsSync(): WindowDimensions {
     try {
       const output = this.execute(
-        'tmux display-message -p "#{client_width} #{client_height}"'
+        ['display-message', '-p', '#{client_width} #{client_height}']
       );
       const [width, height] = output.split(' ').map(n => parseInt(n, 10));
       return { width, height };
@@ -1282,14 +1376,14 @@ export class TmuxService {
   getStatusBarHeightSync(): number {
     try {
       // Check if status bar is enabled
-      const statusEnabled = this.execute('tmux display-message -p "#{status}"').trim();
+      const statusEnabled = this.execute(['display-message', '-p', '#{status}']).trim();
       if (statusEnabled !== 'on') {
         return 0;
       }
 
       // Count the number of status-format lines
       // Each status-format line adds one line to the status bar height
-      const statusFormats = this.execute('tmux show-options -gv status-format');
+      const statusFormats = this.execute(['show-options', '-gv', 'status-format']);
       const formatLines = statusFormats.split('\n').filter(line => line.trim()).length;
 
       return formatLines;
@@ -1355,7 +1449,7 @@ export class TmuxService {
    */
   getAllPaneIdsSync(): string[] {
     try {
-      const output = this.execute('tmux list-panes -F "#{pane_id}"');
+      const output = this.execute(['list-panes', '-F', '#{pane_id}']);
       return output.split('\n').filter(id => id.trim());
     } catch (error) {
       this.logger.warn('Failed to get pane IDs, returning empty array', 'TmuxService');
@@ -1369,7 +1463,7 @@ export class TmuxService {
   getPanePositionsSync(): PanePosition[] {
     try {
       const output = this.execute(
-        `tmux list-panes -F '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}'`
+        ['list-panes', '-F', '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}']
       );
 
       return output.split('\n').map(line => {
@@ -1393,7 +1487,7 @@ export class TmuxService {
    */
   getPaneTitleSync(paneId: string): string {
     try {
-      return this.execute(`tmux display-message -t '${paneId}' -p '#{pane_title}'`);
+      return this.execute(['display-message', '-t', paneId, '-p', '#{pane_title}']);
     } catch (error) {
       this.logger.warn(`Failed to get pane title for ${paneId}, returning empty string`, 'TmuxService');
       return '';
@@ -1408,19 +1502,7 @@ export class TmuxService {
     cwd?: string;
     command?: string;
   } = {}): string {
-    let cmd = 'tmux split-window -h -P -F \'#{pane_id}\'';
-
-    if (options.targetPane) {
-      cmd += ` -t '${options.targetPane}'`;
-    }
-    if (options.cwd) {
-      cmd += ` -c "${options.cwd}"`;
-    }
-    if (options.command) {
-      cmd += ` "${options.command}"`;
-    }
-
-    return this.execute(cmd);
+    return this.execute(this.splitWindowArgs(options));
   }
 
   /**
@@ -1428,7 +1510,7 @@ export class TmuxService {
    */
   refreshClientSync(): void {
     try {
-      this.execute('tmux refresh-client', { silent: true });
+      this.execute(['refresh-client'], { silent: true });
     } catch {
       // Intentionally silent - UI refresh is optional
     }
@@ -1439,7 +1521,7 @@ export class TmuxService {
    */
   clearHistorySync(): void {
     try {
-      this.execute('tmux clear-history', { silent: true });
+      this.execute(['clear-history'], { silent: true });
     } catch {
       // Intentionally silent - history clearing is optional
     }
@@ -1450,7 +1532,7 @@ export class TmuxService {
    */
   getVersionSync(): string {
     try {
-      return this.execute('tmux -V');
+      return this.execute(['-V']);
     } catch (error) {
       this.logger.warn('Failed to get tmux version', 'TmuxService');
       return '';
@@ -1462,7 +1544,7 @@ export class TmuxService {
    */
   getSessionOptionSync(sessionName: string, option: string): string {
     try {
-      return this.execute(`tmux show -t ${sessionName} ${option}`);
+      return this.execute(['show', '-t', sessionName, option]);
     } catch (error) {
       this.logger.warn(`Failed to get session option ${option} for ${sessionName}`, 'TmuxService');
       return '';
@@ -1474,7 +1556,7 @@ export class TmuxService {
    */
   getGlobalOptionSync(option: string): string {
     try {
-      return this.execute(`tmux show-options -gv ${option}`, { silent: true }).trim();
+      return this.execute(['show-options', '-gv', option], { silent: true }).trim();
     } catch (error) {
       this.logger.warn(`Failed to get global option ${option}`, 'TmuxService');
       return '';
@@ -1486,7 +1568,7 @@ export class TmuxService {
    */
   setSessionOptionSync(sessionName: string, option: string, value: string): void {
     try {
-      this.execute(`tmux set -t ${sessionName} ${option} ${value}`, { silent: true });
+      this.execute(['set', '-t', sessionName, option, value], { silent: true });
     } catch (error) {
       this.logger.warn(`Failed to set session option ${option} for ${sessionName}`, 'TmuxService');
     }
@@ -1497,7 +1579,7 @@ export class TmuxService {
    */
   getCurrentSessionNameSync(): string {
     try {
-      return this.execute('tmux display-message -p "#{session_name}"');
+      return this.execute(['display-message', '-p', '#{session_name}']);
     } catch (error) {
       this.logger.warn('Failed to get current session name', 'TmuxService');
       throw error;
@@ -1509,7 +1591,7 @@ export class TmuxService {
    */
   getCurrentPaneIdSync(): string {
     try {
-      return this.execute('tmux display-message -p "#{pane_id}"');
+      return this.execute(['display-message', '-p', '#{pane_id}']);
     } catch (error) {
       this.logger.warn('Failed to get current pane ID', 'TmuxService');
       throw error;
@@ -1521,7 +1603,7 @@ export class TmuxService {
    */
   setWindowOptionSync(option: string, value: string): void {
     try {
-      this.execute(`tmux set-window-option ${option} ${value}`, { silent: true });
+      this.execute(['set-window-option', option, value], { silent: true });
     } catch (error) {
       this.logger.warn(`Failed to set window option ${option}`, 'TmuxService');
     }
@@ -1532,7 +1614,7 @@ export class TmuxService {
    */
   getPaneOptionSync(paneId: string, option: string): string {
     try {
-      return this.execute(`tmux show-options -p -v -t '${paneId}' ${option}`, { silent: true }).trim();
+      return this.execute(['show-options', '-p', '-v', '-t', paneId, option], { silent: true }).trim();
     } catch (error) {
       this.logger.warn(`Failed to get pane option ${option} for ${paneId}`, 'TmuxService');
       return '';
@@ -1544,9 +1626,8 @@ export class TmuxService {
    */
   setPaneOptionSync(paneId: string, option: string, value: string): boolean {
     try {
-      const escapedValue = value.replace(/'/g, `'\\''`);
       this.execute(
-        `tmux set-option -p -t '${paneId}' ${option} '${escapedValue}'`,
+        ['set-option', '-p', '-t', paneId, option, value],
         { silent: true }
       );
       return true;
@@ -1573,7 +1654,7 @@ export class TmuxService {
     }
 
     try {
-      this.execute(`tmux ${this.buildPaneOptionMutationCommand(updates)}`, { silent: true });
+      this.executeSequence(this.paneOptionMutationCommands(updates), { silent: true });
       return true;
     } catch (error) {
       this.logger.warn(`Failed to set ${updates.length} pane options`, 'TmuxService');
@@ -1588,7 +1669,7 @@ export class TmuxService {
     if (mutations.length === 0) return true;
 
     try {
-      this.execute(`tmux ${this.buildPaneOptionMutationCommand(mutations)}`, { silent: true });
+      this.executeSequence(this.paneOptionMutationCommands(mutations), { silent: true });
       return true;
     } catch (error) {
       this.logger.warn(`Failed to update ${mutations.length} pane options`, 'TmuxService');
@@ -1596,19 +1677,14 @@ export class TmuxService {
     }
   }
 
-  private buildPaneOptionMutationCommand(
+  private paneOptionMutationCommands(
     mutations: ReadonlyArray<PaneOptionMutation>
-  ): string {
-    return mutations
-      .map((mutation) => {
-        if ('unset' in mutation) {
-          return `set-option -u -p -t '${mutation.paneId}' ${mutation.option}`;
-        }
-
-        const escapedValue = mutation.value.replace(/'/g, `'\\''`);
-        return `set-option -p -t '${mutation.paneId}' ${mutation.option} '${escapedValue}'`;
-      })
-      .join(' \\; ');
+  ): string[][] {
+    return mutations.map((mutation) => (
+      'unset' in mutation
+        ? ['set-option', '-u', '-p', '-t', mutation.paneId, mutation.option]
+        : ['set-option', '-p', '-t', mutation.paneId, mutation.option, mutation.value]
+    ));
   }
 
   /**
@@ -1616,7 +1692,7 @@ export class TmuxService {
    */
   unsetPaneOptionSync(paneId: string, option: string): boolean {
     try {
-      this.execute(`tmux set-option -u -p -t '${paneId}' ${option}`, { silent: true });
+      this.execute(['set-option', '-u', '-p', '-t', paneId, option], { silent: true });
       return true;
     } catch (error) {
       this.logger.warn(`Failed to unset pane option ${option} for ${paneId}`, 'TmuxService');
@@ -1631,7 +1707,7 @@ export class TmuxService {
    */
   selectLayoutSync(layout: string): boolean {
     try {
-      this.execute(`tmux select-layout '${layout}'`);
+      this.execute(['select-layout', layout]);
       return true;
     } catch (error) {
       this.logger.warn(`Failed to select layout ${layout}`, 'TmuxService');
@@ -1647,10 +1723,10 @@ export class TmuxService {
   resizePaneSync(paneId: string, dimensions: { width?: number; height?: number }): boolean {
     try {
       if (dimensions.width !== undefined) {
-        this.execute(`tmux resize-pane -t '${paneId}' -x ${dimensions.width}`);
+        this.execute(['resize-pane', '-t', paneId, '-x', String(dimensions.width)]);
       }
       if (dimensions.height !== undefined) {
-        this.execute(`tmux resize-pane -t '${paneId}' -y ${dimensions.height}`);
+        this.execute(['resize-pane', '-t', paneId, '-y', String(dimensions.height)]);
       }
       return true;
     } catch (error) {
@@ -1666,7 +1742,13 @@ export class TmuxService {
    */
   resizeWindowSync(dimensions: { width: number; height: number }): boolean {
     try {
-      this.execute(`tmux resize-window -x ${dimensions.width} -y ${dimensions.height}`);
+      this.execute([
+        'resize-window',
+        '-x',
+        String(dimensions.width),
+        '-y',
+        String(dimensions.height),
+      ]);
       return true;
     } catch (error) {
       this.logger.warn('Failed to resize window', 'TmuxService');
@@ -1679,7 +1761,7 @@ export class TmuxService {
    */
   selectPaneSync(paneId: string): void {
     try {
-      this.execute(buildSelectPaneCommand(paneId));
+      this.execute(selectPaneArgs(paneId));
     } catch (error) {
       this.logger.warn(`Failed to select pane ${paneId}`, 'TmuxService');
       throw error;
@@ -1691,7 +1773,7 @@ export class TmuxService {
    */
   setPaneTitleSync(paneId: string, title: string): void {
     try {
-      this.execute(buildSetPaneTitleCommand(paneId, title));
+      this.execute(setPaneTitleArgs(paneId, title));
     } catch (error) {
       this.logger.warn(`Failed to set pane title for ${paneId}`, 'TmuxService');
       throw error;
@@ -1703,7 +1785,7 @@ export class TmuxService {
    */
   killPaneSync(paneId: string): void {
     try {
-      this.execute(buildKillPaneCommand(paneId));
+      this.execute(killPaneArgs(paneId));
     } catch (error) {
       this.logger.warn(`Failed to kill pane ${paneId}`, 'TmuxService');
       throw error;
@@ -1716,7 +1798,7 @@ export class TmuxService {
   listPanesSync(format?: string): string {
     try {
       const formatStr = format || '#{pane_id}=#{pane_index}';
-      return this.execute(`tmux list-panes -F "${formatStr}"`);
+      return this.execute(['list-panes', '-F', formatStr]);
     } catch (error) {
       this.logger.warn('Failed to list panes', 'TmuxService');
       return '';
@@ -1728,7 +1810,7 @@ export class TmuxService {
    */
   setGlobalOptionSync(option: string, value: string): void {
     try {
-      this.execute(`tmux set-option -g ${option} ${value}`, { silent: true });
+      this.execute(['set-option', '-g', option, value], { silent: true });
     } catch (error) {
       this.logger.warn(`Failed to set global option ${option}`, 'TmuxService');
     }
@@ -1739,7 +1821,7 @@ export class TmuxService {
    */
   getPaneWidthSync(paneId: string): number {
     try {
-      const output = this.execute(`tmux display-message -t '${paneId}' -p '#{pane_width}'`);
+      const output = this.execute(['display-message', '-t', paneId, '-p', '#{pane_width}']);
       return parseInt(output, 10);
     } catch (error) {
       this.logger.warn(`Failed to get pane width for ${paneId}`, 'TmuxService');
@@ -1752,7 +1834,7 @@ export class TmuxService {
    */
   getCurrentLayoutSync(): string {
     try {
-      return this.execute('tmux display-message -p "#{window_layout}"');
+      return this.execute(['display-message', '-p', '#{window_layout}']);
     } catch (error) {
       this.logger.warn('Failed to get current layout', 'TmuxService');
       return '';

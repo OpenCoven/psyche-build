@@ -1,6 +1,6 @@
 import path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import type { PaneLayout, PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
 import { attachDurableEffectWarning } from './durableEffectWarnings.js';
 import { TmuxService } from '../services/TmuxService.js';
@@ -1017,10 +1017,11 @@ async function createPaneWithReuseReservation(
       }
       if (resolvedStartPoint) {
         try {
-          execSync(`git rev-parse --verify --end-of-options "${resolvedStartPoint}"`, {
-            stdio: 'pipe',
-            cwd: projectRoot,
-          });
+          execFileSync(
+            'git',
+            ['rev-parse', '--verify', '--end-of-options', resolvedStartPoint],
+            { stdio: 'pipe', cwd: projectRoot },
+          );
         } catch {
           if (startPointBranch) {
             throw new Error(
@@ -1042,19 +1043,24 @@ async function createPaneWithReuseReservation(
 
       let branchExists = false;
       try {
-        execSync(`git show-ref --verify --quiet "refs/heads/${branchName}"`, {
-          stdio: 'pipe',
-          cwd: projectRoot,
-        });
+        execFileSync(
+          'git',
+          ['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`],
+          { stdio: 'pipe', cwd: projectRoot },
+        );
         branchExists = true;
       } catch {
         // The branch will be created with the worktree.
       }
 
-      const startingOid = execSync(
-        `git rev-parse --verify --end-of-options "${
-          branchExists ? branchName : (resolvedStartPoint || 'HEAD')
-        }"`,
+      const startingOid = execFileSync(
+        'git',
+        [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          branchExists ? branchName : (resolvedStartPoint || 'HEAD'),
+        ],
         {
           cwd: projectRoot,
           encoding: 'utf-8',
@@ -1100,8 +1106,9 @@ async function createPaneWithReuseReservation(
 
       let createdOid: string;
       try {
-        createdOid = execSync(
-          `git rev-parse --verify --end-of-options "${branchName}"`,
+        createdOid = execFileSync(
+          'git',
+          ['rev-parse', '--verify', '--end-of-options', branchName],
           {
             cwd: projectRoot,
             encoding: 'utf-8',
@@ -1116,8 +1123,9 @@ async function createPaneWithReuseReservation(
         );
         throw error;
       }
-      const checkedOutBranch = execSync(
-        `git -C "${worktreePath}" rev-parse --abbrev-ref HEAD`,
+      const checkedOutBranch = execFileSync(
+        'git',
+        ['-C', worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD'],
         {
           cwd: projectRoot,
           encoding: 'utf-8',
