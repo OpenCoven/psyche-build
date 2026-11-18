@@ -19,7 +19,6 @@ import { execSync } from 'child_process';
 import { POPUP_CONFIG } from './config.js';
 import { PopupWrapper, writeSuccessAndExit } from './shared/index.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
-import { getStreamDimension } from '../../utils/terminalDimensions.js';
 
 type FilterMode = 'all' | 'errors' | 'warnings' | 'info' | 'pane';
 
@@ -42,7 +41,7 @@ interface LogsPopupAppProps extends LogsPopupProps {
 const LogsPopupApp: React.FC<LogsPopupAppProps> = ({ allLogs, stats, panes = [], resultFile }) => {
   const { stdout } = useStdout();
   const { exit } = useApp();
-  const terminalHeight = getStreamDimension(stdout, 'rows') || 50;
+  const terminalHeight = stdout?.rows || 50;
 
   const [filterMode, setFilterMode] = useState<FilterMode>('all');
   const [selectedPane, setSelectedPane] = useState<string | null>(null);

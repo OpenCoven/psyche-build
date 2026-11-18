@@ -14,7 +14,6 @@ import React, { useMemo, useState } from 'react';
 import { render, Box, Text, useInput, useApp, useStdout } from 'ink';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import { getStreamDimension } from '../../utils/terminalDimensions.js';
 import {
   PopupContainer,
   PopupWrapper,
@@ -96,7 +95,7 @@ const PRReviewPopupApp: React.FC<Props> = ({ resultFile, data }) => {
   const [diff, setDiff] = useState<{ lines: string[]; offset: number; filePath: string } | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const terminalRows = getStreamDimension(stdout, 'rows') || process.stdout.rows || 40;
+  const terminalRows = stdout?.rows || process.stdout.rows || 40;
 
   // Layout budgets — approximate, clamp to sane ranges.
   const summaryMaxVisibleLines = Math.max(6, Math.min(16, Math.floor(terminalRows * 0.42)));

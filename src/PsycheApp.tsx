@@ -25,7 +25,6 @@ import useCovenDesktopUse from "./hooks/useCovenDesktopUse.js"
 
 // Utils
 import { SIDEBAR_WIDTH } from "./utils/layoutManager.js"
-import { getStreamDimension } from "./utils/terminalDimensions.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
 import {
   StateManager,
@@ -174,7 +173,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   bridgeDaemon,
 }) => {
   const { stdout } = useStdout()
-  const terminalHeight = getStreamDimension(stdout, "rows") || 40
+  const terminalHeight = stdout?.rows || 40
   const isDevMode = process.env.PSYCHE_DEV === "true"
   const sessionProjectRoot = projectRoot || process.cwd()
 

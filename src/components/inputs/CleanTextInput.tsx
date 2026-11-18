@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Box, Text, useInput, useFocus, useStdout } from 'ink';
 import stringWidth from 'string-width';
 import { wrapText, findCursorInWrappedLines, findCharIndexAtWidth, preprocessPastedContent } from '../../utils/input.js';
-import { getStreamDimension } from '../../utils/terminalDimensions.js';
 import { COLORS } from '../../theme/colors.js';
 
 interface CleanTextInputProps {
@@ -71,7 +70,7 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
   // The prompt is always rendered separately, so we need to account for it
   // Use process.stdout.columns as fallback since useStdout might not update
   // Allow override via prop for popup usage
-  const terminalWidth = process.stdout.columns || getStreamDimension(stdout, 'columns') || 80;
+  const terminalWidth = process.stdout.columns || (stdout ? stdout.columns : 80);
   // Reduce by 1 more to prevent edge case where text exactly fills width
   const maxWidth = propMaxWidth || Math.max(20, terminalWidth - 7);
 

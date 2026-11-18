@@ -20,7 +20,6 @@ import {
 } from './utils/fileBrowser.js';
 import { POPUP_CONFIG } from './components/popups/config.js';
 import { COLORS } from './theme/colors.js';
-import { getStreamDimension } from './utils/terminalDimensions.js';
 
 type PreviewMode = 'code' | 'diff';
 
@@ -126,10 +125,10 @@ function renderSingleLine(value: string): string {
   return value.length > 0 ? value : ' ';
 }
 
-function readTerminalSize(stdout?: unknown) {
+function readTerminalSize(stdout?: { columns?: number; rows?: number }) {
   return {
-    columns: process.stdout.columns ?? getStreamDimension(stdout, 'columns') ?? 120,
-    rows: process.stdout.rows ?? getStreamDimension(stdout, 'rows') ?? 40,
+    columns: process.stdout.columns ?? stdout?.columns ?? 120,
+    rows: process.stdout.rows ?? stdout?.rows ?? 40,
   };
 }
 
