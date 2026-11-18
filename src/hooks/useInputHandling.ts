@@ -1,7 +1,7 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react"
 import path from "path"
 import { randomUUID } from "node:crypto"
-import { useInput } from "ink"
+import { useInput, useStdin } from "ink"
 import { runPairAction } from "../actions/implementations/pairAction.js"
 import { runDevicesAction } from "../actions/implementations/devicesAction.js"
 import type { PsychePane, SavePanes, SidebarProject } from "../types.js"
@@ -217,6 +217,7 @@ interface UseInputHandlingParams {
 const SIDEBAR_DOUBLE_CLICK_INTERVAL_MS = 800
 
 export function useInputHandling(params: UseInputHandlingParams) {
+  const { stdin } = useStdin()
   const {
     panes,
     selectedIndex,
@@ -277,6 +278,9 @@ export function useInputHandling(params: UseInputHandlingParams) {
   } = params
 
   const layoutRefreshDebounceRef = useRef<NodeJS.Timeout | null>(null)
+  const mouseInputBufferRef = useRef("")
+  const ignoreInputRef = useRef(ignoreInput)
+  ignoreInputRef.current = ignoreInput
   const lastMousePressRef = useRef<{
     targetKey: string
     timestamp: number
@@ -1148,7 +1152,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     return `action:${target.action.index}`
   }
 
-  const handleSidebarMousePress = async (input: string): Promise<boolean> => {
+  const handleSidebarMousePress = (input: string): boolean => {
     const mouseEvent = parseSgrMouseEvent(input)
     if (!mouseEvent || !isPrimaryMousePress(mouseEvent)) {
       return false
@@ -1216,6 +1220,44 @@ export function useInputHandling(params: UseInputHandlingParams) {
     setSelectedIndex(target.action.index)
     return true
   }
+
+  const handleSidebarMousePressRef = useRef(handleSidebarMousePress)
+  handleSidebarMousePressRef.current = handleSidebarMousePress
+
+  useEffect(() => {
+    const handleMouseInput = (chunk: Buffer | string) => {
+      if (ignoreInputRef.current) {
+        mouseInputBufferRef.current = ""
+        return
+      }
+
+      const input = mouseInputBufferRef.current + String(chunk)
+      mouseInputBufferRef.current = ""
+
+      const mouseReports = /\x1b\[<\d+;\d+;\d+[Mm]/g
+      let match: RegExpExecArray | null
+      while ((match = mouseReports.exec(input)) !== null) {
+        handleSidebarMousePressRef.current(match[0])
+      }
+
+      const lastReportStart = input.lastIndexOf("\x1b[<")
+      if (lastReportStart !== -1) {
+        const trailingInput = input.slice(lastReportStart)
+        if (
+          trailingInput.length <= 32
+          && !/\x1b\[<\d+;\d+;\d+[Mm]/.test(trailingInput)
+        ) {
+          mouseInputBufferRef.current = trailingInput
+        }
+      }
+    }
+
+    stdin.on("data", handleMouseInput)
+    return () => {
+      stdin.off("data", handleMouseInput)
+      mouseInputBufferRef.current = ""
+    }
+  }, [stdin])
 
   const formatRitualDescription = (ritual: RitualDefinition): string => {
     const paneCount = ritual.projects.reduce(
@@ -2079,16 +2121,6 @@ export function useInputHandling(params: UseInputHandlingParams) {
   useInput(async (input: string, key: any) => {
     // Ignore input temporarily after popup operations (prevents buffered keys from being processed)
     if (ignoreInput) {
-      return
-    }
-
-    // SGR mouse events (\x1b[<button;col;rowM/m) must be fully consumed here
-    // — `handleSidebarMousePress` only acts on primary *press* events, so
-    // releases / motion / non-primary buttons would otherwise fall through
-    // and arrive at the inline-rename handler as garbage characters
-    // (visible as random "M" / "m" / digits typed into the rename input).
-    if (/(?:\x1b)?\[<\d+;\d+;\d+[Mm]/.test(input)) {
-      await handleSidebarMousePress(input)
       return
     }
 

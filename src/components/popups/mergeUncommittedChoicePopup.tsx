@@ -9,6 +9,7 @@ import React, { useMemo, useState } from 'react';
 import { render, Box, Text, useInput, useApp, useStdout } from 'ink';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
+import { getStreamDimension } from '../../utils/terminalDimensions.js';
 import {
   PopupContainer,
   PopupWrapper,
@@ -171,7 +172,7 @@ const MergeUncommittedChoicePopupApp: React.FC<MergeUncommittedChoicePopupProps>
     () => getVisibleFileWindow(data.files, selectedFileIndex),
     [data.files, selectedFileIndex]
   );
-  const terminalRows = stdout?.rows || process.stdout.rows || 40;
+  const terminalRows = getStreamDimension(stdout, 'rows') || process.stdout.rows || 40;
   const maxVisibleDiffLines = Math.max(
     QUICKLOOK_MIN_VISIBLE_LINES,
     terminalRows - QUICKLOOK_LAYOUT_CHROME_LINES

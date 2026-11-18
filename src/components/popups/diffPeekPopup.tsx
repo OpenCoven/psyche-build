@@ -13,6 +13,7 @@ import {
   writeCancelAndExit,
 } from './shared/index.js';
 import { POPUP_CONFIG } from './config.js';
+import { getStreamDimension } from '../../utils/terminalDimensions.js';
 
 interface DiffPeekPopupData {
   filePath: string;
@@ -48,7 +49,7 @@ const DiffPeekPopupApp: React.FC<DiffPeekPopupProps> = ({ resultFile, data }) =>
     return rawLines;
   }, [data.diffText]);
 
-  const maxVisibleLines = Math.max(8, (stdout?.rows || 30) - 10);
+  const maxVisibleLines = Math.max(8, (getStreamDimension(stdout, 'rows') || 30) - 10);
   const maxOffset = Math.max(0, lines.length - maxVisibleLines);
   const visibleLines = lines.slice(scrollOffset, scrollOffset + maxVisibleLines);
 
