@@ -82,11 +82,13 @@ The iOS project check is meaningful only on the compatible macOS/Xcode host desc
 
 ### 5. Run the repository handoff gate
 
-For a bounded TypeScript/docs/repository-contract iteration:
+For a bounded TypeScript or repository-contract iteration, run the fast gate after bootstrap completes. It runs TypeScript checks and the agent repository contract.
 
 ```bash
 bash ./scripts/agent-check fast
 ```
+
+For documentation changes, also run the repository map and relative-link contract shown above. For changes to the published docs site, run `pnpm --dir docs build` after the locked docs install.
 
 Before handing off a change that affects runtime behavior, architecture, generated desktop output, packaging, persistence, authority, recovery, or another high-risk surface, run:
 
@@ -98,12 +100,9 @@ The full gate covers the unit/contract suite, docs checks/build, typecheck, sour
 
 ## Tracking work
 
-All planning lives in GitHub Issues and the
-[Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11).
-[Tracking work](docs/TRACKER.md) defines the hierarchy (outcome issues with
-sub-issues), the Project fields (Status, Priority, Train, Risk, Evidence), the
-issue forms, and the closure rules. Contributors file work through the issue
-forms; maintainers triage the Project's **Triage** view weekly.
+All planning lives in GitHub Issues and the [Psyche Build Project](https://github.com/orgs/OpenCoven/projects/11). [Tracking work](docs/TRACKER.md) defines the issue hierarchy, Project fields, issue forms, and closure rules. Maintainers triage the Project’s **Triage** view weekly.
+
+Contributors use the [issue chooser](https://github.com/OpenCoven/psyche-build/issues/new/choose) for public reports and proposals. [Support](SUPPORT.md#choose-the-right-route) explains which form to use. Suspected vulnerabilities follow the [private reporting route](SECURITY.md#report-a-vulnerability-privately).
 
 Beads was retired as the planning store on 2026-10-01 under #473. Do not run
 `bd` against this repository; its archive is described in
