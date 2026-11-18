@@ -87,7 +87,7 @@ for the source, workflow, and pinned Cask distinction.
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
 | Bonjour host discovery | Not a desktop product claim | Parser/discovery adapter source only; production connect flow planned under i7c.11/#200 | Validates advertised identity metadata for local discovery; it is not identity, authority, a production caller, or the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
-| Diagnostics/support bundle | Current visible diagnostics only in `v0.0.1`; on `main` the support-bundle v1 schema (#243, PR #278) has since gained a CLI, bounded persistence and provenance/persistence/lifecycle/updater collectors (PRs #462, #467) and an installed-provider collector (PR #483), with graphics, receipt and terminal collectors and any UI still absent | Planned | `v0.0.1` does not claim a support bundle; #199's recovery harness is source-only, including the bounded pre-Git and mid-Git cleanup-owner interruption scenarios and the opt-in application-restart observation, not packaged operator acceptance |
+| Diagnostics/support bundle | Source includes the v1 CLI and Help → Create support bundle (#476), bounded persistence, existing project/provider collectors and native engine/updater/pane-count projections. Receipt-owner data and terminal content are explicitly omitted | Planned | Packaged evidence must identify its exact source/artifact under #474/#476; no released-artifact or broader support claim follows from source tests. `v0.0.1` contains no support bundle |
 | Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
 | Team collaboration | Planned | Planned | Not a first-release claim |
 | Marketplace/plugin ecosystem | Planned | Planned | Must wait for stable capability, identity, and compatibility contracts |
@@ -206,17 +206,7 @@ or a generated artifact alone is insufficient.
   and check it against that release's `SHA256SUMS`. How the check behaves once a
   key exists is in [Release](./RELEASE.md#desktop-update-check); activating it is
   [#477](https://github.com/OpenCoven/psyche-build/issues/477).
-- **The macOS app cannot create a support bundle.** The only way to create one
-  is the `psyche support-bundle` command, run from a source checkout of this
-  repository. The DMG, which the Homebrew Cask installs, contains the app alone
-  and does not provide the command. The command collects provenance,
-  persistence, provider, pane-lifecycle, and updater state; it does not collect
-  graphics, terminal, or receipt state. If you report a problem from an
-  installed app, describe it yourself, and review any terminal output for
-  secrets before you share it. The contract is
-  [Support bundle v1](./SUPPORT-BUNDLE-V1.md); creating a bundle in the app and
-  the remaining collectors are
-  [#476](https://github.com/OpenCoven/psyche-build/issues/476).
+- **Creating a support bundle from Help requires Node.js.** The source action needs the supported Node.js prerequisite and shows visible guidance when it is unavailable. Raw terminal content and authoritative receipt data are explicitly omitted; snapshots remain unverified. The CLI remains available from a source checkout with its own documented omissions. See [Support bundle v1](./SUPPORT-BUNDLE-V1.md#application-help-action) and [#476](https://github.com/OpenCoven/psyche-build/issues/476) for the contract and exact-source packaged evidence. This source capability does not change what previously released artifacts contain.
 
 ## Current known deferrals
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-bundle-cancel"
+description = "Enables the support_bundle_cancel command without any pre-configured scope."
+commands.allow = ["support_bundle_cancel"]
+
+[[permission]]
+identifier = "deny-support-bundle-cancel"
+description = "Denies the support_bundle_cancel command without any pre-configured scope."
+commands.deny = ["support_bundle_cancel"]

@@ -134,6 +134,7 @@
           </div>
 
           <div class="sidebar-foot">
+            <button id="help-toggle" class="chrome-btn" type="button" aria-haspopup="dialog" aria-controls="help-overlay">Help</button>
             <details class="sidebar-settings" id="sidebar-settings">
               <summary title="Theme and background">
                 <span class="appearance-swatch" aria-hidden="true"></span>
@@ -525,11 +526,28 @@
       <div class="help-overlay" id="help-overlay" hidden>
         <div class="help-card" role="dialog" aria-modal="true" aria-labelledby="help-title">
           <div class="help-head">
-            <span class="help-title" id="help-title">Keyboard</span>
+            <span class="help-title" id="help-title">Help</span>
             <span class="help-sub">press esc to close</span>
+            <button id="help-close" class="support-button" type="button">Close Help</button>
           </div>
           <div class="help-grid" id="help-grid"></div>
+          <button id="support-bundle-open" class="support-button" type="button" aria-haspopup="dialog" aria-controls="support-bundle-dialog">Create support bundle</button>
         </div>
+      </div>
+
+      <div class="help-overlay support-overlay" id="support-bundle-dialog" role="dialog" aria-modal="true" aria-labelledby="support-bundle-title" hidden>
+        <section class="help-card">
+          <h2 id="support-bundle-title">Create support bundle</h2>
+          <p>Save bounded diagnostics locally. Terminal content, prompts and credentials are omitted. Nothing is uploaded.</p>
+          <p id="support-bundle-status" role="status" aria-live="polite">Ready to collect diagnostics for the open project.</p>
+          <div id="support-bundle-summary" class="support-summary" aria-label="Redaction and category summary"></div>
+          <div class="support-actions">
+            <button id="support-bundle-create" class="support-button" type="button">Create bundle</button>
+            <button id="support-bundle-cancel" class="support-button" type="button" disabled>Cancel export</button>
+            <button id="support-bundle-reveal" class="support-button" type="button" disabled>Reveal saved file</button>
+            <button id="support-bundle-close" class="support-button" type="button">Close</button>
+          </div>
+        </section>
       </div>
 
       <div class="agent-picker-overlay" id="agent-picker-overlay" hidden>
@@ -583,6 +601,7 @@
     <script src="./status.bundle.js" defer></script>
     <script src="./workspace.bundle.js" defer></script>
     <script src="./update.bundle.js" defer></script>
+    <script src="./support.bundle.js" defer></script>
     <script src="./runtime.bundle.js" defer></script>
     <script src="./runtime-debug.bundle.js" defer></script>
     <script src="./main.js" defer></script>

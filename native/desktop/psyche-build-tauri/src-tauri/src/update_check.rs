@@ -593,6 +593,13 @@ impl UpdateCheck {
         }
     }
 
+    /// Diagnostics must not wait behind a potentially blocked persistence call.
+    pub(crate) fn support_state(&self) -> Option<(bool, CheckState)> {
+        self.inner
+            .try_lock()
+            .map(|inner| (self.checks_enabled(&inner.persisted), inner.state))
+    }
+
     /// Claims the next check if one is due. Returns false when checks are off,
     /// unsupported, already running, or not yet due.
     fn begin_check(&self, now_seconds: i64, force: bool) -> bool {
