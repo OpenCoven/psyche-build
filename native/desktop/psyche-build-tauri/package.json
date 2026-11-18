@@ -5,7 +5,6 @@
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
     "build:web:debug": "node scripts/build-web.mjs --debug",
-
     "build": "pnpm build:web && tauri build",
     "check:runtime-bundle": "pnpm build:web && git diff --exit-code -- web/runtime.bundle.js",
     "check:release-contract": "node ../../../scripts/verify-tauri-release-contract.mjs --target-dir src-tauri/target",
@@ -29,7 +28,7 @@
     "@codemirror/view": "6.43.15",
     "@lezer/highlight": "1.2.5",
     "@opencoven/psyche-vim-core": "workspace:*",
-    "@tauri-apps/plugin-clipboard-manager": "2.3.2",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "codemirror": "6.0.2"
   },
   "devDependencies": {

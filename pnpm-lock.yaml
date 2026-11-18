@@ -188,7 +188,7 @@ importers:
         specifier: workspace:*
         version: link:../../../packages/vim-core
       '@tauri-apps/plugin-clipboard-manager':
-        specifier: 2.3.2
+        specifier: ^2.3.2
         version: 2.3.2
       codemirror:
         specifier: 6.0.2
