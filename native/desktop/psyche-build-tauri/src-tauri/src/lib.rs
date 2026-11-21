@@ -1982,7 +1982,7 @@ fn browser_shortcut_secrets_match(expected: &str, supplied: &str) -> bool {
 fn random_browser_shortcut_secret() -> Result<String, String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .map_err(|error| format!("failed to generate browser shortcut secret: {error}"))?;
     let mut secret = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
