@@ -5,7 +5,7 @@
  * Hook scripts are stored in .psyche/hooks/ and receive context via environment variables.
  */
 
-import { execSync, spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import { chmodSync, existsSync, accessSync, constants, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import path from 'path';
 import os from 'os';
@@ -221,7 +221,7 @@ export async function triggerHookSync(
   LogService.getInstance().debug(startMsg, 'hooks');
 
   try {
-    const output = execSync(hookPath, {
+    const output = execFileSync(hookPath, [], {
       env: env as NodeJS.ProcessEnv,
       cwd: projectRoot,
       encoding: 'utf-8',
