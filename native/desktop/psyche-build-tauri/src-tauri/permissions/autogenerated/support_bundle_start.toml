@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-bundle-start"
+description = "Enables the support_bundle_start command without any pre-configured scope."
+commands.allow = ["support_bundle_start"]
+
+[[permission]]
+identifier = "deny-support-bundle-start"
+description = "Denies the support_bundle_start command without any pre-configured scope."
+commands.deny = ["support_bundle_start"]
