@@ -18,7 +18,7 @@ print(pin)
 PY
 )
 case "$(uname -s)" in
-  Darwin) offline=(sandbox-exec -p '(version 1)(allow default)(deny network*)') ;;
+  Darwin) offline=(sandbox-exec -D "FIXTURE=$(cd "$work" && pwd -P)" -p '(version 1)(allow default)(deny network*)(allow network* (local unix-socket (subpath (param "FIXTURE"))))') ;;
   Linux) offline=(sudo -n unshare --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups) ;;
   *) echo "Requires a macOS or Linux offline sandbox" >&2; exit 1 ;;
 esac

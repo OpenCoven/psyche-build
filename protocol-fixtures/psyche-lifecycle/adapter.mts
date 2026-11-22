@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { planOrchestrationTask } from '../../src/orchestration/planner.js';
-import { actor, effects, human, observe, openNative, projectRoot } from './native.mts';
+import { actor, effects, human, observe, openNative, projectRoot, reconnect } from './native.mts';
 
 const profile = 'psyche.experimental.adapter-lifecycle.v1';
 const input = JSON.parse(readFileSync(0, 'utf8'));
@@ -14,25 +14,36 @@ const command = (id: string, kind: string, payload: object, principal: typeof hu
 });
 
 async function run() {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return deny('unsupported_request');
+  const fields = ['phase', 'profile', 'reader_version', 'request_hex', 'request_id', 'task_id', 'action_id', 'fault'];
+  if (Object.keys(input).some(key => !fields.includes(key))) return deny('unsupported_request');
+  if (!['first', 'replay', 'rollback'].includes(input.phase) || ![undefined, 'agent_approval', 'cancel', 'lost_ack'].includes(input.fault)) return deny('unsupported_request');
+  if (input.profile !== profile) return deny('unsupported_version');
   if (input.phase === 'rollback') {
+    if (![input.task_id, input.action_id].every(id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id))) return deny('unsupported_request');
     const reader = fileURLToPath(new URL('./reopen.mts', import.meta.url));
     return JSON.parse(execFileSync(process.execPath, [...process.execArgv, reader, input.task_id, input.action_id], { encoding: 'utf8' }));
   }
-  if (input.profile !== profile) return deny('unsupported_version');
+  if (typeof input.request_hex !== 'string' || input.request_hex.length > 8192 || !/^(?:[a-f0-9]{2})+$/.test(input.request_hex)) return deny('unsupported_request');
   const requestBytes = Buffer.from(input.request_hex, 'hex');
-  const request = JSON.parse(requestBytes.toString());
   const digest = 'sha256:' + createHash('sha256').update(requestBytes).digest('hex');
   // This fixture admits only the producer's exact synthetic launch golden.
   if (digest !== 'sha256:75d651c5eb7f6e3ccd65631fce08afdcb8ac2a800bc0d8db55eaf9cf43519d04') return deny('unsupported_request');
-  if (input.phase !== 'first') {
+  const request = JSON.parse(requestBytes.toString());
+  if (input.phase === 'replay' || existsSync('fixture-binding.json')) {
     const { version, requestId, requestDigest, action } = JSON.parse(readFileSync('fixture-binding.json', 'utf8'));
     if (input.reader_version !== version) return deny('incompatible_downgrade');
     if (input.request_id !== requestId || digest !== requestDigest) return deny('stale_correlation');
-    assert.equal(input.phase, 'replay');
     const native = await openNative(2);
-    await native.runtime.submit(action);
-    return { ...observe(native, action.payload.taskId, action.id), request_id: requestId, request_digest: requestDigest };
+    const position = native.journal.sequence;
+    const replay = await native.runtime.submit(action);
+    await reconnect(native, 2, action.payload.taskId, action.id);
+    const observed = observe(native, action.payload.taskId, action.id);
+    assert.equal(replay.status, observed.state);
+    assert.equal(native.journal.sequence, position);
+    return { ...observed, request_id: requestId, request_digest: requestDigest };
   }
+  if (input.reader_version !== 1) return deny('incompatible_downgrade');
   if (input.request_id !== request.request_id) return deny('stale_correlation');
   const native = await openNative(1, input.fault === 'lost_ack');
   const plan = planOrchestrationTask({ taskId: randomUUID(), operationId: randomUUID(), projectRoot,
@@ -69,6 +80,7 @@ async function run() {
     return deny(receipt!.code!);
   }
   await submit(command(randomUUID(), 'approval.resolve', resolution));
+  await reconnect(native, 1, taskId, action.id);
   return { ...observe(native, taskId, action.id), request_id: request.request_id, request_digest: digest };
 }
 console.log(JSON.stringify(await run()));

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { ControlClient } from '../../src/control/client.js';
+import { ControlServer } from '../../src/control/server.js';
+import { createControlCredentialStore } from '../../src/control/credentials.js';
 import { ControlJournal } from '../../src/control/journal.js';
 import { createCanonicalElementSemantics } from '../../src/control/policy.js';
 import { ControlRuntime } from '../../src/control/runtime.js';
@@ -48,4 +52,30 @@ export function observe({ runtime, journal }: Awaited<ReturnType<typeof openNati
   assert.equal(recorded.taskId, taskId);
   return { task_id: taskId, action_id: actionId, approval_id: approvalId, approval_digest: payloadDigest,
     receipt_hex: Buffer.from(bytes).toString('hex'), state: recorded.state, executions: effects() };
+}
+
+/** Two separate authenticated read connections to the native host over fixture-local IPC. */
+export async function reconnect(native: Awaited<ReturnType<typeof openNative>>, epoch: number, taskId: string, actionId: string) {
+  const credentials = await createControlCredentialStore({
+    projectRoot, filePath: path.join(projectRoot, 'fixture-credentials.json'), stateRoot: projectRoot,
+  });
+  const endpoint = 'fixture-control.sock';
+  const server = await ControlServer.start({ endpoint, projectRoot, ownerEpoch: epoch, credentials, runtime: native.runtime });
+  try {
+    const expected = native.runtime.receiptForTask(actionId, taskId);
+    assert(expected);
+    for (let connection = 0; connection < 2; connection++) {
+      const client = await ControlClient.connect({ endpoint, projectRoot, clientName: 'offline-canary', token: await credentials.operatorToken() });
+      try {
+        const receipt = await client.actionStatus(actionId, { taskId });
+        assert.equal(receipt?.taskId, taskId);
+        assert.equal(receipt?.actionId, actionId);
+        assert.equal(receipt?.state, expected.state);
+      } finally {
+        await client.close();
+      }
+    }
+  } finally {
+    await server.close();
+  }
 }
