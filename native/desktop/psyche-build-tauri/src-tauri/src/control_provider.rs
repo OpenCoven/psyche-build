@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::Read as StdRead;
 #[cfg(unix)]
@@ -307,7 +308,12 @@ fn normalize_canonical_identity(canonical: &Path) -> String {
 }
 
 fn project_identity_digest(identity: &str) -> String {
-    format!("{:x}", Sha256::digest(identity.as_bytes()))
+    let digest = Sha256::digest(identity.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn project_identity_hash(identity: &str) -> String {
