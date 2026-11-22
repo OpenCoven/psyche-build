@@ -174,7 +174,7 @@ describe('Tauri browser control provider contract', () => {
   it('registers the provider manager and cryptographic dependencies', () => {
     expect(lib).toContain('mod control_provider;');
     expect(lib).toContain('.manage(ControlProviderState::default())');
-    expect(cargo).toContain('sha2 = "0.10"');
+    expect(cargo).toContain('sha2 = "0.11"');
     expect(cargo).toContain('base64 = "0.22"');
   });
 
