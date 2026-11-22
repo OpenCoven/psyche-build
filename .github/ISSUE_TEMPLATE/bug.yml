@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you for helping improve Psyche Build. Search existing issues and review [SUPPORT.md](../../SUPPORT.md) and the [support matrix](../../docs/SUPPORT-MATRIX.md) first.
+        Thank you for helping improve Psyche Build. Search existing issues and review [SUPPORT.md](https://github.com/OpenCoven/psyche-build/blob/main/SUPPORT.md) and the [support matrix](https://github.com/OpenCoven/psyche-build/blob/main/docs/SUPPORT-MATRIX.md) first.
 
         This is public and retained. Do not disclose credentials, tokens, passwords, private keys, certificates, signing material, raw prompts, unrestricted terminal output, private repository contents, complete environment dumps, private service URLs, unredacted personal paths, or vulnerability details. Use the private security link in the issue chooser for suspected vulnerabilities.
   - type: input

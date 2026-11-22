@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        A maintainer applies the `outcome` label after approving this proposal; until then it stays in triage. An outcome owns an exit gate and closes only by hand, with an evidence comment tied to immutable source. Work items become its sub-issues. See [Tracking work](../../docs/TRACKER.md). This is a public issue.
+        A maintainer applies the `outcome` label after approving this proposal; until then it stays in triage. An outcome owns an exit gate and closes only by hand, with an evidence comment tied to immutable source. Work items become its sub-issues. See [Tracking work](https://github.com/OpenCoven/psyche-build/blob/main/docs/TRACKER.md). This is a public issue.
   - type: textarea
     id: outcome
     attributes:
