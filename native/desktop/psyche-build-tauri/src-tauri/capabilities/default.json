@@ -68,6 +68,10 @@
     "allow-control-provider-complete",
     "allow-control-provider-shutdown",
     "allow-control-operator-submit",
-    "allow-control-state"
+    "allow-control-state",
+    "allow-support-bundle-start",
+    "allow-support-bundle-status",
+    "allow-support-bundle-cancel",
+    "allow-support-bundle-reveal"
   ]
 }

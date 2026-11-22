@@ -566,23 +566,9 @@ explicit harness/operator recovery marker. It includes a successful clean
 cleanup control and does not claim mid-Git interruption, automatic crash
 reconciliation, or packaged acceptance.
 
-The merged support-bundle v1 contract is versioned, deterministic, bounded by
-time, count, record, and total size, cancellable, and redacts by default. PR
-#462 gave it a production CLI and bounded persistence, and PR #467 added
-lifecycle and updater collectors. Provider, graphics, receipt and terminal
-collectors and any UI remain absent, and a CLI-collected bundle is always
-`unverified` because it holds no control-plane authority.
+The support-bundle v1 contract is versioned, deterministic, bounded by time, count, record and total size, cancellable, and redacts by default. PRs #462/#467/#483 delivered the CLI, bounded persistence and existing collectors. #476 adds the application Help action through the same pipeline, native WebView-engine/updater/pane-count projections and explicit omissions for unavailable authoritative receipts and all terminal content. Both CLI and application snapshots remain unverified; packaged observation and production release acceptance are separate gates. See [Support bundle v1](./SUPPORT-BUNDLE-V1.md#application-help-action).
 
-#199 closed on 2026-09-16; #475 and #476 own what remains. The harness covers the failure classes reachable without a
-running application, including the unavailable-provider routing and detection
-boundary and the replaced-tmux-identity rebinding boundary; application
-upgrade recovery is deliberately uncovered and the support-bundle production
-surface is incomplete. Application restart is covered by the opt-in
-`pnpm recovery:restart` scenario rather than by the default harness, so it is
-observed on request and does not gate a required check. Those follow observed #474
-operator cases rather than being inferred, and only focused, safe portions of
-former PR #190 should be integrated where they materially improve the bounded
-contract.
+#199 closed on 2026-09-16; #475 and #476 own what remains. The harness covers the failure classes reachable without a running application, including the unavailable-provider routing and detection boundary and the replaced-tmux-identity rebinding boundary; application upgrade recovery is deliberately uncovered. Support-bundle creation is provided by the Help action described above, with exact-source/package evidence owned by #476; it does not establish #474 production acceptance. Application restart is covered by the opt-in `pnpm recovery:restart` scenario rather than by the default harness, so it is observed on request and does not gate a required check. Those follow observed #474 operator cases rather than being inferred, and only focused, safe portions of former PR #190 should be integrated where they materially improve the bounded contract.
 
 ## Stage 4 — contributor and security readiness (delivered)
 
