@@ -30,6 +30,7 @@
 		43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */; };
 		47D56E00948FBC9A38764DAC /* RemoteActionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F1FA349C4783166939B55D /* RemoteActionStoreTests.swift */; };
 		480491FCFB2DDD8E9D6D7767 /* RemoteActionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 203E9FCF5A986D5563D6FE43 /* RemoteActionPresentationTests.swift */; };
+		4811620FEECCC3459A1549C0 /* PaneComposerRotationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB18999FD02E6BB10FB1CC37 /* PaneComposerRotationUITests.swift */; };
 		4A373F936E3C0BAC6C16B32A /* TerminalSessionRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31B908EB65EF4C2EA68E8A81 /* TerminalSessionRegistryTests.swift */; };
 		4AB0F1275B1595BBDFA089EC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53CD9B827118A43330ED5907 /* SettingsView.swift */; };
 		4E7FC9584A7DF9B3D9DCD285 /* CreatePaneForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = E199D1958A85D0E5AA22B1D5 /* CreatePaneForm.swift */; };
@@ -224,6 +225,7 @@
 		E6A1D2D3833898A9E46B0861 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransportTests.swift; sourceTree = "<group>"; };
 		E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedHostStoreTests.swift; sourceTree = "<group>"; };
+		EB18999FD02E6BB10FB1CC37 /* PaneComposerRotationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneComposerRotationUITests.swift; sourceTree = "<group>"; };
 		EF803A7087CE4B5777C57208 /* TerminalKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKey.swift; sourceTree = "<group>"; };
 		F7313D981B100847A9B66306 /* CodingKeyRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingKeyRow.swift; sourceTree = "<group>"; };
 		F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessagesTests.swift; sourceTree = "<group>"; };
@@ -413,6 +415,7 @@
 		9A3699EA12952DD723343768 /* PsycheAppUITests */ = {
 			isa = PBXGroup;
 			children = (
+				EB18999FD02E6BB10FB1CC37 /* PaneComposerRotationUITests.swift */,
 				A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */,
 			);
 			path = PsycheAppUITests;
@@ -754,6 +757,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4811620FEECCC3459A1549C0 /* PaneComposerRotationUITests.swift in Sources */,
 				D1B3875E9E7646C48D686F83 /* PsycheAppUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
