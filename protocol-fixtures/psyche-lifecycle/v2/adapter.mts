@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readSync, writeFileSync, writeSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readSync, writeFileSync, writeSync } from 'node:fs';
 import { runFixture } from '../adapter.mts';
 import { effects, openNative } from '../native.mts';
 
 const store = 'v2-binding.json';
+const executions = 'v2-executions.ndjson';
 const refusal = 'v2-refusal';
 const deny = (code: string) => ({ code, executions: effects() });
 const stored = () => JSON.parse(readFileSync(store, 'utf8'));
@@ -12,7 +13,8 @@ const hash = (bytes: Buffer) => 'sha256:' + createHash('sha256').update(bytes).d
 function invokeSink() {
   const fd = Number(process.env.PSYCHE_TEST_EFFECT_FD);
   if (!Number.isSafeInteger(fd) || fd < 3) throw new Error('missing test effect channel');
-  const frame = Buffer.from(JSON.stringify(stored().binding) + '\n');
+  const { binding } = stored();
+  const frame = Buffer.from(JSON.stringify(binding) + '\n');
   let sent = 0;
   while (sent < frame.length) sent += writeSync(fd, frame, sent, frame.length - sent);
   const response = Buffer.alloc(37);
@@ -22,7 +24,9 @@ function invokeSink() {
     if (!size) throw new Error('missing durable effect acknowledgement');
     offset += size;
   }
-  if (!/^[a-f0-9-]{36}\n$/.test(response.toString('ascii'))) throw new Error('invalid effect acknowledgement');
+  const execution_id = response.toString('ascii').trimEnd();
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(execution_id)) throw new Error('invalid effect acknowledgement');
+  appendFileSync(executions, JSON.stringify({ execution_id, binding }) + '\n', { mode: 0o600, flush: true });
 }
 
 async function run() {
@@ -61,6 +65,8 @@ async function run() {
     refusal(code, outcomeId) { writeFileSync(refusal, JSON.stringify({ code, outcomeId }), { flag: 'wx', mode: 0o600 }); },
   });
   if ('code' in native) return native;
-  return { ...stored().binding, ...native };
+  const events = readFileSync(executions, 'utf8').trimEnd().split('\n');
+  if (events.length !== 1) throw new Error('unexpected native execution count');
+  return { ...stored().binding, ...native, execution_id: JSON.parse(events[0]).execution_id };
 }
 console.log(JSON.stringify(await run()));

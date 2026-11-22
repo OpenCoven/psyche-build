@@ -11,6 +11,7 @@ def check(result, pin):
     def refusal(case, phase, probe, code, count):
         expected[case, phase, probe] = (code, count)
     for probe, code in [("profile_psyche.experimental.adapter-lifecycle.v2.next", "unsupported_version"),
+                        ("profile_psyche.experimental.adapter-lifecycle.v2.retired", "unsupported_version"),
                         ("reader_version_0", "incompatible_downgrade"), ("reader_version_3", "incompatible_downgrade"),
                         ("fault_unrecognized", "unsupported_request")]:
         refusal("unknown_input", "first", probe, code, 0)
@@ -18,10 +19,14 @@ def check(result, pin):
     for case, code in [("agent_approval", "operator_required"), ("cancel", "action_invalidated")]:
         for phase in ("first", "replay", "rollback"):
             refusal(case, phase, "initial" if phase == "first" else "reopen", code, 0)
-    for probe, phase in [("request_id", "replay"), ("payload_digest", "replay"),
-                         ("wrong_task_id", "rollback"), ("wrong_action_id", "rollback")]:
+    for probe, phase in [("request_id", "replay"), ("payload_digest", "replay")]:
         refusal("success", phase, probe, "stale_correlation", 1)
-    refusal("success", "replay", "downgrade", "incompatible_downgrade", 1)
+    for case in ("success", "lost_ack"):
+        for probe in ("wrong_task_id", "wrong_action_id"):
+            refusal(case, "rollback", probe, "stale_correlation", 1)
+        for phase in ("replay", "rollback"):
+            refusal(case, phase, "downgrade", "incompatible_downgrade", 1)
+            refusal(case, phase, "unknown_profile", "unsupported_version", 1)
     rows = result["cases"]
     denials = {(r["case"], r["phase"], r["probe"]): (r["code"], r["executions"]) for r in rows if "code" in r}
     if denials != expected or len(rows) != len(expected) + 6:
