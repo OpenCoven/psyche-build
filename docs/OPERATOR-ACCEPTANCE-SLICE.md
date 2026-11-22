@@ -7,6 +7,10 @@ This runbook advances the remaining packaged Tauri/tmux acceptance gate with one
 bounded disposable workspace. It does not reopen or repeat release construction,
 signing, notarization, checksum, publication, or Homebrew packaging work.
 
+This runbook and its manifest are pinned to the published `v0.0.1` release. To
+record gates G1–G4 on a macOS public beta release candidate, use the
+[beta acceptance pass](./BETA-ACCEPTANCE.md) and its own manifest instead.
+
 ## Evidence subjects
 
 Keep these subjects separate throughout collection:
@@ -97,14 +101,7 @@ ad-hoc** candidate named **Psyche Build Acceptance** with identifier
 the fixed development channel, or the production default profile. Do not apply
 its observations retroactively to the public `v0.0.1`/`v0.0.2` artifacts.
 
-This profile is a conventional storage and subprocess-routing boundary, **not a
-macOS sandbox**. It makes the local project/terminal/tmux/files/Git/settings/
-restart path available for a new candidate without importing the active cockpit.
-It deliberately excludes provider-backed lanes, remote Git/PR success,
-clipboard/opener integration, and automatic browser restoration. Those rows
-remain unobserved, not passed. A disposable macOS account remains necessary for
-acceptance requiring isolation from OS credentials, existing TCC grants, system
-services, arbitrary shell commands, or unrestricted web content.
+This profile is a conventional storage and subprocess-routing boundary, **not a macOS sandbox**. It makes the local project/terminal/tmux/files/Git/settings/ restart path available for a new candidate without importing the active cockpit. It deliberately excludes provider-backed lanes, remote Git/PR success, general clipboard/opener integration, and automatic browser restoration. The scoped support-bundle reveal command is an explicit exception: it can reveal only its verified saved output and does not enable the general opener plugin. Those rows remain unobserved, not passed. A disposable macOS account remains necessary for acceptance requiring isolation from OS credentials, existing TCC grants, system services, arbitrary shell commands, or unrestricted web content.
 
 #### Construct without launching
 

@@ -82,11 +82,12 @@ for the source, workflow, and pinned Cask distinction.
 | File browsing and bounded diff inspection | Supported / source-supported | Not a first mobile-beta claim unless separately accepted | Large content must remain bounded |
 | Ritual discovery and launch | Supported from source where current paths are accepted | Blocked pending #242 execution and capability-gated controls; PR #322 publishes bounded ritual metadata on `main` only | Fixtures, simulator menus, or a merged publication slice do not establish production mobile support |
 | Merge, pull request, and cleanup workflows | Supported / source-supported | Not a first mobile-beta claim unless explicitly accepted | Consequential effects remain operator-visible and explicit |
-| Pane/browser control over MCP | Source-supported bounded interface | Not a direct mobile claim | Requires project scope, exact generations, leases, approvals where necessary, receipts, and revocation |
+| Pane/browser control over MCP: list resources, request a lease, read action status | Source-supported bounded interface | Not a direct mobile claim | Requires project scope and an authenticated task binding |
+| Pane/browser control over MCP: lease grant, approve-once, browser provider registration, and every leased pane or browser operation | **Unavailable** | Not a direct mobile claim | The production owner refuses operator commands with `operator_authority_unavailable` and provider registration with `provider_authority_unavailable`, so no lease is ever granted. The source and tests implement the contract; a native user-presence approval broker is a prerequisite. See [Agent surface control](./AGENT-SURFACE-CONTROL.md#production-availability) |
 | Local daemon / bridge | Source-supported and used by companion paths | Planned companion path | Unavailable optional providers fail closed without disabling core local workflows |
 | Bonjour host discovery | Not a desktop product claim | Parser/discovery adapter source only; production connect flow planned under i7c.11/#200 | Validates advertised identity metadata for local discovery; it is not identity, authority, a production caller, or the remote-connectivity architecture |
 | Remote/off-LAN continuity | Planned | Planned under #200 | Must preserve identity and authority across transport changes |
-| Diagnostics/support bundle | Current visible diagnostics only in `v0.0.1`; on `main` the support-bundle v1 schema (#243, PR #278) has since gained a CLI, bounded persistence and provenance/persistence/lifecycle/updater collectors (PRs #462, #467) and an installed-provider collector (PR #483), with graphics, receipt and terminal collectors and any UI still absent | Planned | `v0.0.1` does not claim a support bundle; #199's recovery harness is source-only, including the bounded pre-Git and mid-Git cleanup-owner interruption scenarios and the opt-in application-restart observation, not packaged operator acceptance |
+| Diagnostics/support bundle | Source includes the v1 CLI and Help → Create support bundle (#476), bounded persistence, existing project/provider collectors and native engine/updater/pane-count projections. Receipt-owner data and terminal content are explicitly omitted | Planned | Packaged evidence must identify its exact source/artifact under #474/#476; no released-artifact or broader support claim follows from source tests. `v0.0.1` contains no support bundle |
 | Automatic update | Supported only when release acceptance proves the configured path | Planned distribution-specific behavior | Update claims must identify source, version, integrity, rollback, and failure behavior |
 | Team collaboration | Planned | Planned | Not a first-release claim |
 | Marketplace/plugin ecosystem | Planned | Planned | Must wait for stable capability, identity, and compatibility contracts |
@@ -186,6 +187,26 @@ A public claim may move from planned to supported only when:
 
 Documentation, source presence, compile success, simulator success, test count,
 or a generated artifact alone is insufficient.
+
+## Current known limitations
+
+- **Initial prompts are visible in the process list for eight agents.** For
+  `claude`, `opencode`, `codex`, `gemini`, `qwen`, `pi`, `cursor`, and
+  `copilot`, the initial prompt is part of the agent's command line while the
+  agent runs, and any process of the same macOS user can read it. Do not put a
+  secret in an initial prompt for these agents. The per-agent record and the
+  owner's decision to ship the macOS public beta with it are in
+  [Agent prompt transport](./AGENT-PROMPT-TRANSPORT.md#known-limitation-in-the-macos-public-beta)
+  ([#523](https://github.com/OpenCoven/psyche-build/issues/523)).
+- **The macOS app does not check for updates.** The app is built with no update
+  signing key, so it makes no update request, shows no update notice, and hides
+  the **Check for updates** setting. You will not be told when a newer release
+  exists. To update, run `brew upgrade --cask psyche-build`, or download the new
+  DMG from the [releases page](https://github.com/OpenCoven/psyche-build/releases)
+  and check it against that release's `SHA256SUMS`. How the check behaves once a
+  key exists is in [Release](./RELEASE.md#desktop-update-check); activating it is
+  [#477](https://github.com/OpenCoven/psyche-build/issues/477).
+- **Creating a support bundle from Help requires Node.js.** The source action needs the supported Node.js prerequisite and shows visible guidance when it is unavailable. Raw terminal content and authoritative receipt data are explicitly omitted; snapshots remain unverified. The CLI remains available from a source checkout with its own documented omissions. See [Support bundle v1](./SUPPORT-BUNDLE-V1.md#application-help-action) and [#476](https://github.com/OpenCoven/psyche-build/issues/476) for the contract and exact-source packaged evidence. This source capability does not change what previously released artifacts contain.
 
 ## Current known deferrals
 

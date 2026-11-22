@@ -8,6 +8,7 @@ Psyche Build is developed in public, but source presence does not mean a platfor
 |---|---|
 | Reproducible product bug on a supported surface | [Bug report](https://github.com/OpenCoven/psyche-build/issues/new?template=bug.yml) |
 | Product or workflow proposal | [Feature request](https://github.com/OpenCoven/psyche-build/issues/new?template=feature.yml) |
+| A public outcome with an owner, an exit gate, and an evidence index | [Outcome proposal](https://github.com/OpenCoven/psyche-build/issues/new?template=outcome.yml) — a maintainer applies the `outcome` label only after approving it; see [Tracking work](docs/TRACKER.md) |
 | Incorrect, missing, or stale documentation | [Documentation report](https://github.com/OpenCoven/psyche-build/issues/new?template=documentation.yml) |
 | Suspected security vulnerability | [Private vulnerability report](https://github.com/OpenCoven/psyche-build/security/advisories/new) — never a public issue |
 | Implementation contribution | [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/CONTRIBUTOR-SAFETY.md`](docs/CONTRIBUTOR-SAFETY.md) |

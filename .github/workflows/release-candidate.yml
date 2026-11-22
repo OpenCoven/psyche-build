@@ -70,7 +70,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.sha }}
           fetch-depth: 0
@@ -127,9 +127,9 @@ jobs:
             echo "main_head=$MAIN_HEAD"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
@@ -138,6 +138,12 @@ jobs:
         with:
           toolchain: 1.95.0
           components: rustfmt
+
+      - name: Install tmux
+        # `pnpm test` drives a real tmux server (the recovery harness and the
+        # production daemon test). The hosted macOS image does not ship tmux,
+        # and ci.yml installs it before the same suite.
+        run: brew install tmux
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
@@ -161,6 +167,7 @@ jobs:
       - name: Verify shared TypeScript, protocol, and package surfaces
         run: |
           set -euo pipefail
+          pnpm --dir docs install --frozen-lockfile --ignore-scripts
           pnpm docs:focus:check
           pnpm --dir docs build
           pnpm test
@@ -194,7 +201,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.verify.outputs.candidate_sha }}
           fetch-depth: 0
@@ -232,9 +239,9 @@ jobs:
             echo "RUST_TARGET=$MATRIX_TARGET"
           } >> "$GITHUB_ENV"
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
@@ -437,7 +444,7 @@ jobs:
           echo "CANDIDATE_ARTIFACT_DIR=$CANDIDATE_DIR" >> "$GITHUB_ENV"
 
       - name: Upload candidate DMG
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: psyche-build-${{ env.CANDIDATE_ID }}-${{ matrix.arch }}
           path: ${{ env.CANDIDATE_ARTIFACT_DIR }}
@@ -490,7 +497,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Download candidate DMGs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: psyche-build-${{ env.CANDIDATE_ID }}-*
           path: candidate
@@ -570,7 +577,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload candidate artifacts and provenance
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: psyche-build-${{ env.CANDIDATE_ID }}
           path: candidate

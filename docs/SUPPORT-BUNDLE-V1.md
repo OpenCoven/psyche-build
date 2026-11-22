@@ -76,18 +76,7 @@ collector is represented as complete success.
 
 ## Threat model and redaction
 
-There are two safety boundaries: input normalization and final deterministic
-serialization. Secret-shaped keys, authorization values, bearer/basic tokens,
-known API-token formats, PEM material, sensitive assignments, infrastructure URLs,
-and absolute paths are redacted or omitted. Prompts, unrestricted terminal or
-repository content, diffs, environment maps, and source contents are omitted.
-Only explicitly bounded terminal tails, project-relative paths, allowlisted
-diagnostic categories, digests, and categorized errors may survive. Provenance
-uses a closed application/platform/architecture vocabulary and a bounded
-release version. Unknown
-top-level fields are omitted and counted. The redaction manifest records
-categories and counts, never original values; caller-supplied manifests are not
-trusted as evidence.
+There are two safety boundaries: input normalization and final deterministic serialization. Secret-shaped keys, authorization values, bearer/basic tokens, known API-token formats, PEM material, sensitive assignments, infrastructure URLs, and absolute paths are redacted or omitted. Prompts, unrestricted terminal or repository content, diffs, environment maps, and source contents are omitted. Only project-relative paths, allowlisted diagnostic categories, digests, and categorized errors may survive; arbitrary terminal text is always omitted. Provenance uses a closed application/platform/architecture vocabulary and a bounded release version. Unknown top-level fields are omitted and counted. The redaction manifest records categories and counts, never original values; caller-supplied manifests are not trusted as evidence.
 
 The support contract intentionally does not capture screenshots, network bodies,
 full process arguments, complete file paths, credentials, source contents, or
@@ -235,8 +224,7 @@ is reported as `recovery_required`. On cancellation the collector rejects
 instead of reporting a zero count, and the collection turns that into
 `collection_timeout_or_cancelled` and `recovery_required`.
 
-Graphics, receipt, and terminal facts remain uncollected; those sections are
-empty rather than fabricated.
+The CLI does not collect graphics, receipt or terminal facts; those sections remain empty rather than fabricated. The application surface below adds a bounded native graphics projection and explicit category accounting. The CLI omission reasons are listed under [Not collected, and why](#not-collected-and-why).
 
 The project identity digest hashes the canonical project root, resolved the way
 the recovery readers resolve it, so one project reached through a symlink
@@ -256,6 +244,42 @@ bundle still serializes, so a collector with the wrong vocabulary silently
 reports nothing. Tests assert `omittedFields === 0` for the shipped collectors
 to keep that failure visible.
 
+### Not collected, and why
+
+The command leaves these sections of the bundle empty. An empty section here means "not looked at", not "nothing to report". The command's summary names them on its `not collected:` line.
+
+| Category | Bundle fields | Reason |
+|---|---|---|
+| Control receipts | `receipts`, `ownerEpoch` | No collector reads the control plane, so a bundle has no action receipts and no owner epoch. |
+| Diagnostic records | `records` | No collector emits diagnostic records. |
+| Graphics | `graphics` | The command has no graphics surface; graphics facts exist only in the desktop app. |
+| Terminal content | `terminalTail` | Terminal content is never collected; the sanitizer drops any terminal line a collector supplies. |
+
+These omissions describe the CLI collectors. The application action below supplies bounded native graphics facts and category-accounting records, while authoritative receipts remain explicitly unavailable. Terminal content is never collected in either surface.
+
+## Application Help action
+
+Help → Create support bundle reuses the v1 TypeScript collection, normalization, serialization and store interface. Its native filesystem adapter preserves the existing filename ownership, retention, permission and cancellation policies using descriptor-relative, no-follow operations; the CLI keeps its existing export behavior. The desktop package embeds a generated worker, so this path needs neither a source checkout nor an installed Psyche CLI. It uses the application's existing Node.js executable lookup and fails visibly if the supported Node prerequisite is unavailable. A supervised headless instance of the native executable performs Node discovery, filesystem setup, descriptor-relative persistence, verification and reveal preparation. It launches the embedded Node worker directly without a shell, with an explicit environment allowlist; inherited Node injection settings are excluded. The worker source is static public code; project and diagnostic input travel over stdin. It never starts an agent/provider, uploads data, or grants control-plane authority.
+
+Only the trusted main WebView may start, inspect, cancel or reveal an export. Native project authority must already admit the canonical project; the job retains its original project lease until it finishes. There is one active job, and stale job identifiers cannot control a newer job. A project switch does not redirect an export. Reveal revalidates the open project, owned destination, file permissions and SHA-256 rather than accepting a caller-chosen path. Symlinked runtime directories are refused before collection and checked again before writing. On macOS, reveal carries a native file-reference URL verified against the still-open inspected descriptor directly to Finder; it does not resolve the original pathname again. If that identity cannot be established, reveal fails visibly.
+
+| Category | Application accounting |
+| --- | --- |
+| Provenance | Build source SHA, release, platform and architecture; always unverified |
+| Persistence | Bounded project recovery/config-presence metadata; does not claim a native workspace snapshot |
+| Providers | Existing bounded filesystem survey only; no provider is executed |
+| Lifecycle | Bounded pane count from the main application snapshot; not an authority source |
+| Updater | Current native updater setting/state; no update check is started |
+| Graphics | Runtime WebView engine; acceleration and broader GPU qualification remain unknown |
+| Receipts | Explicitly omitted: this integration has no authoritative receipt-owner projection |
+| Terminal | Explicitly omitted: raw terminal content is never collected |
+
+Unavailable native projections are explicitly omitted, and omission records are included in the v1 diagnostic records. The UI shows collection/cancellation progress, failure guidance, redaction/omission counts, category accounting, truncation and retention warnings, and a local reveal action. Exported provenance remains unverified and cannot reach `complete`. A bundle requiring recovery is displayed as such even when its file was saved.
+
+Cancellation is cooperative until the store's atomic rename commit point. Before commit, cancellation removes the temporary file and reports cancelled; after commit, it returns the saved file. A native worker timeout, crash or invalid output without a verified terminal result is `recovery_required`, because it is not proof that no file was written. The existing 30-second collection deadline, 64 KiB payload cap, `0600` exclusive temporary-file creation and ten-bundle retention remain in force; the complete helper operation has a 35-second budget, a two-second cancellation grace period and a one-second reap allowance. The parent terminates the helper process group, releases the project lease and reports recovery if verification cannot finish. An unreaped helper fences further attempts so retries cannot accumulate blocked workers. Native admission uses an already-open exact project key, cached runtime facts and a nonblocking updater snapshot; unavailable snapshots are omitted. Native retention scans at most 4,096 directory entries and reports a retention warning if that bound is reached. Ordinary write failures preserve prior bundles and show safe guidance without copying exception text or personal paths.
+
+Source tests and standalone-worker execution do not establish packaged-app acceptance. #476 requires observation of the actual Help action and resulting file on an immutable local package, retained under #474; that observation does not establish release, signing, distribution or broader support acceptance.
+
 ## Rollback and recovery
 
 This foundation is additive and has no persistence migration. A caller can
@@ -266,3 +290,5 @@ normalization before disk I/O, preserve valid prior records after a corrupt
 tail, and surface storage failure as `partial` or `recovery_required` rather
 than blocking application startup. A later CLI/UI integration requires its own
 focused review for authority, clipboard, and clear-confirmation behavior.
+
+Native retention atomically claims each selected leaf into a private unpredictable quarantine before its final ownership check. Unknown replacement contents are restored without overwriting a newer leaf; if restoration is unavailable, their contents remain in a hidden `.retention-*` directory and the saved result reports a retention warning. The helper installs parent-disappearance supervision before Node discovery or filesystem work, for both creation and reveal, and retains it through child cleanup. Native persistence acknowledgements have a separate bounded input budget; malformed, oversized or closed broker input always settles the pending operation.

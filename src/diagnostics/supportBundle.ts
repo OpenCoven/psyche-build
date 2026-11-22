@@ -301,6 +301,7 @@ const SAFE_DIAGNOSTIC_VALUES = new Set([
   'recovery_required', 'running', 'stale', 'stopped', 'succeeded', 'unknown',
   'unavailable', 'unsupported', 'waiting', 'webgl', 'windows', 'x11', 'wayland',
   'arm64', 'aarch64', 'x86_64',
+  'wkwebview', 'webview2', 'webkitgtk',
 ]);
 // Record and collection error identifiers are a closed diagnostic vocabulary.
 // Dynamic authority identifiers use safeIdentifierDigest instead; these fields must
@@ -308,6 +309,8 @@ const SAFE_DIAGNOSTIC_VALUES = new Set([
 const SAFE_DIAGNOSTIC_CATEGORY_VALUES = new Set([
   ...SAFE_DIAGNOSTIC_VALUES,
   'a', 'b', 'alpha', 'beta', 'c', 'captured', 'collector', 'diagnostics',
+  'provenance', 'persistence', 'providers', 'lifecycle', 'updater', 'graphics',
+  'receipts', 'terminal', 'omitted', 'native', 'accounting',
   'disk', 'event', 'failed', 'first', 'fixture', 'four', 'gamma', 'later',
   'malformed', 'no_collectors', 'one', 'oversized-graph', 'path', 'path-test',
   'sample', 'slow-recovery', 'support-bundle', 'test', 'three', 'two', 'warning-two',

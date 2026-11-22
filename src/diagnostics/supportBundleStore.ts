@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SUPPORT_BUNDLE_SCHEMA } from './supportBundle.js';
 
@@ -23,6 +23,12 @@ export interface WrittenSupportBundle {
   /** Candidates retention could not delete or could not confirm as ours. */
   retentionFailures: number;
 }
+export interface NativeSupportStoreRequest {
+  filename: string;
+  serialized: string;
+  maxRetained: number;
+}
+export type NativeSupportStore = (request: NativeSupportStoreRequest, signal?: AbortSignal) => Promise<WrittenSupportBundle>;
 
 export function supportBundleDirectory(projectRoot: string): string {
   return path.join(projectRoot, '.psyche', 'runtime', 'support-bundles');
@@ -56,16 +62,32 @@ export async function writeSupportBundleFile(
     maxRetained?: number;
     /** `--out` exports a single file; it must never prune its destination. */
     retain?: boolean;
+    signal?: AbortSignal;
+    /** App exports may write only into this canonical project's owned directory. */
+    projectRoot?: string;
+    nativeStore?: NativeSupportStore;
   },
 ): Promise<WrittenSupportBundle> {
+  options.signal?.throwIfAborted();
+  if (options.projectRoot !== undefined) {
+    await assertScopedSupportDirectory(options.projectRoot, options.directory);
+    // Pathname checks alone cannot close a concurrent directory-replacement
+    // race. App exports require the native descriptor-relative backend.
+    if (!options.nativeStore) throw new Error('secure support store is unavailable');
+    return options.nativeStore({ filename: options.filename, serialized: options.serialized,
+      maxRetained: options.maxRetained ?? MAX_RETAINED_BUNDLES }, options.signal);
+  }
   await mkdir(options.directory, { recursive: true });
+  options.signal?.throwIfAborted();
   const filePath = path.join(options.directory, options.filename);
   const tempPath = path.join(
     options.directory,
     `.${options.filename}.${randomBytes(8).toString('hex')}.tmp`,
   );
   try {
+    options.signal?.throwIfAborted();
     await writeFile(tempPath, options.serialized, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    options.signal?.throwIfAborted();
     await rename(tempPath, filePath);
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => undefined);
@@ -78,7 +100,9 @@ export async function writeSupportBundleFile(
     removed: [],
     retentionFailures: 0,
   };
-  if (options.retain === false) {
+  // Rename is the commit point. A cancellation after it returns the saved
+  // file, never an assertion that no write happened.
+  if (options.retain === false || options.signal?.aborted) {
     return written;
   }
 
@@ -99,6 +123,7 @@ export async function writeSupportBundleFile(
     .sort();
   const keepAlongside = Math.max(0, retained - 1);
   for (const stale of owned.slice(0, Math.max(0, owned.length - keepAlongside))) {
+    if (options.signal?.aborted) break;
     const stalePath = path.join(options.directory, stale);
     if (!await isSupportBundleFile(stalePath)) {
       written.retentionFailures += 1;
@@ -113,6 +138,23 @@ export async function writeSupportBundleFile(
   }
 
   return written;
+}
+
+export async function assertScopedSupportDirectory(projectRoot: string, directory: string): Promise<void> {
+  const root = await realpath(projectRoot);
+  if (root !== path.resolve(projectRoot) || path.resolve(directory) !== supportBundleDirectory(root)) {
+    throw new Error('support directory is outside the canonical project');
+  }
+  let current = root;
+  for (const part of ['.psyche', 'runtime', 'support-bundles']) {
+    current = path.join(current, part);
+    try {
+      const entry = await lstat(current);
+      if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error('unsafe support directory');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
 }
 
 /**

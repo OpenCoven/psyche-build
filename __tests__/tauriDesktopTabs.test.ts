@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { desktopCargoPin } from './support/dependencyPins.js';
 import { readDesktopCommandSurface } from './support/desktopCompositionRoot.js';
 import { desktopSourceDefining } from './support/desktopRustSurface.js';
 
@@ -449,7 +450,7 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('manages per-webview shortcut authorization across navigation and destruction', () => {
-    expect(tauriCargo).toMatch(/^getrandom\s*=\s*"0\.2"/m);
+    expect(() => desktopCargoPin('getrandom')).not.toThrow();
     expect(tauriLib).toMatch(
       /const MIN_BROWSER_SHORTCUT_INTERVAL: Duration = Duration::from_millis\((?:75|80|90|100)\);/,
     );

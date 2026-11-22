@@ -1238,7 +1238,13 @@ export class ControlRuntime {
       command.id,
       command.actor.id,
       command.payload.taskId,
-      ...command.payload.grants.flatMap((grant) => [grant.target.kind, grant.target.id]),
+      ...command.payload.grants.flatMap((grant) => (
+        grant.target.kind === 'project' && grant.target.id === command.projectRoot
+          // The owner-selected root is identity, not caller-controlled display text.
+          // Scope and pane.create-only authority are still checked when granting.
+          ? [grant.target.kind]
+          : [grant.target.kind, grant.target.id]
+      )),
     ];
     const tooLarge = command.payload.grants.length > AGENT_CONTROL_LIMITS.leaseRequestGrants
       || command.payload.grants.some((grant) => (
@@ -1943,8 +1949,11 @@ export class ControlRuntime {
     try {
       await this.persistTerminalOutcome(idempotencyKey, sequence, outcome);
     } catch (error) {
+      // The key is client-supplied, so it is an argument to a constant format
+      // string and never part of the format itself.
       console.error(
-        `[control-runtime] durable outcome persistence failed for ${idempotencyKey}`,
+        '[control-runtime] durable outcome persistence failed for %s',
+        idempotencyKey,
         error,
       );
     } finally {
