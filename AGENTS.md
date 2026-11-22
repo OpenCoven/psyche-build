@@ -46,19 +46,16 @@ gh api repos/OpenCoven/psyche-build/issues/<N>/dependencies/blocked_by --jq '.[]
 
 ## Canonical routing
 
-Read only the documents needed for the change, but start here rather than reconstructing policy from historical plans:
+Use the [repository map](docs/REPOSITORY-MAP.md#change-routing) to find the owning code, constraints, and checks for your change.
 
-- [Post-release execution](docs/POST-RELEASE-EXECUTION.md) — current sequencing, concurrency, merge, and closure gates.
-- [Roadmap](docs/ROADMAP.md) — current outcome and support-policy snapshot.
-- [Support matrix](docs/SUPPORT-MATRIX.md) — what is supported, planned, compile-only, or unavailable.
-- [Control plane](docs/CONTROL-PLANE.md) — authority, actions, approvals, and receipts.
-- [Agent surface control](docs/AGENT-SURFACE-CONTROL.md) — bounded agent-facing control surfaces.
-- [Bridge security](docs/BRIDGE-SECURITY.md) — authentication, scope, transport, and failure boundaries.
-- [Release acceptance](docs/RELEASE-ACCEPTANCE.md) — evidence required for release and support claims.
-- [Contributing](CONTRIBUTING.md) — contributor workflow and platform prerequisites.
-- [Tracking work](docs/TRACKER.md) — issues, sub-issues, Project fields, and closure rules.
+| Task | Start here |
+| --- | --- |
+| Find or resume an issue | [Tracking work](docs/TRACKER.md#finding-work) and the live issue or PR |
+| Set up a checkout or run checks | [Contributing](CONTRIBUTING.md) |
+| Change delivery order or acceptance gates | [Roadmap](docs/ROADMAP.md#macos-first-rollout-focus) and [Post-release execution](docs/POST-RELEASE-EXECUTION.md) |
+| Change a support claim or qualify a release | [Support matrix](docs/SUPPORT-MATRIX.md) and [Release acceptance](docs/RELEASE-ACCEPTANCE.md) |
 
-Dated files under `docs/superpowers/` are design history unless the current roadmap explicitly marks one active.
+For architecture and security, follow the links for the affected surface in the repository map. Use the [plan classification](docs/superpowers/README.md) when consulting dated designs and plans.
 
 ## Deterministic entrypoints
 

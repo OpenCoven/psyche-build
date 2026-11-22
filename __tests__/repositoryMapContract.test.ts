@@ -1,11 +1,19 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fromMarkdown } from 'mdast-util-from-markdown';
 import { describe, expect, it } from 'vitest';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
 const map = read('docs/REPOSITORY-MAP.md');
+
+interface MarkdownNode {
+  children?: MarkdownNode[];
+  url?: string;
+  position?: { start: { line: number } };
+}
 
 describe('contributor repository map', () => {
   it('routes contributors to the current authority contracts', () => {
@@ -71,24 +79,33 @@ describe('contributor repository map', () => {
     }
   });
 
-  it('keeps every relative link in the top-level documents pointing at a file that exists', () => {
-    // The dated records under docs/superpowers/ are history and are not
-    // edited to follow later moves, so they are not checked.
-    const documents = [
-      ...readdirSync(root).filter((name) => name.endsWith('.md')),
-      ...readdirSync(resolve(root, 'docs'))
-        .filter((name) => name.endsWith('.md'))
-        .map((name) => `docs/${name}`),
-    ];
-    const broken = documents.flatMap((document) =>
-      [...read(document).matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)]
-        .map(([, target]) => target.split('#')[0])
-        .filter((target) => target !== '' && !/^[a-z][a-z0-9+.-]*:/i.test(target))
-        .filter((target) => !existsSync(resolve(root, dirname(document), decodeURIComponent(target))))
-        .map((target) => `${document} -> ${target}`),
-    );
+  it('keeps relative file links in tracked root and top-level docs resolvable', () => {
+    const brokenLinks: string[] = [];
 
-    expect(documents.length).toBeGreaterThan(20);
-    expect(broken).toEqual([]);
+    const files = execFileSync('git', ['ls-files', '-z', '--', '*.md'], {
+      cwd: root,
+      encoding: 'utf8',
+    }).split('\0').filter((file) => /^(?:docs\/)?[^/]+\.md$/.test(file));
+
+    expect(files.length).toBeGreaterThan(20);
+
+    for (const file of files) {
+      const markdown = fromMarkdown(readFileSync(join(root, file), 'utf8'));
+      const nodes: MarkdownNode[] = [markdown];
+      while (nodes.length > 0) {
+        const node = nodes.pop()!;
+        if (node.children) nodes.push(...node.children);
+        if (!node.url) continue;
+
+        const url = node.url;
+        if (/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(url)) continue;
+        const target = url.split(/[?#]/, 1)[0];
+        if (target && !existsSync(resolve(root, dirname(file), decodeURIComponent(target)))) {
+          brokenLinks.push(`${file}:${node.position?.start.line}: ${url}`);
+        }
+      }
+    }
+
+    expect(brokenLinks).toEqual([]);
   });
 });
