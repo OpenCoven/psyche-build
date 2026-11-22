@@ -1,19 +1,30 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { planOrchestrationTask } from '../../src/orchestration/planner.js';
 import { actor, effects, human, observe, openNative, projectRoot, reconnect } from './native.mts';
 
-const profile = 'psyche.experimental.adapter-lifecycle.v1';
-const input = JSON.parse(readFileSync(0, 'utf8'));
 const deny = (code: string) => ({ code, executions: effects() });
 const command = (id: string, kind: string, payload: object, principal: typeof human | typeof actor = human) => ({
   id, kind, idempotencyKey: id, ownerEpoch: 1, projectRoot, createdAt: new Date().toISOString(), actor: principal, payload,
 });
 
-async function run() {
+type FixtureHooks = {
+  onEffect?: () => void;
+  persist?: (requestHex: string, attemptId: string, taskId: string, actionId: string, approvalId: string, approvalDigest: string) => void;
+  refusal?: (code: string, outcomeId: string) => void;
+};
+
+// The v2 wrapper validates its own envelope before calling the shared, exact-golden Build fixture.
+type FixtureInput = {
+  phase: string; profile: string; reader_version: number; request_hex: string; request_id: string;
+  fault?: string; task_id?: string; action_id?: string;
+};
+
+export async function runFixture(input: FixtureInput, hooks: FixtureHooks = {}) {
+  const profile = 'psyche.experimental.adapter-lifecycle.v1';
   if (!input || typeof input !== 'object' || Array.isArray(input)) return deny('unsupported_request');
   const fields = ['phase', 'profile', 'reader_version', 'request_hex', 'request_id', 'task_id', 'action_id', 'fault'];
   if (Object.keys(input).some(key => !fields.includes(key))) return deny('unsupported_request');
@@ -22,7 +33,7 @@ async function run() {
   if (input.phase === 'rollback') {
     if (![input.task_id, input.action_id].every(id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id))) return deny('unsupported_request');
     const reader = fileURLToPath(new URL('./reopen.mts', import.meta.url));
-    return JSON.parse(execFileSync(process.execPath, [...process.execArgv, reader, input.task_id, input.action_id], { encoding: 'utf8' }));
+    return JSON.parse(execFileSync(process.execPath, [...process.execArgv, reader, input.task_id!, input.action_id!], { encoding: 'utf8' }));
   }
   if (typeof input.request_hex !== 'string' || input.request_hex.length > 8192 || !/^(?:[a-f0-9]{2})+$/.test(input.request_hex)) return deny('unsupported_request');
   const requestBytes = Buffer.from(input.request_hex, 'hex');
@@ -34,7 +45,7 @@ async function run() {
     const { version, requestId, requestDigest, action } = JSON.parse(readFileSync('fixture-binding.json', 'utf8'));
     if (input.reader_version !== version) return deny('incompatible_downgrade');
     if (input.request_id !== requestId || digest !== requestDigest) return deny('stale_correlation');
-    const native = await openNative(2);
+    const native = await openNative(2, false, hooks.onEffect);
     const position = native.journal.sequence;
     const replay = await native.runtime.submit(action);
     await reconnect(native, 2, action.payload.taskId, action.id);
@@ -45,7 +56,7 @@ async function run() {
   }
   if (input.reader_version !== 1) return deny('incompatible_downgrade');
   if (input.request_id !== request.request_id) return deny('stale_correlation');
-  const native = await openNative(1, input.fault === 'lost_ack');
+  const native = await openNative(1, input.fault === 'lost_ack', hooks.onEffect);
   const plan = planOrchestrationTask({ taskId: randomUUID(), operationId: randomUUID(), projectRoot,
     prompt: 'Offline controlled submit', lanes: [{ id: randomUUID(), mode: 'isolated-worktree' }] });
   const taskId = plan.lanes[0].taskId;
@@ -65,10 +76,13 @@ async function run() {
   const { approvalId, payloadDigest } = pending.value as {approvalId: string; payloadDigest: string};
   assert(approvalId && payloadDigest && effects() === 0);
   writeFileSync('fixture-binding.json', JSON.stringify({ version: 1, requestId: request.request_id, requestDigest: digest, action }), { flag: 'wx', mode: 0o600 });
+  hooks.persist?.(input.request_hex, request.attempt_id, taskId, action.id, approvalId, payloadDigest);
   const resolution = { approvalId, payloadDigest, decision: 'approve' };
   if (input.fault === 'agent_approval') {
-    const result = await submit(command(randomUUID(), 'approval.resolve', resolution, actor));
+    const decision = command(randomUUID(), 'approval.resolve', resolution, actor);
+    const result = await submit(decision);
     assert(result.status === 'rejected');
+    hooks.refusal?.(result.code, decision.id);
     return deny(result.code);
   }
   if (input.fault === 'cancel') {
@@ -77,10 +91,13 @@ async function run() {
     await submit(command(randomUUID(), 'approval.resolve', resolution));
     const receipt = native.runtime.receiptForTask(action.id, taskId);
     assert.equal(receipt?.state, 'failed');
+    hooks.refusal?.(receipt!.code!, action.id);
     return deny(receipt!.code!);
   }
   await submit(command(randomUUID(), 'approval.resolve', resolution));
   await reconnect(native, 1, taskId, action.id);
   return { ...observe(native, taskId, action.id), request_id: request.request_id, request_digest: digest };
 }
-console.log(JSON.stringify(await run()));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  console.log(JSON.stringify(await runFixture(JSON.parse(readFileSync(0, 'utf8')))));
+}

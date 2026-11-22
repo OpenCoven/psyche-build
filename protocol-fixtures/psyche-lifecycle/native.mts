@@ -14,7 +14,7 @@ export const actor = { id: 'fixture-agent', kind: 'psyche' } as const;
 export const human = { id: 'fixture-human', kind: 'human' } as const;
 export const effects = () => existsSync('effects') ? readFileSync('effects', 'utf8').split('\n').length - 1 : 0;
 
-export async function openNative(epoch: number, uncertain = false) {
+export async function openNative(epoch: number, uncertain = false, onEffect?: () => void) {
   const journal = await ControlJournal.open(projectRoot, epoch);
   const surfaces = new SurfaceRegistry();
   const tab = surfaces.upsertBrowserTab({
@@ -25,6 +25,7 @@ export async function openNative(epoch: number, uncertain = false) {
   // The only effect is appending one independent witness per handler invocation.
   const handlers = {
     async actOnBrowser() {
+      onEffect?.();
       appendFileSync('effects', 'submit\n', { mode: 0o600 });
       if (uncertain) throw Object.assign(new Error('lost acknowledgment'), { ambiguous: true });
     },
