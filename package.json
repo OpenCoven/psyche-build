@@ -115,7 +115,7 @@
     "react": "^19.3.1",
     "selfsigned": "^5.5.0",
     "string-width": "^8.2.2",
-    "vue": "^3.5.45",
+    "vue": "^3.5.46",
     "ws": "^8.23.0"
   },
   "devDependencies": {
@@ -130,7 +130,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "ink-testing-library": "^4.0.0",
-    "npm-run-all2": "^9.0.4",
+    "npm-run-all2": "^9.1.0",
     "postcss": "^8.5.33",
     "postcss-selector-parser": "^7.2.1",
     "postcss-value-parser": "^4.2.0",
