@@ -1,0 +1,18 @@
+{
+  "profile": "psyche.build_receipt_binding.v1",
+  "source_repository": "OpenCoven/psyche",
+  "source_commit": "557c579ed19f97e4177d4a6760e183eab1df11b2",
+  "workflow_run_id": 45585485992,
+  "targets": {
+    "aarch64-apple-darwin": {
+      "artifact_id": 15008591709,
+      "artifact_digest": "sha256:504e1346a1c195dcedc1af3a3a92ba67509ba54eb6ea26e85a9bcab2f9b8e0df",
+      "sha256": "9256f1ff1b8a907d9f713d04c1eb984938ad843a5a766e283cf19760cb146d1a"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "artifact_id": 15008906204,
+      "artifact_digest": "sha256:1fcf2ad1cec5b6399a4881342ae42d6df204450323cba9743def4312628d00db",
+      "sha256": "bdd7a63ce527df07982c0cda9084cf4744bcf11c66bc01fd2d8a1fe153fe405c"
+    }
+  }
+}
