@@ -149,16 +149,19 @@ def scenario(root, node, fixture, kit, ambiguous):
         check("missing_receipt", ("unknown", "recovery_required"), receipt="absent.bin")
         conflict = dict(binding, receipt_digest=digest(native.receipt + b"\n"))
         conflict_sig = sign(work, "conflict.json", conflict, "trusted")
+        for filename in ("conflict.json", conflict_sig):
+            retained["quarantine/" + filename] = (work / filename).read_bytes()
         check("authenticated_conflict", ("quarantine", "conflicting_evidence"), record="conflict.json", sig=conflict_sig)
         quarantine = work / "quarantine"
         quarantine.mkdir()
         for filename in ("conflict.json", conflict_sig):
-            contents = (work / filename).read_bytes()
             (work / filename).rename(quarantine / filename)
-            retained["quarantine/" + filename] = contents
     (work / "reopened.bin").write_bytes(native.reopen())
     check(name + "_restart", valid, receipt="reopened.bin")
     # Move even the profile inputs out of sight of the original native-only reader.
+    mapping = native.cwd / "fixture-binding.json"
+    retained["native-mapping.json"] = mapping.read_bytes()
+    mapping.rename(work / "native-mapping.json")
     archive = work.rename(lane / "retained")
     native.reopen()
     require(all((archive / name).read_bytes() == original for name, original in retained.items()), "retained evidence changed")

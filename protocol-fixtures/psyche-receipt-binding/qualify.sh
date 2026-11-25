@@ -33,14 +33,20 @@ import tarfile
 
 fixture, work, target, node = sys.argv[1:]
 fixture = Path(fixture)
-try:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.connect(("192.0.2.1", 9))
-except OSError as exc:
-    if exc.errno not in (errno.EPERM, errno.EACCES, errno.ENETUNREACH, errno.EHOSTUNREACH):
+def probe(family, address):
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.connect((address, 9))
+    except OSError as exc:
+        if exc.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):
+            return "family_unavailable"
+        if exc.errno in (errno.EPERM, errno.EACCES, errno.ENETUNREACH, errno.EHOSTUNREACH):
+            return "blocked_or_unreachable"
         raise
-else:
     raise SystemExit("network isolation missing")
+
+
+probes = {"ipv4_udp": probe(socket.AF_INET, "192.0.2.1"), "ipv6_udp": probe(socket.AF_INET6, "2001:db8::1")}
 pin = json.loads((fixture / "pin.json").read_bytes())
 archive = (fixture / ("verify-build-binding-" + target + ".tar.gz")).read_bytes()
 actual = hashlib.sha256(archive).hexdigest()
@@ -56,6 +62,6 @@ with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         path.parent.mkdir(exist_ok=True, parents=True)
         path.write_bytes(tar.extractfile(matches[0]).read())
         path.chmod(0o500 if name.startswith("bin/") else 0o400)
-print(json.dumps({"target": target, "producer": pin["source_commit"], "archive_sha256": actual, "ip_network": "denied"}), flush=True)
+print(json.dumps({"target": target, "producer": pin["source_commit"], "archive_sha256": actual, "ip_probes": probes}), flush=True)
 os.execv(sys.executable, [sys.executable, "-I", str(fixture / "canary.py"), str(kit), node])
 PY
