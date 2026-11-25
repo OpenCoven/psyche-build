@@ -35,4 +35,4 @@ except OSError as exc:
 else:
     raise SystemExit('network isolation missing')
 PY
-"${offline[@]}" "${clean[@]}" "$python" -I "$work/adapter-lifecycle.pyz" --sha256 "$pin" -- "$node" --import "$repo/node_modules/tsx/dist/loader.mjs" "$fixture/adapter.mts"
+"${offline[@]}" "${clean[@]}" "$python" -I "$work/adapter-lifecycle.pyz" --sha256 "$pin" -- "$python" -I "$fixture/witness.py" "$node" --import "$repo/node_modules/tsx/dist/loader.mjs" "$fixture/adapter.mts"
