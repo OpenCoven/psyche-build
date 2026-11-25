@@ -99,13 +99,20 @@ final class ControlRequestClientTests: XCTestCase {
     }
 
     func testCorrelatesAResponseBackToItsCaller() async throws {
-        let transport = FakeTransport()
+        let transport = CorrelationRecordingTransport()
+        defer { Task { await transport.disconnect() } }
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
         _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
+        // Registration precedes the separately scheduled transport send. The
+        // fake host may reply only after observing that send, just as a real
+        // host must. The gate keeps the previously failing ordering explicit.
+        try await transport.waitForSendEntry()
+        await transport.allowSend()
+        try await transport.waitForRecordedSend()
         await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
 
         let value = try await response
@@ -117,6 +124,72 @@ final class ControlRequestClientTests: XCTestCase {
         )
         let remaining = await client.pendingRequestCount
         XCTAssertEqual(remaining, 0)
+    }
+
+    func testCorrelationObservationTimesOutWhenEmissionNeverStarts() async throws {
+        let transport = CorrelationRecordingTransport(timeoutScheduler: immediateCorrelationTimeouts())
+        do {
+            try await transport.waitForSendEntry()
+            XCTFail("A missing emission must have a bounded failure")
+        } catch let error as BoundedAsyncSignal.WaitError {
+            XCTAssertEqual(error, .timedOut("correlation send entry"))
+        }
+        await transport.disconnect()
+    }
+
+    func testCorrelationObservationTimesOutAfterRecordingFails() async throws {
+        let transport = CorrelationRecordingTransport(timeoutScheduler: immediateCorrelationTimeouts())
+        await transport.allowSend()
+        do {
+            try await transport.send(.control(.workspaceSnapshot(ControlRequestIDOnly(requestID: "unconnected"))))
+            XCTFail("An unconnected transport must refuse the send")
+        } catch {
+            XCTAssertEqual(error as? FakeTransportError, .connectionFailed)
+        }
+        do {
+            try await transport.waitForRecordedSend()
+            XCTFail("A failed recording must have a bounded observation failure")
+        } catch let error as BoundedAsyncSignal.WaitError {
+            XCTAssertEqual(error, .timedOut("correlation send recording"))
+        }
+        await transport.disconnect()
+    }
+
+    func testCorrelationObservationPreservesCancellation() async throws {
+        let transport = CorrelationRecordingTransport(timeoutScheduler: .init { _, _ in .init(cancel: {}) })
+        let waiter = Task<Void, any Error> { try await transport.waitForSendEntry() }
+        waiter.cancel()
+        do {
+            try await waiter.value
+            XCTFail("An observation cancellation must remain cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        await transport.disconnect()
+    }
+
+    func testCorrelationDisconnectReleasesBlockedSendAndRecordingObserver() async throws {
+        let transport = CorrelationRecordingTransport(timeoutScheduler: .init { _, _ in .init(cancel: {}) })
+        try await transport.connect(to: endpoint())
+        let sending = Task { try await transport.send(.control(.workspaceSnapshot(ControlRequestIDOnly(requestID: "blocked")))) }
+        try await transport.waitForSendEntry()
+        let recording = Task<Void, any Error> { try await transport.waitForRecordedSend() }
+        await transport.disconnect()
+        for task in [sending, recording] {
+            do {
+                try await task.value
+                XCTFail("Disconnect must settle the blocked test operation")
+            } catch {
+                XCTAssertTrue(error is CancellationError)
+            }
+        }
+    }
+
+    private func immediateCorrelationTimeouts() -> BoundedAsyncSignal.TimeoutScheduler {
+        .init { _, expire in
+            expire()
+            return .init(cancel: {})
+        }
     }
 
     func testAnswersOnlyTheRequestThatAsked() async throws {
@@ -656,8 +729,8 @@ final class ControlRequestClientTests: XCTestCase {
     }
 
     /// The request registers on the actor before `send` suspends, but the
-    /// caller reaches this line first. Poll rather than sleep so the test
-    /// stays deterministic.
+    /// caller reaches this line first. This observes registration only, not
+    /// transport emission; a fake host reply must observe the send separately.
     private func waitForPendingRequest(
         on client: ControlRequestClient,
         count: Int = 1,
@@ -749,6 +822,83 @@ private actor CompletionProbe {
 
     func markComplete() {
         isComplete = true
+    }
+}
+
+/// Makes the recorded #510 ordering deterministic without changing the real
+/// client's scheduling or the shared fixture transport. Only this test owns it.
+private actor CorrelationRecordingTransport: PsycheTransport {
+    private let base = FakeTransport()
+    private let entry: BoundedAsyncSignal
+    private let permission: BoundedAsyncSignal
+    private let recording: BoundedAsyncSignal
+    private var closed = false
+
+    init(timeoutScheduler: BoundedAsyncSignal.TimeoutScheduler = .live) {
+        entry = BoundedAsyncSignal(timeoutScheduler: timeoutScheduler)
+        permission = BoundedAsyncSignal(timeoutScheduler: timeoutScheduler)
+        recording = BoundedAsyncSignal(timeoutScheduler: timeoutScheduler)
+    }
+
+    var sentMessages: [MobileClientMessage] {
+        get async { await base.sentMessages }
+    }
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        try await base.connect(to: endpoint)
+        entry.reset()
+        permission.reset()
+        recording.reset()
+        closed = false
+    }
+
+    func disconnect() async {
+        closed = true
+        // Sticky signals release even an observer that has not registered yet;
+        // the post-wait closed check preserves cancellation instead of success.
+        entry.signal()
+        permission.signal()
+        recording.signal()
+        await base.disconnect()
+    }
+
+    func send(_ message: MobileClientMessage) async throws {
+        try checkOpen()
+        entry.signal()
+        try await permission.wait(for: "correlation send permission", timeout: .seconds(2))
+        try checkOpen()
+        try await base.send(message)
+        try checkOpen()
+        recording.signal()
+    }
+
+    func waitForSendEntry() async throws {
+        try checkOpen()
+        try await entry.wait(for: "correlation send entry", timeout: .seconds(2))
+        try checkOpen()
+    }
+
+    func allowSend() {
+        permission.signal()
+    }
+
+    func waitForRecordedSend() async throws {
+        try checkOpen()
+        try await recording.wait(for: "correlation send recording", timeout: .seconds(2))
+        try checkOpen()
+    }
+
+    private func checkOpen() throws {
+        try Task.checkCancellation()
+        guard !closed else { throw CancellationError() }
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        await base.incomingMessages()
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        await base.incomingBinaryFrames()
     }
 }
 
