@@ -1046,12 +1046,11 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     private func openPane(_ paneID: String, in app: XCUIApplication) {
-        let paneRow = app.cells.containing(
-            .any,
-            identifier: "now-pane-\(paneID)"
-        ).firstMatch
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 30))
-        paneRow.tap()
+        // Target the NavigationLink exposed by NowView. Tapping its enclosing
+        // cell can synthesize an event without activating the link.
+        let paneLink = app.buttons["now-pane-\(paneID)"]
+        XCTAssertTrue(paneLink.waitForExistence(timeout: 30))
+        paneLink.tap()
     }
 
     /// Always launches the fixture root.
