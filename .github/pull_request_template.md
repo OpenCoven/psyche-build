@@ -21,7 +21,7 @@ Acceptance gate:
 - [ ] R3 — authority, security, protocol, persistence, recovery, or consequential action
 - [ ] R4 — release, governance, credentials, generated-source ownership, or cross-repository identity
 
-Review [`docs/ROADMAP.md`](../docs/ROADMAP.md), [`docs/SUPPORT-MATRIX.md`](../docs/SUPPORT-MATRIX.md), [`docs/RELEASE-ACCEPTANCE.md`](../docs/RELEASE-ACCEPTANCE.md), and [`docs/CONTRIBUTOR-SAFETY.md`](../docs/CONTRIBUTOR-SAFETY.md) before making availability or production-readiness claims.
+Review [`docs/ROADMAP.md`](https://github.com/OpenCoven/psyche-build/blob/main/docs/ROADMAP.md), [`docs/SUPPORT-MATRIX.md`](https://github.com/OpenCoven/psyche-build/blob/main/docs/SUPPORT-MATRIX.md), [`docs/RELEASE-ACCEPTANCE.md`](https://github.com/OpenCoven/psyche-build/blob/main/docs/RELEASE-ACCEPTANCE.md), and [`docs/CONTRIBUTOR-SAFETY.md`](https://github.com/OpenCoven/psyche-build/blob/main/docs/CONTRIBUTOR-SAFETY.md) before making availability or production-readiness claims.
 
 ## Validation and evidence
 
