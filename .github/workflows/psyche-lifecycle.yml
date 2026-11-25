@@ -41,3 +41,15 @@ jobs:
           name: lifecycle-${{ matrix.os }}-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/lifecycle.json
           if-no-files-found: error
+      - name: Qualify v2 evidence controls and native lifecycle offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash protocol-fixtures/psyche-lifecycle/v2/qualify.sh | tee "$RUNNER_TEMP/lifecycle-v2.json"
+      - name: Retain the independent execution transcript
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lifecycle-v2-${{ matrix.os }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/lifecycle-v2.json
+          if-no-files-found: error
