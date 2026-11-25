@@ -40,6 +40,8 @@ def probe(family, address):
     except OSError as exc:
         if exc.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):
             return "family_unavailable"
+        if exc.errno == errno.EADDRNOTAVAIL:
+            return "no_source_address"
         if exc.errno in (errno.EPERM, errno.EACCES, errno.ENETUNREACH, errno.EHOSTUNREACH):
             return "blocked_or_unreachable"
         raise
