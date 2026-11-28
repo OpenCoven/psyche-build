@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Documentation should distinguish shipped behavior, supported surfaces, plans, and historical design. Review the [roadmap](../../docs/ROADMAP.md) and [support matrix](../../docs/SUPPORT-MATRIX.md) before reporting a support-status mismatch.
+        Documentation should distinguish shipped behavior, supported surfaces, plans, and historical design. Review the [roadmap](https://github.com/OpenCoven/psyche-build/blob/main/docs/ROADMAP.md) and [support matrix](https://github.com/OpenCoven/psyche-build/blob/main/docs/SUPPORT-MATRIX.md) before reporting a support-status mismatch.
 
         This issue is public. Quote only the smallest relevant public excerpt. Do not disclose private repository content, credentials, raw prompts, unrestricted terminal output, complete environment dumps, private service URLs, unredacted personal paths, or vulnerability details.
   - type: input

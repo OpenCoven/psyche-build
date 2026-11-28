@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Keep the request to one observable outcome. Review the [roadmap](../../docs/ROADMAP.md), [support matrix](../../docs/SUPPORT-MATRIX.md), and existing issues first.
+        Keep the request to one observable outcome. Review the [roadmap](https://github.com/OpenCoven/psyche-build/blob/main/docs/ROADMAP.md), [support matrix](https://github.com/OpenCoven/psyche-build/blob/main/docs/SUPPORT-MATRIX.md), and existing issues first.
 
         This is public. Use synthetic examples and omit credentials, private repository content, raw prompts, unrestricted terminal output, complete environment dumps, private service URLs, unredacted personal paths, and security-sensitive details.
   - type: textarea
