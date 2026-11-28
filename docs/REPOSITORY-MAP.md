@@ -17,14 +17,14 @@ Psyche Build is the coding cockpit and product client. Its local project, pane, 
 
 | Path | Primary responsibility | Read before changing | Typical verification |
 | --- | --- | --- | --- |
-| `src/` | Node/TypeScript CLI, TUI/product composition, control client, daemon adapters, panes, integrations, hooks, services | `AGENTS.md`, `CONTROL-PLANE.md`, owning tests | focused Vitest, `pnpm typecheck`, `pnpm test` |
-| `src/control/` | leases, approvals, policy, journaling, idempotency, guarded actions, recovery-facing control contracts | `CONTROL-PLANE.md`, `AGENT-SURFACE-CONTROL.md`, `PSYCHE-COMPATIBILITY-MAP.md` | focused control tests + full TypeScript gate; treat as R3 |
-| `src/daemon/` | daemon transport/adaptation and the concrete mutation-effect boundary | `CONTROL-PLANE.md`, `BRIDGE-SECURITY.md` | daemon/control-adapter tests + typecheck; treat mutation paths as R3 |
-| `src/services/bridge/` | bridge/session transport and security-sensitive integration surfaces | `BRIDGE-SECURITY.md` | focused bridge/security tests; treat as R3 |
-| `native/desktop/` | desktop application surfaces, including the Tauri desktop implementation | `SUPPORT-MATRIX.md`, `RELEASE-ACCEPTANCE.md` | owning web/Rust/Tauri checks; release-sensitive paths are R4 |
-| `native/ios/` | internal iOS companion source and generated Xcode project | `SUPPORT-MATRIX.md`, `RELEASE-ACCEPTANCE.md` | `pnpm ios:project:check` plus owning Core/app/UI checks on a compatible macOS host; R4 |
+| `src/` | Node/TypeScript CLI, TUI/product composition, control client, daemon adapters, panes, integrations, hooks, services | `AGENTS.md`, [`CONTROL-PLANE.md`](CONTROL-PLANE.md), owning tests | focused Vitest, `pnpm typecheck`, `pnpm test` |
+| `src/control/` | leases, approvals, policy, journaling, idempotency, guarded actions, recovery-facing control contracts | [`CONTROL-PLANE.md`](CONTROL-PLANE.md), [`AGENT-SURFACE-CONTROL.md`](AGENT-SURFACE-CONTROL.md), [`PSYCHE-COMPATIBILITY-MAP.md`](PSYCHE-COMPATIBILITY-MAP.md) | focused control tests + full TypeScript gate; treat as R3 |
+| `src/daemon/` | daemon transport/adaptation and the concrete mutation-effect boundary | [`CONTROL-PLANE.md`](CONTROL-PLANE.md), [`BRIDGE-SECURITY.md`](BRIDGE-SECURITY.md) | daemon/control-adapter tests + typecheck; treat mutation paths as R3 |
+| `src/services/bridge/` | bridge/session transport and security-sensitive integration surfaces | [`BRIDGE-SECURITY.md`](BRIDGE-SECURITY.md) | focused bridge/security tests; treat as R3 |
+| `native/desktop/` | desktop application surfaces, including the Tauri desktop implementation | [`SUPPORT-MATRIX.md`](SUPPORT-MATRIX.md), [`RELEASE-ACCEPTANCE.md`](RELEASE-ACCEPTANCE.md) | owning web/Rust/Tauri checks; release-sensitive paths are R4 |
+| `native/ios/` | internal iOS companion source and generated Xcode project | [`SUPPORT-MATRIX.md`](SUPPORT-MATRIX.md), [`RELEASE-ACCEPTANCE.md`](RELEASE-ACCEPTANCE.md) | `pnpm ios:project:check` plus owning Core/app/UI checks on a compatible macOS host; R4 |
 | `native/macos/` | macOS-native support code outside the desktop Tauri tree | owning source/tests and support contract | owning native checks; do not infer release acceptance from compile success |
-| `protocol-fixtures/` | checked-in protocol fixtures used by product compatibility tests | `PSYCHE-COMPATIBILITY-MAP.md`, generator source | `pnpm fixtures:generate` and no generated drift; R3/R4 when compatibility changes |
+| `protocol-fixtures/` | checked-in protocol fixtures used by product compatibility tests | [`PSYCHE-COMPATIBILITY-MAP.md`](PSYCHE-COMPATIBILITY-MAP.md), generator source | `pnpm fixtures:generate` and no generated drift; R3/R4 when compatibility changes |
 | `scripts/` | repository automation: agent bootstrap and check gates, builds, release tooling, generators and validators | script-specific docs, `AGENTS.md` | focused script tests plus the owning end-to-end/dry-run contract |
 | `script/` | one file, `build_and_run.sh`: the local build-and-open helper that `.codex/environments/environment.toml` runs for the desktop app. It is not `scripts/`; new automation belongs there | the script itself | run it; it is not part of any gate |
 | `psyche` | the package's `bin` launcher: it imports `dist/index.js` and nothing else | `package.json` `bin` | `pnpm build`, then `pnpm smoke:pack` |
@@ -65,7 +65,7 @@ Use the smallest row that owns the consequence:
 | pane/process mutations or guarded actions | `src/control/` + `src/daemon/` | every mutation still crosses the canonical control authority/effect boundary |
 | capability scope, approval, receipt, idempotency, revocation, recovery | `src/control/` | preserve exact actor/task/target/revision/digest binding and fail-closed behavior |
 | bridge/session connectivity | `src/services/bridge/` and daemon adapters | preserve authentication, project scope, transport and reconnect failure boundaries |
-| Psyche protocol adoption | adapter seam identified by `PSYCHE-COMPATIBILITY-MAP.md` | no guessed wire contract, floating dependency, or local identity substitution |
+| Psyche protocol adoption | adapter seam identified by [`PSYCHE-COMPATIBILITY-MAP.md`](PSYCHE-COMPATIBILITY-MAP.md) | no guessed wire contract, floating dependency, or local identity substitution |
 | GitHub tracker state | GitHub Issues and the Psyche Build Project, per `TRACKER.md` | outcomes close by hand with evidence; tracker identity is never runtime identity |
 | macOS release/signing/notarization | release workflows/scripts + desktop native surface | exact source/artifact evidence and protected credential path; R4 |
 | iOS project/application behavior | `native/ios/` | generated project provenance plus platform-specific acceptance; R4 |

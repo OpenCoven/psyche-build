@@ -23,9 +23,6 @@ describe('agent repository contract', () => {
       'docs/POST-RELEASE-EXECUTION.md',
       'docs/ROADMAP.md',
       'docs/SUPPORT-MATRIX.md',
-      'docs/CONTROL-PLANE.md',
-      'docs/AGENT-SURFACE-CONTROL.md',
-      'docs/BRIDGE-SECURITY.md',
       'docs/RELEASE-ACCEPTANCE.md',
       'CONTRIBUTING.md',
       'docs/TRACKER.md',
@@ -34,6 +31,14 @@ describe('agent repository contract', () => {
     for (const path of requiredDocuments) {
       expect(agents, `AGENTS.md should route to ${path}`).toContain(path);
       expect(manifest, `agent/manifest.yaml should declare ${path}`).toContain(path);
+    }
+
+    const mapPath = 'docs/REPOSITORY-MAP.md';
+    expect(agents).toContain(`(${mapPath}#change-routing)`);
+    const map = read(mapPath);
+    for (const file of ['CONTROL-PLANE.md', 'AGENT-SURFACE-CONTROL.md', 'BRIDGE-SECURITY.md']) {
+      expect(map, `repository map should link to ${file}`).toContain(`(${file})`);
+      expect(manifest).toContain(`docs/${file}`);
     }
   });
 
